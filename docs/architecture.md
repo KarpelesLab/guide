@@ -148,10 +148,33 @@ between platforms, so anything that affects results (the annealer's acceptance t
 for example) needs an implementation of our own.
 
 **Determinism includes parallelism.** Results must not depend on thread count or
-scheduling. Nets are routed in parallel in batches chosen so they cannot interact
-(disjoint bounding boxes), and their results commit in a fixed order. Hash maps
-with randomized iteration order are not allowed in any path that affects results.
-Debugging, regression testing and benchmark comparison all rely on this, and
+scheduling. A fixed number of nets, the batch size, route at once against a frozen
+state of the resource table, and one thread then commits them in net order. A route
+that uses what an earlier commit of the iteration has taken is thrown away, and the
+net routes again in a later batch. Batch membership depends only on the commits, and a
+route only on the table, so threads have no say in anything. Budgets are charged during
+the same walk through the nets, so that threads cannot race for them.
+
+Batch size is therefore an option that changes results, and thread count is one that
+cannot. A batch size of 1, the default, is exactly the sequential router, and any batch
+size can run on one thread for a space that threads cannot share. Each thread costs a
+full set of search state, 44 bytes per node or about 13 GB at 300 million nodes, so
+threads are the caller's to ask for and the default is one.
+
+This replaces a plan to batch nets with disjoint bounding boxes, because that assumption
+did not survive measuring: 31% of routes on a congested fabric leave their terminals'
+box, and packing such nets by box left a limit of 1.4 times the speed at any thread count.
+Spaces also have no notion of region. Checking everything a search read, rather than only
+the route it found, reproduces sequential results at any batch size, but on hard problems
+it was slower than one thread. Batches of 32 add about 0.1% to route cost on fabrics and
+sparse grids, at most 1.1% on any one problem, with no sign of hurting convergence, though
+dense grids are too chaotic to say more than that. They reach 2 to 3 times the speed on
+problems that take seconds, and nothing on problems of milliseconds. The limit is mostly
+that a few searches are much bigger than the rest, and a net is the unit of work. The
+[engine's documentation](../src/engine.rs) has the measurements.
+
+Hash maps with randomized iteration order are not allowed in any path that affects
+results. Debugging, regression testing and benchmark comparison all rely on this, and
 retrofitting it is close to impossible.
 
 **The validator is independent.** A bug shared by router and checker is invisible,

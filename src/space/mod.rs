@@ -61,6 +61,9 @@ pub trait RoutingSpace {
     ///
     /// No step enters the node a route starts from, so a call with `from == to` asks for
     /// the resources `net` consumes by occupying that node.
+    ///
+    /// This may be called for any pair of nodes, including pairs that are not steps,
+    /// because the validator checks routes that may be wrong.
     fn resources(
         &self,
         net: NetId,

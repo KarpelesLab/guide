@@ -431,9 +431,9 @@ impl<N: Copy + Eq + Hash> Route<N> {
     /// [need routing](Net::needs_routing), but a route that exists is held to the same
     /// standard on every net, since it is consuming resources.
     ///
-    /// The root does not have to be an access point. That suits undirected spaces, where
-    /// a tree can start at a Steiner point, but in a directed space it is up to the engine
-    /// to root the tree at the net's driver: nets do not say which terminal that is.
+    /// The root does not have to be an access point here, because this check knows nothing
+    /// of the space's direction. [`validate::check`](crate::validate::check) also requires
+    /// the root to be on the net's [driver](Net::driver).
     ///
     /// # Errors
     ///

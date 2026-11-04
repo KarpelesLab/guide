@@ -106,6 +106,10 @@
 //! - **Route files** are reproduced byte for byte from a real VPR output, using a graph
 //!   reconstructed from it. VPR itself has not checked anything written here, since it wasn't
 //!   available. Its reader was read closely to know what it checks.
+//! - **Delays** for timing-driven routing, from [`RrGraph::timed_graph`], are the Elmore delay
+//!   that VPR's route tree gives a step through a buffered switch, fixed per step. That is an
+//!   approximation behind unbuffered switches and where a tree branches: see
+//!   [`RrGraph::step_delay`]. No delay here has been compared with VPR's.
 //!
 //! # Limitations
 //!
@@ -157,7 +161,7 @@ pub use place::{PlacedBlock, Placement, read_placement};
 pub use route_file::{RouteFileError, RouteHeader, RouteSummary, write_route};
 pub use rr_graph::{
     BlockType, ChannelDirection, GridTile, LocationBound, NodeKind, NodeLocation, Pin, PinClass,
-    PinClassKind, RrGraph, RrStats, Segment, Switch, SwitchKind, read_rr_graph,
+    PinClassKind, RrDelayBound, RrGraph, RrStats, Segment, Switch, SwitchKind, read_rr_graph,
 };
 
 /// Why a file could not be imported.

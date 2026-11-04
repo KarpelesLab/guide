@@ -10,8 +10,8 @@ use super::*;
 use crate::cost::Cost;
 use crate::id::{NetId, NodeId};
 use crate::net::{Edge, Route, RouteSet, Terminal};
-use crate::space::RoutingSpace;
 use crate::space::graph::Graph;
+use crate::space::{DelaySpace, RoutingSpace};
 
 const NET: &str = include_str!("../../testdata/vtr/mult_4x4.net");
 const PLACE: &str = include_str!("../../testdata/vtr/mult_4x4.place");
@@ -1877,4 +1877,113 @@ fn measure_import() {
         "bound over distance {:.3} on {pairs} sampled pairs",
         bound_total / distance_total
     );
+}
+
+// Delays for timing-driven routing.
+
+#[test]
+fn step_delays_are_the_elmore_delay_of_a_buffered_step() {
+    let switches = "<switch id=\"0\" name=\"m\" type=\"mux\"><timing R=\"100\" Cinternal=\"1e-15\" Tdel=\"4e-11\"/></switch>\
+                    <switch id=\"1\" name=\"slow\" type=\"mux\"><timing Tdel=\"1e-10\"/></switch>";
+    let timed = |id: u32, x: u32| {
+        format!(
+            "<node id=\"{id}\" type=\"CHANX\" capacity=\"1\"><loc xlow=\"{x}\" ylow=\"0\" xhigh=\"{x}\" yhigh=\"0\" ptc=\"0\"/>\
+             <timing R=\"100\" C=\"2e-14\"/><segment segment_id=\"0\"/></node>"
+        )
+    };
+    let nodes = [timed(0, 0), timed(1, 1), timed(2, 2)].concat();
+    let edges = [edge(0, 1, 0), edge(1, 2, 0), edge(0, 2, 1), edge(2, 1, 0)].concat();
+    let device = read_rr_graph(small_graph(switches, &nodes, &edges).as_bytes()).unwrap();
+    // Tdel + R(switch) C(node) + R(node) C(node) / 2 is 40 + 2 + 1 ps, leaving out the
+    // internal capacitance. The slow switch has no R, so it is 100 + 1.
+    assert_eq!(device.step_delay(0, NodeId(1)), 43);
+    assert_eq!(device.step_delay(1, NodeId(2)), 101);
+    assert_eq!(device.step_delay(9, NodeId(2)), 1);
+    assert_eq!(device.step_delay(0, NodeId(99)), 40);
+
+    let timed_graph = device.timed_graph();
+    let mut delays = Vec::new();
+    timed_graph.step_delays(NetId(0), NodeId(0), &mut delays);
+    let mut steps = Vec::new();
+    device.graph().expand(NetId(0), NodeId(0), &mut steps);
+    let expected: Vec<u32> = steps
+        .iter()
+        .zip(device.out_switches(NodeId(0)))
+        .map(|(step, &switch)| device.step_delay(switch, step.to))
+        .collect();
+    assert_eq!(delays, expected);
+    assert_eq!(delays, [43, 101]);
+    let mut timed_steps = Vec::new();
+    timed_graph.expand(NetId(0), NodeId(0), &mut timed_steps);
+    assert_eq!(timed_steps, steps);
+    // The fastest rate is 43 ps for the one tile between neighbours, against 101 for two.
+    assert_eq!(timed_graph.delay_bound().picoseconds_per_tile(), 43.0);
+    // Two tiles, rounded down after a margin: the true delay is 86, through node 1.
+    assert_eq!(
+        timed_graph.delay_lower_bound(NetId(0), NodeId(0), NodeId(2)),
+        85
+    );
+    assert_eq!(assert_delay_bound_holds(&device, (0..3).map(NodeId)), 7);
+}
+
+/// Checks every bound from each of `sources` against the true smallest sum of delays, found by
+/// Dijkstra's algorithm on delays alone, and returns how many pairs were checked.
+fn assert_delay_bound_holds(device: &RrGraph, sources: impl Iterator<Item = NodeId>) -> usize {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+
+    let timed = device.timed_graph();
+    let nodes = device.graph().num_nodes() as usize;
+    let mut checked = 0;
+    let (mut steps, mut delays) = (Vec::new(), Vec::new());
+    for source in sources {
+        let mut distance = vec![u64::MAX; nodes];
+        let mut queue = BinaryHeap::from([Reverse((0u64, source.0))]);
+        distance[source.index()] = 0;
+        while let Some(Reverse((here, node))) = queue.pop() {
+            if here > distance[node as usize] {
+                continue;
+            }
+            steps.clear();
+            delays.clear();
+            timed.expand(NetId(0), NodeId(node), &mut steps);
+            timed.step_delays(NetId(0), NodeId(node), &mut delays);
+            for (step, &delay) in steps.iter().zip(&delays) {
+                let there = here + u64::from(delay);
+                if there < distance[step.to.index()] {
+                    distance[step.to.index()] = there;
+                    queue.push(Reverse((there, step.to.0)));
+                }
+            }
+        }
+        for (target, &true_delay) in distance.iter().enumerate() {
+            if true_delay != u64::MAX {
+                let bound = timed.delay_lower_bound(NetId(0), source, NodeId(target as u32));
+                assert!(
+                    u64::from(bound) <= true_delay,
+                    "{source:?} to {target}: bound {bound} above {true_delay}"
+                );
+                checked += 1;
+            }
+        }
+    }
+    checked
+}
+
+#[test]
+fn the_delay_bound_holds_on_a_genuine_device_graph() {
+    let device = read_rr_graph(Z1000.as_bytes()).unwrap();
+    // The z1000's wires have no R or C, so its delays are its switches' Tdel.
+    assert!(device.timed_graph().delay_bound().picoseconds_per_tile() > 0.0);
+    let nodes = device.graph().num_nodes();
+    let checked = assert_delay_bound_holds(&device, (0..nodes).step_by(7).map(NodeId));
+    assert!(checked > 1000, "{checked}");
+}
+
+#[test]
+fn the_delay_bound_holds_on_a_graph_from_vprs_routes() {
+    let (device, _, _) = mult_4x4();
+    let nodes = device.graph().num_nodes();
+    let checked = assert_delay_bound_holds(&device, (0..nodes).map(NodeId));
+    assert!(checked > 100, "{checked}");
 }

@@ -19,8 +19,8 @@ use super::ImportError;
 use super::xml::{Event, Tag, XmlReader};
 use crate::cost::Cost;
 use crate::id::{NetId, NodeId};
-use crate::space::graph::{Graph, GraphBuilder, LowerBound};
-use crate::space::{RoutingSpace, Step};
+use crate::space::graph::{DelayBound, Graph, GraphBuilder, LowerBound, TimedGraph};
+use crate::space::{DelaySpace, RoutingSpace, Step};
 
 /// The value in [`NodeInfo::segment`] for a node with no segment.
 const NO_SEGMENT: u16 = u16::MAX;
@@ -513,6 +513,62 @@ impl LowerBound for LocationBound {
     }
 }
 
+/// A lower bound on the delay of going between nodes, from where they are on the device.
+///
+/// This is [`LocationBound`] with delays in place of costs: the smallest ratio of a step's
+/// delay to the tiles it can cover, over the same edges and with the same tail reach, so it is
+/// admissible for the same reasons. It comes from [`RrGraph::timed_graph`], whose step delays
+/// it bounds.
+#[derive(Clone)]
+pub struct RrDelayBound {
+    location: LocationBound,
+    picoseconds_per_tile: f64,
+}
+
+impl RrDelayBound {
+    /// Returns the smallest delay of covering one tile, in picoseconds.
+    pub fn picoseconds_per_tile(&self) -> f64 {
+        self.picoseconds_per_tile
+    }
+}
+
+impl fmt::Debug for RrDelayBound {
+    /// Leaves out the tables.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RrDelayBound")
+            .field("picoseconds_per_tile", &self.picoseconds_per_tile)
+            .finish_non_exhaustive()
+    }
+}
+
+impl DelayBound for RrDelayBound {
+    #[inline]
+    fn estimate(&self, from: NodeId, to: NodeId) -> u32 {
+        let nodes = &self.location.nodes;
+        let (Some(from), Some(target)) = (nodes.get(from.index()), nodes.get(to.index())) else {
+            return 0;
+        };
+        let distance = from
+            .gap(target)
+            .saturating_sub(u32::from(self.location.tail_reach(to)));
+        // Delays are whole picoseconds, so rounding down keeps the bound under their sum, and
+        // the margin keeps a product that should be whole from rounding up past it.
+        let estimate = (f64::from(distance) * self.picoseconds_per_tile * (1.0 - 1e-9)).floor();
+        estimate as u32
+    }
+}
+
+/// Converts a delay in seconds to whole picoseconds, rounding to the nearest and saturating.
+fn picoseconds(seconds: f64) -> u32 {
+    let value = (seconds * 1e12).round();
+    if value.is_nan() || value <= 0.0 {
+        0
+    } else {
+        // `as` saturates at the top.
+        value as u32
+    }
+}
+
 /// A routing resource graph, ready to route on, and what's needed to report on the routes.
 ///
 /// # Costs
@@ -615,6 +671,99 @@ impl RrGraph {
     #[inline]
     pub fn bound(&self) -> &LocationBound {
         &self.bound
+    }
+
+    /// Returns the delay of stepping to `to` through the switch `switch`, in picoseconds.
+    ///
+    /// This is the Elmore delay that VPR's route tree gives a node reached through a buffered
+    /// switch, when nothing else hangs off it: the switch's `Tdel` (its maximum, as VPR uses
+    /// for setup timing), plus its resistance driving the node's capacitance, plus half of the
+    /// node's own resistance driving that capacitance:
+    ///
+    /// ```text
+    /// Tdel(switch) + R(switch) * C(to) + 0.5 * R(to) * C(to)
+    /// ```
+    ///
+    /// See `load_route_tree_Tdel` in VPR's `route_tree.cpp`. **It is an approximation** in
+    /// every other case, as a step can only have one delay whatever the tree around it:
+    ///
+    /// - Behind an unbuffered switch, such as a pass gate, VPR adds the resistance upstream of
+    ///   the switch, back to the last buffer, so this is too low there.
+    /// - The capacitance a node drives includes the internal capacitance of the switches out
+    ///   of it that the tree uses, and through unbuffered ones everything beyond them. This
+    ///   leaves those out, so it is too low for a node that the tree branches at.
+    ///
+    /// On an architecture whose switches are all buffered, which is usual for modern ones, the
+    /// only difference is the internal capacitance of branches. A switch or node with no timing
+    /// counts as 0, and so does an unknown switch.
+    pub fn step_delay(&self, switch: u16, to: NodeId) -> u32 {
+        let (r_switch, t_switch) = self
+            .switch(switch)
+            .map_or((0.0, 0.0), |switch| (switch.r, switch.t_del_max));
+        let (r_node, c_node) = self.node_rc(to).unwrap_or((0.0, 0.0));
+        let (r_switch, t_switch) = (f64::from(r_switch), f64::from(t_switch));
+        let (r_node, c_node) = (f64::from(r_node), f64::from(c_node));
+        picoseconds(t_switch + r_switch * c_node + 0.5 * r_node * c_node)
+    }
+
+    /// Returns the graph with the delay of every step, for timing-driven routing.
+    ///
+    /// Each step's delay is [`step_delay`](RrGraph::step_delay) through the switch that a route
+    /// file would name, which is also the one VPR's timing analysis would use: see [parallel
+    /// edges](RrGraph#parallel-edges). The estimator is an [`RrDelayBound`].
+    ///
+    /// The graph's base costs are in seconds, as VPR's are, so a cost of `1e-12` per
+    /// picosecond of delay weighs the two as VPR's router does. This takes 2 bytes per edge in
+    /// the usual case of at most 65536 distinct delays, and a pass over every edge to make.
+    pub fn timed_graph(&self) -> TimedGraph<'_, LocationBound, RrDelayBound> {
+        // Asked in the order of the edges, which is the order of `edge_switches`.
+        let mut edge = 0usize;
+        let timed = self.graph.with_step_delays(|_, to| {
+            let switch = self.edge_switches.get(edge).copied().unwrap_or(u16::MAX);
+            edge += 1;
+            self.step_delay(switch, to)
+        });
+
+        // The same edges as `bound_tables` counts, so that the tail reach applies: none into a
+        // dead end, or into a tail that only leads to dead ends.
+        let mut steps = Vec::new();
+        let is_dead_end = |node: NodeId| self.graph.out_degree(node) == 0;
+        let is_tail: Vec<bool> = (0..self.graph.num_nodes())
+            .map(|node| {
+                steps.clear();
+                self.graph.expand(NetId(0), NodeId(node), &mut steps);
+                !steps.is_empty() && steps.iter().all(|step| is_dead_end(step.to))
+            })
+            .collect();
+
+        let mut ratio = f64::INFINITY;
+        let mut delays = Vec::new();
+        for from in 0..self.graph.num_nodes() {
+            let from = NodeId(from);
+            steps.clear();
+            delays.clear();
+            self.graph.expand(NetId(0), from, &mut steps);
+            timed.step_delays(NetId(0), from, &mut delays);
+            for (step, &delay) in steps.iter().zip(&delays) {
+                if is_dead_end(step.to) || is_tail[step.to.index()] {
+                    continue;
+                }
+                let (Some(a), Some(b)) = (self.info(from), self.info(step.to)) else {
+                    continue;
+                };
+                let tiles = a.gap(b) + b.span();
+                if tiles > 0 {
+                    ratio = ratio.min(f64::from(delay) / f64::from(tiles));
+                }
+            }
+        }
+        if !ratio.is_finite() {
+            ratio = 0.0;
+        }
+        timed.with_delay_bound(RrDelayBound {
+            location: self.bound.clone(),
+            picoseconds_per_tile: ratio,
+        })
     }
 
     /// Returns the facts about this graph from reading its file.

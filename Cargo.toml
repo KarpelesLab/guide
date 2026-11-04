@@ -11,6 +11,13 @@ keywords = ["routing", "placement", "pcb", "fpga", "eda"]
 categories = ["algorithms", "science"]
 exclude = [".github"]
 
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+# FPGA routing problems: importing device graphs and designs from VTR.
+fpga = []
+
 [lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"

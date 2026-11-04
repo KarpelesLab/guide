@@ -1,0 +1,19 @@
+# Keep the GitHub Actions used by the workflows current.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    groups:
+      # One PR for all action bumps per week rather than one per action.
+      actions:
+        patterns:
+          - "*"
+    ignore:
+      # `dtolnay/rust-toolchain@<version>` selects the Rust toolchain by its
+      # tag, so Dependabot would "upgrade" the MSRV job's `@1.95` to whatever
+      # the newest tag is. The MSRV pin follows `rust-version` in Cargo.toml and
+      # is bumped by hand; `@stable` is a moving tag and needs no updates.
+      - dependency-name: "dtolnay/rust-toolchain"

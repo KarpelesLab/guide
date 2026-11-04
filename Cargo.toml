@@ -1,0 +1,18 @@
+[package]
+name = "guide"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Placement and routing engine for PCBs, FPGAs and other constrained connection problems (early scaffold: no routing yet)."
+repository = "https://github.com/KarpelesLab/guide"
+license = "MIT"
+readme = "README.md"
+keywords = ["routing", "placement", "pcb", "fpga", "eda"]
+categories = ["algorithms", "science"]
+exclude = [".github"]
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[dependencies]

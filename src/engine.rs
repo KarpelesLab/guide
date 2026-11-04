@@ -54,6 +54,11 @@
 //!
 //! Nets with fewer than two terminals get an empty route, which occupies nothing.
 //!
+//! An access point on a node outside the space is ignored. A terminal with no other kind
+//! of access point cannot be connected by any route, so its net is reported as
+//! [`NoPath`](UnroutedReason::NoPath) from the start, even if it has no other terminal,
+//! and the other nets are routed as if it were not there.
+//!
 //! # Occupancy
 //!
 //! A net counts once per resource, however many of its edges consume it, and that includes
@@ -95,19 +100,20 @@
 //! point, as long as nothing sets the cancel flag at an unpredictable moment. Nets go in the
 //! order they are given, or a seeded shuffle of it. Hash tables here are looked up and never
 //! iterated, resources are put in order before their state is touched, and totals are
-//! summed over nets in their given order.
+//! summed over nets in their given order. Slot numbers play no part: each resource's state
+//! is worked on alone, so it makes no difference what order the slots come in.
 //!
 //! # State for parallel routing
 //!
 //! Routing a net reads the resource table and writes only to its own worker and to its
 //! record of useless roots. Changes to the table happen apart from that, when the route is
-//! committed. So a batch of nets that cannot interact could be routed with a worker each and
-//! then committed in a fixed order, to the same result. All of this is sequential for now.
+//! committed, and that includes assigning slots to resources: pricing only ever calls
+//! [`NodeSlots::get`], which needs no lock and cannot change anything. So a batch of nets
+//! that cannot interact could be routed with a worker each and then committed in a fixed
+//! order, to the same result. All of this is sequential for now.
 
 use core::cell::RefCell;
 use core::fmt;
-use core::hash::{BuildHasherDefault, Hash, Hasher};
-use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -116,7 +122,7 @@ use crate::id::NetId;
 use crate::net::{Net, Route, RouteSet, RouteStats, UnroutedReason};
 use crate::rng::Rng;
 use crate::search::{Search, SearchLimits, SearchOutcome, Source, Target};
-use crate::space::{RoutingSpace, Step};
+use crate::space::{FastMap, FastSet, NodeSlots, RoutingSpace, Step};
 
 /// What an [`Engine`] may do, and when it has to stop.
 ///
@@ -370,81 +376,28 @@ pub fn route<S: RoutingSpace>(
     Ok(Engine::new(space, nets, options)?.run())
 }
 
-/// A map for hot lookups, keyed by small plain values and never iterated.
-type FastMap<K, V> = HashMap<K, V, BuildHasherDefault<FastHasher>>;
-/// A set for hot lookups, keyed by small plain values and never iterated.
-type FastSet<K> = HashSet<K, BuildHasherDefault<FastHasher>>;
-
-/// A multiplicative hash, in the style of FxHash, for the lookups made once per search step.
-///
-/// The keys are node and resource identifiers chosen by the problem, and an adversary who
-/// could choose them could only slow a run down, so std's collision-resistant hash is not
-/// worth what it costs here. No result depends on the hash values, because these
-/// tables are never iterated.
-#[derive(Clone, Copy, Default)]
-struct FastHasher(u64);
-
-impl FastHasher {
-    #[inline]
-    fn add(&mut self, word: u64) {
-        const MULTIPLIER: u64 = 0xF135_7AEA_2E62_A9C5;
-        self.0 = (self.0 ^ word).wrapping_mul(MULTIPLIER);
-    }
-}
-
-impl Hasher for FastHasher {
-    fn write(&mut self, bytes: &[u8]) {
-        for chunk in bytes.chunks(8) {
-            let mut word = [0; 8];
-            word[..chunk.len()].copy_from_slice(chunk);
-            self.add(u64::from_le_bytes(word));
-        }
-    }
-
-    #[inline]
-    fn write_u8(&mut self, value: u8) {
-        self.add(u64::from(value));
-    }
-
-    #[inline]
-    fn write_u16(&mut self, value: u16) {
-        self.add(u64::from(value));
-    }
-
-    #[inline]
-    fn write_u32(&mut self, value: u32) {
-        self.add(u64::from(value));
-    }
-
-    #[inline]
-    fn write_u64(&mut self, value: u64) {
-        self.add(value);
-    }
-
-    #[inline]
-    fn write_usize(&mut self, value: usize) {
-        self.add(value as u64);
-    }
-
-    #[inline]
-    fn finish(&self) -> u64 {
-        // A multiplication leaves its best bits at the top and the hash table reads the
-        // bottom ones for the bucket.
-        self.0.rotate_left(26)
-    }
-}
-
 /// The negotiation state of one resource.
+///
+/// All of it is in one place because a step reads all of it, so that this is one cache miss
+/// per step rather than one per field.
 #[derive(Clone, Copy)]
 struct ResourceState {
     /// How many nets hold the resource.
     occupancy: u32,
-    /// Copied here because a space's answer could mean a cache miss on every step.
+    /// Copied here because a space's answer could mean a cache miss on every step. Only valid
+    /// once the resource has been occupied, which `ResourceTable::read` takes care of.
     capacity: u32,
     history: Cost,
 }
 
 impl ResourceState {
+    /// The state of a slot that no net has occupied.
+    const UNOCCUPIED: ResourceState = ResourceState {
+        occupancy: 0,
+        capacity: 0,
+        history: Cost::ZERO,
+    };
+
     /// How far beyond capacity the resource is.
     #[inline]
     fn overuse(self) -> u32 {
@@ -458,53 +411,85 @@ fn overuse_with_one_more(occupancy: u32, capacity: u32) -> u32 {
     occupancy.saturating_add(1).saturating_sub(capacity)
 }
 
-/// Every resource a net has ever held.
+/// Every resource a net has ever held, in flat arrays indexed by the space's resource slots.
 ///
-/// Spaces can have far more resources than a problem touches, and there is no way to ask
-/// a space for a dense index, so entries are made when a route first commits to a resource.
-/// A resource with no entry is free and has no history, which is the common case and takes
-/// one failed lookup to find out.
-struct ResourceTable<R> {
-    /// Lookups only, as iterating it would break determinism. `states` is what is iterated.
-    index: FastMap<R, u32>,
-    resources: Vec<R>,
+/// An FPGA graph can have hundreds of millions of resources, and a congested run touches
+/// nearly all of them, so a hash lookup for every step of every search is what this avoids.
+///
+/// Storage only grows when a net occupies a resource, up to that resource's slot, so a run
+/// that stays low in the slot numbers pays only for those. Nothing here asks the space how
+/// many resources it has, which a space generated on demand could not say.
+///
+/// Reading takes `&self` and writing happens only between searches, so that searches can
+/// share the table.
+struct ResourceTable<S: RoutingSpace> {
+    slots: S::ResourceSlots,
+    /// Indexed by slot, and as long as the highest slot occupied so far requires.
     states: Vec<ResourceState>,
+    /// One bit per slot, set if the slot is in `occupied_slots`.
+    listed: Vec<u64>,
+    /// The slots of every resource ever occupied. Going through these rather than `states`
+    /// keeps the work per iteration in proportion to what the run has touched.
+    occupied_slots: Vec<usize>,
+    /// The resource in each of `occupied_slots`, since a space's mapping only goes one way.
+    occupied_resources: Vec<S::Resource>,
 }
 
-impl<R: Copy + Eq + Ord + Hash> ResourceTable<R> {
-    fn new() -> Self {
+impl<S: RoutingSpace> ResourceTable<S> {
+    fn new(space: &S) -> Self {
         ResourceTable {
-            index: FastMap::default(),
-            resources: Vec::new(),
+            slots: space.new_resource_slots(),
             states: Vec::new(),
+            listed: Vec::new(),
+            occupied_slots: Vec::new(),
+            occupied_resources: Vec::new(),
         }
     }
 
-    /// Returns the entry for `resource`, making it if needed.
-    fn intern<S: RoutingSpace<Resource = R>>(&mut self, space: &S, resource: R) -> u32 {
-        *self.index.entry(resource).or_insert_with(|| {
-            self.resources.push(resource);
-            self.states.push(ResourceState {
-                occupancy: 0,
-                capacity: space.capacity(resource),
-                history: Cost::ZERO,
-            });
-            (self.states.len() - 1) as u32
-        })
+    /// Returns the slot for `resource`, making room for it if needed.
+    fn intern(&mut self, space: &S, resource: S::Resource) -> usize {
+        let slot = self.slots.slot(resource);
+        if slot >= self.states.len() {
+            self.states.resize(slot + 1, ResourceState::UNOCCUPIED);
+        }
+        let (word, bit) = (slot / u64::BITS as usize, slot % u64::BITS as usize);
+        if word >= self.listed.len() {
+            self.listed.resize(word + 1, 0);
+        }
+        if self.listed[word] & (1 << bit) == 0 {
+            self.listed[word] |= 1 << bit;
+            self.occupied_slots.push(slot);
+            self.occupied_resources.push(resource);
+            self.states[slot].capacity = space.capacity(resource);
+        }
+        slot
     }
 
-    /// Adds a net to each of `entries`.
-    fn acquire(&mut self, entries: &[u32]) {
-        for &entry in entries {
-            let state = &mut self.states[entry as usize];
+    /// Returns the state of `resource`, or `None` if it is free and has no history, in which
+    /// case the caller has to ask the space for its capacity.
+    ///
+    /// Testing for that here is what makes the slots in between safe to read. An array entry
+    /// for a slot that no net has occupied exists only because a higher slot was occupied, and
+    /// its capacity of 0 means nothing. A real zero capacity has to be priced as one, so it
+    /// must not be read from there.
+    #[inline]
+    fn read(&self, resource: S::Resource) -> Option<ResourceState> {
+        let state = *self.states.get(self.slots.get(resource)?)?;
+        (state.occupancy > 0 || state.history != Cost::ZERO).then_some(state)
+    }
+
+    /// Adds a net to each of `slots`.
+    fn acquire(&mut self, slots: &[usize]) {
+        for &slot in slots {
+            let state = &mut self.states[slot];
             state.occupancy = state.occupancy.saturating_add(1);
         }
     }
 
-    /// Removes a net from each of `entries`.
-    fn release(&mut self, entries: &[u32]) {
-        for &entry in entries {
-            let state = &mut self.states[entry as usize];
+    /// Removes a net from each of `slots`.
+    fn release(&mut self, slots: &[usize]) {
+        for &slot in slots {
+            let state = &mut self.states[slot];
             state.occupancy = state.occupancy.saturating_sub(1);
         }
     }
@@ -513,8 +498,8 @@ impl<R: Copy + Eq + Ord + Hash> ResourceTable<R> {
     fn overuse(&self) -> (u32, u64) {
         let mut resources = 0;
         let mut total = 0;
-        for state in &self.states {
-            let overuse = state.overuse();
+        for &slot in &self.occupied_slots {
+            let overuse = self.states[slot].overuse();
             if overuse > 0 {
                 resources += 1;
                 total += u64::from(overuse);
@@ -525,7 +510,8 @@ impl<R: Copy + Eq + Ord + Hash> ResourceTable<R> {
 
     /// Charges every overused resource for the iteration just finished.
     fn add_history(&mut self, factor: Cost) {
-        for state in &mut self.states {
+        for &slot in &self.occupied_slots {
+            let state = &mut self.states[slot];
             let overuse = state.overuse();
             if overuse > 0 {
                 state.history = state.history + factor * Cost::from(overuse);
@@ -540,7 +526,7 @@ impl<R: Copy + Eq + Ord + Hash> ResourceTable<R> {
 /// borrowing the table, so it is created cheaply and only ever reads shared state.
 struct Priced<'a, S: RoutingSpace> {
     inner: &'a S,
-    table: &'a ResourceTable<S::Resource>,
+    table: &'a ResourceTable<S>,
     present: Cost,
     /// What the current net already holds. Using these again takes nothing from anyone.
     held: &'a FastSet<S::Resource>,
@@ -566,9 +552,8 @@ impl<S: RoutingSpace> Priced<'_, S> {
             if !self.held.is_empty() && self.held.contains(&resource) {
                 continue;
             }
-            let here = match self.table.index.get(&resource) {
-                Some(&entry) => {
-                    let state = self.table.states[entry as usize];
+            let here = match self.table.read(resource) {
+                Some(state) => {
                     history = history + state.history;
                     overuse_with_one_more(state.occupancy, state.capacity)
                 }
@@ -600,9 +585,19 @@ impl<S: RoutingSpace> RoutingSpace for Priced<'_, S> {
     type Node = S::Node;
     type Resource = S::Resource;
     type Slots = S::Slots;
+    type ResourceSlots = S::ResourceSlots;
 
     fn new_slots(&self) -> S::Slots {
         self.inner.new_slots()
+    }
+
+    fn new_resource_slots(&self) -> S::ResourceSlots {
+        self.inner.new_resource_slots()
+    }
+
+    #[inline]
+    fn contains(&self, node: S::Node) -> bool {
+        self.inner.contains(node)
     }
 
     #[inline]
@@ -777,7 +772,7 @@ impl<S: RoutingSpace> Worker<S> {
 /// What every net of an iteration sees, which nothing changes while a net is being routed.
 struct RouteContext<'a, S: RoutingSpace> {
     space: &'a S,
-    table: &'a ResourceTable<S::Resource>,
+    table: &'a ResourceTable<S>,
     present: Cost,
     cancel: Option<&'a AtomicBool>,
 }
@@ -820,7 +815,9 @@ fn route_net<S: RoutingSpace>(
             worker.sources.clear();
             if route.is_empty() {
                 for point in driver.access_points() {
-                    if !dead_roots.contains(&point.node) {
+                    // A node outside the space has no resources to be priced by. The search
+                    // would ignore it anyway.
+                    if !dead_roots.contains(&point.node) && space.contains(point.node) {
                         let start = priced.source_cost(net.id, point.node, point.cost);
                         worker.sources.push(Source::with_cost(point.node, start));
                     }
@@ -905,12 +902,14 @@ fn route_net<S: RoutingSpace>(
 struct NetState<N> {
     /// The current route, which is `None` until the net has been routed.
     route: Option<Route<N>>,
-    /// The table entries the route holds.
-    held: Vec<u32>,
+    /// The table slots the route holds.
+    held: Vec<usize>,
     cost: Cost,
     /// Access points of the driver known not to reach every terminal. Reachability does not
     /// depend on prices, so this is true for the rest of the run.
     dead_roots: Vec<N>,
+    /// Whether the net can never be routed, because no root reaches every terminal or
+    /// because a terminal is entirely outside the space.
     no_path: bool,
 }
 
@@ -963,7 +962,7 @@ pub struct Engine<'a, S: RoutingSpace> {
     space: &'a S,
     nets: &'a [Net<S::Node>],
     options: EngineOptions<'a>,
-    table: ResourceTable<S::Resource>,
+    table: ResourceTable<S>,
     states: Vec<NetState<S::Node>>,
     worker: Worker<S>,
     /// Indices into `nets`, in the order they take their turns.
@@ -1007,19 +1006,19 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
 
         let states = nets
             .iter()
-            .map(|_| NetState {
+            .map(|net| NetState {
                 route: None,
                 held: Vec::new(),
                 cost: Cost::ZERO,
                 dead_roots: Vec::new(),
-                no_path: false,
+                no_path: has_terminal_outside(space, net),
             })
             .collect();
         Ok(Engine {
             space,
             nets,
             options,
-            table: ResourceTable::new(),
+            table: ResourceTable::new(space),
             states,
             worker: Worker::new(space),
             order: (0..nets.len() as u32).collect(),
@@ -1197,7 +1196,7 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
         state
             .held
             .iter()
-            .any(|&entry| self.table.states[entry as usize].overuse() > 0)
+            .any(|&slot| self.table.states[slot].overuse() > 0)
     }
 
     /// Rips up a net and routes it again, or puts it back if interrupted.
@@ -1255,11 +1254,10 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
     }
 
     fn unrouted_count(&self) -> u32 {
-        let unrouted = self
-            .nets
-            .iter()
-            .zip(&self.states)
-            .filter(|(net, state)| net.needs_routing() && state.route.is_none());
+        let unrouted =
+            self.nets.iter().zip(&self.states).filter(|(net, state)| {
+                (net.needs_routing() || state.no_path) && state.route.is_none()
+            });
         unrouted.count() as u32
     }
 
@@ -1294,12 +1292,12 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
     fn current_routes(&self, reason: UnroutedReason) -> RouteSet<S::Node> {
         let mut routes = RouteSet::new();
         for (net, state) in self.nets.iter().zip(&self.states) {
-            if !net.needs_routing() {
+            if state.no_path {
+                routes.set_unrouted(net.id, UnroutedReason::NoPath);
+            } else if !net.needs_routing() {
                 routes.set_route(net.id, Route::new());
             } else if let Some(route) = &state.route {
                 routes.set_route(net.id, route.clone());
-            } else if state.no_path {
-                routes.set_unrouted(net.id, UnroutedReason::NoPath);
             } else {
                 routes.set_unrouted(net.id, reason);
             }
@@ -1308,19 +1306,21 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
     }
 
     fn collect_overused(&self) -> Vec<OverusedResource<S::Resource>> {
-        // A position in `found` for each table entry, plus one, so that nets can be matched
-        // to entries in a single pass.
-        let mut positions = vec![0u32; self.table.states.len()];
+        let table = &self.table;
+        // Where each slot's entry is in `found`, so that nets can be matched to entries in a
+        // single pass. Overused resources are few, and this is only looked up.
+        let mut positions = FastMap::default();
         let mut found = Vec::new();
-        for (entry, state) in self.table.states.iter().enumerate() {
+        for (&slot, &resource) in table.occupied_slots.iter().zip(&table.occupied_resources) {
+            let state = table.states[slot];
             if state.overuse() > 0 {
+                positions.insert(slot, found.len());
                 found.push(OverusedResource {
-                    resource: self.table.resources[entry],
+                    resource,
                     occupancy: state.occupancy,
                     capacity: state.capacity,
                     nets: Vec::new(),
                 });
-                positions[entry] = found.len() as u32;
             }
         }
         if found.is_empty() {
@@ -1328,10 +1328,10 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
         }
 
         for (net, state) in self.nets.iter().zip(&self.states) {
-            for &entry in &state.held {
-                let position = positions[entry as usize];
-                if position > 0 {
-                    found[position as usize - 1].nets.push(net.id);
+            for slot in &state.held {
+                if let Some(&position) = positions.get(slot) {
+                    let entry: &mut OverusedResource<S::Resource> = &mut found[position];
+                    entry.nets.push(net.id);
                 }
             }
         }
@@ -1341,6 +1341,17 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
         found.sort_unstable_by_key(|entry| entry.resource);
         found
     }
+}
+
+/// Returns whether any terminal of `net` has no access point in the space, so that no route
+/// can connect it.
+fn has_terminal_outside<S: RoutingSpace>(space: &S, net: &Net<S::Node>) -> bool {
+    net.terminals.iter().any(|terminal| {
+        !terminal
+            .access_points()
+            .iter()
+            .any(|point| space.contains(point.node))
+    })
 }
 
 #[cfg(test)]
@@ -1354,7 +1365,7 @@ mod tests {
     use core::cell::Cell;
     use core::fmt::Debug;
     use proptest::prelude::*;
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::{BTreeMap, BTreeSet, HashSet};
 
     // Helpers.
 
@@ -1876,9 +1887,18 @@ mod tests {
         type Node = NodeId;
         type Resource = NodeId;
         type Slots = DenseSlots<NodeId>;
+        type ResourceSlots = DenseSlots<NodeId>;
 
         fn new_slots(&self) -> Self::Slots {
             DenseSlots::new()
+        }
+
+        fn new_resource_slots(&self) -> Self::ResourceSlots {
+            DenseSlots::new()
+        }
+
+        fn contains(&self, node: NodeId) -> bool {
+            self.graph.contains(node)
         }
 
         fn expand(&self, net: NetId, from: NodeId, out: &mut Vec<Step<NodeId>>) {
@@ -1954,8 +1974,15 @@ mod tests {
             type Node = NodeId;
             type Resource = NodeId;
             type Slots = DenseSlots<NodeId>;
+            type ResourceSlots = DenseSlots<NodeId>;
             fn new_slots(&self) -> Self::Slots {
                 DenseSlots::new()
+            }
+            fn new_resource_slots(&self) -> Self::ResourceSlots {
+                DenseSlots::new()
+            }
+            fn contains(&self, node: NodeId) -> bool {
+                self.0.contains(node)
             }
             fn expand(&self, net: NetId, from: NodeId, out: &mut Vec<Step<NodeId>>) {
                 self.0.expand(net, from, out);
@@ -2364,9 +2391,18 @@ mod tests {
         type Node = NodeId;
         type Resource = NodeId;
         type Slots = DenseSlots<NodeId>;
+        type ResourceSlots = DenseSlots<NodeId>;
 
         fn new_slots(&self) -> Self::Slots {
             DenseSlots::new()
+        }
+
+        fn new_resource_slots(&self) -> Self::ResourceSlots {
+            DenseSlots::new()
+        }
+
+        fn contains(&self, node: NodeId) -> bool {
+            self.grid.contains(node)
         }
 
         fn expand(&self, net: NetId, from: NodeId, out: &mut Vec<Step<NodeId>>) {
@@ -2624,9 +2660,7 @@ mod tests {
         let mut engine = Engine::new(&space, &nets, schedule).unwrap();
         engine.step();
         engine.step();
-        let history = |engine: &Engine<'_, Graph>, node| {
-            engine.table.states[engine.table.index[&NodeId(node)] as usize].history
-        };
+        let history = |engine: &Engine<'_, Graph>, node| engine.table.states[node as usize].history;
         assert_eq!(history(&engine, 3), Cost::from(10));
         assert_eq!(history(&engine, 4), Cost::ZERO);
         // None is added for the iteration that ends the run, as nothing would ever read it.
@@ -2645,13 +2679,13 @@ mod tests {
             reports_bus_twice: false,
             root_resource: false,
         };
-        let mut table = ResourceTable::new();
+        let mut table = ResourceTable::new(&space);
         let bus = table.intern(&space, BUS);
         let two = table.intern(&space, NodeId(2));
-        table.states[bus as usize].occupancy = 3;
-        table.states[bus as usize].history = Cost::from(2);
-        table.states[two as usize].occupancy = 1;
-        table.states[two as usize].history = Cost::from(5);
+        table.states[bus].occupancy = 3;
+        table.states[bus].history = Cost::from(2);
+        table.states[two].occupancy = 1;
+        table.states[two].history = Cost::from(5);
 
         let held = FastSet::default();
         let buffer = RefCell::new(Vec::new());
@@ -2702,10 +2736,10 @@ mod tests {
             reports_bus_twice: true,
             root_resource: false,
         };
-        let mut table = ResourceTable::new();
+        let mut table = ResourceTable::new(&space);
         let bus = table.intern(&space, BUS);
-        table.states[bus as usize].occupancy = 1;
-        table.states[bus as usize].history = Cost::from(2);
+        table.states[bus].occupancy = 1;
+        table.states[bus].history = Cost::from(2);
         let held = FastSet::default();
         let buffer = RefCell::new(Vec::new());
         let priced = Priced {
@@ -2729,10 +2763,10 @@ mod tests {
             for history in values {
                 for occupancy in values {
                     for present in values {
-                        let mut table = ResourceTable::new();
+                        let mut table = ResourceTable::new(&space);
                         let entry = table.intern(&space, NodeId(0));
-                        table.states[entry as usize].history = Cost::from(history);
-                        table.states[entry as usize].occupancy = occupancy;
+                        table.states[entry].history = Cost::from(history);
+                        table.states[entry].occupancy = occupancy;
                         let held = FastSet::default();
                         let buffer = RefCell::new(Vec::new());
                         let priced = Priced {
@@ -2750,22 +2784,268 @@ mod tests {
         }
     }
 
-    #[test]
-    fn hasher_treats_every_key_shape_consistently() {
-        let hash = |value: &dyn Fn(&mut FastHasher)| {
-            let mut hasher = FastHasher::default();
-            value(&mut hasher);
-            hasher.finish()
+    /// The prices of the steps out of `(0, 0)` of a space whose resources go through interned
+    /// slots.
+    fn lazy_pricing(table: &ResourceTable<Lazy>, space: &Lazy, present: u32) -> Vec<f64> {
+        let held = FastSet::default();
+        let buffer = RefCell::new(Vec::new());
+        let priced = Priced {
+            inner: space,
+            table,
+            present: Cost::from(present),
+            held: &held,
+            buffer: &buffer,
         };
-        assert_eq!(hash(&|h| h.write_u32(7)), hash(&|h| h.write_u64(7)));
-        assert_eq!(hash(&|h| h.write_u8(7)), hash(&|h| h.write_u16(7)));
-        assert_eq!(hash(&|h| h.write_usize(7)), hash(&|h| h.write_u64(7)));
-        assert_ne!(hash(&|h| h.write_u32(7)), hash(&|h| h.write_u32(8)));
+        let mut out = Vec::new();
+        priced.expand(NetId(0), (0, 0), &mut out);
+        out.iter().map(|step| step.cost.get()).collect()
+    }
+
+    #[test]
+    fn a_resource_that_no_net_has_occupied_is_priced_by_its_capacity() {
+        // Slots 1, 2 and 3 exist in the arrays only because slot 4 made them grow, and none
+        // of them has been told its capacity. Reading them as a capacity of 0 would overcharge
+        // node 3, and reading them as free would undercharge node 2.
+        let mut builder = GraphBuilder::new(5);
+        for node in 1..5 {
+            builder
+                .add_edge(NodeId(0), NodeId(node), Cost::ONE)
+                .unwrap();
+        }
+        builder.set_capacity(NodeId(2), 0).unwrap();
+        builder.set_capacity(NodeId(4), 0).unwrap();
+        let space = builder.build();
+
+        let mut table = ResourceTable::new(&space);
+        let far = table.intern(&space, NodeId(4));
+        table.acquire(&[far]);
+        assert_eq!(table.states.len(), 5);
+
+        let held = FastSet::default();
+        let buffer = RefCell::new(Vec::new());
+        let priced = Priced {
+            inner: &space,
+            table: &table,
+            present: Cost::from(10),
+            held: &held,
+            buffer: &buffer,
+        };
+        let mut out = Vec::new();
+        priced.expand(NetId(0), NodeId(0), &mut out);
+        let prices: Vec<f64> = out.iter().map(|step| step.cost.get()).collect();
+        // Free. No capacity, so overuse 1. Free. Occupied with no capacity, so overuse 2.
+        assert_eq!(prices, [1.0, 11.0, 1.0, 21.0]);
+
+        // The same goes for a slot past the end of the arrays.
+        let mut table = ResourceTable::new(&space);
+        let near = table.intern(&space, NodeId(1));
+        table.acquire(&[near]);
+        assert_eq!(table.states.len(), 2);
+        let priced = Priced {
+            inner: &space,
+            table: &table,
+            present: Cost::from(10),
+            held: &held,
+            buffer: &buffer,
+        };
+        let mut out = Vec::new();
+        priced.expand(NetId(0), NodeId(0), &mut out);
+        let prices: Vec<f64> = out.iter().map(|step| step.cost.get()).collect();
+        assert_eq!(prices, [11.0, 11.0, 1.0, 11.0]);
+    }
+
+    #[test]
+    fn a_resource_given_up_again_is_priced_like_one_never_occupied() {
+        let space = graph(2, &[(0, 1)]);
+        let mut table = ResourceTable::new(&space);
+        let slot = table.intern(&space, NodeId(1));
+        table.acquire(&[slot]);
+        table.release(&[slot]);
+        assert!(table.read(NodeId(1)).is_none());
+        // And it is listed once, however many times it comes and goes.
+        assert_eq!(table.intern(&space, NodeId(1)), slot);
+        table.acquire(&[slot]);
+        assert_eq!(table.occupied_slots, [slot]);
+        assert_eq!(table.occupied_resources, [NodeId(1)]);
+        assert_eq!(table.overuse(), (0, 0));
+        table.acquire(&[slot]);
+        assert_eq!(table.overuse(), (1, 1));
+    }
+
+    #[test]
+    fn a_missing_interned_resource_is_free_and_priced_by_its_capacity() {
+        let space = Lazy { size: 3 };
+        let mut table = ResourceTable::new(&space);
+        // Unassigned, and so read without touching anything.
+        assert_eq!(lazy_pricing(&table, &space, 10), [1.0, 1.0]);
+        assert_eq!(table.slots.get((1, 0)), None);
+        assert!(table.states.is_empty());
+
+        let slot = table.intern(&space, (1, 0));
+        table.acquire(&[slot]);
+        assert_eq!(lazy_pricing(&table, &space, 10), [11.0, 1.0]);
+        table.states[slot].history = Cost::from(2);
+        assert_eq!(lazy_pricing(&table, &space, 10), [33.0, 1.0]);
+    }
+
+    #[test]
+    fn the_table_can_be_read_from_several_threads() {
+        fn assert_sync<T: Sync>() {}
+        assert_sync::<ResourceTable<Grid>>();
+        assert_sync::<ResourceTable<Graph>>();
+        assert_sync::<ResourceTable<Lazy>>();
+    }
+
+    #[test]
+    fn dense_and_interned_resources_negotiate_to_the_same_routes() {
+        /// A grid with its resources relabelled, so that they go through a hash map and get
+        /// numbered as they are first occupied, rather than by cell.
+        struct Relabelled(Grid);
+        impl RoutingSpace for Relabelled {
+            type Node = NodeId;
+            type Resource = (u32, u32);
+            type Slots = DenseSlots<NodeId>;
+            type ResourceSlots = InternedSlots<(u32, u32)>;
+            fn new_slots(&self) -> Self::Slots {
+                DenseSlots::new()
+            }
+            fn new_resource_slots(&self) -> Self::ResourceSlots {
+                InternedSlots::new()
+            }
+            fn contains(&self, node: NodeId) -> bool {
+                self.0.contains(node)
+            }
+            fn expand(&self, net: NetId, from: NodeId, out: &mut Vec<Step<NodeId>>) {
+                self.0.expand(net, from, out);
+            }
+            fn lower_bound(&self, net: NetId, from: NodeId, to: NodeId) -> Cost {
+                self.0.lower_bound(net, from, to)
+            }
+            fn resources(&self, _: NetId, _: NodeId, to: NodeId, out: &mut Vec<(u32, u32)>) {
+                if self.0.contains(to) {
+                    // The cell number is kept as the first field, so resources sort the same.
+                    out.push((to.0, 7));
+                }
+            }
+            fn capacity(&self, (cell, _): (u32, u32)) -> u32 {
+                self.0.capacity(NodeId(cell))
+            }
+        }
+
+        for seed in 0..4 {
+            let (grid, nets) = permutation_problem(14, 2, seed);
+            let mut dense = Engine::new(&grid, &nets, options()).unwrap();
+            let relabelled = Relabelled(grid.clone());
+            let mut interned = Engine::new(&relabelled, &nets, options()).unwrap();
+            while dense.step().is_some() {}
+            while interned.step().is_some() {}
+            assert_eq!(dense.reports(), interned.reports());
+            let (dense, interned) = (dense.outcome(), interned.outcome());
+            assert_eq!(dense.routes, interned.routes);
+            assert_eq!(dense.total_cost, interned.total_cost);
+            assert_eq!(dense.overused.len(), interned.overused.len());
+            for (a, b) in dense.overused.iter().zip(&interned.overused) {
+                assert_eq!((a.resource.0, a.occupancy), (b.resource.0, b.occupancy));
+                assert_eq!(a.nets, b.nets);
+            }
+        }
+    }
+
+    // Nodes outside the space.
+
+    #[test]
+    fn a_terminal_outside_the_space_is_no_path_for_that_net_alone() {
+        let far = u32::MAX;
+        let grid = Grid::new(4, 4, 1).unwrap();
+        let space = graph(3, &[(0, 1), (1, 2)]);
+        for nets in [
+            // As a driver, as another terminal, and as the only terminal.
+            [net(0, &[far, 1]), net(1, &[1, far]), net(2, &[far])],
+            [net(0, &[far, far]), net(1, &[0, 1, far]), net(2, &[far])],
+        ] {
+            let mut all = nets.to_vec();
+            all.push(net(3, &[0, 2]));
+
+            let outcome = route(&grid, &all, options()).unwrap();
+            for id in 0..3 {
+                assert_eq!(
+                    outcome.routes.outcome(NetId(id)),
+                    Some(&NetOutcome::Unrouted(UnroutedReason::NoPath)),
+                );
+            }
+            assert_eq!(nodes_of(&outcome, 3), [0, 1, 2]);
+            assert_eq!(outcome.stop, StopReason::Converged);
+            assert!(!outcome.is_success());
+            assert!(outcome.overused.is_empty());
+            // None of those nets got as far as a search.
+            assert_eq!(outcome.routes.stats.searches, 1);
+
+            let outcome = route(&space, &all, options()).unwrap();
+            assert_eq!(outcome.routes.unrouted().count(), 3);
+            assert_eq!(nodes_of(&outcome, 3), [0, 1, 2]);
+        }
+    }
+
+    #[test]
+    fn nets_outside_the_space_are_counted_in_reports_as_unrouted() {
+        let grid = Grid::new(4, 1, 1).unwrap();
+        let nets = [net(0, &[100]), net(1, &[100, 0]), net(2, &[0, 3])];
+        let mut engine = Engine::new(&grid, &nets, options()).unwrap();
+        let report = engine.step().unwrap();
+        assert_eq!(report.unrouted, 2);
+        assert_eq!(report.nets_rerouted, 1);
+        assert_eq!(engine.step(), None);
+    }
+
+    #[test]
+    fn access_points_outside_the_space_are_ignored_when_others_are_inside() {
+        let far = u32::MAX;
+        let grid = Grid::new(4, 1, 1).unwrap();
+        let nets = [Net {
+            id: NetId(0),
+            // The foreign access points are the cheapest, and neither is any use.
+            terminals: vec![
+                terminal(&[(far, 0), (0, 5)]),
+                terminal(&[(far - 1, 0), (3, 7)]),
+            ],
+        }];
+        let outcome = route_checked(&grid, &nets, options());
+        assert_legal(&grid, &nets, &outcome);
+        assert_eq!(nodes_of(&outcome, 0), [0, 1, 2, 3]);
+        assert_eq!(outcome.total_cost, Cost::from(3 + 5 + 7));
+    }
+
+    #[test]
+    fn a_single_terminal_inside_the_space_still_gets_an_empty_route() {
+        let grid = Grid::new(2, 1, 1).unwrap();
+        let nets = [net(0, &[1])];
+        let outcome = route_checked(&grid, &nets, options());
+        assert!(outcome.is_success());
+        assert_eq!(nodes_of(&outcome, 0), [] as [u32; 0]);
+    }
+
+    #[test]
+    fn terminals_outside_a_generated_space_do_not_get_slots() {
+        let space = Lazy { size: 3 };
+        let nets = [
+            Net {
+                id: NetId(0),
+                terminals: vec![Terminal::at((-1, 0)), Terminal::at((1, 0))],
+            },
+            Net {
+                id: NetId(1),
+                terminals: vec![Terminal::at((0, 0)), Terminal::at((2, 2))],
+            },
+        ];
+        let mut engine = Engine::new(&space, &nets, options()).unwrap();
+        while engine.step().is_some() {}
+        assert_eq!(engine.table.slots.get((-1, 0)), None);
+        let outcome = engine.outcome();
         assert_eq!(
-            hash(&|h| h.write(&[7, 0, 0, 0, 0, 0, 0, 0])),
-            hash(&|h| h.write_u64(7))
+            outcome.routes.unrouted().collect::<Vec<_>>(),
+            [(NetId(0), UnroutedReason::NoPath)]
         );
-        assert_ne!(hash(&|h| h.write(&[1; 9])), hash(&|h| h.write(&[1; 8])));
+        assert!(outcome.routes.route(NetId(1)).is_some());
     }
 
     // Errors.
@@ -2815,9 +3095,18 @@ mod tests {
         type Node = (i32, i32);
         type Resource = (i32, i32);
         type Slots = InternedSlots<(i32, i32)>;
+        type ResourceSlots = InternedSlots<(i32, i32)>;
 
         fn new_slots(&self) -> Self::Slots {
             InternedSlots::new()
+        }
+
+        fn new_resource_slots(&self) -> Self::ResourceSlots {
+            InternedSlots::new()
+        }
+
+        fn contains(&self, node: (i32, i32)) -> bool {
+            (0..self.size).contains(&node.0) && (0..self.size).contains(&node.1)
         }
 
         fn expand(&self, _net: NetId, (x, y): (i32, i32), out: &mut Vec<Step<(i32, i32)>>) {

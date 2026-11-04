@@ -49,14 +49,25 @@ Both currently declare Rust 1.89 and will move to `guide`'s 1.95 before adopting
 ### `RoutingSpace`
 
 The central abstraction, and the one most likely to be wrong the first time. An
-engine has to answer four questions, and a domain answers them however it likes:
+engine has to answer five questions, and a domain answers them however it likes. It
+also has to say how to keep flat arrays of state for its nodes and its resources:
 
 ```rust
 pub trait RoutingSpace {
     /// A search state: a device wire, or (position, layer, direction) on a board.
-    type Node: Copy + Eq + Hash;
+    type Node: Copy + Eq + Hash + Debug;
     /// Something nets compete for.
-    type Resource: Copy + Eq + Hash;
+    type Resource: Copy + Eq + Ord + Hash + Debug;
+    /// How search state is keyed: `DenseSlots` or `InternedSlots`, or a mapping of its own.
+    type Slots: NodeSlots<Self::Node>;
+    /// How negotiation state is keyed, in the same way.
+    type ResourceSlots: NodeSlots<Self::Resource>;
+
+    fn new_slots(&self) -> Self::Slots;
+    fn new_resource_slots(&self) -> Self::ResourceSlots;
+
+    /// Does this node exist at all? A blocked cell does, and a number past the end doesn't.
+    fn contains(&self, node: Self::Node) -> bool;
 
     /// Where can a route for this net go next, and at what base cost?
     fn expand(&self, net: NetId, from: Self::Node, out: &mut Vec<Step<Self::Node>>);
@@ -69,6 +80,15 @@ pub trait RoutingSpace {
 
     /// How many nets can share this resource before it counts as overused?
     fn capacity(&self, resource: Self::Resource) -> u32;
+}
+
+pub trait NodeSlots<N> {
+    /// The slot for this key, assigning one if needed. For a search, which owns its mapping.
+    fn slot(&mut self, key: N) -> usize;
+    /// The slot for this key if it has one, changing nothing. For pricing, which shares it.
+    fn get(&self, key: N) -> Option<usize>;
+    /// Forgets assignments, ready for a new search.
+    fn clear(&mut self);
 }
 ```
 
@@ -172,10 +192,17 @@ it is needed, it gets isolated in a small audited module and the lint relaxed th
    inlining, at a cost in compile time and API friction. A generic core with a
    `dyn`-friendly wrapper for callers is the likely answer.
 
-3. **Does search state belong to the engine or the space?** FPGA search state is best
-   a flat array indexed by node, with generation counters for fast reset. PCB nodes
-   are not dense, so they need a hash map. The space probably has to pick its own
-   node-to-slot mapping.
+3. **Does search state belong to the engine or the space?** Settled, at least for now:
+   the state belongs to the engine and the search, in flat arrays, and the space picks
+   the mapping into them through `Slots` and `ResourceSlots`. `Grid` and `Graph` use
+   `DenseSlots`, whose slot is the ID itself. A space with generated nodes, such as a
+   PCB's, uses `InternedSlots`, which is a hash map. Searches reset theirs with generation
+   counters, or by clearing the map. An engine keeps its resource mapping for the whole
+   run and assigns a slot when a net first occupies a resource, between searches, so that
+   pricing only reads the mapping and any number of searches can share it. On a miss, the
+   resource is one that no net has occupied. Still open is whether the flat resource arrays
+   should move to pages for the largest graphs, as they take 16 bytes for every resource
+   up to the highest one occupied.
 
 4. **How are global and detailed routing composed?** Possibly as two spaces at
    different resolutions, where a global result restricts expansion in the detailed

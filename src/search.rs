@@ -56,6 +56,12 @@
 //! Costs that saturate at [`Cost::MAX`] all compare equal, so among paths too expensive
 //! to represent the search returns one of them, chosen by the same deterministic rules.
 //!
+//! # Nodes outside the space
+//!
+//! Sources and targets that the space does not [contain](RoutingSpace::contains) are
+//! ignored, as if they had not been listed, before anything is done with them. A slot
+//! mapping might turn such a node into a huge index, so it never gets to see one.
+//!
 //! # Limits
 //!
 //! [`Search::find_path`] runs until it reaches a target or runs out of nodes. On an unbounded
@@ -184,7 +190,8 @@ pub enum SearchOutcome<'a, N> {
     /// The cheapest path.
     Found(Found<'a, N>),
     /// Every node reachable from the sources was explored, so no target can be reached
-    /// at any budget. This includes `sources` or `targets` being empty.
+    /// at any budget. This includes `sources` or `targets` being empty, or holding only
+    /// nodes outside the space.
     Unreachable,
     /// [`SearchLimits::max_expansions`] ran out first. A target may or may not be reachable.
     LimitReached,
@@ -417,7 +424,8 @@ impl<S: RoutingSpace> Search<S> {
     /// Finds the cheapest path for `net` from any of `sources` to any of `targets`.
     ///
     /// Returns `None` if no target can be reached, which includes `sources` or `targets`
-    /// being empty.
+    /// being empty. Nodes that the space does not [contain](RoutingSpace::contains) are
+    /// ignored, in either list, so a node outside the space cannot be a path of its own.
     ///
     /// A node may be listed more than once. Among duplicate sources the lowest starting
     /// cost wins, and duplicate targets make no difference. A source that is also a
@@ -441,9 +449,18 @@ impl<S: RoutingSpace> Search<S> {
     ///     type Node = NodeId;
     ///     type Resource = NodeId;
     ///     type Slots = DenseSlots<NodeId>;
+    ///     type ResourceSlots = DenseSlots<NodeId>;
     ///
     ///     fn new_slots(&self) -> Self::Slots {
     ///         DenseSlots::new()
+    ///     }
+    ///
+    ///     fn new_resource_slots(&self) -> Self::ResourceSlots {
+    ///         DenseSlots::new()
+    ///     }
+    ///
+    ///     fn contains(&self, node: NodeId) -> bool {
+    ///         node.0 < self.len
     ///     }
     ///
     ///     fn expand(&self, _net: NetId, from: NodeId, out: &mut Vec<Step<NodeId>>) {
@@ -548,7 +565,9 @@ impl<S: RoutingSpace> Search<S> {
     {
         self.begin();
 
-        for target in targets {
+        // Asked of `space` and not of a slot mapping, since a mapping might have no answer
+        // but a slot number that is far too large to allocate.
+        for target in targets.into_iter().filter(|t| space.contains(t.node)) {
             let slot = self.slots.slot(target.node);
             self.ensure_slot(slot, target.node);
             // Skipping duplicates here spares a lower bound per duplicate per node.
@@ -565,7 +584,7 @@ impl<S: RoutingSpace> Search<S> {
             return SearchOutcome::Unreachable;
         }
 
-        for source in sources {
+        for source in sources.into_iter().filter(|s| space.contains(s.node)) {
             self.offer(space, net, source.node, source.cost, NO_PARENT);
         }
 
@@ -640,7 +659,7 @@ impl<S: RoutingSpace> Search<S> {
         self.generation += 1;
     }
 
-    /// Grows the arrays to include `slot`.
+    /// Grows the arrays to include `slot`, which must be the slot of a node in the space.
     #[inline]
     fn ensure_slot(&mut self, slot: usize, node: S::Node) {
         if slot >= self.states.len() {
@@ -816,9 +835,18 @@ mod tests {
         type Node = NodeId;
         type Resource = NodeId;
         type Slots = DenseSlots<NodeId>;
+        type ResourceSlots = DenseSlots<NodeId>;
 
         fn new_slots(&self) -> Self::Slots {
             DenseSlots::new()
+        }
+
+        fn new_resource_slots(&self) -> Self::ResourceSlots {
+            DenseSlots::new()
+        }
+
+        fn contains(&self, node: NodeId) -> bool {
+            node.index() < self.steps.len()
         }
 
         fn expand(&self, _net: NetId, from: NodeId, out: &mut Vec<Step<NodeId>>) {
@@ -854,9 +882,18 @@ mod tests {
         type Node = (i32, i32);
         type Resource = (i32, i32);
         type Slots = InternedSlots<(i32, i32)>;
+        type ResourceSlots = InternedSlots<(i32, i32)>;
 
         fn new_slots(&self) -> Self::Slots {
             InternedSlots::new()
+        }
+
+        fn new_resource_slots(&self) -> Self::ResourceSlots {
+            InternedSlots::new()
+        }
+
+        fn contains(&self, node: (i32, i32)) -> bool {
+            (0..self.size).contains(&node.0) && (0..self.size).contains(&node.1)
         }
 
         fn expand(&self, net: NetId, (x, y): (i32, i32), out: &mut Vec<Step<(i32, i32)>>) {
@@ -1308,6 +1345,97 @@ mod tests {
     }
 
     #[test]
+    fn nodes_outside_the_space_are_ignored_without_allocating() {
+        let far = u32::MAX;
+        let grid = crate::space::grid::Grid::new(3, 1, 1).unwrap();
+        let graph = crate::space::graph::GraphBuilder::new(3).build();
+        let mut on_grid = Search::new(&grid);
+        let mut on_graph = Search::new(&graph);
+
+        // Neither would survive trying to allocate state for a slot near `u32::MAX`.
+        for (from, to) in [(&[far][..], &[0][..]), (&[0], &[far]), (&[far], &[far])] {
+            let found = on_grid.find_path(&grid, NET, sources(from), targets(to));
+            assert_eq!(found, None);
+            assert_eq!(on_grid.stats(), SearchStats::default());
+            let found = on_graph.find_path(&graph, NET, sources(from), targets(to));
+            assert_eq!(found, None);
+        }
+        // Node 0 is all that any of those could have allocated for.
+        assert_eq!(on_grid.states.len(), 1);
+        assert_eq!(on_graph.states.len(), 1);
+
+        // Through `Target`, with a cost that would otherwise be queued.
+        let outcome = on_grid.find_path_with(
+            &grid,
+            NET,
+            sources(&[0]),
+            with_costs(&[(far, 3), (far - 1, 0)]),
+            SearchLimits::NONE,
+        );
+        assert_eq!(outcome, SearchOutcome::Unreachable);
+        assert_eq!(on_grid.stats().pushes, 0);
+
+        // A limit of no expansions does not turn this into running out of limits.
+        let limits = SearchLimits {
+            max_expansions: 0,
+            cancel: None,
+        };
+        let outcome =
+            on_grid.find_path_with(&grid, NET, sources(&[far]), with_costs(&[(1, 0)]), limits);
+        assert_eq!(outcome, SearchOutcome::Unreachable);
+    }
+
+    #[test]
+    fn nodes_outside_the_space_do_not_get_in_the_way_of_those_inside() {
+        let far = u32::MAX;
+        let grid = crate::space::grid::Grid::new(4, 1, 1).unwrap();
+        let mut search = Search::new(&grid);
+        let expected = (targets(&[1, 2, 3]), Cost::from(2));
+
+        let found = search
+            .find_path(&grid, NET, sources(&[far, 1, far]), targets(&[far, 3]))
+            .unwrap();
+        assert_eq!((found.path.to_vec(), found.cost), expected);
+        let pushes = search.stats().pushes;
+
+        // The same work as without them, at the same cost and by the same path.
+        let found = search
+            .find_path(&grid, NET, sources(&[1]), targets(&[3]))
+            .unwrap();
+        assert_eq!((found.path.to_vec(), found.cost), expected);
+        assert_eq!(search.stats().pushes, pushes);
+        assert!(search.states.len() <= 4);
+    }
+
+    #[test]
+    fn a_blocked_cell_is_in_the_space_and_a_foreign_node_is_not() {
+        let far = u32::MAX;
+        let mut grid = crate::space::grid::Grid::new(2, 1, 1).unwrap();
+        grid.set_blocked(0, 0, 0, true).unwrap();
+        let mut search = Search::new(&grid);
+        // A blocked cell is still a path of one node, which the validator then rejects.
+        let found = search.find_path(&grid, NET, sources(&[0]), targets(&[0]));
+        assert_eq!(found.map(|found| found.path.len()), Some(1));
+        assert_eq!(
+            search.find_path(&grid, NET, sources(&[far]), targets(&[far])),
+            None
+        );
+    }
+
+    #[test]
+    fn interned_slots_are_not_assigned_to_nodes_outside_the_space() {
+        let space = LazyGrid { size: 4 };
+        let mut search = Search::new(&space);
+        let outside = (-1, 0);
+        let found = search.find_path(&space, NET, [Source::new(outside)], [outside]);
+        assert_eq!(found, None);
+        assert_eq!(search.slots.get(outside), None);
+        let found = search.find_path(&space, NET, [Source::new((0, 0))], [outside, (1, 0)]);
+        assert_eq!(found.map(|found| found.cost), Some(Cost::ONE));
+        assert_eq!(search.slots.get(outside), None);
+    }
+
+    #[test]
     fn repeated_searches_do_not_grow_the_buffers() {
         let edges: Vec<_> = (0..99u32)
             .flat_map(|n| [(n, n + 1, 1), (n + 1, n, 1)])
@@ -1696,8 +1824,15 @@ mod tests {
             type Node = NodeId;
             type Resource = NodeId;
             type Slots = DenseSlots<NodeId>;
+            type ResourceSlots = DenseSlots<NodeId>;
             fn new_slots(&self) -> Self::Slots {
                 DenseSlots::new()
+            }
+            fn new_resource_slots(&self) -> Self::ResourceSlots {
+                DenseSlots::new()
+            }
+            fn contains(&self, node: NodeId) -> bool {
+                node.0 < u32::MAX
             }
             fn expand(&self, _net: NetId, from: NodeId, out: &mut Vec<Step<NodeId>>) {
                 if from.0 == self.at {
@@ -1748,8 +1883,15 @@ mod tests {
             type Node = NodeId;
             type Resource = NodeId;
             type Slots = DenseSlots<NodeId>;
+            type ResourceSlots = DenseSlots<NodeId>;
             fn new_slots(&self) -> Self::Slots {
                 self.0.new_slots()
+            }
+            fn new_resource_slots(&self) -> Self::ResourceSlots {
+                DenseSlots::new()
+            }
+            fn contains(&self, node: NodeId) -> bool {
+                self.0.contains(node)
             }
             fn expand(&self, net: NetId, from: NodeId, out: &mut Vec<Step<NodeId>>) {
                 self.0.expand(net, from, out);

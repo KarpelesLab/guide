@@ -36,10 +36,21 @@ impl<S: RoutingSpace> RoutingSpace for WithoutBound<'_, S> {
     type Node = S::Node;
     type Resource = S::Resource;
     type Slots = S::Slots;
+    type ResourceSlots = S::ResourceSlots;
 
     #[inline]
     fn new_slots(&self) -> S::Slots {
         self.0.new_slots()
+    }
+
+    #[inline]
+    fn new_resource_slots(&self) -> S::ResourceSlots {
+        self.0.new_resource_slots()
+    }
+
+    #[inline]
+    fn contains(&self, node: S::Node) -> bool {
+        self.0.contains(node)
     }
 
     #[inline]

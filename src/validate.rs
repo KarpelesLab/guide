@@ -18,6 +18,13 @@
 //!   point of the net's [driver](Net::driver). An empty route has no root to blame, and
 //!   [`Route::validate`] already reports it as missing a terminal. Other nets have nothing
 //!   to drive, so their routes can be rooted anywhere.
+//! - Each terminal of a net in the problem has an access point that the space
+//!   [contains](RoutingSpace::contains), whether or not the net has a route. An access point
+//!   elsewhere is no fault if another one exists, as that terminal can still be connected,
+//!   and searches and engines do just that.
+//! - Each node of a route is one that the space contains. That has to be checked by itself,
+//!   as a route of a single node has no edge to be found wanting, and spaces report no
+//!   resources for a node they do not have.
 //! - Each edge is a step that [`RoutingSpace::expand`] offers that net.
 //! - No resource is used by more nets than its [capacity](RoutingSpace::capacity). Usage
 //!   comes from [`RoutingSpace::resources`], for every edge and for the root. It counts
@@ -68,22 +75,15 @@
 //! 1. [`DuplicateNet`](Fault::DuplicateNet), by ascending net.
 //! 2. [`MissingOutcome`](Fault::MissingOutcome), by ascending net.
 //! 3. [`UnknownNet`](Fault::UnknownNet), by ascending net.
-//! 4. By ascending net, [`InvalidRoute`](Fault::InvalidRoute), then
-//!    [`RootNotOnDriver`](Fault::RootNotOnDriver), then [`NotAStep`](Fault::NotAStep) in
-//!    edge order.
-//! 5. [`Overuse`](Fault::Overuse), by ascending resource, each listing nets in ascending
+//! 4. [`TerminalNotInSpace`](Fault::TerminalNotInSpace), by ascending net, then terminal.
+//! 5. By ascending net, [`InvalidRoute`](Fault::InvalidRoute), then
+//!    [`RootNotOnDriver`](Fault::RootNotOnDriver), then
+//!    [`NodeNotInSpace`](Fault::NodeNotInSpace) in the order the route lists its nodes, then
+//!    [`NotAStep`](Fault::NotAStep) in edge order.
+//! 6. [`Overuse`](Fault::Overuse), by ascending resource, each listing nets in ascending
 //!    order.
 //!
 //! Hash maps are used for lookups and never iterated.
-//!
-//! # Limits
-//!
-//! A checker can only see what the space tells it. [`RoutingSpace`] cannot say whether a
-//! node exists, and [`Grid`](crate::space::grid::Grid) and
-//! [`Graph`](crate::space::graph::Graph) report that a foreign node consumes no resources.
-//! So if a problem has a terminal on a foreign node, a route of just that node looks legal.
-//! Any edge to or from such a node is still caught, as [`expand`](RoutingSpace::expand)
-//! has no such step to offer.
 //!
 //! # Examples
 //!
@@ -176,6 +176,22 @@ pub enum Fault<N, R> {
         /// The route's root.
         root: N,
     },
+    /// No access point of a net's terminal is on a node that the space contains, so no route
+    /// can connect it. The problem is at fault here, and an unrouted net does not excuse it.
+    TerminalNotInSpace {
+        /// The net.
+        net: NetId,
+        /// The terminal's index in [`Net::terminals`].
+        terminal: usize,
+    },
+    /// A route uses a node that the space does not contain. Each distinct node is reported
+    /// once per route, with the root and both ends of each edge all counted.
+    NodeNotInSpace {
+        /// The net.
+        net: NetId,
+        /// The node.
+        node: N,
+    },
     /// An edge of a route is not a step that the space offers the net.
     NotAStep {
         /// The net.
@@ -212,6 +228,18 @@ impl<N: fmt::Debug, R: fmt::Debug> fmt::Display for Fault<N, R> {
                 "net {}: route starts at {root:?}, which is not an access point of its driver",
                 net.0
             ),
+            Fault::TerminalNotInSpace { net, terminal } => write!(
+                f,
+                "net {}: terminal {terminal} has no access point in the space",
+                net.0
+            ),
+            Fault::NodeNotInSpace { net, node } => {
+                write!(
+                    f,
+                    "net {}: route uses {node:?}, which is not in the space",
+                    net.0
+                )
+            }
             Fault::NotAStep { net, index, edge } => write!(
                 f,
                 "net {}: edge {index} from {:?} to {:?} is not a step of the space",
@@ -397,6 +425,18 @@ pub fn check<S: RoutingSpace>(
         }
     }
 
+    for net in &sorted {
+        for (terminal, access) in net.terminals.iter().enumerate() {
+            let points = access.access_points();
+            if !points.iter().any(|point| space.contains(point.node)) {
+                faults.push(Fault::TerminalNotInSpace {
+                    net: net.id,
+                    terminal,
+                });
+            }
+        }
+    }
+
     let mut summary = Summary {
         nets: sorted.len(),
         ..Summary::default()
@@ -483,11 +523,23 @@ fn check_route<S: RoutingSpace>(
         sound = false;
     }
 
+    // Not `Route::nodes`, because an invalid route can leave out a node that only starts edges.
+    scratch.nodes.clear();
+    let ends = route.edges().iter().flat_map(|edge| [edge.from, edge.to]);
+    for node in route.root().into_iter().chain(ends) {
+        if scratch.nodes.insert(node) && !space.contains(node) {
+            faults.push(Fault::NodeNotInSpace { net: net.id, node });
+            sound = false;
+        }
+    }
+
     scratch.expanded.clear();
     scratch.steps.clear();
     let mut total = Cost::ZERO;
     for (index, &edge) in route.edges().iter().enumerate() {
-        if scratch.expanded.insert(edge.from) {
+        // Spaces only have to expand what they contain, and a node they do not contain has
+        // no steps to offer, which is what the edge gets reported for.
+        if scratch.expanded.insert(edge.from) && space.contains(edge.from) {
             scratch.expansion.clear();
             space.expand(net.id, edge.from, &mut scratch.expansion);
             for step in &scratch.expansion {
@@ -1232,10 +1284,34 @@ mod tests {
             assert_eq!(
                 report.faults(),
                 [
+                    Fault::TerminalNotInSpace {
+                        net: NetId(0),
+                        terminal: 0,
+                    },
+                    Fault::TerminalNotInSpace {
+                        net: NetId(0),
+                        terminal: 1,
+                    },
+                    Fault::TerminalNotInSpace {
+                        net: NetId(1),
+                        terminal: 0,
+                    },
+                    Fault::NodeNotInSpace {
+                        net: NetId(0),
+                        node: NodeId(far),
+                    },
+                    Fault::NodeNotInSpace {
+                        net: NetId(0),
+                        node: NodeId(far - 1),
+                    },
                     Fault::NotAStep {
                         net: NetId(0),
                         index: 0,
                         edge: edge(far, far - 1),
+                    },
+                    Fault::NodeNotInSpace {
+                        net: NetId(1),
+                        node: NodeId(far),
                     },
                     Fault::NotAStep {
                         net: NetId(1),
@@ -1247,18 +1323,208 @@ mod tests {
         }
     }
 
-    /// Pins the limit stated in the module documentation: the trait gives no way to tell
-    /// that a node does not exist, and a foreign node reports no resources.
     #[test]
-    fn a_lone_foreign_root_on_foreign_terminals_cannot_be_detected() {
+    fn a_lone_foreign_root_on_foreign_terminals_is_caught() {
         let far = u32::MAX;
         let nets = [net(0, vec![at(far), at(far)])];
+        let routes = set(vec![(0, Route::from_root(NodeId(far)))]);
+        for report in [
+            check(&row(2), &nets, &routes),
+            check(&graph(2, &[(0, 1, 1)]), &nets, &routes),
+        ] {
+            assert_eq!(
+                report.faults(),
+                [
+                    Fault::TerminalNotInSpace {
+                        net: NetId(0),
+                        terminal: 0,
+                    },
+                    Fault::TerminalNotInSpace {
+                        net: NetId(0),
+                        terminal: 1,
+                    },
+                    Fault::NodeNotInSpace {
+                        net: NetId(0),
+                        node: NodeId(far),
+                    },
+                ]
+            );
+            assert!(!report.is_legal());
+            assert_eq!(report.cost(NetId(0)), None);
+        }
+    }
+
+    #[test]
+    fn a_foreign_root_is_caught_when_the_terminals_are_not_on_it() {
+        // Nothing but the root is wrong here, on a net that has nothing to drive.
+        let far = u32::MAX;
+        let nets = [net(0, vec![])];
         let report = check(
             &row(2),
             &nets,
             &set(vec![(0, Route::from_root(NodeId(far)))]),
         );
-        assert!(report.is_legal());
+        assert_eq!(
+            report.faults(),
+            [Fault::NodeNotInSpace {
+                net: NetId(0),
+                node: NodeId(far),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_node_is_reported_once_per_route_however_often_it_appears() {
+        let far = u32::MAX;
+        let nets = [net(0, vec![]), net(1, vec![])];
+        let tree = route(far, &[(far, 0), (far, 1)]);
+        let routes = set(vec![(0, tree.clone()), (1, tree)]);
+        let report = check(&row(2), &nets, &routes);
+        let on_foreign: Vec<_> = report
+            .faults()
+            .iter()
+            .filter(|fault| matches!(fault, Fault::NodeNotInSpace { .. }))
+            .collect();
+        let expected = |id| Fault::NodeNotInSpace {
+            net: NetId(id),
+            node: NodeId(far),
+        };
+        assert_eq!(on_foreign, [&expected(0), &expected(1)]);
+    }
+
+    #[test]
+    fn a_node_that_only_starts_an_edge_is_still_checked() {
+        // `Route::nodes` would not list `far`, since no edge arrives there.
+        let far = u32::MAX;
+        let nets = [net(0, vec![at(0), at(1)])];
+        let report = check(
+            &row(2),
+            &nets,
+            &set(vec![(0, route(0, &[(0, 1), (far, 1)]))]),
+        );
+        assert!(report.faults().contains(&Fault::NodeNotInSpace {
+            net: NetId(0),
+            node: NodeId(far),
+        }));
+    }
+
+    #[test]
+    fn a_terminal_outside_the_space_is_a_fault_on_an_unrouted_net_too() {
+        let far = u32::MAX;
+        let nets = [net(4, vec![at(0), at(far)]), net(2, vec![at(far)])];
+        let mut routes = RouteSet::new();
+        routes.set_unrouted(NetId(4), UnroutedReason::NoPath);
+        routes.set_route(NetId(2), Route::new());
+        let report = check(&row(2), &nets, &routes);
+        assert_eq!(
+            report.faults(),
+            [
+                Fault::TerminalNotInSpace {
+                    net: NetId(2),
+                    terminal: 0,
+                },
+                Fault::TerminalNotInSpace {
+                    net: NetId(4),
+                    terminal: 1,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_terminal_with_any_access_point_in_the_space_is_no_fault() {
+        let far = u32::MAX;
+        let nets = [net(
+            0,
+            vec![either(&[(far, 0), (0, 2)]), either(&[(1, 3), (far - 1, 0)])],
+        )];
+        let report = check(&row(2), &nets, &set(vec![(0, path(&[0, 1]))]));
+        assert_eq!(report.faults(), []);
+        assert_eq!(report.cost(NetId(0)), Some(Cost::from(1 + 2 + 3)));
+    }
+
+    #[test]
+    fn a_blocked_cell_is_in_the_space() {
+        // It is overused and not missing, which keeps the two faults apart.
+        let mut grid = row(1);
+        grid.set_blocked(0, 0, 0, true).unwrap();
+        let nets = [net(0, vec![at(0)])];
+        let report = check(&grid, &nets, &set(vec![(0, Route::from_root(NodeId(0)))]));
+        assert!(matches!(report.faults(), [Fault::Overuse { .. }]));
+    }
+
+    #[test]
+    fn a_space_is_not_asked_to_expand_a_node_it_does_not_have() {
+        struct Fussy(Grid);
+        impl RoutingSpace for Fussy {
+            type Node = NodeId;
+            type Resource = NodeId;
+            type Slots = <Grid as RoutingSpace>::Slots;
+            type ResourceSlots = <Grid as RoutingSpace>::ResourceSlots;
+            fn new_slots(&self) -> Self::Slots {
+                self.0.new_slots()
+            }
+            fn new_resource_slots(&self) -> Self::ResourceSlots {
+                self.0.new_resource_slots()
+            }
+            fn contains(&self, node: NodeId) -> bool {
+                self.0.contains(node)
+            }
+            fn expand(&self, net: NetId, from: NodeId, out: &mut Vec<Step<NodeId>>) {
+                assert!(self.0.contains(from), "asked to expand {from:?}");
+                self.0.expand(net, from, out);
+            }
+            fn lower_bound(&self, net: NetId, from: NodeId, to: NodeId) -> Cost {
+                self.0.lower_bound(net, from, to)
+            }
+            fn resources(&self, net: NetId, from: NodeId, to: NodeId, out: &mut Vec<NodeId>) {
+                self.0.resources(net, from, to, out);
+            }
+            fn capacity(&self, resource: NodeId) -> u32 {
+                self.0.capacity(resource)
+            }
+        }
+
+        let far = u32::MAX;
+        let nets = [net(0, vec![at(far), at(0)])];
+        let report = check(&Fussy(row(1)), &nets, &set(vec![(0, path(&[far, 0]))]));
+        assert!(report.faults().contains(&Fault::NotAStep {
+            net: NetId(0),
+            index: 0,
+            edge: edge(far, 0),
+        }));
+    }
+
+    #[test]
+    fn engine_results_on_problems_with_foreign_terminals_agree_with_the_engine() {
+        use crate::engine::{EngineOptions, route as run_engine};
+
+        let far = u32::MAX;
+        let grid = row(4);
+        // The first net is unrouted and at fault, and the second has a spare access point.
+        let nets = [
+            net(0, vec![at(far), at(1)]),
+            net(1, vec![either(&[(far, 0), (2, 0)]), at(3)]),
+        ];
+        let outcome = run_engine(&grid, &nets, EngineOptions::default()).unwrap();
+        assert!(!outcome.is_success());
+        let report = check(&grid, &nets, &outcome.routes);
+        assert_eq!(
+            report.faults(),
+            [Fault::TerminalNotInSpace {
+                net: NetId(0),
+                terminal: 0,
+            }]
+        );
+        assert_eq!(
+            report.status(NetId(0)),
+            Some(NetStatus::Unrouted(UnroutedReason::NoPath))
+        );
+
+        // With the first net gone, the result is legal in the eyes of both.
+        let outcome = run_engine(&grid, &nets[1..], EngineOptions::default()).unwrap();
+        assert!(outcome.is_success());
+        assert!(check(&grid, &nets[1..], &outcome.routes).is_complete());
     }
 
     #[test]
@@ -1508,6 +1774,20 @@ mod tests {
     fn faults_read_well() {
         let shown = [
             (
+                Fault::TerminalNotInSpace {
+                    net: NetId(1),
+                    terminal: 2,
+                },
+                "net 1: terminal 2 has no access point in the space",
+            ),
+            (
+                Fault::NodeNotInSpace {
+                    net: NetId(1),
+                    node: NodeId(9),
+                },
+                "net 1: route uses NodeId(9), which is not in the space",
+            ),
+            (
                 Fault::DuplicateNet {
                     net: NetId(1),
                     count: 2,
@@ -1580,9 +1860,18 @@ mod tests {
         type Node = u32;
         type Resource = BusResource;
         type Slots = InternedSlots<u32>;
+        type ResourceSlots = InternedSlots<BusResource>;
 
         fn new_slots(&self) -> InternedSlots<u32> {
             InternedSlots::new()
+        }
+
+        fn new_resource_slots(&self) -> Self::ResourceSlots {
+            InternedSlots::new()
+        }
+
+        fn contains(&self, node: u32) -> bool {
+            node < u32::MAX
         }
 
         fn expand(&self, net: NetId, from: u32, out: &mut Vec<Step<u32>>) {
@@ -2124,6 +2413,7 @@ mod tests {
                         fault,
                         Fault::InvalidRoute { net, .. }
                         | Fault::RootNotOnDriver { net, .. }
+                        | Fault::NodeNotInSpace { net, .. }
                         | Fault::NotAStep { net, .. } if *net == id
                     ));
                     if let NetStatus::Routed { cost } = status {

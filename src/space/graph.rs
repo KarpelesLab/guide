@@ -433,8 +433,9 @@ fn set_in_lazy_column<T: Copy + PartialEq>(
 ///
 /// # Foreign nodes
 ///
-/// A [`NodeId`] outside the graph has no steps, consumes no resources and has a capacity
-/// of 0. Bounds involving one are [`Cost::ZERO`], and don't reach the estimator.
+/// A [`NodeId`] outside the graph is not [contained](RoutingSpace::contains) in it. It has
+/// no steps, consumes no resources and has a capacity of 0. Bounds involving one are
+/// [`Cost::ZERO`], and don't reach the estimator.
 ///
 /// # Memory
 ///
@@ -558,8 +559,10 @@ impl<B> Graph<B> {
             + self.capacities.heap_bytes()
     }
 
+    /// Returns whether `node` is in the graph, which is what
+    /// [`RoutingSpace::contains`] answers, whatever the estimator.
     #[inline]
-    const fn contains(&self, node: NodeId) -> bool {
+    pub const fn contains(&self, node: NodeId) -> bool {
         node.0 < self.num_nodes
     }
 }
@@ -578,10 +581,21 @@ impl<B: LowerBound> RoutingSpace for Graph<B> {
     type Node = NodeId;
     type Resource = NodeId;
     type Slots = DenseSlots<NodeId>;
+    type ResourceSlots = DenseSlots<NodeId>;
 
     #[inline]
     fn new_slots(&self) -> DenseSlots<NodeId> {
         DenseSlots::new()
+    }
+
+    #[inline]
+    fn new_resource_slots(&self) -> DenseSlots<NodeId> {
+        DenseSlots::new()
+    }
+
+    #[inline]
+    fn contains(&self, node: NodeId) -> bool {
+        Graph::contains(self, node)
     }
 
     #[inline]
@@ -866,6 +880,16 @@ mod tests {
     #[test]
     fn uses_dense_slots() {
         assert_eq!(sample().new_slots().slot(NodeId(3)), 3);
+        assert_eq!(sample().new_resource_slots().get(NodeId(3)), Some(3));
+    }
+
+    #[test]
+    fn contains_exactly_the_nodes_it_was_built_with() {
+        let graph = sample();
+        assert!(RoutingSpace::contains(&graph, NodeId(3)));
+        assert!(!RoutingSpace::contains(&graph, NodeId(4)));
+        assert!(!RoutingSpace::contains(&graph, NodeId(u32::MAX)));
+        assert!(!GraphBuilder::new(0).build().contains(NodeId(0)));
     }
 
     #[test]

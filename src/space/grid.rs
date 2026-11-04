@@ -377,9 +377,9 @@ fn lowest_set_bit(value: f64) -> f64 {
 ///
 /// # Foreign nodes
 ///
-/// A [`NodeId`] beyond the last cell behaves as a blocked cell would: it has no steps,
-/// consumes no resources and has a capacity of 0. Bounds involving one are
-/// [`Cost::ZERO`].
+/// A [`NodeId`] beyond the last cell is not [contained](RoutingSpace::contains) in the grid,
+/// unlike a blocked cell. It otherwise behaves as a blocked cell would: it has no steps,
+/// consumes no resources and has a capacity of 0. Bounds involving one are [`Cost::ZERO`].
 ///
 /// # Examples
 ///
@@ -669,10 +669,21 @@ impl RoutingSpace for Grid {
     type Node = NodeId;
     type Resource = NodeId;
     type Slots = DenseSlots<NodeId>;
+    type ResourceSlots = DenseSlots<NodeId>;
 
     #[inline]
     fn new_slots(&self) -> DenseSlots<NodeId> {
         DenseSlots::new()
+    }
+
+    #[inline]
+    fn new_resource_slots(&self) -> DenseSlots<NodeId> {
+        DenseSlots::new()
+    }
+
+    #[inline]
+    fn contains(&self, node: NodeId) -> bool {
+        node.0 < self.cells
     }
 
     fn expand(&self, _net: NetId, from: NodeId, out: &mut Vec<Step<NodeId>>) {
@@ -1120,6 +1131,23 @@ mod tests {
     fn uses_dense_slots() {
         let grid = Grid::new(2, 2, 1).unwrap();
         assert_eq!(grid.new_slots().slot(NodeId(3)), 3);
+        assert_eq!(grid.new_resource_slots().get(NodeId(3)), Some(3));
+    }
+
+    #[test]
+    fn contains_every_cell_blocked_or_not_and_nothing_else() {
+        let mut grid = Grid::new(2, 2, 2).unwrap();
+        grid.set_blocked(1, 0, 0, true).unwrap();
+        for id in 0..8 {
+            assert!(grid.contains(NodeId(id)));
+        }
+        assert!(!grid.contains(NodeId(8)));
+        assert!(!grid.contains(NodeId(u32::MAX)));
+
+        // On the largest grid, the one number left over is the only foreign node.
+        let largest = Grid::new(65535, 65537, 1).unwrap();
+        assert!(largest.contains(NodeId(u32::MAX - 1)));
+        assert!(!largest.contains(NodeId(u32::MAX)));
     }
 
     #[test]

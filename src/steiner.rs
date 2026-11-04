@@ -347,6 +347,12 @@ pub enum RefineError<N> {
         /// The route's root.
         root: N,
     },
+    /// The route's root is not a node of the space. An edge to or from a node outside the
+    /// space is reported as [`NotAStep`](RefineError::NotAStep).
+    RootNotInSpace {
+        /// The route's root.
+        root: N,
+    },
     /// An edge of the route is not a step that the space offers.
     NotAStep {
         /// The start of the edge.
@@ -365,6 +371,9 @@ impl<N: fmt::Debug> fmt::Display for RefineError<N> {
                     f,
                     "route's root {root:?} is not an access point of the driver"
                 )
+            }
+            RefineError::RootNotInSpace { root } => {
+                write!(f, "route's root {root:?} is not in the space")
             }
             RefineError::NotAStep { from, to } => {
                 write!(f, "the space has no step from {from:?} to {to:?}")
@@ -388,7 +397,8 @@ impl<N: fmt::Debug> Error for RefineError<N> {}
 /// # Errors
 ///
 /// Returns [`SteinerError::UnreachableTerminal`] if no access point of the driver reaches
-/// all the other terminals.
+/// all the other terminals. Access points that the space does not
+/// [contain](RoutingSpace::contains) reach nothing and cannot be reached.
 ///
 /// # Panics
 ///
@@ -431,7 +441,8 @@ pub fn kmb_tree<S: RoutingSpace>(
 /// # Errors
 ///
 /// Returns [`SteinerError::UnreachableTerminal`] if no access point of the driver reaches
-/// all the other terminals.
+/// all the other terminals. Access points that the space does not
+/// [contain](RoutingSpace::contains) reach nothing and cannot be reached.
 ///
 /// # Panics
 ///
@@ -489,7 +500,8 @@ pub fn takahashi_matsuyama<S: RoutingSpace>(
 /// # Errors
 ///
 /// Returns an error if the route is not valid for the net, is not rooted at an access
-/// point of the driver, or has an edge that the space does not offer as a step.
+/// point of the driver that is in the space, or has an edge that the space does not offer
+/// as a step.
 ///
 /// # Panics
 ///
@@ -550,6 +562,10 @@ pub fn refine_tree<S: RoutingSpace>(
         .any(|point| point.node == root)
     {
         return Err(RefineError::RootNotDriver { root });
+    }
+    // Edges get checked against the space below, and a route of just its root has none.
+    if !space.contains(root) {
+        return Err(RefineError::RootNotInSpace { root });
     }
     router
         .step_costs(route)
@@ -861,6 +877,10 @@ impl<'a, S: RoutingSpace> Router<'a, S> {
     fn step_costs(&mut self, route: &Route<S::Node>) -> Result<Vec<Cost>, Edge<S::Node>> {
         let mut costs = Vec::with_capacity(route.edges().len());
         for &edge in route.edges() {
+            // A route being refined can be wrong, and spaces only expand what they contain.
+            if !self.space.contains(edge.from) {
+                return Err(edge);
+            }
             self.steps.clear();
             self.space.expand(self.net.id, edge.from, &mut self.steps);
             let cost = self
@@ -2563,6 +2583,106 @@ mod tests {
         assert_eq!(refined.route, Route::new());
     }
 
+    // Nodes outside the space.
+
+    #[test]
+    fn terminals_outside_the_space_are_unreachable() {
+        let far = u32::MAX;
+        let space = graph(3, &[(0, 1, 1), (1, 2, 1)]);
+        let mut search = Search::new(&space);
+        let options = SteinerOptions::default();
+        // As the driver, and as the only other terminal, and as both on the same node, and
+        // with enough terminals to get as far as a closure.
+        for terminals in [
+            &[far, 2][..],
+            &[0, far],
+            &[far, far],
+            &[0, 1, far],
+            &[far, 1, 2],
+        ] {
+            let net = at(terminals);
+            let terminal = terminals[1..].iter().position(|&node| node == far);
+            let terminal = terminal.map_or(1, |position| position + 1);
+            let expected = Err(SteinerError::UnreachableTerminal { terminal });
+            assert_eq!(takahashi_matsuyama(&mut search, &space, &net), expected);
+            assert_eq!(kmb_tree(&mut search, &space, &net, &options), expected);
+        }
+    }
+
+    #[test]
+    fn access_points_outside_the_space_are_passed_over() {
+        let far = u32::MAX;
+        let space = graph(4, &[(0, 1, 1), (1, 2, 1), (1, 3, 1)]);
+        let mut search = Search::new(&space);
+        let access = |points: &[(u32, u32)]| {
+            let points = points
+                .iter()
+                .map(|&(node, cost)| AccessPoint {
+                    node: NodeId(node),
+                    cost: cost.into(),
+                })
+                .collect();
+            Terminal::new(points).unwrap()
+        };
+        let net = Net {
+            id: NET,
+            terminals: vec![
+                access(&[(far, 0), (0, 2)]),
+                access(&[(far - 1, 0), (2, 3)]),
+                access(&[(3, 1), (far - 2, 0)]),
+            ],
+        };
+        let tree = takahashi_matsuyama(&mut search, &space, &net).unwrap();
+        assert_eq!(tree.route.root(), Some(NodeId(0)));
+        assert_eq!(tree.cost, Cost::from(3 + 2 + 3 + 1));
+        let options = SteinerOptions::default();
+        let tree = kmb_tree(&mut search, &space, &net, &options).unwrap();
+        assert_eq!(tree.cost, Cost::from(3 + 2 + 3 + 1));
+    }
+
+    #[test]
+    fn refinement_rejects_a_root_outside_the_space() {
+        // This route is a valid tree for its net, and has no edge to fail on.
+        let far = u32::MAX;
+        let space = graph(2, &[(0, 1, 1)]);
+        let mut search = Search::new(&space);
+        let net = at(&[far, far]);
+        let route = Route::from_root(NodeId(far));
+        let error = refine_tree(
+            &mut search,
+            &space,
+            &net,
+            &route,
+            &SteinerOptions::default(),
+        )
+        .unwrap_err();
+        assert_eq!(error, RefineError::RootNotInSpace { root: NodeId(far) });
+        assert!(error.to_string().contains("not in the space"));
+
+        // A tree through a foreign node, with the edge out of it listed first.
+        let net = at(&[0, 1]);
+        let edges = [(far, 1), (0, far)].map(|(from, to)| Edge {
+            from: NodeId(from),
+            to: NodeId(to),
+        });
+        let route = Route::from_edges(NodeId(0), edges.to_vec());
+        let error = refine_tree(
+            &mut search,
+            &space,
+            &net,
+            &route,
+            &SteinerOptions::default(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            RefineError::NotAStep {
+                from: NodeId(far),
+                to: NodeId(1)
+            }
+        );
+    }
+
     // Other spaces.
 
     /// A grid with a surcharge on some cells, as a negotiating engine would price them.
@@ -2575,9 +2695,18 @@ mod tests {
         type Node = NodeId;
         type Resource = NodeId;
         type Slots = <Grid as RoutingSpace>::Slots;
+        type ResourceSlots = <Grid as RoutingSpace>::ResourceSlots;
 
         fn new_slots(&self) -> Self::Slots {
             self.grid.new_slots()
+        }
+
+        fn new_resource_slots(&self) -> Self::ResourceSlots {
+            self.grid.new_resource_slots()
+        }
+
+        fn contains(&self, node: NodeId) -> bool {
+            self.grid.contains(node)
         }
 
         fn expand(&self, net: NetId, from: NodeId, out: &mut Vec<Step<NodeId>>) {
@@ -2631,9 +2760,18 @@ mod tests {
         type Node = (i32, char);
         type Resource = (i32, char);
         type Slots = InternedSlots<(i32, char)>;
+        type ResourceSlots = InternedSlots<(i32, char)>;
 
         fn new_slots(&self) -> Self::Slots {
             InternedSlots::new()
+        }
+
+        fn new_resource_slots(&self) -> Self::ResourceSlots {
+            InternedSlots::new()
+        }
+
+        fn contains(&self, node: (i32, char)) -> bool {
+            (0..8).contains(&node.0) && matches!(node.1, 'a' | 'b')
         }
 
         fn expand(&self, _: NetId, (x, layer): (i32, char), out: &mut Vec<Step<(i32, char)>>) {

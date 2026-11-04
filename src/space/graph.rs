@@ -929,10 +929,11 @@ mod tests {
     #[test]
     fn table_holds_exactly_as_many_values_as_its_index_can_address() {
         let distinct = |count: u32| {
-            let mut builder = GraphBuilder::new(count);
+            // Every edge leads to one extra node, so that none of them is a self-loop.
+            let mut builder = GraphBuilder::new(count + 1);
             for node in 0..count {
                 builder
-                    .add_edge(NodeId(node), NodeId(0), Cost::from(node))
+                    .add_edge(NodeId(node), NodeId(count), Cost::from(node))
                     .unwrap();
             }
             builder.build()
@@ -943,12 +944,12 @@ mod tests {
             panic!("65536 distinct values should fit a table");
         };
         assert_eq!(table.len(), 1 << 16);
-        assert_eq!(steps(&largest_table, 65535), [(0, 65535.0)]);
+        assert_eq!(steps(&largest_table, 65535), [(65536, 65535.0)]);
 
         let direct = distinct((1 << 16) + 1);
         assert!(matches!(direct.step_costs, Column::Direct(_)));
-        assert_eq!(steps(&direct, 65536), [(0, 65536.0)]);
-        assert_eq!(steps(&direct, 1), [(0, 1.0)]);
+        assert_eq!(steps(&direct, 65536), [(65537, 65536.0)]);
+        assert_eq!(steps(&direct, 1), [(65537, 1.0)]);
     }
 
     #[test]
@@ -1035,27 +1036,29 @@ mod tests {
     }
 
     proptest! {
-        /// Checks the storage against the edges as they were stated.
+        /// Checks the storage against the edges as they were stated, after merging.
         #[test]
         fn expansion_follows_insertion_order((nodes, edges, bases) in any_graph()) {
             let graph = build(nodes, &edges, &bases);
-            prop_assert_eq!(graph.num_edges() as usize, edges.len());
             let mut out = Vec::new();
+            let mut num_edges = 0;
             for node in 0..nodes {
-                let expected: Vec<_> = edges
-                    .iter()
-                    .filter(|edge| edge.0 == node)
-                    .map(|&(_, to, edge_cost)| Step {
-                        to: NodeId(to),
-                        cost: edge_cost + bases[to as usize],
-                    })
-                    .collect();
+                let mut expected: Vec<Step<NodeId>> = Vec::new();
+                for &(_, to, edge_cost) in edges.iter().filter(|edge| edge.0 == node && edge.1 != node) {
+                    let step_cost = edge_cost + bases[to as usize];
+                    match expected.iter_mut().find(|step| step.to == NodeId(to)) {
+                        Some(step) => step.cost = step.cost.min(step_cost),
+                        None => expected.push(Step { to: NodeId(to), cost: step_cost }),
+                    }
+                }
+                num_edges += expected.len();
                 out.clear();
                 graph.expand(NET, NodeId(node), &mut out);
                 prop_assert_eq!(&out, &expected);
                 prop_assert_eq!(graph.out_degree(NodeId(node)) as usize, expected.len());
                 prop_assert_eq!(graph.base_cost(NodeId(node)), Some(bases[node as usize]));
             }
+            prop_assert_eq!(graph.num_edges() as usize, num_edges);
         }
 
         #[test]

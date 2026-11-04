@@ -254,7 +254,6 @@ mod tests {
     use std::io::{BufReader, Cursor};
 
     const GENUINE: &str = include_str!("../../testdata/vtr/mult_4x4.place");
-    const GENUINE_FIXED: &str = include_str!("../../testdata/vtr/apex2_block_locations.place");
 
     #[test]
     fn reads_a_genuine_placement() {
@@ -281,8 +280,12 @@ mod tests {
 
     #[test]
     fn reads_vprs_partial_placement_of_fixed_blocks() {
-        // From a regression test of VPR's `--fix_clusters`, with odd names such as `[493]`.
-        let placement = read_placement(GENUINE_FIXED.as_bytes()).unwrap();
+        // The form VPR's `--fix_clusters` reads: no header, and odd names such as `[493]`.
+        let text = "#block name\tx\ty\tsubblk\tlayer\tblock number\n\
+            #----------\t--\t--\t------\t-----\t------------\n\
+            n_n1829\t\t3\t5\t4\t0\t#3\n\
+            [493]\t\t2\t1\t2\t0\t#7\n";
+        let placement = read_placement(text.as_bytes()).unwrap();
         assert!(placement.array_size().is_none());
         assert!(placement.netlist_file().is_none());
         assert_eq!(placement.block("[493]").map(|block| block.x), Some(2));

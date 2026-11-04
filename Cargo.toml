@@ -9,7 +9,8 @@ license = "MIT"
 readme = "README.md"
 keywords = ["routing", "placement", "pcb", "fpga", "eda"]
 categories = ["algorithms", "science"]
-exclude = [".github"]
+# The sample files are only used by tests, and some have licences of their own.
+exclude = [".github", "testdata"]
 
 [package.metadata.docs.rs]
 all-features = true

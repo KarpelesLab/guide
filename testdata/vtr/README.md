@@ -10,7 +10,6 @@ ever executed.
 | `mult_4x4.net`, `.place`, `.route` | `vpr/test/gui/fixtures/clean/` | Unmodified VPR output, for `mult_4x4` on `k6_N10_40nm.xml` |
 | `multiclock.net` | `vtr_flow/tasks/regression_tests/vtr_reg_strong/strong_place/` | Unmodified, for global nets |
 | `unconnected.net` | `vpr/test/` | Unmodified, for multi-bit ports |
-| `apex2_block_locations.place` | `vtr_flow/tasks/regression_tests/vtr_reg_strong/strong_fix_clusters/` | Unmodified, a partial placement |
 | `z1000_corner.rr_graph.xml` | `vtr_flow/arch/zeroasic/z1000/z1000_rr_graph.zip` | **An excerpt, not the file as distributed**: the tiles up to (2, 2) of the graph, with nodes renumbered, most metadata removed, and the switches, segments and block types that it uses |
 
 The full z1000 graph is 96 MB, too large to keep here. Tests that use it are `#[ignore]`d
@@ -24,12 +23,13 @@ otherwise, and notes its benchmark circuits and ABC as exceptions.
 - The `.net`, `.place` and `.route` files are VPR's output, kept among VPR's own test
   files, and are treated here as covered by the MIT licence. They describe circuits packed
   into LUTs and flip-flops. `mult_4x4.blif`, the source of `mult_4x4`, states no terms of its
-  own. The sources of `multiclock`, `unconnected` and `apex2` were not traced, and `apex2`
-  is an MCNC benchmark, so check those if redistributing them matters beyond these tests.
+  own. The original circuits of `multiclock` and `unconnected` were not traced. A placement
+  of the MCNC benchmark `apex2` was left out for that reason, because VTR's licence excepts
+  its benchmark circuits.
 - `z1000_corner.rr_graph.xml` comes from VTR's capture of the Zero ASIC z1000 architecture.
   VTR's `vtr_flow/arch/zeroasic/README.md` traces this to
   [logiklib](https://github.com/siliconcompiler/logiklib), whose repository is under the
-  Apache-2.0 licence (<https://www.apache.org/licenses/LICENSE-2.0>). So the file is treated
+  Apache-2.0 licence (a copy is in [`LICENSE-APACHE-2.0`](LICENSE-APACHE-2.0)). So the file is treated
   as under that licence as well as VTR's, and it is modified as described above.
 
 ```
@@ -55,3 +55,5 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+These files are not part of the published crate.

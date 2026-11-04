@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 
 use crate::cost::Cost;
 use crate::id::{NetId, NodeId};
-use crate::space::{DenseSlots, RoutingSpace, Step};
+use crate::space::{DelaySpace, DenseSlots, RoutingSpace, Step};
 
 /// Removes self-loops and merges parallel edges in sorted edge lists, in place.
 fn merge_edges(offsets: &mut [u32], targets: &mut Vec<NodeId>, step_costs: &mut Vec<Cost>) {
@@ -79,6 +79,33 @@ impl LowerBound for ZeroBound {
     #[inline]
     fn estimate(&self, _from: NodeId, _to: NodeId) -> Cost {
         Cost::ZERO
+    }
+}
+
+/// An estimate of the delay of getting between two nodes of a [`TimedGraph`], in picoseconds.
+///
+/// The estimate must never exceed the smallest sum of step delays between the two nodes.
+/// Closures implement this, and estimators are only called with nodes of the graph.
+pub trait DelayBound {
+    /// Returns a lower bound on the delay of getting from `from` to `to`.
+    fn estimate(&self, from: NodeId, to: NodeId) -> u32;
+}
+
+impl<F: Fn(NodeId, NodeId) -> u32> DelayBound for F {
+    #[inline]
+    fn estimate(&self, from: NodeId, to: NodeId) -> u32 {
+        self(from, to)
+    }
+}
+
+/// The delay estimator that knows nothing: always 0, which is always correct.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ZeroDelayBound;
+
+impl DelayBound for ZeroDelayBound {
+    #[inline]
+    fn estimate(&self, _from: NodeId, _to: NodeId) -> u32 {
+        0
     }
 }
 
@@ -521,6 +548,48 @@ impl<B> Graph<B> {
         }
     }
 
+    /// Pairs this graph with a delay for each of its edges, for timing-driven routing.
+    ///
+    /// `delay` is asked once for each edge, given its two ends, in the order of the nodes and
+    /// then of [`expand`](RoutingSpace::expand). The graph itself is untouched, and costs
+    /// nothing more if this is never called. See [`TimedGraph`] for what the result takes.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use guide::cost::Cost;
+    /// use guide::id::{NetId, NodeId};
+    /// use guide::space::DelaySpace;
+    /// use guide::space::graph::GraphBuilder;
+    ///
+    /// let mut builder = GraphBuilder::new(3);
+    /// builder.add_edge(NodeId(0), NodeId(1), Cost::ONE)?;
+    /// builder.add_edge(NodeId(0), NodeId(2), Cost::ONE)?;
+    /// let graph = builder.build();
+    ///
+    /// let timed = graph.with_step_delays(|_from, to| 100 * to.0);
+    /// let mut delays = Vec::new();
+    /// timed.step_delays(NetId(0), NodeId(0), &mut delays);
+    /// assert_eq!(delays, [100, 200]);
+    /// # Ok::<(), guide::space::graph::GraphError>(())
+    /// ```
+    pub fn with_step_delays(
+        &self,
+        mut delay: impl FnMut(NodeId, NodeId) -> u32,
+    ) -> TimedGraph<'_, B, ZeroDelayBound> {
+        let mut delays = Vec::with_capacity(self.targets.len());
+        for node in 0..self.num_nodes as usize {
+            let from = NodeId(node as u32);
+            let edges = self.offsets[node] as usize..self.offsets[node + 1] as usize;
+            delays.extend(self.targets[edges].iter().map(|&to| delay(from, to)));
+        }
+        TimedGraph {
+            graph: self,
+            delays: Column::compact(delays, 0),
+            bound: ZeroDelayBound,
+        }
+    }
+
     /// Returns the number of nodes. Valid node IDs are below this.
     #[inline]
     pub const fn num_nodes(&self) -> u32 {
@@ -661,6 +730,127 @@ impl<B: LowerBound> RoutingSpace for Graph<B> {
     }
 }
 
+/// A [`Graph`] with a delay for each of its edges: a space for timing-driven routing.
+///
+/// Everything else is the graph's, so that routes, costs, and what the
+/// [validator](crate::validate) says are just as they are on the graph itself.
+///
+/// Created by [`Graph::with_step_delays`], borrowing the graph. Delays take 2 bytes per edge
+/// if there are at most 65536 distinct values, 4 if there are more, and none if all are equal.
+///
+/// The bound on delay comes from the estimator `D`, by default [`ZeroDelayBound`]. See
+/// [`with_delay_bound`](TimedGraph::with_delay_bound).
+pub struct TimedGraph<'g, B = ZeroBound, D = ZeroDelayBound> {
+    graph: &'g Graph<B>,
+    /// In the order of the graph's edges.
+    delays: Column<u32>,
+    bound: D,
+}
+
+impl<'g, B, D> TimedGraph<'g, B, D> {
+    /// Replaces the estimator of delay.
+    ///
+    /// The estimator must be admissible, which the graph can't verify. A wrong one costs
+    /// routes their optimality, not their validity.
+    #[must_use]
+    pub fn with_delay_bound<E: DelayBound>(self, bound: E) -> TimedGraph<'g, B, E> {
+        TimedGraph {
+            graph: self.graph,
+            delays: self.delays,
+            bound,
+        }
+    }
+
+    /// Returns the graph.
+    #[inline]
+    pub const fn graph(&self) -> &'g Graph<B> {
+        self.graph
+    }
+
+    /// Returns the estimator of delay.
+    #[inline]
+    pub const fn delay_bound(&self) -> &D {
+        &self.bound
+    }
+
+    /// Returns the bytes the delays hold on the heap, not counting the graph or the estimator.
+    pub fn heap_bytes(&self) -> usize {
+        self.delays.heap_bytes()
+    }
+}
+
+impl<B, D> fmt::Debug for TimedGraph<'_, B, D> {
+    /// Leaves out the tables, which can hold billions of entries.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TimedGraph")
+            .field("graph", &self.graph)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<B: LowerBound, D> RoutingSpace for TimedGraph<'_, B, D> {
+    type Node = NodeId;
+    type Resource = NodeId;
+    type Slots = DenseSlots<NodeId>;
+    type ResourceSlots = DenseSlots<NodeId>;
+
+    #[inline]
+    fn new_slots(&self) -> DenseSlots<NodeId> {
+        self.graph.new_slots()
+    }
+
+    #[inline]
+    fn new_resource_slots(&self) -> DenseSlots<NodeId> {
+        self.graph.new_resource_slots()
+    }
+
+    #[inline]
+    fn contains(&self, node: NodeId) -> bool {
+        Graph::contains(self.graph, node)
+    }
+
+    #[inline]
+    fn expand(&self, net: NetId, from: NodeId, out: &mut Vec<Step<NodeId>>) {
+        self.graph.expand(net, from, out);
+    }
+
+    #[inline]
+    fn lower_bound(&self, net: NetId, from: NodeId, to: NodeId) -> Cost {
+        self.graph.lower_bound(net, from, to)
+    }
+
+    #[inline]
+    fn resources(&self, net: NetId, from: NodeId, to: NodeId, out: &mut Vec<NodeId>) {
+        self.graph.resources(net, from, to, out);
+    }
+
+    #[inline]
+    fn capacity(&self, resource: NodeId) -> u32 {
+        self.graph.capacity(resource)
+    }
+}
+
+impl<B: LowerBound, D: DelayBound> DelaySpace for TimedGraph<'_, B, D> {
+    #[inline]
+    fn step_delays(&self, _net: NetId, from: NodeId, out: &mut Vec<u32>) {
+        if !Graph::contains(self.graph, from) {
+            return;
+        }
+        let start = self.graph.offsets[from.index()] as usize;
+        let end = self.graph.offsets[from.index() + 1] as usize;
+        out.extend((start..end).map(|edge| self.delays.get(edge)));
+    }
+
+    #[inline]
+    fn delay_lower_bound(&self, _net: NetId, from: NodeId, to: NodeId) -> u32 {
+        if Graph::contains(self.graph, from) && Graph::contains(self.graph, to) {
+            self.bound.estimate(from, to)
+        } else {
+            0
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -668,6 +858,55 @@ mod tests {
     use proptest::prelude::*;
 
     const NET: NetId = NetId(0);
+
+    #[test]
+    fn step_delays_line_up_with_steps() {
+        let graph = sample();
+        let timed = graph.with_step_delays(|from, to| 100 * from.0 + to.0);
+        for node in 0..4 {
+            let mut delays = Vec::new();
+            timed.step_delays(NET, NodeId(node), &mut delays);
+            let expected: Vec<u32> = steps(&graph, node)
+                .iter()
+                .map(|&(to, _)| 100 * node + to)
+                .collect();
+            assert_eq!(delays, expected);
+
+            let mut timed_steps = Vec::new();
+            timed.expand(NET, NodeId(node), &mut timed_steps);
+            let mut plain_steps = Vec::new();
+            graph.expand(NET, NodeId(node), &mut plain_steps);
+            assert_eq!(timed_steps, plain_steps);
+        }
+    }
+
+    #[test]
+    fn step_delays_keep_what_is_there_and_ignore_foreign_nodes() {
+        let graph = sample();
+        let timed = graph.with_step_delays(|_, _| 7);
+        let mut delays = vec![1];
+        timed.step_delays(NET, NodeId(99), &mut delays);
+        assert_eq!(delays, [1]);
+        timed.step_delays(NET, NodeId(2), &mut delays);
+        assert_eq!(delays, [1, 7, 7]);
+        assert_eq!(timed.heap_bytes(), 0);
+    }
+
+    #[test]
+    fn delay_bounds_reach_the_estimator_only_for_nodes_of_the_graph() {
+        let graph = sample();
+        let timed = graph.with_step_delays(|_, _| 7);
+        assert_eq!(timed.delay_lower_bound(NET, NodeId(0), NodeId(1)), 0);
+        let bound = |from: NodeId, to: NodeId| {
+            assert!(from.0 < 4 && to.0 < 4);
+            5
+        };
+        let timed = timed.with_delay_bound(bound);
+        assert_eq!(timed.delay_lower_bound(NET, NodeId(0), NodeId(1)), 5);
+        assert_eq!(timed.delay_lower_bound(NET, NodeId(0), NodeId(9)), 0);
+        assert_eq!(timed.lower_bound(NET, NodeId(0), NodeId(1)), Cost::ZERO);
+        assert_eq!(timed.capacity(NodeId(1)), graph.capacity(NodeId(1)));
+    }
 
     fn cost(value: f64) -> Cost {
         Cost::new(value).unwrap()

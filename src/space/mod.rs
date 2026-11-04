@@ -103,6 +103,38 @@ pub trait RoutingSpace {
     fn capacity(&self, resource: Self::Resource) -> u32;
 }
 
+/// A space that knows how long its steps take, which is what timing-driven routing needs.
+///
+/// This is a trait of its own because [`Step::cost`] means whatever the space wants it to
+/// mean, and most spaces have no delays at all. Nothing about [`RoutingSpace`] changes, and a
+/// space without timing never pays for this.
+///
+/// Delays are in `u32` picoseconds, as in [`timing`](crate::timing), and **each step has a
+/// fixed delay**. It can't depend on the rest of the route, so a delay that really depends on
+/// the tree around it, as an Elmore delay does, has to be approximated by one number per step.
+/// The [engine](crate::engine#timing-driven-routing) says what that means for routes, and
+/// [`TimedGraph`](graph::TimedGraph) is a ready-made implementation.
+pub trait DelaySpace: RoutingSpace {
+    /// Appends the delay of each step that [`expand`](RoutingSpace::expand) produces for the
+    /// same arguments to `out`, in the same order and as many of them.
+    ///
+    /// As with [`expand`](RoutingSpace::expand), existing entries must be left in place. This
+    /// answers for every step out of a node at once because that is what a search asks for,
+    /// and a space stored by edges can then answer without looking any of them up.
+    fn step_delays(&self, net: NetId, from: Self::Node, out: &mut Vec<u32>);
+
+    /// Returns a lower bound on the delay of any path for `net` from `from` to `to`.
+    ///
+    /// The result must never exceed the smallest sum of step delays between the two. The
+    /// default of 0 is always correct. A search for a critical connection is then guided only
+    /// by the weight it has left on cost, which at a criticality of 0.99 is not much.
+    #[inline]
+    fn delay_lower_bound(&self, net: NetId, from: Self::Node, to: Self::Node) -> u32 {
+        let _ = (net, from, to);
+        0
+    }
+}
+
 /// Maps a space's nodes or resources to the dense indices that state is stored under.
 ///
 /// Users keep flat arrays indexed by slot, so slots should be small and densely packed. A

@@ -13,7 +13,8 @@ cargo bench --bench engine                             # criterion timings, abou
 GUIDE_ENGINE_SWEEP=options cargo bench --bench engine  # option tables, about a minute
 GUIDE_ENGINE_SWEEP=refine cargo bench --bench engine   # refinement after negotiation, seconds
 GUIDE_ENGINE_SWEEP=expansion cargo bench --bench engine  # time per expansion, about 4 minutes
-GUIDE_ENGINE_SWEEP=all cargo bench --bench engine      # all three sweeps
+GUIDE_ENGINE_SWEEP=timing cargo bench --bench engine   # timing-driven routing, about a minute
+GUIDE_ENGINE_SWEEP=all cargo bench --bench engine      # all four sweeps
 ```
 
 The sweeps print Markdown tables and skip criterion. The default bench prints each instance's
@@ -353,6 +354,105 @@ that these runs come from, which saw fastest times of 142 to 194 ns on the first
 | grid512/heavy | 1000 | 2 | 121456 | 117916096 | 0691545f90124ea7 | 3 | 166 | 176 |
 | fabric128 | 4000 | 6 | 812 | 212427637 | 2790fd092d7af567 | 3 | 264 | 269 |
 
+### Timing-driven routing
+
+Measured on 2026-11-04, on the commit that adds this section, with rustc 1.97.1.
+
+**These are synthetic, and not a comparison with VPR.** No real VTR design can be routed yet:
+the graph of a real VTR architecture needs VPR to generate it, and VPR was not available. So
+the fabric, its delays and its netlist are all made up here, as `benches/engine.rs` describes.
+
+- **The fabrics** are the FPGA-like family above, 16 x 16 and 32 x 32 tiles at 1 track, and a
+  third group at 32 x 32 with 2 tracks, which has room to spare. 6 seeds each, the same seeds.
+- **Delays** are fixed per step: 40 ps into a pin, and 70 ps for a switch onto a wire plus 60
+  ps per tile on a single wire and 30 ps per tile on a long one, which spans 4 tiles. So long
+  wires are faster per tile, as on real devices, and also cheaper, so cost and delay agree on
+  which wires are good but not by how much. The delay bound is the tile distance times
+  47.5 ps, the fastest a long wire covers a tile.
+- **The netlist** puts a register on one tile in four, and on the others a cell of 200 ps from
+  the tile's sink pin to its source pin. A pin that no net reaches launches, and one that
+  reaches no net captures. The clock period is 0, so that the fastest circuit is wanted, and
+  criticality is each connection's share of the longest path through it. Net arcs start at
+  50 ps per tile of distance. Combinational loops come out of the random nets, and the timing
+  graph breaks them, as `src/timing.rs` describes.
+- **A picosecond costs 1/50**, so that a tile's worth of delay costs about a tile's worth of
+  wire. Criticality options are VPR's defaults.
+- **"Alone"** is the critical path if every connection had its own fastest route, as if no
+  other connection or net were there. No route can beat it for any one sink, so it is a floor.
+
+Sums over each group's 6 instances. Ratios are to the first row, over instances both solved,
+which here is all of them. Wirelength counts the steps of all routes. Every critical path here
+was also worked out afresh from the routes, by the bench and not the engine, and matched what
+the engine reported.
+
+#### 16 x 16, 1 track, up to 200 nets
+
+| Setting | Solved | Critical path, ps | / reference | / alone | Wirelength | / reference | Cost / reference | Iterations | Expansions | / reference |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| No timing (reference) | 6/6 | 70530 | 1.000 | 1.229 | 10228 | 1.000 | 1.000 | 52 | 622345 | 1.000 |
+| Timing | 6/6 | 60000 | 0.851 | 1.046 | 10617 | 1.038 | 1.073 | 87 | 921050 | 1.480 |
+| No timing, first_present 0 | 6/6 | 79550 | 1.128 | 1.387 | 10352 | 1.012 | 1.027 | 56 | 693533 | 1.114 |
+| Timing, first_present 0 | 6/6 | 59960 | 0.850 | 1.045 | 10583 | 1.035 | 1.064 | 95 | 934261 | 1.501 |
+| No timing, batch 32 | 6/6 | 76060 | 1.078 | 1.326 | 10476 | 1.024 | 1.046 | 70 | 1153927 | 1.854 |
+| Timing, batch 32 | 6/6 | 59860 | 0.849 | 1.043 | 10689 | 1.045 | 1.087 | 91 | 1404907 | 2.257 |
+
+Alone: 57370 ps.
+
+#### 32 x 32, 1 track, up to 800 nets
+
+| Setting | Solved | Critical path, ps | / reference | / alone | Wirelength | / reference | Cost / reference | Iterations | Expansions | / reference |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| No timing (reference) | 6/6 | 91270 | 1.000 | 1.337 | 42445 | 1.000 | 1.000 | 61 | 3081090 | 1.000 |
+| Timing | 6/6 | 73070 | 0.801 | 1.070 | 43845 | 1.033 | 1.052 | 74 | 3956505 | 1.284 |
+| No timing, first_present 0 | 6/6 | 88780 | 0.973 | 1.301 | 42712 | 1.006 | 1.008 | 65 | 3292157 | 1.069 |
+| Timing, first_present 0 | 6/6 | 70560 | 0.773 | 1.034 | 43790 | 1.032 | 1.054 | 83 | 4107080 | 1.333 |
+| No timing, batch 32 | 6/6 | 93910 | 1.029 | 1.376 | 42892 | 1.011 | 1.019 | 58 | 4117569 | 1.336 |
+| Timing, batch 32 | 6/6 | 69850 | 0.765 | 1.023 | 44312 | 1.044 | 1.078 | 98 | 5349372 | 1.736 |
+
+Alone: 68260 ps.
+
+#### 32 x 32, 2 tracks, up to 800 nets
+
+| Setting | Solved | Critical path, ps | / reference | / alone | Wirelength | / reference | Cost / reference | Iterations | Expansions | / reference |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| No timing (reference) | 6/6 | 70790 | 1.000 | 1.095 | 38357 | 1.000 | 1.000 | 30 | 923159 | 1.000 |
+| Timing | 6/6 | 64670 | 0.914 | 1.000 | 38824 | 1.012 | 1.032 | 35 | 1201355 | 1.301 |
+| No timing, first_present 0 | 6/6 | 69590 | 0.983 | 1.077 | 38519 | 1.004 | 1.016 | 30 | 1091078 | 1.182 |
+| Timing, first_present 0 | 6/6 | 64670 | 0.914 | 1.000 | 38867 | 1.013 | 1.037 | 34 | 1345878 | 1.458 |
+| No timing, batch 32 | 6/6 | 71110 | 1.005 | 1.100 | 38350 | 1.000 | 1.001 | 30 | 1083899 | 1.174 |
+| Timing, batch 32 | 6/6 | 64670 | 0.914 | 1.000 | 38817 | 1.012 | 1.032 | 35 | 1349808 | 1.462 |
+
+Alone: 64640 ps.
+
+What this shows:
+
+- **Timing shortens the critical path by 9% to 20%**, and brings it to within 0% to 7% of the
+  floor, against 9% to 34% above it without timing. The price is 1% to 4% more wire, 3% to 7%
+  more cost, and 28% to 48% more expansions. On the fabric with room to spare, timing reaches
+  the floor to within 30 ps of 64640.
+- **`first_present` with timing on**, which the docs of `EngineOptions` asked to have measured
+  again: 0 gave the same critical path on two groups and one 3.4% shorter on the third, for 1.4%
+  to 12% more expansions and more iterations. Without timing, 0 gave a critical path 12.8%
+  longer on the small fabric, and 2.7% and 1.7% shorter on the others. Neither is a case for changing
+  the default, and 18 synthetic instances are not enough to make one.
+- **Batches of 32 did not hurt timing** here: the critical path was 0% to 4.4% shorter than
+  timing-driven at a batch size of 1, for more expansions, as without timing.
+
+**Time.** In the default bench, timing-driven runs of the FPGA-like fabric took 14.5 ms against
+11.4 ms at 16 x 16, and 79 ms against 51 ms at 32 x 32, pinned to one core, over three rounds
+each. Per expansion, that is 18% to 21% more, for reading a delay with each step and
+weighing it, and the rest is the extra expansions. The timing analysis after each iteration
+is a small part of it.
+
+**What timing costs when it is not used.** The engine's results without timing are the same to
+the bit, which every golden value and determinism test in the crate checks. For time, the
+default bench's dense grid of 32, multi-terminal grid of 48, island fabric and both FPGA-like
+fabrics were run against the commit before timing, alternating, three rounds each, pinned to
+one core of the same shared machine at a load of about 35. The medians of the branch were 0.1%
+to 2.8% slower on four of them and 0.5% faster on the island fabric, and the same binary moved
+by up to 3.5% between rounds. The 2.8%, on the dense grid, is within that, and could be noise or
+a small real cost: this machine can't tell the two apart.
+
 ## What this does not show
 
 - Nothing here is a real design. Dense permutation problems are a stress test, with terminals
@@ -363,6 +463,9 @@ that these runs come from, which saw fastest times of 142 to 194 ns on the first
 - The defaults were tuned on the tuning seeds, and the other seeds only have the same shape.
 - reticle reports searches flooding on a real FPGA without a charge in the first iteration, which
   did not happen on these instances, so the `first_present` results may not carry over at all.
+- The delays of the timing sweep are fixed per step and made up, and its netlist is random.
+  Real devices have Elmore delays that depend on the tree, and real netlists have structure.
+  None of it is evidence of how timing-driven routing here compares with VPR's.
 
 ## FPGA and PCB comparisons
 

@@ -9,6 +9,7 @@
 //! GUIDE_ENGINE_SWEEP=options cargo bench --bench engine
 //! GUIDE_ENGINE_SWEEP=refine cargo bench --bench engine
 //! GUIDE_ENGINE_SWEEP=expansion cargo bench --bench engine
+//! GUIDE_ENGINE_SWEEP=timing cargo bench --bench engine
 //! ```
 //!
 //! Criterion's throughput is in nodes expanded, so its `elem/s` means expansions per second.
@@ -28,15 +29,16 @@ use std::time::{Duration, Instant};
 use criterion::measurement::WallTime;
 use criterion::{BenchmarkGroup, Criterion, Throughput, criterion_group};
 use guide::cost::Cost;
-use guide::engine::{EngineOptions, Outcome, route};
+use guide::engine::{Connection, EngineOptions, Outcome, TimingDriven, route, route_timed};
 use guide::id::{NetId, NodeId};
 use guide::net::{Net, NetOutcome, Route, RouteSet, Terminal};
 use guide::rng::Rng;
-use guide::search::Search;
-use guide::space::graph::{Graph, GraphBuilder, LowerBound};
+use guide::search::{Search, SearchLimits, SearchOutcome, Source, Target};
+use guide::space::graph::{DelayBound, Graph, GraphBuilder, LowerBound, TimedGraph};
 use guide::space::grid::Grid;
-use guide::space::{RoutingSpace, Step};
+use guide::space::{DelaySpace, RoutingSpace, Step};
 use guide::steiner::{SteinerOptions, kmb_tree, refine_tree, takahashi_matsuyama};
+use guide::timing::{Constraints, TimingAnalysis, TimingGraphBuilder};
 use guide::validate::check;
 
 /// The environment variable that selects a sweep in place of the timings.
@@ -544,6 +546,50 @@ fn fabrics(c: &mut Criterion) {
     group.finish();
 }
 
+/// The FPGA-like fabrics again, timing-driven, which is the default bench's measure of what
+/// timing costs in time. See the timing sweep for what it does to the routes.
+fn timed_fabrics(c: &mut Criterion) {
+    let mut group = c.benchmark_group("engine_timing");
+    for (tiles, count) in FPGA_LIKE_SIZES {
+        let fabric = narrow_fabric(tiles);
+        let graph = fabric.build(u64::from(tiles));
+        let nets = fabric.nets(count, 3, 6, 900);
+        let timing = fabric.timing(&nets);
+        let instance = TimedInstance {
+            group: 0,
+            fabric,
+            graph,
+            nets,
+            timing,
+        };
+        let space = instance.space();
+        let options = EngineOptions::default();
+        let outcome =
+            route_timed(&space, &instance.nets, options, instance.timing.clone()).unwrap();
+        let stats = outcome.routes.stats;
+        let name = format!("fpga_like/{tiles}x{tiles}/up_to_{count}_nets");
+        println!(
+            "{name}: {} nets, success {}, {} iterations, {} expansions, total cost {}, critical path {:?} ps",
+            instance.nets.len(),
+            outcome.is_success(),
+            stats.iterations,
+            stats.nodes_expanded,
+            outcome.total_cost,
+            outcome
+                .timing
+                .and_then(|timing| timing.metrics.critical_path_delay),
+        );
+        group.throughput(Throughput::Elements(stats.nodes_expanded));
+        group.bench_function(&name, |b| {
+            b.iter(|| {
+                let timing = instance.timing.clone();
+                route_timed(&space, black_box(&instance.nets), options, timing).unwrap()
+            });
+        });
+    }
+    group.finish();
+}
+
 /// The cheapest of the runs that the expansion sweep times, for an eye on the time per
 /// expansion in the default bench.
 fn expansion_cost(c: &mut Criterion) {
@@ -571,7 +617,7 @@ fn configured() -> Criterion {
 criterion_group! {
     name = benches;
     config = configured();
-    targets = dense_permutations, multi_terminal_nets, fabrics, expansion_cost
+    targets = dense_permutations, multi_terminal_nets, fabrics, timed_fabrics, expansion_cost
 }
 
 // Sweep instances.
@@ -1300,6 +1346,414 @@ fn expansion_sweep() {
     print_expansion_cost("fabric128", &graph, &nets, 6, 3);
 }
 
+// Timing-driven routing.
+
+/// What entering a pin takes, in picoseconds.
+const PIN_DELAY: u32 = 40;
+/// What a switch onto a wire takes.
+const SWITCH_DELAY: u32 = 70;
+/// What a wire takes per tile, by kind, as in [`WIRE_SPAN`]. Long wires are faster per tile and
+/// cheaper too, so delay and cost agree on which wires are good, but not on by how much.
+const WIRE_DELAY_PER_TILE: [u32; 2] = [60, 30];
+/// The fastest a tile can be covered, by a long wire: `(70 + 4 * 30) / 4`.
+const FASTEST_PER_TILE: f64 = 47.5;
+/// What a picosecond costs: one tile's worth of cost for one tile's worth of delay, about.
+const DELAY_COST: f64 = 1.0 / 50.0;
+
+impl Fabric {
+    /// The delay of a step, by what it enters: a pin, or a wire with its switch.
+    fn delay(self, to: NodeId) -> u32 {
+        let per_tile = self.nodes_per_tile();
+        let (tile, offset) = (to.0 / per_tile, to.0 % per_tile);
+        let (x, y) = (tile % self.tiles, tile / self.tiles);
+        if offset < SITE_NODES {
+            0
+        } else if offset < SITE_NODES + 2 * self.pins {
+            PIN_DELAY
+        } else {
+            let index = offset - SITE_NODES - 2 * self.pins;
+            let covered = self.wire_end(x, y, index).2;
+            SWITCH_DELAY + WIRE_DELAY_PER_TILE[Self::wire_kind(index)] * covered
+        }
+    }
+
+    /// The tile of a node: where its site is, for a site's nodes.
+    fn tile_of(self, node: NodeId) -> usize {
+        (node.0 / self.nodes_per_tile()) as usize
+    }
+
+    /// A netlist for these nets. A tile is a register one time in four, and otherwise a cell
+    /// of 200 ps from the sink it is driven through to the source it drives. A pin that nothing
+    /// reaches launches, and one that reaches nothing captures. The clock period is 0, so the
+    /// fastest circuit is wanted. Net arcs start at an estimate of 50 ps per tile.
+    fn timing(self, nets: &[Net<NodeId>]) -> TimingDriven {
+        let tiles = (self.tiles * self.tiles) as usize;
+        let mut drives = vec![false; tiles];
+        let mut driven = vec![false; tiles];
+        for net in nets {
+            drives[self.tile_of(net.terminals[0].access_points()[0].node)] = true;
+            for terminal in &net.terminals[1..] {
+                driven[self.tile_of(terminal.access_points()[0].node)] = true;
+            }
+        }
+        let mut builder = TimingGraphBuilder::new();
+        let mut pins = Vec::with_capacity(tiles);
+        for tile in 0..tiles {
+            if tile % 4 == 0 {
+                let register = builder.add_register(60, 40).unwrap();
+                pins.push((register.q, register.d));
+            } else {
+                let (input, output) = (builder.add_point().unwrap(), builder.add_point().unwrap());
+                builder.add_cell_arc(input, output, 200).unwrap();
+                if !driven[tile] {
+                    builder.set_launch(input, 0).unwrap();
+                }
+                if !drives[tile] {
+                    builder.set_capture(output, 0).unwrap();
+                }
+                pins.push((output, input));
+            }
+        }
+        let position = |node: NodeId| {
+            let tile = self.tile_of(node) as u32;
+            (tile % self.tiles, tile / self.tiles)
+        };
+        let mut connections = Vec::new();
+        for net in nets {
+            let driver = net.terminals[0].access_points()[0].node;
+            for (terminal, sink) in net.terminals.iter().enumerate().skip(1) {
+                let sink = sink.access_points()[0].node;
+                let ((a, b), (c, d)) = (position(driver), position(sink));
+                let estimate = 50 * (a.abs_diff(c) + b.abs_diff(d));
+                let arc = builder
+                    .add_net_arc(
+                        pins[self.tile_of(driver)].0,
+                        pins[self.tile_of(sink)].1,
+                        estimate,
+                    )
+                    .unwrap();
+                connections.push(Connection {
+                    net: net.id,
+                    terminal: terminal as u32,
+                    arc,
+                });
+            }
+        }
+        TimingDriven::new(
+            builder.build(),
+            Constraints::single_clock(0).unwrap(),
+            connections,
+            cost(DELAY_COST),
+        )
+    }
+}
+
+/// The tile distance times the fastest delay of a tile, from the same positions as
+/// [`TileBound`].
+struct TileDelayBound {
+    positions: Vec<(u16, u16)>,
+}
+
+impl DelayBound for TileDelayBound {
+    fn estimate(&self, from: NodeId, to: NodeId) -> u32 {
+        let (a, b) = (self.positions[from.index()], self.positions[to.index()]);
+        let distance = u32::from(a.0.abs_diff(b.0)) + u32::from(a.1.abs_diff(b.1));
+        (f64::from(distance) * FASTEST_PER_TILE).floor() as u32
+    }
+}
+
+/// A space whose steps cost their delays, with no bound, for the fastest each connection could
+/// be on its own.
+struct DelaysAsCosts<'a, S>(&'a S);
+
+impl<S: DelaySpace> RoutingSpace for DelaysAsCosts<'_, S> {
+    type Node = S::Node;
+    type Resource = S::Resource;
+    type Slots = S::Slots;
+    type ResourceSlots = S::ResourceSlots;
+
+    fn new_slots(&self) -> S::Slots {
+        self.0.new_slots()
+    }
+    fn new_resource_slots(&self) -> S::ResourceSlots {
+        self.0.new_resource_slots()
+    }
+    fn contains(&self, node: S::Node) -> bool {
+        self.0.contains(node)
+    }
+    fn expand(&self, net: NetId, from: S::Node, out: &mut Vec<Step<S::Node>>) {
+        let start = out.len();
+        self.0.expand(net, from, out);
+        let mut delays = Vec::new();
+        self.0.step_delays(net, from, &mut delays);
+        for (step, delay) in out[start..].iter_mut().zip(delays) {
+            step.cost = Cost::from(delay);
+        }
+    }
+    fn lower_bound(&self, _net: NetId, _from: S::Node, _to: S::Node) -> Cost {
+        Cost::ZERO
+    }
+    fn resources(&self, net: NetId, from: S::Node, to: S::Node, out: &mut Vec<S::Resource>) {
+        self.0.resources(net, from, to, out);
+    }
+    fn capacity(&self, resource: S::Resource) -> u32 {
+        self.0.capacity(resource)
+    }
+}
+
+/// Analyses the routes from nothing, walking each one for its delays, and returns the
+/// critical-path delay.
+fn critical_path_of<S: DelaySpace<Node = NodeId>>(
+    space: &S,
+    nets: &[Net<NodeId>],
+    routes: &RouteSet<NodeId>,
+    timing: &TimingDriven,
+) -> u64 {
+    let mut graph = timing.graph.clone();
+    for connection in &timing.connections {
+        let net = &nets[connection.net.0 as usize];
+        let Some(route) = routes.route(net.id) else {
+            continue;
+        };
+        let mut arrival = HashMap::new();
+        if let Some(root) = route.root() {
+            arrival.insert(root, 0u32);
+        }
+        for edge in route.edges() {
+            let (mut steps, mut delays) = (Vec::new(), Vec::new());
+            space.expand(net.id, edge.from, &mut steps);
+            space.step_delays(net.id, edge.from, &mut delays);
+            let position = steps.iter().position(|step| step.to == edge.to).unwrap();
+            arrival.insert(edge.to, arrival[&edge.from] + delays[position]);
+        }
+        let sink = net.terminals[connection.terminal as usize].access_points()[0].node;
+        graph.set_delay(connection.arc, arrival[&sink]).unwrap();
+    }
+    let mut analysis = TimingAnalysis::new(&graph);
+    analysis.run(&graph, &timing.constraints);
+    analysis.critical_path().map_or(0, |path| path.arrival())
+}
+
+/// The critical path if every connection had the fastest route there is, on its own. No tree
+/// can beat this for any sink, so it is a floor under what routing can reach.
+fn alone_critical_path<S: DelaySpace<Node = NodeId>>(
+    space: &S,
+    nets: &[Net<NodeId>],
+    timing: &TimingDriven,
+) -> u64 {
+    let delays_only = DelaysAsCosts(space);
+    let mut search = Search::new(space);
+    let mut graph = timing.graph.clone();
+    for connection in &timing.connections {
+        let net = &nets[connection.net.0 as usize];
+        let from = net.terminals[0].access_points()[0].node;
+        let to = net.terminals[connection.terminal as usize].access_points()[0].node;
+        let sources = [Source::new(from)];
+        let outcome = search.find_path_with(
+            &delays_only,
+            net.id,
+            sources,
+            [Target::new(to)],
+            SearchLimits::NONE,
+        );
+        if let SearchOutcome::Found(found) = outcome {
+            graph
+                .set_delay(connection.arc, found.cost.get() as u32)
+                .unwrap();
+        }
+    }
+    let mut analysis = TimingAnalysis::new(&graph);
+    analysis.run(&graph, &timing.constraints);
+    analysis.critical_path().map_or(0, |path| path.arrival())
+}
+
+/// What one run came to, with or without timing.
+#[derive(Clone, Copy)]
+struct TimedRun {
+    solved: bool,
+    iterations: u64,
+    expansions: u64,
+    cost: f64,
+    /// Steps in all routes, which is the number of nodes they use beyond their roots.
+    wirelength: u64,
+    critical: u64,
+}
+
+/// A fabric instance with delays.
+struct TimedInstance {
+    group: usize,
+    fabric: Fabric,
+    graph: Graph<TileBound>,
+    nets: Vec<Net<NodeId>>,
+    timing: TimingDriven,
+}
+
+impl TimedInstance {
+    fn space(&self) -> TimedGraph<'_, TileBound, TileDelayBound> {
+        let fabric = self.fabric;
+        self.graph
+            .with_step_delays(|_, to| fabric.delay(to))
+            .with_delay_bound(TileDelayBound {
+                positions: fabric.positions(),
+            })
+    }
+
+    fn run(&self, options: EngineOptions<'static>, timed: bool) -> TimedRun {
+        let space = self.space();
+        let outcome = if timed {
+            route_timed(&space, &self.nets, options, self.timing.clone()).unwrap()
+        } else {
+            route(&space, &self.nets, options).unwrap()
+        };
+        let critical = critical_path_of(&space, &self.nets, &outcome.routes, &self.timing);
+        if let Some(reported) = &outcome.timing {
+            assert_eq!(reported.metrics.critical_path_delay, Some(critical));
+        }
+        assert!(check(&space, &self.nets, &outcome.routes).is_complete() == outcome.is_success());
+        TimedRun {
+            solved: outcome.is_success(),
+            iterations: outcome.routes.stats.iterations,
+            expansions: outcome.routes.stats.nodes_expanded,
+            cost: outcome.total_cost.get(),
+            wirelength: outcome
+                .routes
+                .routes()
+                .map(|(_, route)| route.edges().len() as u64)
+                .sum(),
+            critical,
+        }
+    }
+}
+
+/// The FPGA-like family, plus a wider fabric with 2 tracks that has room to spare.
+fn timed_family() -> (Vec<String>, Vec<TimedInstance>) {
+    let mut groups = Vec::new();
+    let mut instances = Vec::new();
+    let shapes = [
+        (narrow_fabric(16), 200usize),
+        (narrow_fabric(32), 800),
+        (
+            Fabric {
+                tracks: 2,
+                ..narrow_fabric(32)
+            },
+            800,
+        ),
+    ];
+    for (group, &(fabric, count)) in shapes.iter().enumerate() {
+        groups.push(format!(
+            "{0}x{0}, {1} track{2}, up to {count} nets",
+            fabric.tiles,
+            fabric.tracks,
+            if fabric.tracks == 1 { "" } else { "s" }
+        ));
+        for seed in 0..FABRIC_SEEDS {
+            let graph = fabric.build(u64::from(fabric.tiles) + seed);
+            let nets = fabric.nets(count, 3, 6, 900 + seed);
+            let timing = fabric.timing(&nets);
+            instances.push(TimedInstance {
+                group,
+                fabric,
+                graph,
+                nets,
+                timing,
+            });
+        }
+    }
+    (groups, instances)
+}
+
+fn timing_sweep() {
+    let (groups, instances) = timed_family();
+    let settings: [(&str, EngineOptions<'static>, bool); 6] = [
+        ("No timing (reference)", EngineOptions::default(), false),
+        ("Timing", EngineOptions::default(), true),
+        (
+            "No timing, first_present 0",
+            options_with(|o| o.first_present = Cost::ZERO),
+            false,
+        ),
+        (
+            "Timing, first_present 0",
+            options_with(|o| o.first_present = Cost::ZERO),
+            true,
+        ),
+        (
+            "No timing, batch 32",
+            options_with(|o| o.batch_size = 32),
+            false,
+        ),
+        (
+            "Timing, batch 32",
+            options_with(|o| o.batch_size = 32),
+            true,
+        ),
+    ];
+    let runs: Vec<Vec<TimedRun>> = settings
+        .iter()
+        .map(|&(_, options, timed)| par_map(&instances, |instance| instance.run(options, timed)))
+        .collect();
+    let alone: Vec<u64> = par_map(&instances, |instance| {
+        alone_critical_path(&instance.space(), &instance.nets, &instance.timing)
+    });
+
+    println!("\n## Timing-driven routing\n");
+    println!(
+        "Sums over each group's {FABRIC_SEEDS} instances. Ratios are to the first row, over the \
+         instances both solved. \"Alone\" is the critical path with every connection on its \
+         fastest route, ignoring the others.\n"
+    );
+    for (group, name) in groups.iter().enumerate() {
+        let members: Vec<usize> = (0..instances.len())
+            .filter(|&index| instances[index].group == group)
+            .collect();
+        let floor: u64 = members.iter().map(|&index| alone[index]).sum();
+        println!("### {name}\n");
+        println!(
+            "| Setting | Solved | Critical path, ps | / reference | / alone | Wirelength | / reference | Cost / reference | Iterations | Expansions | / reference |"
+        );
+        println!("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
+        let reference = &runs[0];
+        for ((setting, _, _), these) in settings.iter().zip(&runs) {
+            let both: Vec<usize> = members
+                .iter()
+                .copied()
+                .filter(|&index| these[index].solved && reference[index].solved)
+                .collect();
+            let sum = |runs: &[TimedRun], field: fn(&TimedRun) -> f64, over: &[usize]| -> f64 {
+                over.iter().map(|&index| field(&runs[index])).sum()
+            };
+            let critical = sum(these, |run| run.critical as f64, &members);
+            let wirelength = sum(these, |run| run.wirelength as f64, &members);
+            let expansions = sum(these, |run| run.expansions as f64, &members);
+            println!(
+                "| {setting} | {}/{} | {critical:.0} | {} | {} | {wirelength:.0} | {} | {} | {:.0} | {expansions:.0} | {} |",
+                members.iter().filter(|&&index| these[index].solved).count(),
+                members.len(),
+                ratio(
+                    sum(these, |run| run.critical as f64, &both),
+                    sum(reference, |run| run.critical as f64, &both)
+                ),
+                ratio(critical, floor as f64),
+                ratio(
+                    sum(these, |run| run.wirelength as f64, &both),
+                    sum(reference, |run| run.wirelength as f64, &both)
+                ),
+                ratio(
+                    sum(these, |run| run.cost, &both),
+                    sum(reference, |run| run.cost, &both)
+                ),
+                sum(these, |run| run.iterations as f64, &members),
+                ratio(
+                    sum(these, |run| run.expansions as f64, &both),
+                    sum(reference, |run| run.expansions as f64, &both)
+                ),
+            );
+        }
+        println!("\nAlone: {floor} ps.\n");
+    }
+}
+
 fn main() {
     let Ok(sweep) = std::env::var(SWEEP_VARIABLE) else {
         benches();
@@ -1316,8 +1770,18 @@ fn main() {
     if all || sweep == "expansion" {
         expansion_sweep();
     }
-    if !(all || matches!(sweep.as_str(), "options" | "refine" | "expansion")) {
-        eprintln!("{SWEEP_VARIABLE} must be all, options, refine or expansion, not {sweep:?}");
+    if all || sweep == "timing" {
+        timing_sweep();
+    }
+    if !(all
+        || matches!(
+            sweep.as_str(),
+            "options" | "refine" | "expansion" | "timing"
+        ))
+    {
+        eprintln!(
+            "{SWEEP_VARIABLE} must be all, options, refine, expansion or timing, not {sweep:?}"
+        );
         std::process::exit(2);
     }
 }

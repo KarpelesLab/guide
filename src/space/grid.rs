@@ -145,6 +145,10 @@ impl GridBuilder {
     ///
     /// It has no effect on routing unless the connectivity is
     /// [`Connectivity::Octilinear`], but it is validated regardless.
+    ///
+    /// Sums of √2 round, which makes searches on open grids far slower than they could
+    /// be. See [Lower bound](Grid#lower-bound) for what to use if that matters more than
+    /// the last few digits of a cost.
     #[must_use]
     pub fn diagonal_cost(mut self, cost: f64) -> Self {
         self.diagonal = cost;
@@ -242,22 +246,55 @@ const DEFAULT_CAPACITY: u32 = 1;
 /// at most `(cells - 1) * EPSILON / 2` of the total. Scaling by `1 - (cells + 4) * EPSILON`
 /// covers that and the few rounding errors made computing the bound itself.
 ///
-/// Whole-number costs with a small enough total never round at all, and they keep the
-/// exact bound. That matters beyond tidiness: scaling makes `g + h` grow slightly along a
-/// path, so a search can no longer see the exact ties between equally good paths that
-/// let it run straight to the target.
+/// Costs that are all whole multiples of one power of two never round if the total is
+/// small enough, because every sum of them is that power of two times a representable
+/// integer. Those costs keep the exact bound, and so does every product and sum made
+/// computing it, since a bound counts fewer than `cells` moves.
+///
+/// That matters beyond tidiness. A search has to expand every node with `g + h` below the
+/// cost of the route. Any margin larger than rounding noise puts every node on an optimal
+/// path there, however it is shaped, so the search cannot run straight to the target.
+///
+/// The margin is kept proportional to the distance for fractional costs, even though that
+/// sorts tied nodes nearest to the source first. This expands each of them once, with its
+/// final `g`. An absolute margin expands the same nodes, in an order set by rounding
+/// noise, and re-opens them each time a different order of steps rounds a little lower.
 fn bound_scale(cells: u32, used_costs: &[Cost]) -> f64 {
     /// Integers up to this size are all exactly representable.
     const EXACT_LIMIT: f64 = 9_007_199_254_740_992.0;
 
     let cells = f64::from(cells);
-    let exact = used_costs
-        .iter()
-        .all(|cost| cost.get().fract() == 0.0 && cost.get() * cells <= EXACT_LIMIT);
-    if exact {
+    let mut unit = f64::INFINITY;
+    let mut largest = 0.0_f64;
+    for cost in used_costs.iter().map(|cost| cost.get()) {
+        if cost > 0.0 {
+            unit = unit.min(lowest_set_bit(cost));
+            largest = largest.max(cost);
+        }
+    }
+    // Dividing by a power of two only changes the exponent, so it is exact unless it
+    // overflows, and an infinity fails the comparison. The product can only round down to
+    // the limit from one unit above it, and a path has a whole step less than that.
+    if (largest * cells).is_finite() && largest / unit * cells <= EXACT_LIMIT {
         1.0
     } else {
         1.0 - (cells + 4.0) * f64::EPSILON
+    }
+}
+
+/// Returns the value of the lowest set bit of a positive, finite number: the largest power
+/// of two it is a whole multiple of.
+fn lowest_set_bit(value: f64) -> f64 {
+    const FRACTION_BITS: u64 = (1 << (f64::MANTISSA_DIGITS - 1)) - 1;
+
+    let bits = value.to_bits();
+    if bits & FRACTION_BITS == 0 {
+        // A power of two, whose only significant bit is the implicit one.
+        value
+    } else {
+        // Clearing the lowest bit leaves a number of the same exponent, or zero, so the
+        // difference is exact.
+        value - f64::from_bits(bits & (bits - 1))
     }
 }
 
@@ -311,6 +348,36 @@ fn bound_scale(cells: u32, used_costs: &[Cost]) -> f64 {
 ///
 /// Blocked cells are ignored, and the bound is exact only on an unobstructed grid with
 /// room for the moves it counts.
+///
+/// The bound gives up a tiny fraction of itself to rounding, unless no sum can round:
+/// when every cost in use is a whole multiple of one power of two, and the largest cost
+/// times the number of cells is at most `2^53` of that power of two. Whole numbers qualify,
+/// and so do values like 0.75.
+///
+/// This decides how fast a search is on open space, where many paths tie for cheapest.
+/// With sums that cannot round, it runs straight to the target. Otherwise it has to expand
+/// about all of the nodes on those paths, which is around 100 times as many on an open
+/// 1024 x 1024 grid with the default diagonal cost of √2. To avoid that, use a diagonal
+/// cost with some low bits clear. This one is within one part in 10^8 of √2, so it only
+/// changes a route when two routes were about that close in cost:
+///
+/// ```
+/// use core::f64::consts::SQRT_2;
+/// use guide::space::grid::{Connectivity, Grid};
+///
+/// // Exact up to 2^26.5 cells, or about 9700 x 9700.
+/// let unit = 2f64.powi(26);
+/// let grid = Grid::builder(1024, 1024, 1)
+///     .connectivity(Connectivity::Octilinear)
+///     .diagonal_cost((SQRT_2 * unit).floor() / unit)
+///     .build()?;
+/// # let _ = grid;
+/// # Ok::<(), guide::space::grid::GridError>(())
+/// ```
+///
+/// Obstacles change the picture. Where they leave few ties to exploit, an exact bound
+/// expands slightly fewer nodes but queues more of them, since running ahead on a tie
+/// often reaches a node too expensively first, so a search can take somewhat longer.
 ///
 /// # Nets
 ///
@@ -681,6 +748,7 @@ impl RoutingSpace for Grid {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::search::{Search, Source};
     use crate::space::NodeSlots;
     use proptest::prelude::*;
 
@@ -1137,6 +1205,226 @@ mod tests {
         assert!(bound.get() <= exact && bound.get() >= exact * (1.0 - 1e-9));
     }
 
+    /// `(cells, costs, whether the bound stays exact)`.
+    #[test]
+    fn only_costs_whose_sums_cannot_round_keep_the_exact_bound() {
+        let tiny_unit = 2f64.powi(-40);
+        let cases: &[(u32, &[f64], bool)] = &[
+            (100, &[], true),
+            (100, &[0.0], true),
+            (100, &[1.0, 4.0], true),
+            (100, &[0.75, 1.5, 0.125], true),
+            (100, &[3.0, 0.25], true),
+            // Subnormal numbers add up exactly too.
+            (100, &[f64::from_bits(1), f64::from_bits(6)], true),
+            // Multiples of a large power of two, with room left below saturation.
+            (100, &[2f64.powi(60), 3.0 * 2f64.powi(60)], true),
+            // Not multiples of any power of two that would leave room.
+            (100, &[0.1], false),
+            (100, &[1.0, SQRT_2], false),
+            (100, &[1e-300], false),
+            // Each is fine alone, but they share no unit.
+            (100, &[1.0, 2f64.powi(-60)], false),
+            (100, &[f64::from_bits(1), 1.0], false),
+            (100, &[f64::MAX, f64::from_bits(1)], false),
+            // Sums would saturate rather than stay exact.
+            (100, &[2f64.powi(1020)], false),
+            (100, &[f64::MAX], false),
+            // Either side of 2^53 units.
+            (1 << 12, &[1.0 + tiny_unit], true),
+            (1 << 13, &[1.0 + tiny_unit], false),
+            (1 << 26, &[1.0, 134_217_727.0 / 2f64.powi(26)], true),
+            (1 << 27, &[1.0, 134_217_727.0 / 2f64.powi(26)], false),
+            (1 << 31, &[4_194_304.0], true),
+            (1 << 31, &[4_194_305.0], false),
+        ];
+        for &(cells, costs, exact) in cases {
+            let used: Vec<_> = costs.iter().map(|&cost| Cost::new(cost).unwrap()).collect();
+            let scale = bound_scale(cells, &used);
+            assert_eq!(scale == 1.0, exact, "{costs:?} over {cells} cells: {scale}");
+            assert!(scale <= 1.0 && scale > 0.5);
+        }
+    }
+
+    #[test]
+    fn the_documented_diagonal_cost_is_exact_up_to_the_documented_size() {
+        let unit = 2f64.powi(26);
+        let diagonal = Cost::new((SQRT_2 * unit).floor() / unit).unwrap();
+        assert!((diagonal.get() - SQRT_2).abs() / SQRT_2 < 1e-8);
+        let used = [Cost::ONE, diagonal];
+        // 2^26.5, rounded down.
+        assert_eq!(bound_scale(94_906_265, &used), 1.0);
+        assert!(bound_scale(94_906_267, &used) < 1.0);
+    }
+
+    #[test]
+    fn lowest_set_bit_finds_the_unit_of_a_cost() {
+        for (value, expected) in [
+            (1.0, 1.0),
+            (3.0, 1.0),
+            (6.0, 2.0),
+            (0.75, 0.25),
+            (1024.0, 1024.0),
+            (1.0 + f64::EPSILON, f64::EPSILON),
+            (f64::MAX, 2f64.powi(971)),
+            (f64::MIN_POSITIVE, f64::MIN_POSITIVE),
+            (f64::from_bits(1), f64::from_bits(1)),
+            (f64::from_bits(6), f64::from_bits(2)),
+        ] {
+            assert_eq!(lowest_set_bit(value), expected, "{value:e}");
+        }
+    }
+
+    #[test]
+    fn long_sums_of_multiples_of_a_power_of_two_match_the_bound_exactly() {
+        let unit = 2f64.powi(-26);
+        for cost in [0.75, 1.5, 0.125, (SQRT_2 / unit).floor() * unit] {
+            let grid = Grid::builder(2000, 1, 1)
+                .orthogonal_cost(cost)
+                .build()
+                .unwrap();
+            let mut sum = Cost::ZERO;
+            for x in 1..2000 {
+                sum = sum + grid.orthogonal_cost();
+                assert_eq!(grid.lower_bound(NET, NodeId(0), NodeId(x)), sum);
+            }
+        }
+    }
+
+    #[test]
+    fn bound_with_fractional_costs_equals_the_distance_when_sums_cannot_round() {
+        let grid = octilinear(6, 5, 2)
+            .diagonal_cost(1.5)
+            .via_cost(0.75)
+            .build()
+            .unwrap();
+        let distances = all_pairs(&grid);
+        for from in 0..grid.cell_count() {
+            for to in 0..grid.cell_count() {
+                assert_eq!(
+                    Some(grid.lower_bound(NET, NodeId(from), NodeId(to))),
+                    distances[from as usize][to as usize],
+                );
+            }
+        }
+    }
+
+    /// Routes across an open grid in each direction, returning how many nodes each search
+    /// expanded and how many steps its path has.
+    ///
+    /// The search has to agree with the bound on the cost, which is exact on an open grid
+    /// when no sum rounds, and to within rounding otherwise.
+    fn route_across_open_grid(grid: &Grid, corners: [(u32, u32); 2]) -> Vec<(u64, u64)> {
+        let [(ax, ay), (bx, by)] = corners;
+        let (a, b) = (
+            grid.node_at(ax, ay, 0).unwrap(),
+            grid.node_at(bx, by, 0).unwrap(),
+        );
+        let (c, d) = (
+            grid.node_at(bx, ay, 0).unwrap(),
+            grid.node_at(ax, by, 0).unwrap(),
+        );
+        let mut search = Search::new(grid);
+        [(a, b), (b, a), (c, d), (d, c)]
+            .into_iter()
+            .map(|(from, to)| {
+                let found = search
+                    .find_path(grid, NET, [Source::new(from)], [to])
+                    .unwrap();
+                let bound = grid.lower_bound(NET, from, to).get();
+                assert!((found.cost.get() - bound).abs() <= 1e-6 * bound);
+                let steps = found.path.len() as u64 - 1;
+                (search.stats().expanded, steps)
+            })
+            .collect()
+    }
+
+    /// Without an exact bound, each of these routes expands tens of thousands of nodes or
+    /// more: all of the cells on some cheapest path. With one, it expands barely more than
+    /// the path itself, whatever the direction.
+    #[test]
+    fn open_octilinear_grids_expand_little_more_than_the_path_when_sums_cannot_round() {
+        let unit = 2f64.powi(26);
+        for diagonal in [1.5, 181.0 / 128.0, (SQRT_2 * unit).floor() / unit] {
+            let grid = octilinear(1024, 1024, 1)
+                .diagonal_cost(diagonal)
+                .build()
+                .unwrap();
+            assert_eq!(grid.bound_scale, 1.0);
+            for corners in [[(0, 0), (1023, 400)], [(100, 900), (700, 20)]] {
+                for (expanded, steps) in route_across_open_grid(&grid, corners) {
+                    assert!(
+                        expanded <= 2 * steps,
+                        "{expanded} expanded for {steps} steps, with diagonals of {diagonal}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The same for fractional costs on a 4-connected grid and with layers involved.
+    #[test]
+    fn open_grids_of_any_kind_expand_little_more_than_the_path_when_sums_cannot_round() {
+        let grid = Grid::builder(512, 512, 1)
+            .orthogonal_cost(0.75)
+            .build()
+            .unwrap();
+        for (expanded, steps) in route_across_open_grid(&grid, [(0, 0), (511, 200)]) {
+            assert!(expanded <= 2 * steps, "{expanded} for {steps} steps");
+        }
+
+        let grid = octilinear(256, 256, 4)
+            .orthogonal_cost(0.75)
+            .diagonal_cost(1.0625)
+            .via_cost(2.5)
+            .build()
+            .unwrap();
+        let from = grid.node_at(3, 240, 0).unwrap();
+        let to = grid.node_at(250, 90, 3).unwrap();
+        let mut search = Search::new(&grid);
+        let found = search
+            .find_path(&grid, NET, [Source::new(from)], [to])
+            .unwrap();
+        assert_eq!(found.cost, grid.lower_bound(NET, from, to));
+        let steps = found.path.len() as u64 - 1;
+        assert!(search.stats().expanded <= 2 * steps);
+    }
+
+    /// Pins the limit of what a bound can do for costs that round. √2 still expands all of
+    /// the cells on some cheapest path, but only once each: an absolute margin, or none,
+    /// lets rounding noise pick the order and re-opens many of them.
+    #[test]
+    fn a_margin_on_costs_that_round_expands_each_tied_cell_at_most_once() {
+        let grid = octilinear(512, 512, 1).build().unwrap();
+        assert!(grid.bound_scale < 1.0);
+        let (from, to) = ((10, 30), (500, 300));
+        let distance = |a: (u32, u32), b: (u32, u32)| {
+            let (dx, dy) = (a.0.abs_diff(b.0), a.1.abs_diff(b.1));
+            grid.planar_distance(dx, dy)
+        };
+        let whole = distance(from, to);
+        let mut tied_cells = 0;
+        for y in 0..grid.height() {
+            for x in 0..grid.width() {
+                let through = distance(from, (x, y)) + distance((x, y), to);
+                if (through - whole).abs() < 1e-6 {
+                    tied_cells += 1;
+                }
+            }
+        }
+
+        let (from, to) = (
+            grid.node_at(from.0, from.1, 0).unwrap(),
+            grid.node_at(to.0, to.1, 0).unwrap(),
+        );
+        let mut search = Search::new(&grid);
+        search
+            .find_path(&grid, NET, [Source::new(from)], [to])
+            .unwrap();
+        let expanded = search.stats().expanded;
+        assert!(expanded <= tied_cells, "{expanded} > {tied_cells}");
+    }
+
     #[test]
     fn bound_saturates_like_path_sums() {
         let grid = Grid::builder(10, 1, 1)
@@ -1248,6 +1536,41 @@ mod tests {
     }
 
     proptest! {
+        /// Costs chosen to pass or just miss the test for sums that cannot round, on the
+        /// small grids where the distances can be checked against the rounded sums. The
+        /// costs in `any_grid` share a unit only by accident.
+        #[test]
+        fn lower_bound_with_shared_units_never_exceeds_the_shortest_distance(
+            (width, height, layers) in (1u32..=4, 1u32..=4, 1u32..=3),
+            connectivity in any_connectivity(),
+            multiples in (0u64..1 << 53, 0u64..1 << 53, 0u64..1 << 53),
+            shifts in (0u32..53, 0u32..53, 0u32..53),
+            exponent in -60i32..60,
+        ) {
+            let cost = |multiple: u64, shift: u32| {
+                (multiple >> shift) as f64 * 2f64.powi(exponent)
+            };
+            let grid = Grid::builder(width, height, layers)
+                .connectivity(connectivity)
+                .orthogonal_cost(cost(multiples.0, shifts.0))
+                .diagonal_cost(cost(multiples.1, shifts.1))
+                .via_cost(cost(multiples.2, shifts.2))
+                .build()
+                .unwrap();
+            let distances = all_pairs(&grid);
+            for from in 0..grid.cell_count() {
+                for to in 0..grid.cell_count() {
+                    if let Some(distance) = distances[from as usize][to as usize] {
+                        let bound = grid.lower_bound(NET, NodeId(from), NodeId(to));
+                        prop_assert!(
+                            bound <= distance,
+                            "{from} to {to}: bound {bound} > distance {distance} on {grid:?}"
+                        );
+                    }
+                }
+            }
+        }
+
         #[test]
         fn lower_bound_never_exceeds_the_shortest_distance(grid in any_grid()) {
             let distances = all_pairs(&grid);

@@ -47,7 +47,7 @@ adopting it would be a regression.
 
 Crate at v0.0.0, CI, release-plz, documentation, this roadmap.
 
-### M1: Core model and search
+### M1: Core model and search (done)
 
 The vocabulary everything else uses, and single-net routing.
 

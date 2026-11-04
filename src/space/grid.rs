@@ -3,7 +3,6 @@
 //! [`Grid`] is a multi-layer rectangular grid: the simple space for tests and benchmarks,
 //! and a stepping stone to PCB routing.
 
-use core::f64::consts::SQRT_2;
 use core::fmt;
 
 use crate::cost::Cost;
@@ -141,14 +140,13 @@ impl GridBuilder {
         self
     }
 
-    /// Sets the cost of a diagonal step. The default is √2.
+    /// Sets the cost of a diagonal step. The default is [`DEFAULT_DIAGONAL_COST`].
     ///
     /// It has no effect on routing unless the connectivity is
     /// [`Connectivity::Octilinear`], but it is validated regardless.
     ///
-    /// Sums of √2 round, which makes searches on open grids far slower than they could
-    /// be. See [Lower bound](Grid#lower-bound) for what to use if that matters more than
-    /// the last few digits of a cost.
+    /// Costs with many significant bits, such as exactly √2, make searches on open grids
+    /// far slower. See [Lower bound](Grid#lower-bound).
     #[must_use]
     pub fn diagonal_cost(mut self, cost: f64) -> Self {
         self.diagonal = cost;
@@ -229,6 +227,14 @@ impl GridBuilder {
         })
     }
 }
+
+/// The default cost of a diagonal step: √2 rounded down to a multiple of `2^-20`.
+///
+/// It is about 3.8e-7 below √2, so it only changes a route when two routes were about that
+/// close in cost. In exchange, sums of it cannot round on any grid that can be built, even
+/// one with `u32::MAX` cells, which keeps the [lower bound](Grid#lower-bound) exact and
+/// makes searches on open grids around 100 times cheaper.
+pub const DEFAULT_DIAGONAL_COST: f64 = 1_482_910.0 / 1_048_576.0;
 
 const BLOCKED_WORD_BITS: u32 = u64::BITS;
 
@@ -357,23 +363,9 @@ fn lowest_set_bit(value: f64) -> f64 {
 /// This decides how fast a search is on open space, where many paths tie for cheapest.
 /// With sums that cannot round, it runs straight to the target. Otherwise it has to expand
 /// about all of the nodes on those paths, which is around 100 times as many on an open
-/// 1024 x 1024 grid with the default diagonal cost of √2. To avoid that, use a diagonal
-/// cost with some low bits clear. This one is within one part in 10^8 of √2, so it only
-/// changes a route when two routes were about that close in cost:
-///
-/// ```
-/// use core::f64::consts::SQRT_2;
-/// use guide::space::grid::{Connectivity, Grid};
-///
-/// // Exact up to 2^26.5 cells, or about 9700 x 9700.
-/// let unit = 2f64.powi(26);
-/// let grid = Grid::builder(1024, 1024, 1)
-///     .connectivity(Connectivity::Octilinear)
-///     .diagonal_cost((SQRT_2 * unit).floor() / unit)
-///     .build()?;
-/// # let _ = grid;
-/// # Ok::<(), guide::space::grid::GridError>(())
-/// ```
+/// 1024 x 1024 grid. That is why the default diagonal cost is
+/// [`DEFAULT_DIAGONAL_COST`] rather than exactly √2. For the same reason, prefer costs with
+/// few significant bits when choosing your own.
 ///
 /// Obstacles change the picture. Where they leave few ties to exploit, an exact bound
 /// expands slightly fewer nodes but queues more of them, since running ahead on a tie
@@ -393,7 +385,7 @@ fn lowest_set_bit(value: f64) -> f64 {
 ///
 /// ```
 /// use guide::id::NetId;
-/// use guide::space::grid::{Connectivity, Grid};
+/// use guide::space::grid::{Connectivity, DEFAULT_DIAGONAL_COST, Grid};
 /// use guide::space::RoutingSpace;
 ///
 /// let mut grid = Grid::builder(3, 3, 2)
@@ -409,11 +401,11 @@ fn lowest_set_bit(value: f64) -> f64 {
 ///
 /// let reached: Vec<_> = steps.iter().map(|s| grid.position(s.to).unwrap()).collect();
 /// assert_eq!(reached, [(0, 1, 0), (1, 1, 0), (0, 0, 1)]);
-/// assert_eq!(steps[1].cost.get(), core::f64::consts::SQRT_2);
+/// assert_eq!(steps[1].cost.get(), DEFAULT_DIAGONAL_COST);
 /// assert_eq!(steps[2].cost.get(), 5.0);
 ///
 /// let far = grid.node_at(2, 2, 1).unwrap();
-/// assert!(grid.lower_bound(net, corner, far).get() <= 2.0 * core::f64::consts::SQRT_2 + 5.0);
+/// assert!(grid.lower_bound(net, corner, far).get() <= 2.0 * DEFAULT_DIAGONAL_COST + 5.0);
 /// # Ok::<(), guide::space::grid::GridError>(())
 /// ```
 #[derive(Clone)]
@@ -446,7 +438,7 @@ impl Grid {
             layers,
             connectivity: Connectivity::Orthogonal,
             orthogonal: 1.0,
-            diagonal: SQRT_2,
+            diagonal: DEFAULT_DIAGONAL_COST,
             via: 1.0,
         }
     }
@@ -750,6 +742,7 @@ mod tests {
     use super::*;
     use crate::search::{Search, Source};
     use crate::space::NodeSlots;
+    use core::f64::consts::SQRT_2;
     use proptest::prelude::*;
 
     const NET: NetId = NetId(0);
@@ -855,7 +848,7 @@ mod tests {
         assert_eq!(
             steps(&grid, last),
             [
-                (65533, 65535, 0, SQRT_2),
+                (65533, 65535, 0, DEFAULT_DIAGONAL_COST),
                 (65534, 65535, 0, 1.0),
                 (65533, 65536, 0, 1.0),
             ]
@@ -925,7 +918,7 @@ mod tests {
         assert_eq!(grid.connectivity(), Connectivity::Orthogonal);
         assert_eq!(grid.orthogonal_cost(), Cost::ONE);
         assert_eq!(grid.via_cost(), Cost::ONE);
-        assert_eq!(grid.diagonal_cost().get(), SQRT_2);
+        assert_eq!(grid.diagonal_cost().get(), DEFAULT_DIAGONAL_COST);
     }
 
     #[test]
@@ -971,20 +964,28 @@ mod tests {
         let grid = octilinear(3, 3, 1).build().unwrap();
         assert_eq!(
             steps(&grid, grid.node_at(0, 0, 0).unwrap()),
-            [(1, 0, 0, 1.0), (0, 1, 0, 1.0), (1, 1, 0, SQRT_2)]
+            [
+                (1, 0, 0, 1.0),
+                (0, 1, 0, 1.0),
+                (1, 1, 0, DEFAULT_DIAGONAL_COST)
+            ]
         );
         assert_eq!(
             steps(&grid, grid.node_at(2, 2, 0).unwrap()),
-            [(1, 1, 0, SQRT_2), (2, 1, 0, 1.0), (1, 2, 0, 1.0)]
+            [
+                (1, 1, 0, DEFAULT_DIAGONAL_COST),
+                (2, 1, 0, 1.0),
+                (1, 2, 0, 1.0)
+            ]
         );
         // A row must not wrap around: from the end of one, +1 is the start of the next.
         assert_eq!(
             steps(&grid, grid.node_at(2, 1, 0).unwrap()),
             [
-                (1, 0, 0, SQRT_2),
+                (1, 0, 0, DEFAULT_DIAGONAL_COST),
                 (2, 0, 0, 1.0),
                 (1, 1, 0, 1.0),
-                (1, 2, 0, SQRT_2),
+                (1, 2, 0, DEFAULT_DIAGONAL_COST),
                 (2, 2, 0, 1.0),
             ]
         );
@@ -1014,11 +1015,11 @@ mod tests {
         assert_eq!(
             reached,
             [
-                (0, 0, 0, SQRT_2),
-                (2, 0, 0, SQRT_2),
+                (0, 0, 0, DEFAULT_DIAGONAL_COST),
+                (2, 0, 0, DEFAULT_DIAGONAL_COST),
                 (0, 1, 0, 1.0),
                 (2, 1, 0, 1.0),
-                (0, 2, 0, SQRT_2),
+                (0, 2, 0, DEFAULT_DIAGONAL_COST),
                 (1, 2, 0, 1.0),
             ]
         );
@@ -1199,7 +1200,10 @@ mod tests {
 
     #[test]
     fn bound_is_close_despite_the_rounding_margin() {
-        let grid = octilinear(1000, 1000, 1).build().unwrap();
+        let grid = octilinear(1000, 1000, 1)
+            .diagonal_cost(SQRT_2)
+            .build()
+            .unwrap();
         let bound = grid.lower_bound(NET, NodeId(0), grid.node_at(999, 999, 0).unwrap());
         let exact = 999.0 * SQRT_2;
         assert!(bound.get() <= exact && bound.get() >= exact * (1.0 - 1e-9));
@@ -1339,13 +1343,32 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn the_default_diagonal_is_close_to_root_two_and_exact_on_the_largest_grid() {
+        assert_eq!(
+            DEFAULT_DIAGONAL_COST,
+            (SQRT_2 * 2f64.powi(20)).floor() / 2f64.powi(20)
+        );
+        const { assert!(DEFAULT_DIAGONAL_COST < SQRT_2 && SQRT_2 - DEFAULT_DIAGONAL_COST < 4e-7) };
+        // Whether the bound is exact depends on the costs and the size, not on the layout.
+        let largest = 65535 * 65537;
+        assert_eq!(u32::MAX, largest);
+        let diagonal = Cost::new(DEFAULT_DIAGONAL_COST).unwrap();
+        assert_eq!(bound_scale(largest, &[Cost::ONE, diagonal]), 1.0);
+    }
+
     /// Without an exact bound, each of these routes expands tens of thousands of nodes or
     /// more: all of the cells on some cheapest path. With one, it expands barely more than
     /// the path itself, whatever the direction.
     #[test]
     fn open_octilinear_grids_expand_little_more_than_the_path_when_sums_cannot_round() {
         let unit = 2f64.powi(26);
-        for diagonal in [1.5, 181.0 / 128.0, (SQRT_2 * unit).floor() / unit] {
+        for diagonal in [
+            1.5,
+            181.0 / 128.0,
+            DEFAULT_DIAGONAL_COST,
+            (SQRT_2 * unit).floor() / unit,
+        ] {
             let grid = octilinear(1024, 1024, 1)
                 .diagonal_cost(diagonal)
                 .build()
@@ -1395,7 +1418,10 @@ mod tests {
     /// lets rounding noise pick the order and re-opens many of them.
     #[test]
     fn a_margin_on_costs_that_round_expands_each_tied_cell_at_most_once() {
-        let grid = octilinear(512, 512, 1).build().unwrap();
+        let grid = octilinear(512, 512, 1)
+            .diagonal_cost(SQRT_2)
+            .build()
+            .unwrap();
         assert!(grid.bound_scale < 1.0);
         let (from, to) = ((10, 30), (500, 300));
         let distance = |a: (u32, u32), b: (u32, u32)| {

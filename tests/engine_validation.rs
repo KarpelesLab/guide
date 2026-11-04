@@ -4,7 +4,7 @@
 //! that the engine's claims about its own results hold.
 
 use guide::cost::Cost;
-use guide::engine::{EngineOptions, Outcome, route};
+use guide::engine::{EngineOptions, Outcome, route, route_parallel};
 use guide::id::{NetId, NodeId};
 use guide::net::{AccessPoint, Net, Terminal};
 use guide::space::RoutingSpace;
@@ -229,6 +229,84 @@ proptest! {
         // Costs may differ here: the validator charges the cheapest access point on the
         // route, and the engine the one each path connected through.
         assert_agrees(&graph, &nets, &outcome);
+    }
+}
+
+/// A batch size for a random problem, with thread counts that test more than a batch can use.
+fn batched(batch_size: u32) -> EngineOptions<'static> {
+    let mut options = options();
+    options.batch_size = batch_size;
+    options
+}
+
+// Routes from threads get the same scrutiny as any others, and have to be the routes that one
+// thread finds. The validator has no idea how they were found.
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(48))]
+
+    #[test]
+    fn parallel_grid_results_pass_validation(
+        (width, height, layers) in (2u32..10, 2u32..10, 1u32..4),
+        connectivity in connectivity(),
+        blocked in proptest::collection::vec((0u32..10, 0u32..10, 0u32..4), 0..12),
+        capacity in 1u32..3,
+        endpoints in proptest::collection::vec(
+            proptest::collection::vec((0u32..10, 0u32..10, 0u32..4), 1..5),
+            0..10,
+        ),
+        batch_size in 1u32..12,
+        threads in 2usize..9,
+    ) {
+        let (grid, nets) =
+            grid_problem(width, height, layers, connectivity, &blocked, capacity, &endpoints);
+        let outcome = route_parallel(&grid, &nets, batched(batch_size), threads).unwrap();
+        assert_agrees(&grid, &nets, &outcome);
+        assert_costs_agree(&grid, &nets, &outcome);
+        prop_assert_eq!(outcome, route(&grid, &nets, batched(batch_size)).unwrap());
+    }
+
+    #[test]
+    fn parallel_graph_results_pass_validation(
+        nodes in 2u32..24,
+        edges in proptest::collection::vec((0u32..24, 0u32..24, 0u32..9), 0..80),
+        capacities in proptest::collection::vec(0u32..3, 0..24),
+        endpoints in proptest::collection::vec(
+            proptest::collection::vec(0u32..24, 1..5),
+            0..8,
+        ),
+        batch_size in 1u32..10,
+        threads in 2usize..9,
+    ) {
+        let (graph, nets) = graph_problem(nodes, &edges, &capacities, &endpoints);
+        let outcome = route_parallel(&graph, &nets, batched(batch_size), threads).unwrap();
+        assert_agrees(&graph, &nets, &outcome);
+        assert_costs_agree(&graph, &nets, &outcome);
+        prop_assert_eq!(outcome, route(&graph, &nets, batched(batch_size)).unwrap());
+    }
+}
+
+#[test]
+fn a_dense_board_routes_to_a_legal_result_in_batches_on_any_number_of_threads() {
+    let (width, height, layers) = (16, 16, 2);
+    let endpoints: Vec<_> = (0..8)
+        .map(|i| vec![(2 * i, 0, 0), (2 * (7 - i), height - 1, 0)])
+        .collect();
+    let (grid, nets) = grid_problem(
+        width,
+        height,
+        layers,
+        Connectivity::Orthogonal,
+        &[],
+        1,
+        &endpoints,
+    );
+    let mut options = EngineOptions::default();
+    options.batch_size = 4;
+    for threads in [1, 2, 3, 4, 8] {
+        let outcome = route_parallel(&grid, &nets, options, threads).unwrap();
+        assert_agrees(&grid, &nets, &outcome);
+        assert_costs_agree(&grid, &nets, &outcome);
+        assert!(outcome.is_success(), "on {threads} threads");
     }
 }
 

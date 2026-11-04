@@ -83,7 +83,8 @@
 //! # Results
 //!
 //! [`Outcome`] holds the best iteration seen, chosen by fewest unrouted nets, then least
-//! total overuse, then least total cost, with the earliest winning ties. A run that ends
+//! total overuse, then, for a [timing-driven](#timing-driven-routing) run, the timing, then
+//! least total cost, with the earliest winning ties. A run that ends
 //! with conflicts **keeps the conflicting routes**, and [`Outcome::overused`] lists every
 //! overused resource with the nets on it. [`Outcome::is_success`] is true only if every net
 //! is routed and nothing is overused, and [`Outcome::legal_routes`] returns the routes only
@@ -94,6 +95,128 @@
 //! have to pick which of the nets on a resource to sacrifice. It would also need a reason
 //! that [`UnroutedReason`] does not have, and calling congestion a spent budget or a missing
 //! path would be untrue.
+//!
+//! # Timing-driven routing
+//!
+//! [`Engine::with_timing`] and [`route_timed`] weigh delay against cost as VPR's
+//! timing-driven router does (Betz, Rose and Marquardt, 1999). They need a space that
+//! implements [`DelaySpace`], a [`TimingGraph`] of the design, and the arc of that graph for
+//! each [`Connection`], all in a [`TimingDriven`]. A run without them is exactly as it was
+//! before timing existed, to the bit, and took the same time within the noise of the machine
+//! it was measured on. `docs/benchmarks.md` has that, and what timing does on generated
+//! FPGA-like fabrics: a critical path 9% to 20% shorter, for 1% to 4% more wire and 28% to
+//! 48% more expansions.
+//!
+//! Each connection, from a driver to one of its sinks, has a criticality `c`, from a
+//! [`TimingAnalysis`] of the routes so far as [`crate::timing`] describes, and the search for
+//! it pays for a step
+//!
+//! ```text
+//! (1 - c) * price + c * delay_cost * delay
+//! ```
+//!
+//! where `price` is the step's price from the negotiation above, `delay` is its delay in
+//! picoseconds, and [`delay_cost`](TimingDriven::delay_cost) says what a picosecond is worth.
+//! That is VPR's `evaluate_timing_driven_backward_costs` in `connection_router.tpp`, which adds
+//! `(1 - criticality) * cong_cost` and `criticality * Tdel` to the cost of reaching a node.
+//! reticle's router does the same for each node it enters, with its delays turned into cost by
+//! a ratio worked out from the graph. Here that ratio is the caller's, since only the space
+//! knows what its costs mean. VPR's costs are in seconds, so on an
+//! `RrGraph` of the `fpga` feature it is `1e-12`.
+//!
+//! A critical connection's access costs are weighted like its prices. A connection whose
+//! criticality is 0 is searched for exactly as without timing.
+//!
+//! ## Connections, not nets
+//!
+//! A net's sinks can be anything from fully critical to not at all, so a timing-driven net is
+//! grown one sink at a time, the most critical first, as VPR's `route_net` does. Each search
+//! goes to that one sink, with its own criticality, and the first critical sink gets the first
+//! choice of trunk. Every node of the tree so far is a source at what it took to get there,
+//! `c * delay_cost` times its delay from the root, which is how VPR starts a search from its
+//! route tree, at `criticality * Tdel`. So a critical sink that would join the tree far from
+//! the root pays for the delay of getting there, and can go back to the root instead.
+//!
+//! Sinks of criticality 0 come last, and are connected as they are without timing: each
+//! search goes to whichever is nearest. So a run in which nothing is critical gives the same
+//! routes as a run without timing, which is tested.
+//!
+//! The delay of a connection is the sum of the step delays along the tree from the root to the
+//! sink, to the fastest of its access points that the tree reaches.
+//!
+//! ## The lower bound
+//!
+//! A search of criticality `c` estimates what is left as
+//!
+//! ```text
+//! (1 - c) * lower_bound + c * delay_cost * delay_lower_bound
+//! ```
+//!
+//! from the space's [`lower_bound`](RoutingSpace::lower_bound) and
+//! [`delay_lower_bound`](DelaySpace::delay_lower_bound). This is admissible whenever both of
+//! those are. Along any path, each price is at least the step's base cost, since prices only
+//! ever raise a cost, so the prices add up to at least the cost bound, and the delays to at
+//! least the delay bound. Both weights are at least 0, so the blend of the sums is at least the
+//! blend of the bounds, and access costs at the end only add to it. The result is shrunk by a
+//! millionth of a millionth, as each blended step is rounded on its own.
+//!
+//! The space's cost bound on its own, unscaled, would not do. At a criticality of 0.99 a step
+//! that costs 1 and takes no time counts as 0.01, and a bound of 1 for it would be a hundred
+//! times too high. With the default delay bound of 0, the blend is still admissible, but a
+//! critical search then has little to go on, so a space with a sense of distance should give
+//! one. A property test checks the bound against true distances, with prices from history and
+//! overuse, at any criticality, and on bounds both as tight as they can be and looser.
+//!
+//! ## The loop
+//!
+//! Criticalities are worked out once before the first iteration, from the delays the timing
+//! graph was built with, which should be the caller's best estimates. After each iteration,
+//! every routed connection's delay goes into the timing graph through
+//! [`apply_net_delays`](TimingGraph::apply_net_delays), the analysis runs again, and
+//! criticalities are refreshed. A connection whose net has no route keeps its last delay. Every
+//! [`IterationReport`] has what the analysis found, critical-path delay included, in
+//! [`timing`](IterationReport::timing).
+//!
+//! Criticalities do not change during an iteration, so every net of an iteration sees the
+//! same ones, whatever its batch and thread. That keeps the thread count out of the result as
+//! it is without timing, which is tested on 1 to 8 threads.
+//!
+//! ## Which iteration is best, and when to stop
+//!
+//! After unrouted nets and overuse, iterations are ranked by worst negative slack, then total
+//! negative slack, and only then by cost, which is the order of VPR's
+//! `is_better_quality_routing` after legality. Once timing is met, more slack is not better,
+//! as in VPR. [`Outcome::timing`] has the timing of the best iteration, with the delay of each
+//! connection.
+//!
+//! A run still stops as soon as nothing is overused. VPR does the same by default, with a
+//! `--router_max_convergence_count` of 1. A net that holds nothing overused is not rerouted,
+//! so a connection that grew slow is only rerouted if its net is in a conflict. VPR's
+//! `--incremental_reroute_delay_ripup` would also reroute critical connections that are much
+//! slower than the best they have had. That is not here yet.
+//!
+//! ## What a delay is
+//!
+//! **Each step has a fixed delay**, which is an approximation. The delay along a tree is then
+//! the sum of the steps from the root, whatever else hangs off it. VPR's is an Elmore delay
+//! over its route tree, in which a node's delay depends on the capacitance downstream of it,
+//! which changes as the tree grows, and behind an unbuffered switch on the resistance back to
+//! the last buffer. A fixed delay can't know either. On a device whose switches are all
+//! buffered, the only part lost is the internal capacitance of the switches a branch adds,
+//! which `RrGraph::step_delay`, in the `fpga` feature, says more about. It was
+//! chosen because it keeps a search a plain shortest path over fixed step costs, so that the
+//! search, its lower bound and its optimality are as they are without timing, and because the
+//! router and the timing analysis then agree exactly on every delay.
+//!
+//! ## Non-configurable edges
+//!
+//! These are not handled yet: see the `fpga` module. When they are, a set of nodes tied together
+//! will be taken as a whole when one of them is entered. The design here will meet that in two
+//! places. The congestion side is weighted by `1 - c`, so whatever a set is priced at is
+//! weighted like any other price, and the bound stays admissible as long as that price is at
+//! least the base cost. On the delay side, a step through a short is a step like any other,
+//! with its own delay, but the members of a set that the path does not go through add load
+//! that a fixed delay does not see, which is one more way for it to be an approximation.
 //!
 //! # Determinism
 //!
@@ -263,7 +386,8 @@ use crate::id::NetId;
 use crate::net::{Net, Route, RouteSet, RouteStats, UnroutedReason};
 use crate::rng::Rng;
 use crate::search::{Search, SearchLimits, SearchOutcome, Source, Target};
-use crate::space::{FastMap, FastSet, NodeSlots, RoutingSpace, Step};
+use crate::space::{DelaySpace, FastMap, FastSet, NodeSlots, RoutingSpace, Step};
+use crate::timing::{ArcId, ArcKind, Constraints, CriticalityOptions, TimingAnalysis, TimingGraph};
 
 /// What an [`Engine`] may do, and when it has to stop.
 ///
@@ -304,6 +428,11 @@ pub struct EngineOptions<'c> {
     /// cheaper elsewhere, because nets avoid conflicts that they would otherwise create and
     /// then have to resolve. It is worth measuring again on real fabrics, where 0 may turn
     /// out to be the better setting.
+    ///
+    /// With [timing](self#timing-driven-routing), on the same FPGA-like fabrics, 0 gave a
+    /// critical path from as short to 3.4% shorter, for 1.4% to 12% more expansions and more
+    /// iterations, with wirelength within 0.3%. That is too mixed a result, on too few
+    /// synthetic instances, to change the default for.
     pub first_present: Cost,
     /// The present factor of the second iteration, from which it grows. The default is 0.5,
     /// as in VPR and reticle.
@@ -365,6 +494,99 @@ impl Default for EngineOptions<'_> {
     }
 }
 
+/// One connection of a net, from its driver to one of its sinks, and the arc of a
+/// [`TimingGraph`] that stands for it.
+///
+/// This is how a caller tells the engine which arc's delay a route decides. See [timing-driven
+/// routing](self#timing-driven-routing).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Connection {
+    /// The net.
+    pub net: NetId,
+    /// The sink, as an index in the net's terminals. It can't be 0, which is the driver.
+    pub terminal: u32,
+    /// The net arc of the timing graph for this connection.
+    pub arc: ArcId,
+}
+
+/// What makes a run timing-driven: a timing graph to analyse the routes with, and how to
+/// weigh what it finds against cost. See [timing-driven routing](self#timing-driven-routing).
+///
+/// Create this with [`new`](TimingDriven::new), and set the other fields if need be.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct TimingDriven {
+    /// The timing graph. Its net arcs start out with estimated delays, from which the first
+    /// iteration's criticalities come, and the engine replaces those of the connections it
+    /// routes. Other net arcs keep their delays throughout.
+    pub graph: TimingGraph,
+    /// What the timing graph is checked against.
+    pub constraints: Constraints,
+    /// The connections that routes decide the delays of. A sink that is not listed has a
+    /// criticality of 0, and a net arc that is not listed keeps its delay.
+    pub connections: Vec<Connection>,
+    /// How slack turns into criticality. The default is VPR's.
+    pub criticality: CriticalityOptions,
+    /// What a picosecond of delay costs, in the units of the space's costs.
+    ///
+    /// This is what makes delay and cost comparable, and it is up to the space. On an
+    /// `RrGraph` of the `fpga` feature, whose costs are in seconds as VPR's are, it is
+    /// `1e-12`, which weighs the two as VPR does. A space whose steps cost about 1 per tile
+    /// wants about 1 over the delay of a tile.
+    pub delay_cost: Cost,
+}
+
+impl TimingDriven {
+    /// Sets up timing-driven routing, with VPR's criticality options.
+    pub fn new(
+        graph: TimingGraph,
+        constraints: Constraints,
+        connections: Vec<Connection>,
+        delay_cost: Cost,
+    ) -> TimingDriven {
+        TimingDriven {
+            graph,
+            constraints,
+            connections,
+            criticality: CriticalityOptions::default(),
+            delay_cost,
+        }
+    }
+}
+
+/// What the timing analysis said about the routes of an iteration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct TimingMetrics {
+    /// The arrival time at the end of the critical path, in picoseconds: the critical-path
+    /// delay. `None` if no path is constrained.
+    pub critical_path_delay: Option<u64>,
+    /// The worst slack, in picoseconds, or `None` if no path is constrained.
+    pub worst_slack: Option<i64>,
+    /// The total negative slack, in picoseconds: zero if timing is met.
+    pub total_negative_slack: i128,
+}
+
+impl TimingMetrics {
+    /// The worst slack where it is negative, and otherwise 0, which is what VPR ranks by: once
+    /// timing is met, more slack is not better.
+    fn worst_negative_slack(&self) -> i64 {
+        self.worst_slack.map_or(0, |slack| slack.min(0))
+    }
+}
+
+/// The timing of an [`Outcome`]'s routes.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct TimingOutcome {
+    /// What the analysis of these routes found.
+    pub metrics: TimingMetrics,
+    /// The delay of each connection, in the order given in [`TimingDriven::connections`], or
+    /// `None` for a connection whose net has no route. The analysis used the estimate it was
+    /// given for those.
+    pub connection_delays: Vec<Option<u32>>,
+}
+
 /// Why an [`Engine`] could not be created.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -374,12 +596,50 @@ pub enum EngineError {
         /// The repeated ID.
         net: NetId,
     },
+    /// A [`Connection`] names a net that is not being routed.
+    UnknownNet {
+        /// The net.
+        net: NetId,
+    },
+    /// A [`Connection`] names a terminal that is the driver or does not exist.
+    NotASink {
+        /// The net.
+        net: NetId,
+        /// The terminal.
+        terminal: u32,
+    },
+    /// A [`Connection`] names an arc that is not a net arc of the timing graph.
+    NotANetArc {
+        /// The arc.
+        arc: ArcId,
+    },
+    /// Two [`Connection`]s are for the same sink or the same arc.
+    DuplicateConnection {
+        /// The net of the second one.
+        net: NetId,
+        /// The terminal of the second one.
+        terminal: u32,
+    },
 }
 
 impl fmt::Display for EngineError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             EngineError::DuplicateNet { net } => write!(f, "net {} is listed twice", net.0),
+            EngineError::UnknownNet { net } => {
+                write!(f, "a connection names net {}, which is not routed", net.0)
+            }
+            EngineError::NotASink { net, terminal } => {
+                write!(f, "terminal {terminal} of net {} is not a sink", net.0)
+            }
+            EngineError::NotANetArc { arc } => {
+                write!(f, "arc {} is not a net arc of the timing graph", arc.0)
+            }
+            EngineError::DuplicateConnection { net, terminal } => write!(
+                f,
+                "terminal {terminal} of net {} repeats a sink or an arc of another connection",
+                net.0
+            ),
         }
     }
 }
@@ -433,6 +693,9 @@ pub struct IterationReport {
     /// iteration had taken something they use or had left them with nothing to resolve. Their
     /// expansions are in [`nodes_expanded`](IterationReport::nodes_expanded).
     pub discarded: u32,
+    /// What timing analysis found of the routes the iteration left, or `None` if the run is
+    /// not timing-driven.
+    pub timing: Option<TimingMetrics>,
 }
 
 /// A resource with more nets on it than its capacity allows.
@@ -473,6 +736,8 @@ pub struct Outcome<N, R> {
     /// any pricing, and the lowest access cost among the access points through which that
     /// path connected each terminal.
     pub total_cost: Cost,
+    /// The timing of these routes, or `None` if the run is not timing-driven.
+    pub timing: Option<TimingOutcome>,
 }
 
 impl<N, R> Outcome<N, R> {
@@ -599,6 +864,51 @@ where
     S::ResourceSlots: Sync,
 {
     Ok(Engine::new(space, nets, options)?.run_parallel(threads))
+}
+
+/// Routes `nets` through `space` to the end, under `options`, weighing delay against cost as
+/// `timing` says. See [timing-driven routing](self#timing-driven-routing).
+///
+/// This is [`Engine::with_timing`] followed by [`Engine::run`].
+///
+/// # Errors
+///
+/// Returns an error if two nets have the same ID, or if a connection is not valid: see
+/// [`EngineError`].
+pub fn route_timed<S: DelaySpace>(
+    space: &S,
+    nets: &[Net<S::Node>],
+    options: EngineOptions<'_>,
+    timing: TimingDriven,
+) -> Result<Outcome<S::Node, S::Resource>, EngineError> {
+    Ok(Engine::with_timing(space, nets, options, timing)?.run())
+}
+
+/// Routes as [`route_timed`] does, with up to `threads` threads searching at once, and the same
+/// result for every thread count. See [`route_parallel`].
+///
+/// # Errors
+///
+/// As for [`route_timed`].
+///
+/// # Panics
+///
+/// A panic in a space's methods on any thread reaches the caller.
+pub fn route_timed_parallel<S>(
+    space: &S,
+    nets: &[Net<S::Node>],
+    options: EngineOptions<'_>,
+    timing: TimingDriven,
+    threads: usize,
+) -> Result<Outcome<S::Node, S::Resource>, EngineError>
+where
+    S: DelaySpace + Sync,
+    S::Node: Send + Sync,
+    S::Resource: Send + Sync,
+    S::Slots: Send,
+    S::ResourceSlots: Sync,
+{
+    Ok(Engine::with_timing(space, nets, options, timing)?.run_parallel(threads))
 }
 
 /// The negotiation state of one resource.
@@ -861,6 +1171,90 @@ impl<S: RoutingSpace> RoutingSpace for Priced<'_, S> {
     }
 }
 
+/// [`DelaySpace::step_delays`] for the space of an engine, which only a timing-driven engine
+/// has. Keeping it as a pointer is what spares every other engine a `DelaySpace` bound.
+type StepDelays<S> = fn(&S, NetId, <S as RoutingSpace>::Node, &mut Vec<u32>);
+/// [`DelaySpace::delay_lower_bound`], in the same way.
+type DelayLowerBound<S> =
+    fn(&S, NetId, <S as RoutingSpace>::Node, <S as RoutingSpace>::Node) -> u32;
+
+/// What shrinks the blended lower bound, so that rounding cannot lift it above the sum of the
+/// rounded step costs it bounds. Each blended step and the bound itself are a few roundings
+/// of relative size 2^-53 from exact, and this is a thousand times that.
+const BLENDED_BOUND_SHRINK: f64 = 1.0 - 1e-12;
+
+/// A priced space as one connection of a given criticality `c` sees it, after VPR: a step
+/// costs `(1 - c) * price + c * delay_cost * delay`.
+///
+/// Its lower bound is the same blend of the space's two lower bounds, which is admissible
+/// because each of them is. A price is never below the step's base cost, which the space's
+/// cost bound is under, and the delays it adds up are the ones its delay bound is under. Both
+/// weights are not negative, so the blend of the bounds is under the blend of the sums.
+/// Scaling matters here: the cost bound alone, unscaled, would overestimate a step that costs
+/// more than its delay is worth.
+struct Blended<'p, 'a, S: RoutingSpace> {
+    priced: &'p Priced<'a, S>,
+    step_delays: StepDelays<S>,
+    delay_bound: DelayLowerBound<S>,
+    /// `1 - c`.
+    congestion: Cost,
+    /// `c` times the cost of a picosecond.
+    delay: Cost,
+    /// For the space's answers, borrowed only within a call.
+    delays: &'p RefCell<Vec<u32>>,
+}
+
+impl<S: RoutingSpace> RoutingSpace for Blended<'_, '_, S> {
+    type Node = S::Node;
+    type Resource = S::Resource;
+    type Slots = S::Slots;
+    type ResourceSlots = S::ResourceSlots;
+
+    fn new_slots(&self) -> S::Slots {
+        self.priced.new_slots()
+    }
+
+    fn new_resource_slots(&self) -> S::ResourceSlots {
+        self.priced.new_resource_slots()
+    }
+
+    #[inline]
+    fn contains(&self, node: S::Node) -> bool {
+        self.priced.contains(node)
+    }
+
+    #[inline]
+    fn expand(&self, net: NetId, from: S::Node, out: &mut Vec<Step<S::Node>>) {
+        let start = out.len();
+        self.priced.expand(net, from, out);
+        let mut delays = self.delays.borrow_mut();
+        delays.clear();
+        (self.step_delays)(self.priced.inner, net, from, &mut delays);
+        for (position, step) in out[start..].iter_mut().enumerate() {
+            // A space that gives too few delays breaks its contract, and gets no delay for
+            // the steps it left out rather than a panic.
+            let delay = delays.get(position).copied().unwrap_or(0);
+            step.cost = self.congestion * step.cost + self.delay * Cost::from(delay);
+        }
+    }
+
+    #[inline]
+    fn lower_bound(&self, net: NetId, from: S::Node, to: S::Node) -> Cost {
+        let cost = self.priced.inner.lower_bound(net, from, to);
+        let delay = (self.delay_bound)(self.priced.inner, net, from, to);
+        let blended = self.congestion * cost + self.delay * Cost::from(delay);
+        Cost::new(blended.get() * BLENDED_BOUND_SHRINK).unwrap_or(Cost::ZERO)
+    }
+
+    fn resources(&self, net: NetId, from: S::Node, to: S::Node, out: &mut Vec<S::Resource>) {
+        self.priced.resources(net, from, to, out);
+    }
+
+    fn capacity(&self, resource: S::Resource) -> u32 {
+        self.priced.capacity(resource)
+    }
+}
+
 /// Why a net's routing stopped early.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Interrupt {
@@ -891,6 +1285,8 @@ enum Attempt<N, R> {
         cost: Cost,
         /// Everything the route consumes, in ascending order and without repeats.
         resources: Vec<R>,
+        /// The delay to each terminal, by index, when timing-driven, and otherwise empty.
+        delays: Vec<u32>,
     },
     NoPath,
     Interrupted(Interrupt),
@@ -915,6 +1311,12 @@ struct Worker<S: RoutingSpace> {
     steps: Vec<Step<S::Node>>,
     /// The route being replaced, when routing in a batch.
     replacing: FastSet<S::Resource>,
+    /// A buffer for a space's delays, borrowed only within a single call.
+    delay_buffer: RefCell<Vec<u32>>,
+    /// The delay from the root to each node of the tree, when timing-driven. Only looked up.
+    arrival: FastMap<S::Node, u32>,
+    /// The delay to each terminal, by index, when timing-driven.
+    terminal_delays: Vec<u32>,
     searches: u64,
     expanded: u64,
 }
@@ -933,6 +1335,9 @@ impl<S: RoutingSpace> Worker<S> {
             new_nodes: FastSet::default(),
             steps: Vec::new(),
             replacing: FastSet::default(),
+            delay_buffer: RefCell::new(Vec::new()),
+            arrival: FastMap::default(),
+            terminal_delays: Vec::new(),
             searches: 0,
             expanded: 0,
         }
@@ -951,8 +1356,15 @@ impl<S: RoutingSpace> Worker<S> {
     }
 
     /// Adds the edges from the most recent path to the tree, and returns what they added to
-    /// its cost and how far along the path they start.
-    fn adopt_path(&mut self, space: &S, net: NetId, route: &mut Route<S::Node>) -> (Cost, usize) {
+    /// its cost and how far along the path they start. With `step_delays`, this also works
+    /// out the delay from the root to each new node.
+    fn adopt_path(
+        &mut self,
+        space: &S,
+        net: NetId,
+        route: &mut Route<S::Node>,
+        step_delays: Option<StepDelays<S>>,
+    ) -> (Cost, usize) {
         let starting = route.is_empty();
         // Sources are the tree itself, so a path only leaves the tree, and has no repeats
         // because each node of it has a single parent. A failure would mean a broken
@@ -965,6 +1377,9 @@ impl<S: RoutingSpace> Worker<S> {
         if starting {
             let root = self.path[0];
             self.hold(space, net, root, root);
+            if step_delays.is_some() {
+                self.arrival.insert(root, 0);
+            }
         }
         let mut cost = Cost::ZERO;
         for index in from_index..self.path.len() - 1 {
@@ -973,8 +1388,17 @@ impl<S: RoutingSpace> Worker<S> {
             space.expand(net, from, &mut self.steps);
             // Searches do not report the base cost, because they only saw the price. Paths
             // are a tiny part of what a search expands, so asking again costs little.
-            if let Some(step) = self.steps.iter().find(|step| step.to == to) {
-                cost = cost + step.cost;
+            let position = self.steps.iter().position(|step| step.to == to);
+            if let Some(position) = position {
+                cost = cost + self.steps[position].cost;
+            }
+            if let Some(step_delays) = step_delays {
+                let delays = self.delay_buffer.get_mut();
+                delays.clear();
+                step_delays(space, net, from, delays);
+                let delay = position.and_then(|p| delays.get(p).copied()).unwrap_or(0);
+                let before = self.arrival.get(&from).copied().unwrap_or(0);
+                self.arrival.insert(to, before.saturating_add(delay));
             }
             self.hold(space, net, from, to);
         }
@@ -982,28 +1406,64 @@ impl<S: RoutingSpace> Worker<S> {
     }
 
     /// Takes the terminals connected by the most recent path off the list, and returns
-    /// the sum of their access costs.
-    fn connect_terminals(&mut self, net: &Net<S::Node>, from_index: usize) -> Cost {
+    /// the sum of their access costs. When timing-driven, this records their delays.
+    fn connect_terminals(&mut self, net: &Net<S::Node>, from_index: usize, timed: bool) -> Cost {
         self.new_nodes.clear();
         self.new_nodes.extend(&self.path[from_index..]);
         let new_nodes = &self.new_nodes;
+        let arrival = &self.arrival;
+        let terminal_delays = &mut self.terminal_delays;
         let mut cost = Cost::ZERO;
         self.pending.retain(|&terminal| {
-            let lowest = net.terminals[terminal]
-                .access_points()
-                .iter()
-                .filter(|point| new_nodes.contains(&point.node))
-                .map(|point| point.cost)
-                .min();
-            match lowest {
-                Some(access) => {
-                    cost = cost + access;
-                    false
-                }
-                None => true,
+            let points = net.terminals[terminal].access_points();
+            let on_path = || {
+                points
+                    .iter()
+                    .filter(|point| new_nodes.contains(&point.node))
+            };
+            let Some(access) = on_path().map(|point| point.cost).min() else {
+                return true;
+            };
+            cost = cost + access;
+            if timed {
+                // A sink with several access points on the tree is as fast as the fastest.
+                let delay = on_path()
+                    .filter_map(|point| arrival.get(&point.node).copied())
+                    .min();
+                terminal_delays[terminal] = delay.unwrap_or(0);
             }
+            false
         });
         cost
+    }
+}
+
+/// What a timing-driven engine tells each net while it is being routed: how to learn delays,
+/// and how critical its connections are. None of it changes during an iteration.
+struct RouteTiming<'a, S: RoutingSpace> {
+    step_delays: StepDelays<S>,
+    delay_bound: DelayLowerBound<S>,
+    delay_cost: Cost,
+    /// The criticality of every terminal of every net, at `offsets[net] + terminal`.
+    criticality: &'a [f64],
+    offsets: &'a [u32],
+}
+
+// By hand, because a derive would ask for `S: Copy` when only pointers to its methods are here.
+impl<S: RoutingSpace> Clone for RouteTiming<'_, S> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<S: RoutingSpace> Copy for RouteTiming<'_, S> {}
+
+impl<'a, S: RoutingSpace> RouteTiming<'a, S> {
+    /// Returns the criticality of each terminal of the net at `index`.
+    fn of_net(&self, index: usize) -> &'a [f64] {
+        let start = self.offsets[index] as usize;
+        let end = self.offsets[index + 1] as usize;
+        &self.criticality[start..end]
     }
 }
 
@@ -1013,20 +1473,37 @@ struct RouteContext<'a, S: RoutingSpace> {
     table: &'a ResourceTable<S>,
     present: Cost,
     cancel: Option<&'a AtomicBool>,
+    timing: Option<RouteTiming<'a, S>>,
+}
+
+/// Returns the most critical of the terminals still to connect, if any has a criticality
+/// above 0, with that criticality. The lowest index wins a tie, which keeps the order fixed.
+fn most_critical(pending: &[usize], criticality: &[f64]) -> Option<(usize, f64)> {
+    let mut best: Option<(usize, f64)> = None;
+    for &terminal in pending {
+        let here = criticality.get(terminal).copied().unwrap_or(0.0);
+        if here > 0.0 && best.is_none_or(|(_, most)| here > most) {
+            best = Some((terminal, here));
+        }
+    }
+    best
 }
 
 /// Routes one net that needs it against the current state of the table.
 ///
 /// `budget` is how many expansions it may use, and `dead_roots` lists the driver's access
-/// points known not to reach every terminal.
+/// points known not to reach every terminal. `criticality` has the criticality of each of the
+/// net's terminals when the run is timing-driven.
 fn route_net<S: RoutingSpace>(
     context: &RouteContext<'_, S>,
     net: &Net<S::Node>,
+    criticality: &[f64],
     budget: u64,
     dead_roots: &mut Vec<S::Node>,
     worker: &mut Worker<S>,
 ) -> Attempt<S::Node, S::Resource> {
     let space = context.space;
+    let timing = context.timing;
     let mut spent = 0u64;
     let Some(driver) = net.driver() else {
         return Attempt::NoPath;
@@ -1038,6 +1515,11 @@ fn route_net<S: RoutingSpace>(
         worker.held_list.clear();
         worker.pending.clear();
         worker.pending.extend(1..net.terminals.len());
+        worker.arrival.clear();
+        worker.terminal_delays.clear();
+        if timing.is_some() {
+            worker.terminal_delays.resize(net.terminals.len(), 0);
+        }
         let mut route = Route::new();
         let mut cost = Cost::ZERO;
 
@@ -1050,6 +1532,22 @@ fn route_net<S: RoutingSpace>(
                 buffer: &worker.buffer,
                 replacing: &worker.replacing,
             };
+            // A critical connection is routed on its own, most critical first, as in VPR, so
+            // that it gets its own weight on delay and the first choice of the tree. Those of
+            // no criticality are left to the end, and routed as without timing: each search
+            // connects whichever is nearest, which makes the same trees as a timing-free run.
+            let critical = timing.and_then(|timing| {
+                let (terminal, c) = most_critical(&worker.pending, criticality)?;
+                let blend = Blended {
+                    priced: &priced,
+                    step_delays: timing.step_delays,
+                    delay_bound: timing.delay_bound,
+                    congestion: Cost::new(1.0 - c).unwrap_or(Cost::ZERO),
+                    delay: Cost::new(c).unwrap_or(Cost::ZERO) * timing.delay_cost,
+                    delays: &worker.delay_buffer,
+                };
+                Some((terminal, blend))
+            });
 
             worker.sources.clear();
             if route.is_empty() {
@@ -1058,32 +1556,58 @@ fn route_net<S: RoutingSpace>(
                     // would ignore it anyway.
                     if !dead_roots.contains(&point.node) && space.contains(point.node) {
                         let start = priced.source_cost(net.id, point.node, point.cost);
+                        let start = match &critical {
+                            Some((_, blend)) => blend.congestion * start,
+                            None => start,
+                        };
                         worker.sources.push(Source::with_cost(point.node, start));
                     }
                 }
+            } else if let Some((_, blend)) = &critical {
+                // A connection that joins the tree far from the root has the delay of getting
+                // there to pay for, as VPR charges it.
+                let arrival = &worker.arrival;
+                worker.sources.extend(route.nodes().map(|node| {
+                    let delay = arrival.get(&node).copied().unwrap_or(0);
+                    Source::with_cost(node, blend.delay * Cost::from(delay))
+                }));
             } else {
                 worker.sources.extend(route.nodes().map(Source::new));
             }
             worker.targets.clear();
-            for &terminal in &worker.pending {
-                let points = net.terminals[terminal].access_points();
-                let targets = points
-                    .iter()
-                    .map(|point| Target::with_cost(point.node, point.cost));
-                worker.targets.extend(targets);
+            match &critical {
+                Some((terminal, blend)) => {
+                    let points = net.terminals[*terminal].access_points();
+                    let targets = points
+                        .iter()
+                        .map(|point| Target::with_cost(point.node, blend.congestion * point.cost));
+                    worker.targets.extend(targets);
+                }
+                None => {
+                    for &terminal in &worker.pending {
+                        let points = net.terminals[terminal].access_points();
+                        let targets = points
+                            .iter()
+                            .map(|point| Target::with_cost(point.node, point.cost));
+                        worker.targets.extend(targets);
+                    }
+                }
             }
 
             let limits = SearchLimits {
                 max_expansions: budget.saturating_sub(spent),
                 cancel: context.cancel,
             };
-            let outcome = worker.search.find_path_with(
-                &priced,
-                net.id,
-                worker.sources.iter().copied(),
-                worker.targets.iter().copied(),
-                limits,
-            );
+            let sources = worker.sources.iter().copied();
+            let targets = worker.targets.iter().copied();
+            let outcome = match &critical {
+                Some((_, blend)) => worker
+                    .search
+                    .find_path_with(blend, net.id, sources, targets, limits),
+                None => worker
+                    .search
+                    .find_path_with(&priced, net.id, sources, targets, limits),
+            };
             let end = match outcome {
                 SearchOutcome::Found(found) => {
                     worker.path.clear();
@@ -1122,9 +1646,11 @@ fn route_net<S: RoutingSpace>(
                     .min();
                 cost = cost + access.unwrap_or(Cost::ZERO);
             }
-            let (steps_cost, from_index) = worker.adopt_path(space, net.id, &mut route);
+            let step_delays = timing.map(|timing| timing.step_delays);
+            let (steps_cost, from_index) =
+                worker.adopt_path(space, net.id, &mut route, step_delays);
             cost = cost + steps_cost;
-            cost = cost + worker.connect_terminals(net, from_index);
+            cost = cost + worker.connect_terminals(net, from_index, timing.is_some());
         }
 
         let mut resources = worker.held_list.clone();
@@ -1133,6 +1659,7 @@ fn route_net<S: RoutingSpace>(
             route,
             cost,
             resources,
+            delays: worker.terminal_delays.clone(),
         };
     }
 }
@@ -1162,9 +1689,11 @@ fn route_in_batch<S: RoutingSpace>(
     worker.replacing.clear();
     worker.replacing.extend(state.resources.iter().copied());
     let mut dead_roots = state.dead_roots.clone();
+    let criticality = context.route.timing.map_or(&[][..], |t| t.of_net(index));
     let attempt = route_net(
         &context.route,
         &context.nets[index],
+        criticality,
         context.budget,
         &mut dead_roots,
         worker,
@@ -1206,6 +1735,8 @@ struct NetState<N, R> {
     /// The resources in those slots, in ascending order.
     resources: Vec<R>,
     cost: Cost,
+    /// The delay to each terminal of the route, by index, when timing-driven.
+    delays: Vec<u32>,
     /// Access points of the driver known not to reach every terminal. Reachability does not
     /// depend on prices, so this is true for the rest of the run.
     dead_roots: Vec<N>,
@@ -1228,9 +1759,206 @@ struct Best<N, R> {
     routes: RouteSet<N>,
     overused: Vec<OverusedResource<R>>,
     iteration: u32,
-    unrouted: u32,
-    total_overuse: u64,
+    rank: Rank,
     total_cost: Cost,
+    timing: Option<TimingOutcome>,
+}
+
+/// What decides which iteration is best, compared in this order, where less is better.
+///
+/// Timing comes after legality and before cost, as in VPR's `is_better_quality_routing`,
+/// which ranks legal routings by worst negative slack, then total negative slack, then
+/// wirelength. Here every iteration is ranked, legal or not, so legality comes first. Without
+/// timing, both slacks are 0 and the order is as it always was.
+type Rank = (u32, u64, i64, i128, Cost);
+
+/// The rank of an iteration with the given state.
+fn rank(unrouted: u32, total_overuse: u64, timing: Option<&TimingMetrics>, cost: Cost) -> Rank {
+    let (worst, total) = timing.map_or((0, 0), |metrics| {
+        (
+            metrics.worst_negative_slack(),
+            metrics.total_negative_slack.min(0),
+        )
+    });
+    // Negated so that less is better, as for the rest.
+    (
+        unrouted,
+        total_overuse,
+        worst.saturating_neg(),
+        total.saturating_neg(),
+        cost,
+    )
+}
+
+/// Returns the delay that the current route of the net at `index` gives one of its terminals,
+/// if it has a route.
+fn delay_of<N, R>(states: &[NetState<N, R>], index: usize, terminal: usize) -> Option<u32> {
+    let state = &states[index];
+    state.route.as_ref()?;
+    Some(state.delays.get(terminal).copied().unwrap_or(0))
+}
+
+/// The timing side of a timing-driven engine.
+struct TimingState<S: RoutingSpace> {
+    step_delays: StepDelays<S>,
+    delay_bound: DelayLowerBound<S>,
+    delay_cost: Cost,
+    graph: TimingGraph,
+    analysis: TimingAnalysis,
+    constraints: Constraints,
+    options: CriticalityOptions,
+    /// As given, for the order of [`TimingOutcome::connection_delays`].
+    connections: Vec<Connection>,
+    /// Where each connection is: its net's index, its terminal, and its slot, which is at
+    /// `offsets[net] + terminal`.
+    places: Vec<(usize, usize, usize)>,
+    /// Where each net's terminals start among the slots.
+    offsets: Vec<u32>,
+    /// The criticality of every terminal slot, which only changes between iterations, so that
+    /// all of an iteration's nets see the same ones whatever the batches and threads.
+    criticality: Vec<f64>,
+    /// The delay of every arc, by [`ArcId`], for the timing graph to take its net delays from.
+    arc_delays: Vec<u32>,
+    /// A buffer for the analysis's criticalities, by [`ArcId`].
+    arc_criticality: Vec<f64>,
+    metrics: TimingMetrics,
+}
+
+impl<S: RoutingSpace> TimingState<S> {
+    /// Checks the connections and runs a first analysis on the estimated delays.
+    fn new<N>(
+        nets: &[Net<N>],
+        timing: TimingDriven,
+        step_delays: StepDelays<S>,
+        delay_bound: DelayLowerBound<S>,
+    ) -> Result<Self, EngineError> {
+        let TimingDriven {
+            graph,
+            constraints,
+            connections,
+            criticality: options,
+            delay_cost,
+        } = timing;
+
+        let mut offsets = Vec::with_capacity(nets.len() + 1);
+        let mut total = 0u32;
+        for net in nets {
+            offsets.push(total);
+            total = total.saturating_add(net.terminals.len() as u32);
+        }
+        offsets.push(total);
+        // Looked up and never iterated.
+        let index_of: FastMap<NetId, usize> = nets
+            .iter()
+            .enumerate()
+            .map(|(index, net)| (net.id, index))
+            .collect();
+
+        let mut places = Vec::with_capacity(connections.len());
+        let mut slot_taken = vec![false; total as usize];
+        let mut arc_taken = vec![false; graph.num_arcs() as usize];
+        for connection in &connections {
+            let Connection { net, terminal, arc } = *connection;
+            let index = *index_of.get(&net).ok_or(EngineError::UnknownNet { net })?;
+            if terminal == 0 || terminal as usize >= nets[index].terminals.len() {
+                return Err(EngineError::NotASink { net, terminal });
+            }
+            if graph.arc(arc).is_none_or(|info| info.kind != ArcKind::Net) {
+                return Err(EngineError::NotANetArc { arc });
+            }
+            let slot = offsets[index] as usize + terminal as usize;
+            if slot_taken[slot] || arc_taken[arc.index()] {
+                return Err(EngineError::DuplicateConnection { net, terminal });
+            }
+            slot_taken[slot] = true;
+            arc_taken[arc.index()] = true;
+            places.push((index, terminal as usize, slot));
+        }
+
+        let arc_delays = (0..graph.num_arcs())
+            .map(|arc| graph.arc(ArcId(arc)).map_or(0, |info| info.delay))
+            .collect();
+        let analysis = TimingAnalysis::new(&graph);
+        let mut state = TimingState {
+            step_delays,
+            delay_bound,
+            delay_cost,
+            graph,
+            analysis,
+            constraints,
+            options,
+            connections,
+            places,
+            offsets,
+            criticality: vec![0.0; total as usize],
+            arc_delays,
+            arc_criticality: Vec::new(),
+            metrics: TimingMetrics {
+                critical_path_delay: None,
+                worst_slack: None,
+                total_negative_slack: 0,
+            },
+        };
+        state.run();
+        state.refresh_criticality();
+        Ok(state)
+    }
+
+    /// Runs the analysis on the delays the graph has.
+    fn run(&mut self) {
+        self.analysis.run(&self.graph, &self.constraints);
+        self.metrics = TimingMetrics {
+            critical_path_delay: self.analysis.critical_path().map(|path| path.arrival()),
+            worst_slack: self.analysis.worst_slack(),
+            total_negative_slack: self.analysis.total_negative_slack(),
+        };
+    }
+
+    /// Takes the delays of the routes there are, and analyses them. A connection whose net has
+    /// no route keeps the delay it had.
+    fn analyse<R>(&mut self, states: &[NetState<S::Node, R>]) {
+        for (connection, &(net, terminal, _)) in self.connections.iter().zip(&self.places) {
+            if let Some(delay) = delay_of(states, net, terminal) {
+                self.arc_delays[connection.arc.index()] = delay;
+            }
+        }
+        let delays = &self.arc_delays;
+        self.graph
+            .apply_net_delays(&|arc: ArcId| delays.get(arc.index()).copied().unwrap_or(0));
+        self.run();
+    }
+
+    /// Sets the criticality of every connection from the latest analysis.
+    fn refresh_criticality(&mut self) {
+        self.analysis
+            .fill_arc_criticalities(&self.options, &mut self.arc_criticality);
+        for (connection, &(_, _, slot)) in self.connections.iter().zip(&self.places) {
+            self.criticality[slot] = self.arc_criticality[connection.arc.index()];
+        }
+    }
+
+    /// Returns the timing of the current routes, as last analysed.
+    fn outcome<R>(&self, states: &[NetState<S::Node, R>]) -> TimingOutcome {
+        TimingOutcome {
+            metrics: self.metrics,
+            connection_delays: self
+                .places
+                .iter()
+                .map(|&(net, terminal, _)| delay_of(states, net, terminal))
+                .collect(),
+        }
+    }
+
+    /// Returns what the nets of an iteration need to know.
+    fn route_timing(&self) -> RouteTiming<'_, S> {
+        RouteTiming {
+            step_delays: self.step_delays,
+            delay_bound: self.delay_bound,
+            delay_cost: self.delay_cost,
+            criticality: &self.criticality,
+            offsets: &self.offsets,
+        }
+    }
 }
 
 /// A negotiated-congestion router, as a state machine.
@@ -1299,6 +2027,7 @@ pub struct Engine<'a, S: RoutingSpace> {
     reports: Vec<IterationReport>,
     best: Option<Best<S::Node, S::Resource>>,
     stop: Option<StopReason>,
+    timing: Option<TimingState<S>>,
 }
 
 impl<S: RoutingSpace> fmt::Debug for Engine<'_, S> {
@@ -1335,6 +2064,7 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
                 held: Vec::new(),
                 resources: Vec::new(),
                 cost: Cost::ZERO,
+                delays: Vec::new(),
                 dead_roots: Vec::new(),
                 no_path: has_terminal_outside(space, net),
             })
@@ -1358,6 +2088,7 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
             reports: Vec::new(),
             best: None,
             stop: None,
+            timing: None,
         })
     }
 
@@ -1574,6 +2305,7 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
                 route,
                 cost,
                 resources,
+                delays,
             } => {
                 self.commits += 1;
                 for &resource in &resources {
@@ -1592,11 +2324,13 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
                 state.resources = resources;
                 state.route = Some(route);
                 state.cost = cost;
+                state.delays = delays;
             }
             Attempt::NoPath => {
                 state.resources.clear();
                 state.route = None;
                 state.cost = Cost::ZERO;
+                state.delays.clear();
                 state.no_path = true;
             }
             // Budgets stop before this, and a cancelled route is not committed.
@@ -1612,6 +2346,7 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
                 table: &self.table,
                 present: self.present,
                 cancel: self.options.cancel,
+                timing: self.timing.as_ref().map(TimingState::route_timing),
             },
             nets: self.nets,
             states: &self.states,
@@ -1656,7 +2391,16 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
             .filter(|state| state.route.is_some())
             .map(|state| state.cost)
             .sum();
+        let timing = self.timing.as_mut().map(|timing| {
+            timing.analyse(&self.states);
+            timing.metrics
+        });
         self.consider_best(interrupted, unrouted, total_overuse, total_cost);
+        // Only now, so that the best iteration's criticalities were the ones it routed with,
+        // and so that the next iteration has a single set for all of its nets.
+        if let Some(timing) = &mut self.timing {
+            timing.refresh_criticality();
+        }
 
         let report = IterationReport {
             iteration: self.iteration,
@@ -1671,6 +2415,7 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
             total_cost,
             batches,
             discarded,
+            timing,
         };
         self.reports.push(report);
 
@@ -1702,6 +2447,26 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
         &self.reports
     }
 
+    /// Returns the criticality that the next iteration gives a connection, by its index in
+    /// [`TimingDriven::connections`], or `None` if there is no such connection or the run is
+    /// not timing-driven.
+    pub fn connection_criticality(&self, connection: usize) -> Option<f64> {
+        let timing = self.timing.as_ref()?;
+        let &(_, _, slot) = timing.places.get(connection)?;
+        Some(timing.criticality[slot])
+    }
+
+    /// Returns the timing graph, with the delays of the latest routes, or `None` if the run is
+    /// not timing-driven.
+    pub fn timing_graph(&self) -> Option<&TimingGraph> {
+        self.timing.as_ref().map(|timing| &timing.graph)
+    }
+
+    /// Returns the analysis of the latest routes, or `None` if the run is not timing-driven.
+    pub fn timing_analysis(&self) -> Option<&TimingAnalysis> {
+        self.timing.as_ref().map(|timing| &timing.analysis)
+    }
+
     /// Returns the resources overused right now, which need not be by the best iteration.
     pub fn overused(&self) -> Vec<OverusedResource<S::Resource>> {
         self.collect_overused()
@@ -1710,12 +2475,13 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
     /// Returns the best result so far, which the engine keeps.
     pub fn outcome(&self) -> Outcome<S::Node, S::Resource> {
         let stop = self.stop.unwrap_or(StopReason::NotFinished);
-        let (mut routes, overused, best_iteration, total_cost) = match &self.best {
+        let (mut routes, overused, best_iteration, total_cost, timing) = match &self.best {
             Some(best) => (
                 best.routes.clone(),
                 best.overused.clone(),
                 best.iteration,
                 best.total_cost,
+                best.timing.clone(),
             ),
             None => {
                 let reason = match stop {
@@ -1724,7 +2490,14 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
                     }
                     _ => UnroutedReason::Cancelled,
                 };
-                (self.current_routes(reason), Vec::new(), 0, Cost::ZERO)
+                let timing = self.timing.as_ref().map(|t| t.outcome(&self.states));
+                (
+                    self.current_routes(reason),
+                    Vec::new(),
+                    0,
+                    Cost::ZERO,
+                    timing,
+                )
             }
         };
         routes.stats = self.stats;
@@ -1734,6 +2507,7 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
             stop,
             best_iteration,
             total_cost,
+            timing,
         }
     }
 
@@ -1780,11 +2554,14 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
             table: &self.table,
             present: self.present,
             cancel: self.options.cancel,
+            timing: self.timing.as_ref().map(TimingState::route_timing),
         };
+        let criticality = context.timing.map_or(&[][..], |t| t.of_net(index));
         let budget = self.options.max_expansions;
         let attempt = route_net(
             &context,
             net,
+            criticality,
             budget.saturating_sub(self.stats.nodes_expanded),
             &mut state.dead_roots,
             &mut self.workers[0],
@@ -1800,6 +2577,7 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
                 route,
                 cost,
                 resources,
+                delays,
             } => {
                 state.held.clear();
                 for &resource in &resources {
@@ -1809,6 +2587,7 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
                 state.resources = resources;
                 state.route = Some(route);
                 state.cost = cost;
+                state.delays = delays;
                 Ok(())
             }
             Attempt::NoPath => {
@@ -1816,6 +2595,7 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
                 state.resources.clear();
                 state.route = None;
                 state.cost = Cost::ZERO;
+                state.delays.clear();
                 state.no_path = true;
                 Ok(())
             }
@@ -1842,20 +2622,18 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
         total_overuse: u64,
         total_cost: Cost,
     ) {
-        let rank = (unrouted, total_overuse, total_cost);
-        let better = self
-            .best
-            .as_ref()
-            .is_none_or(|best| rank < (best.unrouted, best.total_overuse, best.total_cost));
+        let metrics = self.timing.as_ref().map(|timing| &timing.metrics);
+        let rank = rank(unrouted, total_overuse, metrics, total_cost);
+        let better = self.best.as_ref().is_none_or(|best| rank < best.rank);
         if better {
             let reason = interrupted.map_or(UnroutedReason::BudgetExhausted, Interrupt::reason);
             self.best = Some(Best {
                 routes: self.current_routes(reason),
                 overused: self.collect_overused(),
                 iteration: self.iteration,
-                unrouted,
-                total_overuse,
+                rank,
                 total_cost,
+                timing: self.timing.as_ref().map(|t| t.outcome(&self.states)),
             });
         }
     }
@@ -1913,6 +2691,81 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
         }
         found.sort_unstable_by_key(|entry| entry.resource);
         found
+    }
+}
+
+impl<'a, S: DelaySpace> Engine<'a, S> {
+    /// Creates a timing-driven engine, which does no work until it is stepped. See
+    /// [timing-driven routing](self#timing-driven-routing).
+    ///
+    /// The timing graph is analysed once here, with the delays it was built with, for the
+    /// criticalities of the first iteration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if two nets have the same ID, or if a connection names a net that is
+    /// not among `nets`, a terminal that is not a sink of it, an arc that is not a net arc, or a
+    /// sink or an arc that another connection already named.
+    ///
+    /// # Examples
+    ///
+    /// Two ways from 0 to 3: a cheap and slow one through 1, and a dear and fast one through 2.
+    /// The only connection is on the only path, so it is fully critical, up to VPR's maximum
+    /// of 0.99, and it takes the fast way.
+    ///
+    /// ```
+    /// use guide::cost::Cost;
+    /// use guide::engine::{Connection, Engine, EngineOptions, TimingDriven};
+    /// use guide::id::{NetId, NodeId};
+    /// use guide::net::{Net, Terminal};
+    /// use guide::space::graph::GraphBuilder;
+    /// use guide::timing::{Constraints, TimingGraphBuilder};
+    ///
+    /// let mut builder = GraphBuilder::new(4);
+    /// for (from, to, cost) in [(0, 1, 1), (1, 3, 1), (0, 2, 3), (2, 3, 3)] {
+    ///     builder.add_edge(NodeId(from), NodeId(to), Cost::from(cost))?;
+    /// }
+    /// let graph = builder.build();
+    /// // 500 ps a step through node 1, and 100 through node 2.
+    /// let space = graph.with_step_delays(|from, to| if from.0 == 1 || to.0 == 1 { 500 } else { 100 });
+    ///
+    /// let mut timing = TimingGraphBuilder::new();
+    /// let (driver, sink) = (timing.add_input(0)?, timing.add_output(0)?);
+    /// let arc = timing.add_net_arc(driver, sink, 0)?;
+    /// let connections = vec![Connection { net: NetId(0), terminal: 1, arc }];
+    /// let setup = TimingDriven::new(
+    ///     timing.build(),
+    ///     Constraints::single_clock(0)?,
+    ///     connections,
+    ///     Cost::new(0.01).unwrap(),
+    /// );
+    ///
+    /// let nets = [Net { id: NetId(0), terminals: vec![Terminal::at(NodeId(0)), Terminal::at(NodeId(3))] }];
+    /// let mut engine = Engine::with_timing(&space, &nets, EngineOptions::default(), setup).unwrap();
+    /// assert_eq!(engine.connection_criticality(0), Some(0.99));
+    ///
+    /// let report = engine.step().unwrap();
+    /// assert_eq!(report.timing.unwrap().critical_path_delay, Some(200));
+    /// let outcome = engine.run();
+    /// assert!(outcome.is_success());
+    /// assert!(outcome.routes.route(NetId(0)).unwrap().contains(NodeId(2)));
+    /// assert_eq!(outcome.timing.unwrap().connection_delays, [Some(200)]);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn with_timing(
+        space: &'a S,
+        nets: &'a [Net<S::Node>],
+        options: EngineOptions<'a>,
+        timing: TimingDriven,
+    ) -> Result<Self, EngineError> {
+        let mut engine = Engine::new(space, nets, options)?;
+        engine.timing = Some(TimingState::new(
+            nets,
+            timing,
+            S::step_delays,
+            S::delay_lower_bound,
+        )?);
+        Ok(engine)
     }
 }
 
@@ -2018,6 +2871,9 @@ fn has_terminal_outside<S: RoutingSpace>(space: &S, net: &Net<S::Node>) -> bool 
 
 #[cfg(test)]
 mod parallel_tests;
+
+#[cfg(test)]
+mod timing_tests;
 
 #[cfg(test)]
 mod tests {

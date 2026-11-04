@@ -83,28 +83,28 @@ fn local_grid(
 
 // The fabric of `benches/search.rs`.
 
-const COST_PER_TILE: f64 = 0.75;
-const WIRE_SPAN: [u32; 2] = [1, 4];
+pub(super) const COST_PER_TILE: f64 = 0.75;
+pub(super) const WIRE_SPAN: [u32; 2] = [1, 4];
 const WIRE_COST_PER_TILE: [f64; 2] = [1.0, COST_PER_TILE];
 const SWITCH_COST: [f64; 3] = [0.125, 0.1875, 0.25];
-const SITE_NODES: u32 = 2;
+pub(super) const SITE_NODES: u32 = 2;
 const DIRECTIONS: [(i64, i64); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
 
 #[derive(Clone, Copy, Debug)]
-struct BenchFabric {
-    tiles: u32,
-    tracks: u32,
-    pins: u32,
+pub(super) struct BenchFabric {
+    pub(super) tiles: u32,
+    pub(super) tracks: u32,
+    pub(super) pins: u32,
     output_flexibility: u32,
     switch_fanout: u32,
     input_flexibility: u32,
 }
 
 impl BenchFabric {
-    fn wires_per_tile(self) -> u32 {
+    pub(super) fn wires_per_tile(self) -> u32 {
         self.tracks * WIRE_SPAN.len() as u32 * DIRECTIONS.len() as u32
     }
-    fn nodes_per_tile(self) -> u32 {
+    pub(super) fn nodes_per_tile(self) -> u32 {
         SITE_NODES + 2 * self.pins + self.wires_per_tile()
     }
     fn num_nodes(self) -> u32 {
@@ -113,10 +113,10 @@ impl BenchFabric {
     fn tile_base(self, x: u32, y: u32) -> u32 {
         (x + self.tiles * y) * self.nodes_per_tile()
     }
-    fn source(self, x: u32, y: u32) -> NodeId {
+    pub(super) fn source(self, x: u32, y: u32) -> NodeId {
         NodeId(self.tile_base(x, y))
     }
-    fn sink(self, x: u32, y: u32) -> NodeId {
+    pub(super) fn sink(self, x: u32, y: u32) -> NodeId {
         NodeId(self.tile_base(x, y) + 1)
     }
     fn output_pin(self, x: u32, y: u32, pin: u32) -> NodeId {
@@ -128,10 +128,10 @@ impl BenchFabric {
     fn wire(self, x: u32, y: u32, index: u32) -> NodeId {
         NodeId(self.tile_base(x, y) + SITE_NODES + 2 * self.pins + index)
     }
-    fn wire_kind(index: u32) -> usize {
+    pub(super) fn wire_kind(index: u32) -> usize {
         ((index / DIRECTIONS.len() as u32) as usize) % WIRE_SPAN.len()
     }
-    fn wire_end(self, x: u32, y: u32, index: u32) -> (u32, u32, u32) {
+    pub(super) fn wire_end(self, x: u32, y: u32, index: u32) -> (u32, u32, u32) {
         let direction = DIRECTIONS[index as usize % DIRECTIONS.len()];
         let span = i64::from(WIRE_SPAN[Self::wire_kind(index)]);
         let limit = i64::from(self.tiles) - 1;
@@ -215,7 +215,7 @@ impl BenchFabric {
     }
 
     /// One net per used source, with a few sinks nearby and sometimes a far one.
-    fn nets(self, count: u32, reach: u32, seed: u64) -> Vec<Net<NodeId>> {
+    pub(super) fn nets(self, count: u32, reach: u32, seed: u64) -> Vec<Net<NodeId>> {
         let mut rng = Rng::new(seed);
         let tiles = u64::from(self.tiles);
         let mut sources = FastSet::default();
@@ -254,7 +254,7 @@ impl BenchFabric {
     }
 }
 
-struct TileBound {
+pub(super) struct TileBound {
     positions: Vec<(u16, u16)>,
 }
 
@@ -269,7 +269,7 @@ impl LowerBound for TileBound {
 
 // What has to hold.
 
-const THREAD_COUNTS: [usize; 5] = [1, 2, 3, 4, 8];
+pub(super) const THREAD_COUNTS: [usize; 5] = [1, 2, 3, 4, 8];
 
 /// Runs on one thread with [`Engine::step`], which no thread is involved in, for comparing with.
 fn run_stepped<S: RoutingSpace>(
@@ -354,7 +354,7 @@ fn run_through_batches<S: RoutingSpace>(
     (engine.outcome(), engine.reports().to_vec())
 }
 
-fn small_fabric(tiles: u32, tracks: u32) -> BenchFabric {
+pub(super) fn small_fabric(tiles: u32, tracks: u32) -> BenchFabric {
     BenchFabric {
         tiles,
         tracks,
@@ -365,7 +365,7 @@ fn small_fabric(tiles: u32, tracks: u32) -> BenchFabric {
     }
 }
 
-fn fabric_graph(fabric: BenchFabric) -> Graph<TileBound> {
+pub(super) fn fabric_graph(fabric: BenchFabric) -> Graph<TileBound> {
     fabric
         .build(u64::from(fabric.tiles))
         .with_lower_bound(TileBound {

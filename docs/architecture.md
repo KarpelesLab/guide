@@ -21,16 +21,28 @@ us things. Code sketches are illustrative, not an API.
  ├───────────────────────────────────────────────────────────┤
  │ Core model          nets, terminals, costs, RoutingSpace  │
  └───────────────────────────────────────────────────────────┘
-   Geometry kernel: used by PCB-like domains only
+   Geometry layer: built on polyclip, used by PCB-like domains only
    Validator: depends on the core model and domains, never on the engines
 ```
 
 Dependencies point downward only. Engines never name a domain type. Domains that
-have no geometry (FPGA) do not pay for the geometry kernel.
+have no geometry (FPGA) do not pay for the geometry layer.
 
 These start as modules in the single `guide` crate, with optional domains and
 interchange formats behind Cargo features. We can split into a workspace later if
 compile times or release cadence call for it.
+
+## Target consumers
+
+Two existing crates are expected to adopt `guide`, and they constrain its design:
+
+- [reticle](https://github.com/KarpelesLab/reticle), an HDL compiler with its own
+  FPGA placer and router. Its contributing rules forbid third-party crates, and
+  all of its current dependencies are optional.
+- [cadlab](https://github.com/KarpelesLab/cadlab), a headless PCB CAD tool with its
+  own autorouter, built on [polyclip](https://github.com/KarpelesLab/polyclip).
+
+Both currently declare Rust 1.89 and will move to `guide`'s 1.95 before adopting it.
 
 ## Core abstractions
 
@@ -92,15 +104,28 @@ interface, so that the two can be iterated together (roadmap M9).
 
 Each of these can be revisited, but changing one should be a conscious act.
 
-**Integer coordinates (`i32` database units; nanometres on PCBs).** Floating point
-makes geometric predicates unreliable and results platform-dependent. `i32`
-nanometres spans ±2.1 m, which is ample, and intermediate products fit in `i64`,
-so predicates can be exact and stay fast. KiCad's internal representation is
-similar, so conversion is lossless.
+**Numeric types follow the consumers.** Conversions at the crate boundary should be
+free and infallible wherever possible:
 
-**Integer fixed-point costs.** Floating-point addition is non-associative, and
-results can vary with evaluation order. PathFinder's multiplicative history costs
-work fine in fixed point, with overflow handled by saturation.
+| Quantity | Type | Why |
+| --- | --- | --- |
+| Layout coordinates | `i64` database units (nanometres on PCBs), limited to ±2^40 | Matches polyclip, cadlab's `Nm` and reticle's DEF points. The limit is polyclip's `MAX_COORD`, about 1.1 km in nanometres, and such values convert to `f64` exactly. |
+| Exact geometry checks | `i128` and wider, through polyclip | Products of `i64` coordinates do not fit in `i64`. |
+| Approximate geometry | `f64` | Used for search and filtering only, and never stored in results. The validator has the final word. |
+| Routing costs | `Cost`, a non-negative, non-NaN `f64` | Tuning values are fractional. The invariant lets queues compare `to_bits()` as a `u64`, as reticle does. |
+| Placement costs | `u64` | Matches reticle's half-perimeter cost. |
+| Delays | `u32` picoseconds per element, `u64` for path totals | Matches reticle's timing data. |
+| Criticality, temperature | `f64` | These are ratios. |
+| Node, edge and net IDs | `u32` newtypes | Keeps graph storage compact. Matches reticle's `NodeId` and `PipId` and cadlab's grid nodes. |
+| FPGA tile positions | `u32`, with `i32` spans | Matches reticle's routing graph. |
+| Rotation | `i32` millidegrees | Matches cadlab's `Angle`. |
+| Seeds | `u64` | Matches reticle's placer. |
+
+**Floats are allowed in results-affecting code, under rules.** Addition, subtraction,
+multiplication, division and `sqrt` are deterministic for a fixed order of operations,
+so the order must be fixed. `exp`, `powf` and the trigonometric functions can differ
+between platforms, so anything that affects results (the annealer's acceptance test,
+for example) needs an implementation of our own.
 
 **Determinism includes parallelism.** Results must not depend on thread count or
 scheduling. Nets are routed in parallel in batches chosen so they cannot interact
@@ -117,8 +142,17 @@ KiCad's own DRC.
 behaviour a first-order concern. Nodes and nets are newtyped integer indices, which
 also keeps the borrow checker out of graph algorithms.
 
-**Minimal dependencies.** The crate's default build should need few or no external
-crates and no external solver. Parsers and optional integrations go behind features.
+**No dependencies in the core.** The default build has no external crates and no
+external solver, which keeps it usable from reticle. Parsers and optional
+integrations go behind features.
+
+**Geometry uses polyclip, but does not expose it.** polyclip already provides polygon
+booleans, offsetting, arcs and exact distance queries, so a feature-gated geometry
+layer builds on it rather than reimplementing them. Its types stay out of the public
+API: cargo treats each polyclip 0.0.x release as breaking, so exposing them would force
+`guide` and its consumers to upgrade in lockstep. `guide` has its own
+`Point { x: i64, y: i64 }`, Y-up like polyclip and cadlab, with conversions behind the
+feature.
 
 **No `unsafe`, at least initially.** The crate forbids it. If profiling later proves
 it is needed, it gets isolated in a small audited module and the lint relaxed there.
@@ -151,3 +185,7 @@ it is needed, it gets isolated in a small audited module and the lint relaxed th
    requirement. Stability across versions would freeze every algorithmic improvement,
    so the current intent is that it is not promised, and that a seed and version
    together identify a result. Needs settling before 1.0.
+
+6. **Do search costs need `f32` storage?** cadlab's grid search uses `f32`, possibly to
+   save memory on large boards. We start with `f64` and only add a narrower or generic
+   cost type if benchmarks justify it.

@@ -11,7 +11,7 @@ Design background is in [docs/architecture.md](docs/architecture.md).
 **The engine first, then FPGA routing, then PCB.** This is deliberately not
 "PCB first", even though PCB may be the larger audience.
 
-FPGA routing is a pure graph problem: no geometry kernel is needed, and public
+FPGA routing is a pure graph problem: no geometry layer is needed, and public
 benchmarks and mature open-source tools (VPR, nextpnr) provide objective
 comparisons. That makes it the cheapest honest test of the shared engine. PCB
 routing then adds geometry on top of an engine already known to work, and tests
@@ -36,6 +36,11 @@ regressions fail review. The metrics:
 
 Results come from a validator that does not share search code with the router.
 
+reticle and cadlab already have their own routers and are expected to adopt `guide`
+([target consumers](docs/architecture.md#target-consumers)). So there is a further
+bar: `guide` has to match or beat each one on its own designs and boards, or
+adopting it would be a regression.
+
 ## Milestones
 
 ### M0: Scaffold (done)
@@ -46,7 +51,8 @@ Crate at v0.0.0, CI, release-plz, documentation, this roadmap.
 
 The vocabulary everything else uses, and single-net routing.
 
-- Nets, terminals, routes, integer fixed-point costs.
+- Nets, terminals, routes, and the [numeric types](docs/architecture.md#decisions)
+  shared by all domains.
 - The `RoutingSpace` abstraction ([architecture](docs/architecture.md#core-abstractions)).
 - Dijkstra and A\* with reusable search state (no per-search allocation).
 - A simple grid space and a generic explicit-graph space.
@@ -80,12 +86,13 @@ First real domain and the first test of the abstraction.
 **Exit:** the VTR benchmarks route legally, and first results are published
 against VPR for channel width, delay and runtime.
 
-### M4: Geometry kernel
+### M4: Geometry layer
 
-Everything PCB routing needs that FPGA routing did not.
+Everything PCB routing needs that FPGA routing did not, as an optional feature.
+polyclip already provides polygons with arcs, offsetting, booleans and exact distance
+queries, so this milestone builds on it instead of reimplementing them.
 
-- Integer coordinates, with robust predicates that cannot suffer rounding error.
-- Polygons with arcs, offsetting, boolean operations.
+- `i64` coordinates and conversions to and from polyclip, kept out of the public API.
 - Spatial index and clearance queries.
 - Design rule model: widths, clearances, via definitions, per-net-class and
   per-layer overrides.
@@ -97,7 +104,7 @@ Everything PCB routing needs that FPGA routing did not.
 
 - Specctra DSN import and SES export, giving KiCad interoperability through its
   existing Freerouting workflow.
-- Multi-layer, grid-free routing over the geometry kernel: through vias, keepouts,
+- Multi-layer, grid-free routing over the geometry layer: through vias, keepouts,
   fixed pre-routes, net classes.
 - Global routing followed by detailed routing.
 - Post-routing cleanup: via removal, track shortening.

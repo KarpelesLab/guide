@@ -39,7 +39,7 @@ capacitors near their power pins, thermal grouping and functional clusters.
 
 **Maps onto the core:** search, negotiation, Steiner construction, placement engines.
 
-**Stays domain-specific:** geometry kernel, design rule evaluation, push-and-shove,
+**Stays domain-specific:** geometry layer, design rule evaluation, push-and-shove,
 pair and meander generation, DSN and KiCad formats. PCB is the domain most likely
 to stress the `RoutingSpace` abstraction
 ([open question 1](architecture.md#open-questions)).

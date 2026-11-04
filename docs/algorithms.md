@@ -62,7 +62,7 @@ meanders, and rerouting of critical connections.
 | R-tree or uniform grid | Clearance queries; benchmarks will decide which, per domain |
 | Constrained Delaunay triangulation | Topological routing, navigation meshes |
 | Compressed sparse row graphs | Compact FPGA routing graphs |
-| Radix or bucket heaps | Integer-cost priority queues, often faster than binary heaps |
+| Radix, bucket or 4-ary heaps | Priority queues on integer keys, including `f64` costs bit-cast to `u64` |
 | Static timing analysis | Delay and criticality; incremental updates |
 
 ## References

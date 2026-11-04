@@ -58,13 +58,27 @@
 //!
 //! # Limits
 //!
-//! The search runs until it reaches a target or runs out of nodes. On an unbounded space
-//! with an unreachable target it does not return, so such spaces have to bound
-//! themselves in [`expand`](RoutingSpace::expand). An inconsistent bound can also cause
-//! many re-expansions, exponentially many in contrived worst cases.
+//! [`Search::find_path`] runs until it reaches a target or runs out of nodes. On an unbounded
+//! space with an unreachable target it does not return, so such spaces have to bound
+//! themselves in [`expand`](RoutingSpace::expand), or be searched through
+//! [`Search::find_path_with`], which takes [`SearchLimits`] and reports running out of
+//! them apart from finding nothing. An inconsistent bound can also cause many
+//! re-expansions, exponentially many in contrived worst cases.
+//!
+//! # Target costs
+//!
+//! [`Search::find_path_with`] takes a [`Target`] with a cost per target, as if each target
+//! had one more step of that cost into a shared final node. That is how the search treats
+//! it. A target that leaves the queue queues its own finish at `g + cost` and is expanded
+//! like any other node, because a dearer target may lie on the way to a cheaper one. The
+//! search ends when a finish leaves the queue. The heuristic of a non-target node adds each
+//! target's cost to the bound for that target, and stays admissible, while a target's own
+//! heuristic stays zero, since a route may also go on from there to a target with a lower
+//! cost. Everything above still applies, with paths costed up to and including the finish.
 
 use core::fmt;
 use core::mem;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::cost::Cost;
 use crate::id::NetId;
@@ -72,6 +86,15 @@ use crate::space::{NodeSlots, RoutingSpace, Step};
 
 /// Marks a node with no parent in its slot's `parent` field: the path starts there.
 const NO_PARENT: usize = usize::MAX;
+
+/// Set in a [`HeapEntry`]'s `slot` when the entry is a target's finish rather than the node
+/// itself. Slots index arrays in memory, so they never get this high.
+const FINISH_BIT: usize = 1 << (usize::BITS - 1);
+
+/// How many expansions pass between looks at a cancel flag. A flag is cheap to read but
+/// lives on a cache line that another thread may write, and a search gets through this
+/// many expansions in well under a millisecond in a release build.
+const CANCEL_CHECK_INTERVAL: u64 = 1024;
 
 /// A node a search may start from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -99,7 +122,77 @@ impl<N> Source<N> {
     }
 }
 
-/// A path found by [`Search::find_path`].
+/// A node a search may finish at, for [`Search::find_path_with`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Target<N> {
+    /// The node to finish at.
+    pub node: N,
+    /// The cost of finishing here, on top of the cost of getting here, such as a
+    /// pad-access cost.
+    pub cost: Cost,
+}
+
+impl<N> Target<N> {
+    /// Creates a target that costs nothing to finish at.
+    #[inline]
+    pub const fn new(node: N) -> Self {
+        Target {
+            node,
+            cost: Cost::ZERO,
+        }
+    }
+
+    /// Creates a target with a finishing cost.
+    #[inline]
+    pub const fn with_cost(node: N, cost: Cost) -> Self {
+        Target { node, cost }
+    }
+}
+
+/// What may stop a [`Search::find_path_with`] before it reaches a target.
+#[derive(Clone, Copy, Debug)]
+pub struct SearchLimits<'a> {
+    /// How many expansions the search may make, re-expansions included. A search that can
+    /// finish without another expansion still does, so zero allows a source that is also
+    /// a target of no cost.
+    pub max_expansions: u64,
+    /// A flag that stops the search once set. It is read before the first expansion and
+    /// about every thousand after that, so a search that expands nothing never reads it.
+    pub cancel: Option<&'a AtomicBool>,
+}
+
+impl SearchLimits<'_> {
+    /// No limits, which is how [`Search::find_path`] runs.
+    pub const NONE: SearchLimits<'static> = SearchLimits {
+        max_expansions: u64::MAX,
+        cancel: None,
+    };
+}
+
+impl Default for SearchLimits<'_> {
+    #[inline]
+    fn default() -> Self {
+        SearchLimits::NONE
+    }
+}
+
+/// How a [`Search::find_path_with`] ended.
+///
+/// It borrows the search's buffers when a path was found, like [`Found`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SearchOutcome<'a, N> {
+    /// The cheapest path.
+    Found(Found<'a, N>),
+    /// Every node reachable from the sources was explored, so no target can be reached
+    /// at any budget. This includes `sources` or `targets` being empty.
+    Unreachable,
+    /// [`SearchLimits::max_expansions`] ran out first. A target may or may not be reachable.
+    LimitReached,
+    /// [`SearchLimits::cancel`] was set first. A target may or may not be reachable.
+    Cancelled,
+}
+
+/// A path found by [`Search::find_path`] or [`Search::find_path_with`].
 ///
 /// It borrows the search's buffers, so copy out what you need to keep before starting
 /// the next search.
@@ -108,7 +201,7 @@ pub struct Found<'a, N> {
     /// The nodes in order, from a source to a target. A source that is also the cheapest
     /// target gives a path of just that node.
     pub path: &'a [N],
-    /// The total cost, including the starting cost of the source.
+    /// The total cost, including the starting cost of the source and the cost of the target.
     pub cost: Cost,
 }
 
@@ -276,8 +369,11 @@ pub struct Search<S: RoutingSpace> {
     generation: u32,
     heap: QuadHeap,
     next_sequence: u64,
-    /// The distinct targets of the current search.
-    targets: Vec<S::Node>,
+    /// The distinct targets of the current search, with the lowest cost given for each.
+    targets: Vec<Target<S::Node>>,
+    /// Where each slot's target is in `targets`. Valid if the slot's `target` is current.
+    /// Apart from [`SlotState`] because it is only read when a target leaves the queue.
+    target_positions: Vec<usize>,
     /// The expansion buffer.
     steps: Vec<Step<S::Node>>,
     /// The path of the most recent search.
@@ -305,6 +401,7 @@ impl<S: RoutingSpace> Search<S> {
             heap: QuadHeap::default(),
             next_sequence: 0,
             targets: Vec::new(),
+            target_positions: Vec::new(),
             steps: Vec::new(),
             path: Vec::new(),
             stats: SearchStats::default(),
@@ -393,19 +490,79 @@ impl<S: RoutingSpace> Search<S> {
         sources: impl IntoIterator<Item = Source<S::Node>>,
         targets: impl IntoIterator<Item = S::Node>,
     ) -> Option<Found<'_, S::Node>> {
+        let targets = targets.into_iter().map(Target::new);
+        match self.find_path_with(space, net, sources, targets, SearchLimits::NONE) {
+            SearchOutcome::Found(found) => Some(found),
+            _ => None,
+        }
+    }
+
+    /// Like [`find_path`](Search::find_path), with target costs and limits, and with a result
+    /// that tells running out of limits apart from there being no path.
+    ///
+    /// Among duplicate targets the lowest cost wins. The `space` need not be the one the
+    /// search was created from, as long as its nodes map to slots in the same way, so that
+    /// a wrapper around a space can be searched with a `Search` that outlives the wrapper.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use guide::cost::Cost;
+    /// use guide::id::{NetId, NodeId};
+    /// use guide::search::{Search, SearchLimits, SearchOutcome, Source, Target};
+    /// use guide::space::grid::Grid;
+    ///
+    /// let grid = Grid::new(8, 1, 1)?;
+    /// let mut search = Search::new(&grid);
+    /// let source = [Source::new(NodeId(0))];
+    ///
+    /// // Node 2 is closer, but costs more to finish at.
+    /// let targets = [
+    ///     Target::with_cost(NodeId(2), Cost::from(9)),
+    ///     Target::new(NodeId(5)),
+    /// ];
+    /// let outcome =
+    ///     search.find_path_with(&grid, NetId(0), source, targets, SearchLimits::NONE);
+    /// let SearchOutcome::Found(found) = outcome else {
+    ///     panic!("expected a path, got {outcome:?}");
+    /// };
+    /// assert_eq!(found.path.last(), Some(&NodeId(5)));
+    /// assert_eq!(found.cost, Cost::from(5));
+    ///
+    /// // Three expansions cannot get that far, which says nothing about reachability.
+    /// let limits = SearchLimits { max_expansions: 3, cancel: None };
+    /// let outcome = search.find_path_with(&grid, NetId(0), source, targets, limits);
+    /// assert_eq!(outcome, SearchOutcome::LimitReached);
+    /// # Ok::<(), guide::space::grid::GridError>(())
+    /// ```
+    pub fn find_path_with<T>(
+        &mut self,
+        space: &T,
+        net: NetId,
+        sources: impl IntoIterator<Item = Source<S::Node>>,
+        targets: impl IntoIterator<Item = Target<S::Node>>,
+        limits: SearchLimits<'_>,
+    ) -> SearchOutcome<'_, S::Node>
+    where
+        T: RoutingSpace<Node = S::Node>,
+    {
         self.begin();
 
         for target in targets {
-            let slot = self.slots.slot(target);
-            self.ensure_slot(slot, target);
+            let slot = self.slots.slot(target.node);
+            self.ensure_slot(slot, target.node);
             // Skipping duplicates here spares a lower bound per duplicate per node.
-            if self.states[slot].target != self.generation {
+            if self.states[slot].target == self.generation {
+                let kept = &mut self.targets[self.target_positions[slot]].cost;
+                *kept = (*kept).min(target.cost);
+            } else {
                 self.states[slot].target = self.generation;
+                self.target_positions[slot] = self.targets.len();
                 self.targets.push(target);
             }
         }
         if self.targets.is_empty() {
-            return None;
+            return SearchOutcome::Unreachable;
         }
 
         for source in sources {
@@ -413,6 +570,15 @@ impl<S: RoutingSpace> Search<S> {
         }
 
         while let Some(entry) = self.heap.pop() {
+            if entry.slot & FINISH_BIT != 0 {
+                let slot = entry.slot & !FINISH_BIT;
+                // Read afresh, in case the node got cheaper by so little that its finish
+                // came out the same as this one. Otherwise, a node that gets cheaper queues
+                // a new finish, which comes first.
+                let cost = self.states[slot].g + self.target_cost(slot);
+                return SearchOutcome::Found(self.finish(slot, cost));
+            }
+
             let state = self.states[entry.slot];
             if entry.inverted_g != !state.g.key() {
                 self.stats.stale_pops += 1;
@@ -423,7 +589,23 @@ impl<S: RoutingSpace> Search<S> {
             // target has an `f` no greater than that target's true cost, and so would
             // have come first. The module documentation covers what rounding does to this.
             if state.target == self.generation {
-                return Some(self.finish(entry.slot, state.g));
+                let finishing = self.target_cost(entry.slot);
+                if finishing == Cost::ZERO {
+                    return SearchOutcome::Found(self.finish(entry.slot, state.g));
+                }
+                let total = state.g + finishing;
+                self.push_entry(total, total, entry.slot | FINISH_BIT);
+            }
+
+            if self.stats.expanded >= limits.max_expansions {
+                return SearchOutcome::LimitReached;
+            }
+            if self.stats.expanded.is_multiple_of(CANCEL_CHECK_INTERVAL)
+                && limits
+                    .cancel
+                    .is_some_and(|flag| flag.load(Ordering::Relaxed))
+            {
+                return SearchOutcome::Cancelled;
             }
 
             self.stats.expanded += 1;
@@ -438,7 +620,7 @@ impl<S: RoutingSpace> Search<S> {
             }
             self.steps = steps;
         }
-        None
+        SearchOutcome::Unreachable
     }
 
     /// Discards the previous search's state.
@@ -466,12 +648,16 @@ impl<S: RoutingSpace> Search<S> {
             // Nodes have no default value, and `node` will do as a filler: entries are
             // only read for slots reached in the current generation, which overwrites them.
             self.nodes.resize(slot + 1, node);
+            self.target_positions.resize(slot + 1, 0);
         }
     }
 
     /// Records a way to reach `node` at cost `g`, and queues it if that is an improvement.
     #[inline]
-    fn offer(&mut self, space: &S, net: NetId, node: S::Node, g: Cost, parent: usize) {
+    fn offer<T>(&mut self, space: &T, net: NetId, node: S::Node, g: Cost, parent: usize)
+    where
+        T: RoutingSpace<Node = S::Node>,
+    {
         let slot = self.slots.slot(node);
         self.ensure_slot(slot, node);
 
@@ -498,6 +684,12 @@ impl<S: RoutingSpace> Search<S> {
         state.parent = parent;
 
         let f = g + state.h;
+        self.push_entry(f, g, slot);
+    }
+
+    /// Queues an entry for `slot`, which may have the [`FINISH_BIT`] set.
+    #[inline]
+    fn push_entry(&mut self, f: Cost, g: Cost, slot: usize) {
         self.heap.push(HeapEntry {
             f: f.key(),
             inverted_g: !g.key(),
@@ -506,6 +698,12 @@ impl<S: RoutingSpace> Search<S> {
         });
         self.next_sequence += 1;
         self.stats.pushes += 1;
+    }
+
+    /// Returns the finishing cost of the target in `slot`, which must be current.
+    #[inline]
+    fn target_cost(&self, slot: usize) -> Cost {
+        self.targets[self.target_positions[slot]].cost
     }
 
     /// Builds the result for the target in `slot`.
@@ -523,17 +721,18 @@ impl<S: RoutingSpace> Search<S> {
     }
 }
 
-/// Returns the search heuristic for `node`: the lowest bound over `targets`.
+/// Returns the search heuristic for `node`: the lowest bound over `targets`, each with the
+/// cost of finishing at that target.
 #[inline]
-fn min_lower_bound<S: RoutingSpace>(
-    space: &S,
+fn min_lower_bound<T: RoutingSpace>(
+    space: &T,
     net: NetId,
-    node: S::Node,
-    targets: &[S::Node],
+    node: T::Node,
+    targets: &[Target<T::Node>],
 ) -> Cost {
     let mut lowest = Cost::MAX;
-    for &target in targets {
-        lowest = lowest.min(space.lower_bound(net, node, target));
+    for target in targets {
+        lowest = lowest.min(space.lower_bound(net, node, target.node) + target.cost);
         if lowest == Cost::ZERO {
             break;
         }
@@ -1311,6 +1510,279 @@ mod tests {
         })
     }
 
+    #[derive(Debug, PartialEq, Eq)]
+    enum SearchEnd {
+        Unreachable,
+        LimitReached,
+        Cancelled,
+    }
+
+    fn outcome_summary(outcome: SearchOutcome<'_, NodeId>) -> Result<(Vec<u32>, f64), SearchEnd> {
+        match outcome {
+            SearchOutcome::Found(found) => {
+                Ok((found.path.iter().map(|n| n.0).collect(), found.cost.get()))
+            }
+            SearchOutcome::Unreachable => Err(SearchEnd::Unreachable),
+            SearchOutcome::LimitReached => Err(SearchEnd::LimitReached),
+            SearchOutcome::Cancelled => Err(SearchEnd::Cancelled),
+        }
+    }
+
+    fn with_costs(list: &[(u32, u32)]) -> Vec<Target<NodeId>> {
+        list.iter()
+            .map(|&(node, cost)| Target::with_cost(NodeId(node), Cost::from(cost)))
+            .collect()
+    }
+
+    /// Runs one unlimited search with target costs.
+    fn route_to(space: &TestGraph, from: &[u32], to: &[(u32, u32)]) -> Option<(Vec<u32>, f64)> {
+        let mut search = Search::new(space);
+        let outcome = search.find_path_with(
+            space,
+            NET,
+            sources(from),
+            with_costs(to),
+            SearchLimits::NONE,
+        );
+        outcome_summary(outcome).ok()
+    }
+
+    #[test]
+    fn target_costs_count_towards_the_choice_and_the_total() {
+        let space = TestGraph::with_integer_edges(3, &[(0, 1, 1), (0, 2, 5)]);
+        assert_eq!(
+            route_to(&space, &[0], &[(1, 9), (2, 0)]),
+            Some((vec![0, 2], 5.0))
+        );
+        assert_eq!(
+            route_to(&space, &[0], &[(1, 3), (2, 9)]),
+            Some((vec![0, 1], 4.0))
+        );
+    }
+
+    #[test]
+    fn a_dear_target_can_be_passed_through_to_a_cheap_one() {
+        let space = TestGraph::with_integer_edges(3, &[(0, 1, 1), (1, 2, 1)]);
+        assert_eq!(
+            route_to(&space, &[0], &[(1, 9), (2, 0)]),
+            Some((vec![0, 1, 2], 2.0))
+        );
+    }
+
+    #[test]
+    fn a_source_that_is_a_costed_target_pays_its_cost_or_loses_to_a_cheaper_one() {
+        let space = TestGraph::with_integer_edges(2, &[(0, 1, 1)]);
+        assert_eq!(route_to(&space, &[0], &[(0, 2)]), Some((vec![0], 2.0)));
+        assert_eq!(
+            route_to(&space, &[0], &[(0, 2), (1, 0)]),
+            Some((vec![0, 1], 1.0))
+        );
+    }
+
+    #[test]
+    fn duplicate_targets_keep_the_lowest_cost_in_any_order() {
+        let space = TestGraph::with_integer_edges(3, &[(0, 1, 1), (0, 2, 4)]);
+        for list in [[(1, 9), (1, 1), (2, 0)], [(1, 1), (1, 9), (2, 0)]] {
+            assert_eq!(route_to(&space, &[0], &list), Some((vec![0, 1], 2.0)));
+        }
+    }
+
+    #[test]
+    fn target_costs_keep_the_heuristic_admissible() {
+        // The bound from 1 to 2 is exact, and adding each target's own cost must not make
+        // the search give up on the route through 1, which is the cheapest overall.
+        let space = TestGraph::with_integer_edges(4, &[(0, 1, 1), (1, 2, 1), (0, 3, 2)])
+            .with_bounds_to(2, &[(0, 2), (1, 1)]);
+        assert_eq!(
+            route_to(&space, &[0], &[(2, 1), (3, 5)]),
+            Some((vec![0, 1, 2], 3.0))
+        );
+    }
+
+    #[test]
+    fn zero_target_costs_leave_expansions_as_they_were() {
+        let space = TestGraph::with_integer_edges(3, &[(0, 1, 1), (1, 2, 1)]);
+        let mut search = Search::new(&space);
+        search.find_path(&space, NET, sources(&[0]), targets(&[1]));
+        let plain = search.stats();
+        let outcome = search.find_path_with(
+            &space,
+            NET,
+            sources(&[0]),
+            with_costs(&[(1, 0)]),
+            SearchLimits::NONE,
+        );
+        assert_eq!(outcome_summary(outcome), Ok((vec![0, 1], 1.0)));
+        assert_eq!(search.stats(), plain);
+    }
+
+    #[test]
+    fn limits_tell_running_out_apart_from_having_no_path() {
+        let space = TestGraph::with_integer_edges(5, &[(0, 1, 1), (1, 2, 1), (2, 3, 1)]);
+        let mut search = Search::new(&space);
+        let limit = |max_expansions| SearchLimits {
+            max_expansions,
+            cancel: None,
+        };
+
+        // Reaching 3 takes exactly three expansions.
+        for (allowed, expected) in [
+            (0, Err(SearchEnd::LimitReached)),
+            (2, Err(SearchEnd::LimitReached)),
+            (3, Ok((vec![0, 1, 2, 3], 3.0))),
+            (4, Ok((vec![0, 1, 2, 3], 3.0))),
+        ] {
+            let outcome = search.find_path_with(
+                &space,
+                NET,
+                sources(&[0]),
+                with_costs(&[(3, 0)]),
+                limit(allowed),
+            );
+            assert_eq!(outcome_summary(outcome), expected, "{allowed}");
+        }
+
+        // Exploring everything takes four, and proves that 4 cannot be reached.
+        for (allowed, expected) in [(3, SearchEnd::LimitReached), (4, SearchEnd::Unreachable)] {
+            let outcome = search.find_path_with(
+                &space,
+                NET,
+                sources(&[0]),
+                with_costs(&[(4, 0)]),
+                limit(allowed),
+            );
+            assert_eq!(outcome_summary(outcome), Err(expected), "{allowed}");
+        }
+
+        // Needing no expansions is possible with none allowed.
+        let outcome =
+            search.find_path_with(&space, NET, sources(&[0]), with_costs(&[(0, 0)]), limit(0));
+        assert_eq!(outcome_summary(outcome), Ok((vec![0], 0.0)));
+        // As is seeing that there is nothing to search.
+        let outcome =
+            search.find_path_with(&space, NET, sources(&[]), with_costs(&[(0, 0)]), limit(0));
+        assert_eq!(outcome_summary(outcome), Err(SearchEnd::Unreachable));
+    }
+
+    #[test]
+    fn a_set_flag_stops_a_search_before_it_expands() {
+        let space = TestGraph::with_integer_edges(3, &[(0, 1, 1), (1, 2, 1)]);
+        let mut search = Search::new(&space);
+        let flag = AtomicBool::new(true);
+        let limits = SearchLimits {
+            max_expansions: u64::MAX,
+            cancel: Some(&flag),
+        };
+
+        let outcome =
+            search.find_path_with(&space, NET, sources(&[0]), with_costs(&[(2, 0)]), limits);
+        assert_eq!(outcome_summary(outcome), Err(SearchEnd::Cancelled));
+        assert_eq!(space.expansions.get(), 0);
+
+        flag.store(false, Ordering::Relaxed);
+        let outcome =
+            search.find_path_with(&space, NET, sources(&[0]), with_costs(&[(2, 0)]), limits);
+        assert_eq!(outcome_summary(outcome), Ok((vec![0, 1, 2], 2.0)));
+    }
+
+    #[test]
+    fn a_flag_set_during_a_long_search_is_seen_within_the_interval() {
+        /// A row of nodes that raises a flag when it reaches a given one.
+        struct Trip<'a> {
+            flag: &'a AtomicBool,
+            at: u32,
+        }
+        impl RoutingSpace for Trip<'_> {
+            type Node = NodeId;
+            type Resource = NodeId;
+            type Slots = DenseSlots<NodeId>;
+            fn new_slots(&self) -> Self::Slots {
+                DenseSlots::new()
+            }
+            fn expand(&self, _net: NetId, from: NodeId, out: &mut Vec<Step<NodeId>>) {
+                if from.0 == self.at {
+                    self.flag.store(true, Ordering::Relaxed);
+                }
+                out.push(Step {
+                    to: NodeId(from.0 + 1),
+                    cost: Cost::ONE,
+                });
+            }
+            fn lower_bound(&self, _net: NetId, _from: NodeId, _to: NodeId) -> Cost {
+                Cost::ZERO
+            }
+            fn resources(&self, _: NetId, _: NodeId, to: NodeId, out: &mut Vec<NodeId>) {
+                out.push(to);
+            }
+            fn capacity(&self, _resource: NodeId) -> u32 {
+                1
+            }
+        }
+
+        let flag = AtomicBool::new(false);
+        let space = Trip {
+            flag: &flag,
+            at: 100,
+        };
+        let mut search = Search::new(&space);
+        let limits = SearchLimits {
+            max_expansions: u64::MAX,
+            cancel: Some(&flag),
+        };
+        let outcome = search.find_path_with(
+            &space,
+            NET,
+            sources(&[0]),
+            with_costs(&[(100_000, 0)]),
+            limits,
+        );
+        assert_eq!(outcome_summary(outcome), Err(SearchEnd::Cancelled));
+        assert_eq!(search.stats().expanded, CANCEL_CHECK_INTERVAL);
+    }
+
+    #[test]
+    fn a_wrapper_space_can_share_a_search_with_the_space_it_wraps() {
+        /// Doubles every step, and borrows what it wraps for a short time only.
+        struct Doubled<'a>(&'a TestGraph);
+        impl RoutingSpace for Doubled<'_> {
+            type Node = NodeId;
+            type Resource = NodeId;
+            type Slots = DenseSlots<NodeId>;
+            fn new_slots(&self) -> Self::Slots {
+                self.0.new_slots()
+            }
+            fn expand(&self, net: NetId, from: NodeId, out: &mut Vec<Step<NodeId>>) {
+                self.0.expand(net, from, out);
+                for step in out.iter_mut() {
+                    step.cost = step.cost * Cost::from(2);
+                }
+            }
+            fn lower_bound(&self, net: NetId, from: NodeId, to: NodeId) -> Cost {
+                self.0.lower_bound(net, from, to)
+            }
+            fn resources(&self, net: NetId, from: NodeId, to: NodeId, out: &mut Vec<NodeId>) {
+                self.0.resources(net, from, to, out);
+            }
+            fn capacity(&self, resource: NodeId) -> u32 {
+                self.0.capacity(resource)
+            }
+        }
+
+        let space = TestGraph::with_integer_edges(2, &[(0, 1, 3)]);
+        let mut search = Search::new(&space);
+        for _ in 0..2 {
+            let wrapped = Doubled(&space);
+            let outcome = search.find_path_with(
+                &wrapped,
+                NET,
+                sources(&[0]),
+                with_costs(&[(1, 1)]),
+                SearchLimits::NONE,
+            );
+            assert_eq!(outcome_summary(outcome), Ok((vec![0, 1], 7.0)));
+        }
+    }
+
     proptest! {
         #[test]
         fn heap_pops_in_sorted_order(
@@ -1444,6 +1916,89 @@ mod tests {
             if let Some(found) = found {
                 let cost = path_cost(&space, &starts, &case.targets, found.path)?;
                 prop_assert_eq!(cost, found.cost);
+            }
+        }
+
+        /// Target costs against brute force, where each target's cost is added to its
+        /// distance. Every bound is admissible, inconsistent, and blind to the target costs.
+        #[test]
+        fn target_costs_match_brute_force(
+            case in case(),
+            finishing in prop::collection::vec(0..=20u32, 4),
+        ) {
+            let starts = integer_starts(&case);
+            let goals: Vec<(u32, u32)> = case
+                .targets
+                .iter()
+                .zip(&finishing)
+                .map(|(&node, &cost)| (node, cost))
+                .collect();
+            let plain = TestGraph::with_integer_edges(case.nodes, &case.edges);
+            let distances = bellman_ford(&plain, starts.iter().copied());
+            let expected = goals
+                .iter()
+                .filter_map(|&(node, cost)| {
+                    distances[node as usize].map(|distance| distance + Cost::from(cost))
+                })
+                .min();
+
+            for space in [plain, with_integer_bound(&case)] {
+                let mut search = Search::new(&space);
+                let outcome = search.find_path_with(
+                    &space,
+                    NET,
+                    cost_sources(&starts),
+                    with_costs(&goals),
+                    SearchLimits::NONE,
+                );
+                match outcome {
+                    SearchOutcome::Found(found) => {
+                        prop_assert_eq!(Some(found.cost), expected);
+                        let nodes: Vec<u32> = goals.iter().map(|goal| goal.0).collect();
+                        let cost = path_cost(&space, &starts, &nodes, found.path)?;
+                        // The finish of this target, at the lowest cost given for it.
+                        let last = found.path.last().unwrap().0;
+                        let finish = goals
+                            .iter()
+                            .filter(|goal| goal.0 == last)
+                            .map(|goal| Cost::from(goal.1))
+                            .min()
+                            .unwrap();
+                        prop_assert_eq!(cost + finish, found.cost);
+                    }
+                    SearchOutcome::Unreachable => prop_assert_eq!(expected, None),
+                    other => prop_assert!(false, "no limit was set, got {:?}", other),
+                }
+            }
+        }
+
+        /// Limits only ever stop a search early. A search allowed fewer expansions than it
+        /// needed must say so, and with enough it must behave as if it had no limit.
+        #[test]
+        fn limits_never_change_an_answer(case in case(), fraction in 0.0..1.0f64) {
+            let starts = integer_starts(&case);
+            let space = TestGraph::with_integer_edges(case.nodes, &case.edges);
+            let goals: Vec<_> = case.targets.iter().map(|&node| (node, 0)).collect();
+            let run = |search: &mut Search<TestGraph>, max_expansions| {
+                let limits = SearchLimits { max_expansions, cancel: None };
+                outcome_summary(search.find_path_with(
+                    &space,
+                    NET,
+                    cost_sources(&starts),
+                    with_costs(&goals),
+                    limits,
+                ))
+            };
+
+            let mut search = Search::new(&space);
+            let unlimited = run(&mut search, u64::MAX);
+            let needed = search.stats().expanded;
+            prop_assert_eq!(run(&mut search, needed), unlimited);
+            prop_assert_eq!(search.stats().expanded, needed);
+            if needed > 0 {
+                let fewer = (needed as f64 * fraction) as u64;
+                prop_assert_eq!(run(&mut search, fewer), Err(SearchEnd::LimitReached));
+                prop_assert_eq!(search.stats().expanded, fewer);
             }
         }
 

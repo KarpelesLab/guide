@@ -280,9 +280,10 @@ pub struct EngineOptions<'c> {
     ///
     /// VPR and reticle allow 50 and 40, but with few nets left to route late in a run, more
     /// iterations cost little when they are not needed. On dense grids, 100 instead of 50
-    /// took the share of problems solved from 58 of 72 to 71 of 72, for 3% more expansions.
-    /// The price is paid on a problem that cannot be solved, which takes twice as long to
-    /// give up on.
+    /// solved 71 of 72 problems rather than 58 on the set used for tuning, and 71 rather
+    /// than 68 on a fresh set, for 1% to 3% more expansions. The price is paid on a problem
+    /// that cannot be solved, which takes about 1.8 times as long to give up on. See
+    /// `docs/benchmarks.md` for these results and how to reproduce them.
     pub max_iterations: u32,
     /// How many nodes all searches together may expand. The default is no limit.
     ///
@@ -298,17 +299,19 @@ pub struct EngineOptions<'c> {
     /// measured searches flooding on a real FPGA without it, because no lower bound knows
     /// what earlier nets have taken. That did not happen on the dense grids and small
     /// island-style fabrics measured here, whose lower bounds are close to exact. Against 0,
-    /// a charge from the start took 30% to 65% of the expansions, solved at least as many
-    /// problems, and gave routes about 4% cheaper, because nets avoid conflicts that they
-    /// would otherwise create and then have to resolve. It is worth measuring again on real
-    /// fabrics, where 0 may turn out to be the better setting.
+    /// a charge from the start took 42% to 62% of the expansions on dense grids and 93% on an
+    /// FPGA-like fabric. It gave routes about 3.5% cheaper on dense grids and 1% to 2.5%
+    /// cheaper elsewhere, because nets avoid conflicts that they would otherwise create and
+    /// then have to resolve. It is worth measuring again on real fabrics, where 0 may turn
+    /// out to be the better setting.
     pub first_present: Cost,
     /// The present factor of the second iteration, from which it grows. The default is 0.5,
     /// as in VPR and reticle.
     pub initial_present: Cost,
     /// What the present factor is multiplied by after each iteration from the second. The
-    /// default is 1.8, as in reticle, where VPR uses 1.3. On dense grids, 1.3 took about 1.5
-    /// times the expansions and solved fewer problems within the same number of iterations.
+    /// default is 1.8, as in reticle, where VPR uses 1.3. On dense grids, 1.3 took 1.2 to 1.4
+    /// times the expansions and solved fewer problems within the same number of iterations,
+    /// but on multi-terminal grids it solved more, 71 against 67.
     pub present_growth: Cost,
     /// The most the present factor can be. The default is 1000, as in VPR.
     ///
@@ -321,16 +324,18 @@ pub struct EngineOptions<'c> {
     /// and 5 did worse. At zero, a step that costs nothing can never become dear.
     pub history_factor: Cost,
     /// Whether to route every net in every iteration, and not only those holding an overused
-    /// resource. The default is false. On dense grids this rescued one problem out of 72 that
-    /// was otherwise stuck, and its routes were no better, for about twice the expansions.
+    /// resource. The default is false. On dense grids this solved fewer problems within the
+    /// default iteration cap, 67 of 72 against 71, for about 1.8 times the expansions, and
+    /// its routes were only 0.4% cheaper.
     pub reroute_all: bool,
     /// A seed to shuffle the order of the nets with before each iteration after the first.
     /// The default is none, which keeps the given order throughout.
     ///
-    /// This did not help on average, so it is off. On dense grids and fabrics it left
-    /// iterations and expansions about the same or a little worse, and routes up to 1% dearer.
-    /// It is here as a way out, should a problem get stuck in a cycle: it rescued one
-    /// problem out of 72.
+    /// This did not help on average, so it is off. On dense grids it took 5% to 28% more
+    /// expansions and gave routes up to 1.1% dearer, and on an FPGA-like fabric up to 45% and
+    /// 5.8%. Changing only the seed moves dense grids between 65 and 72 problems solved of
+    /// 72, so it can be a way out for a problem stuck in a cycle, but a difference of a few
+    /// problems between two settings means little.
     pub shuffle_seed: Option<u64>,
     /// How many nets to route at a time against the same state of the resource table. The
     /// default is 1, which is plain sequential routing.

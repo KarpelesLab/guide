@@ -1,8 +1,8 @@
 # Architecture
 
-**None of this is implemented yet.** It records the intended design so that early
-code heads in a consistent direction, and it will change as implementation teaches
-us things. Code sketches are illustrative, not an API.
+This records the intended design, and it changes as implementation teaches us things.
+The core model, search, multi-net engine, validator and timing analysis exist; see the
+[roadmap](../ROADMAP.md) for what doesn't yet. Code sketches are illustrative, not an API.
 
 ## Layers
 

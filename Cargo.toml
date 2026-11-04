@@ -16,3 +16,6 @@ unsafe_code = "forbid"
 missing_docs = "warn"
 
 [dependencies]
+
+[dev-dependencies]
+proptest = { version = "1", default-features = false, features = ["std"] }

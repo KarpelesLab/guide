@@ -18,12 +18,16 @@ all-features = true
 [features]
 # FPGA routing problems: importing device graphs and designs from VTR.
 fpga = []
+# PCB-like domains: shapes, exact clearances, a spatial index, design rules and a DRC.
+pcb = ["dep:polyclip"]
 
 [lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"
 
 [dependencies]
+# Exact integer polygon geometry. Kept out of the public API: see src/geom/poly.rs.
+polyclip = { version = "0.0.6", optional = true }
 
 [dev-dependencies]
 proptest = { version = "1", default-features = false, features = ["std"] }

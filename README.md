@@ -1,5 +1,10 @@
 # guide
 
+[![CI](https://github.com/KarpelesLab/guide/actions/workflows/ci.yml/badge.svg)](https://github.com/KarpelesLab/guide/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/guide.svg)](https://crates.io/crates/guide)
+[![docs.rs](https://img.shields.io/docsrs/guide)](https://docs.rs/guide)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A placement and routing engine for Rust, aiming at the best achievable results
 across every kind of problem that reduces to *connecting terminals through
 contended resources*:

@@ -148,6 +148,9 @@ pub struct Net<N> {
     /// Identifies the net within its problem.
     pub id: NetId,
     /// The terminals to connect. Errors refer to them by their index here.
+    ///
+    /// The first terminal is the net's driver: in a directed space, routes grow away from
+    /// it, so a route's root must be one of its access points. See [`Net::driver`].
     pub terminals: Vec<Terminal<N>>,
 }
 
@@ -159,6 +162,12 @@ impl<N> Net<N> {
     #[inline]
     pub fn needs_routing(&self) -> bool {
         self.terminals.len() >= 2
+    }
+
+    /// Returns the terminal that routes grow from, or `None` for a net with no terminals.
+    #[inline]
+    pub fn driver(&self) -> Option<&Terminal<N>> {
+        self.terminals.first()
     }
 }
 

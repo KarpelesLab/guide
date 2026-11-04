@@ -42,6 +42,10 @@ pub trait RoutingSpace {
     ///
     /// `out` may already hold entries, which must be left in place. Spaces should not
     /// clear it, so that callers can reuse its allocation across calls.
+    ///
+    /// Routes identify a step by its two nodes, so a call may produce at most one step to
+    /// any given node, and none back to `from`. A space with parallel connections offers
+    /// the one it prefers.
     fn expand(&self, net: NetId, from: Self::Node, out: &mut Vec<Step<Self::Node>>);
 
     /// Returns a lower bound on the cost for `net` to get from `from` to `to`.
@@ -54,6 +58,9 @@ pub trait RoutingSpace {
     /// Appends the resources `net` consumes by stepping from `from` to `to` to `out`.
     ///
     /// As with [`expand`](RoutingSpace::expand), existing entries must be left in place.
+    ///
+    /// No step enters the node a route starts from, so a call with `from == to` asks for
+    /// the resources `net` consumes by occupying that node.
     fn resources(
         &self,
         net: NetId,

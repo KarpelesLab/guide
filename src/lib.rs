@@ -11,9 +11,12 @@
 //! [architecture notes]: https://github.com/KarpelesLab/guide/blob/master/docs/architecture.md
 
 pub mod cost;
+pub mod engine;
 pub mod id;
 pub mod math;
 pub mod net;
 pub mod rng;
 pub mod search;
 pub mod space;
+pub mod steiner;
+pub mod validate;

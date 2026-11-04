@@ -12,6 +12,44 @@ use crate::cost::Cost;
 use crate::id::{NetId, NodeId};
 use crate::space::{DenseSlots, RoutingSpace, Step};
 
+/// Removes self-loops and merges parallel edges in sorted edge lists, in place.
+fn merge_edges(offsets: &mut [u32], targets: &mut Vec<NodeId>, step_costs: &mut Vec<Cost>) {
+    // Where each target was last written. Positions from before the current node's start
+    // belong to other nodes, so this array never needs resetting.
+    const UNSEEN: u32 = u32::MAX;
+    let mut written_at = vec![UNSEEN; offsets.len() - 1];
+
+    let mut write = 0u32;
+    let mut read = 0usize;
+    for node in 0..offsets.len() - 1 {
+        let end = offsets[node + 1] as usize;
+        let start = write;
+        offsets[node] = start;
+        while read < end {
+            let (target, step_cost) = (targets[read], step_costs[read]);
+            read += 1;
+            if target.index() == node {
+                continue;
+            }
+            let seen = written_at[target.index()];
+            if seen != UNSEEN && seen >= start {
+                let kept = &mut step_costs[seen as usize];
+                *kept = (*kept).min(step_cost);
+            } else {
+                written_at[target.index()] = write;
+                targets[write as usize] = target;
+                step_costs[write as usize] = step_cost;
+                write += 1;
+            }
+        }
+    }
+    *offsets
+        .last_mut()
+        .expect("offsets holds at least one entry") = write;
+    targets.truncate(write as usize);
+    step_costs.truncate(write as usize);
+}
+
 /// An estimate of the cost of getting between two nodes of a [`Graph`].
 ///
 /// The estimate must never exceed the true cost, or searches lose their optimality
@@ -213,8 +251,12 @@ impl GraphBuilder {
     /// Adds a directed edge.
     ///
     /// Edges out of the same node are kept in the order they were added, which is the
-    /// order [`expand`](RoutingSpace::expand) produces them in. Self-loops and parallel
-    /// edges are allowed.
+    /// order [`expand`](RoutingSpace::expand) produces them in.
+    ///
+    /// [`build`](GraphBuilder::build) drops self-loops, and merges parallel edges into the
+    /// cheapest one at the position of the first, as [`RoutingSpace::expand`] requires.
+    /// Only a domain can tell parallel edges apart, so one that needs to know which was
+    /// chosen has to keep that record itself.
     ///
     /// # Errors
     ///
@@ -304,6 +346,7 @@ impl GraphBuilder {
             step_costs[position] = edge.cost + base;
         }
         drop(next);
+        merge_edges(&mut offsets, &mut targets, &mut step_costs);
 
         Graph {
             num_nodes,
@@ -735,13 +778,20 @@ mod tests {
     }
 
     #[test]
-    fn self_loops_and_parallel_edges_are_kept() {
-        let mut builder = GraphBuilder::new(2);
+    fn self_loops_are_dropped_and_parallel_edges_merged_into_the_cheapest() {
+        let mut builder = GraphBuilder::new(4);
         builder.add_edge(NodeId(0), NodeId(0), cost(3.0)).unwrap();
         builder.add_edge(NodeId(0), NodeId(1), cost(2.0)).unwrap();
+        builder.add_edge(NodeId(0), NodeId(2), cost(5.0)).unwrap();
         builder.add_edge(NodeId(0), NodeId(1), cost(1.0)).unwrap();
+        // The same target from another node is not a parallel edge.
+        builder.add_edge(NodeId(3), NodeId(1), cost(9.0)).unwrap();
+        builder.add_edge(NodeId(3), NodeId(2), cost(4.0)).unwrap();
         let graph = builder.build();
-        assert_eq!(steps(&graph, 0), [(0, 3.0), (1, 2.0), (1, 1.0)]);
+        assert_eq!(steps(&graph, 0), [(1, 1.0), (2, 5.0)]);
+        assert_eq!(steps(&graph, 1), []);
+        assert_eq!(steps(&graph, 3), [(1, 9.0), (2, 4.0)]);
+        assert_eq!(graph.num_edges(), 4);
     }
 
     #[test]

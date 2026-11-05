@@ -1,0 +1,2 @@
+# Test data is compared byte for byte, so checkouts must not convert line endings.
+testdata/** -text

@@ -8,7 +8,8 @@
 //! [roadmap] for the plan and the [architecture notes] for the intended design.
 //!
 //! The `fpga` feature adds support for FPGA routing problems, and the `pcb` feature adds
-//! the geometry layer, `geom`, that PCB routing will build on.
+//! the geometry layer, `geom`, that PCB routing will build on. The `kicad` feature, which
+//! implies `pcb`, reads KiCad boards into it, for clearance checks.
 //!
 //! [roadmap]: https://github.com/KarpelesLab/guide/blob/master/ROADMAP.md
 //! [architecture notes]: https://github.com/KarpelesLab/guide/blob/master/docs/architecture.md
@@ -20,6 +21,8 @@ pub mod fpga;
 #[cfg(feature = "pcb")]
 pub mod geom;
 pub mod id;
+#[cfg(feature = "kicad")]
+pub mod kicad;
 pub mod math;
 pub mod net;
 pub mod rng;

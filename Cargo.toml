@@ -20,6 +20,8 @@ all-features = true
 fpga = []
 # PCB-like domains: shapes, exact clearances, a spatial index, design rules and a DRC.
 pcb = ["dep:polyclip"]
+# Reading KiCad boards and their rules into the geometry layer, for clearance checks.
+kicad = ["pcb"]
 
 [lints.rust]
 unsafe_code = "forbid"

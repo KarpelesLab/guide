@@ -2221,10 +2221,20 @@ fn finish(mut sections: Sections, end_line: u64) -> Result<RrGraph, ImportError>
 
     let mut builder = GraphBuilder::with_edge_capacity(num_nodes, targets.len());
     for node in 0..nodes.len() {
-        for &target in &targets[offsets[node] as usize..offsets[node + 1] as usize] {
-            builder
-                .add_edge(NodeId(node as u32), NodeId(target), Cost::ZERO)
-                .map_err(|_| ImportError::TooManyEdges)?;
+        let edges = offsets[node] as usize..offsets[node + 1] as usize;
+        for (&target, &switch) in targets[edges.clone()].iter().zip(&edge_switches[edges]) {
+            let (from, to) = (NodeId(node as u32), NodeId(target));
+            // VPR takes a node behind a short or a non-configurable buffer whenever it takes
+            // the node in front, and so does a router on this graph.
+            let tied = switches[usize::from(switch)]
+                .as_ref()
+                .is_some_and(|switch| !switch.kind.is_configurable());
+            let added = if tied {
+                builder.add_non_configurable_edge(from, to, Cost::ZERO)
+            } else {
+                builder.add_edge(from, to, Cost::ZERO)
+            };
+            added.map_err(|_| ImportError::TooManyEdges)?;
         }
     }
     drop(targets);

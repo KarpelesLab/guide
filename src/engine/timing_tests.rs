@@ -595,6 +595,7 @@ proptest! {
             held: &held,
             buffer: &buffer,
             replacing: &replacing,
+            tied: None,
         };
         let exact = blend(&exact_priced);
         // The same table is read through a space of another type, whose resources and slots
@@ -614,6 +615,7 @@ proptest! {
             held: &held,
             buffer: &buffer,
             replacing: &replacing,
+            tied: None,
         };
         let bounding = Blended {
             priced: &bound_priced,

@@ -133,9 +133,13 @@
 //!   each pin. A [`Route`] is a tree and can't pass a node twice, so [`write_route`] refuses
 //!   these, and [`Design::shared_sink_nets`] lists them. This doesn't occur in VPR's clusters
 //!   where pins in a class are equivalent, as a net then takes only one pin of the class.
-//! - **Non-configurable edges** (`short` and `buffer` switches) are ordinary edges in the
-//!   [`Graph`]. VPR always takes a non-configurable set of nodes as a whole, which a router
-//!   here has to arrange. [`RrStats::non_configurable_edges`] says if a graph has any.
+//! - **Non-configurable edges** (`short` and `buffer` switches) are
+//!   [non-configurable](crate::space::RoutingSpace::non_configurable) edges of the [`Graph`],
+//!   so the engine takes a set of tied nodes as a whole, as VPR does, and the validator checks
+//!   that routes do. [`RrStats::non_configurable_edges`] says if a graph has any. Where a
+//!   configurable and a non-configurable edge join the same two nodes, the graph keeps one
+//!   edge, through the configurable switch as [parallel edges](RrGraph#parallel-edges) says,
+//!   and it is not tied. VPR would tie those nodes.
 //! - **Base costs** match VPR except for two details, given at [`read_rr_graph`].
 //! - **Digests are the caller's job.** VPR checks that a route file names the SHA-256 of the
 //!   placement it was made from, and this crate has no SHA-256, so [`RouteHeader`] takes it

@@ -101,6 +101,36 @@ pub trait RoutingSpace {
 
     /// Returns how many nets can share `resource` before it counts as overused.
     fn capacity(&self, resource: Self::Resource) -> u32;
+
+    /// Appends to `out` the nodes that a route on `from` must also reach, through steps out
+    /// of `from` that can't be switched off.
+    ///
+    /// These are what VPR calls **non-configurable edges**, such as wires shorted together:
+    /// if a route uses one end, it has the other as well, whether it wants it or not. A set
+    /// of nodes tied together is described by the steps between them, and a step from `a` to
+    /// `b` here says nothing about one from `b` to `a`, which a space lists as well if the two
+    /// are tied both ways. Each node listed has to be a step that
+    /// [`expand`](RoutingSpace::expand) offers `net` from `from`, and not `from` itself.
+    ///
+    /// Engines take every node reachable this way from each node a route enters, through as
+    /// many such steps as it takes, and pay for their resources when they decide to enter it.
+    /// The [validator](crate::validate) reports a route that has a node without the nodes
+    /// listed here. As with [`expand`](RoutingSpace::expand), existing entries must be left in
+    /// place, and the order must be deterministic.
+    ///
+    /// The default has none, and costs nothing.
+    #[inline]
+    fn non_configurable(&self, net: NetId, from: Self::Node, out: &mut Vec<Self::Node>) {
+        let _ = (net, from, out);
+    }
+
+    /// Returns whether [`non_configurable`](RoutingSpace::non_configurable) can append
+    /// anything for any node. Engines skip every part of handling those steps when it is
+    /// false, which it is by default, so a space that has some must say so here.
+    #[inline]
+    fn has_non_configurable(&self) -> bool {
+        false
+    }
 }
 
 /// A space that knows how long its steps take, which is what timing-driven routing needs.

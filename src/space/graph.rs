@@ -249,6 +249,9 @@ pub struct GraphBuilder {
     /// that doesn't use a per-node value doesn't allocate for it.
     base_costs: Vec<Cost>,
     capacities: Vec<u32>,
+    /// The edges that are non-configurable, as `(from, to)`, in the order they were added.
+    /// Empty in a graph without them, which then takes no more memory than before.
+    tied: Vec<(NodeId, NodeId)>,
     /// `u32::MAX` outside of tests, which can't afford to reach that many edges.
     max_edges: usize,
 }
@@ -262,6 +265,7 @@ impl GraphBuilder {
             edges: Vec::new(),
             base_costs: Vec::new(),
             capacities: Vec::new(),
+            tied: Vec::new(),
             max_edges: u32::MAX as usize,
         }
     }
@@ -296,6 +300,49 @@ impl GraphBuilder {
             return Err(GraphError::TooManyEdges);
         }
         self.edges.push(PendingEdge { from, to, cost });
+        Ok(())
+    }
+
+    /// Adds a directed edge that is **non-configurable**: a route that uses `from` has to use
+    /// `to` as well, as with wires shorted together. See
+    /// [`RoutingSpace::non_configurable`].
+    ///
+    /// This is an edge like any other, which [`add_edge`](GraphBuilder::add_edge) describes,
+    /// and it stays non-configurable if it is merged with a parallel edge. Two nodes tied both
+    /// ways need an edge each way.
+    ///
+    /// # Errors
+    ///
+    /// As for [`add_edge`](GraphBuilder::add_edge).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use guide::cost::Cost;
+    /// use guide::id::{NetId, NodeId};
+    /// use guide::space::RoutingSpace;
+    /// use guide::space::graph::GraphBuilder;
+    ///
+    /// let mut builder = GraphBuilder::new(3);
+    /// builder.add_edge(NodeId(0), NodeId(1), Cost::ONE)?;
+    /// builder.add_non_configurable_edge(NodeId(1), NodeId(2), Cost::ZERO)?;
+    /// builder.add_non_configurable_edge(NodeId(2), NodeId(1), Cost::ZERO)?;
+    /// let graph = builder.build();
+    ///
+    /// let mut tied = Vec::new();
+    /// graph.non_configurable(NetId(0), NodeId(1), &mut tied);
+    /// assert_eq!(tied, [NodeId(2)]);
+    /// assert!(graph.has_non_configurable());
+    /// # Ok::<(), guide::space::graph::GraphError>(())
+    /// ```
+    pub fn add_non_configurable_edge(
+        &mut self,
+        from: NodeId,
+        to: NodeId,
+        cost: Cost,
+    ) -> Result<(), GraphError> {
+        self.add_edge(from, to, cost)?;
+        self.tied.push((from, to));
         Ok(())
     }
 
@@ -345,6 +392,7 @@ impl GraphBuilder {
             edges,
             base_costs,
             capacities,
+            mut tied,
             max_edges: _,
         } = self;
         let nodes = num_nodes as usize;
@@ -375,6 +423,26 @@ impl GraphBuilder {
         drop(next);
         merge_edges(&mut offsets, &mut targets, &mut step_costs);
 
+        // Stable, so that tied nodes keep the order they were added in, and without repeats or
+        // self-loops, as the merged edges are. Every one of these is an edge too.
+        tied.retain(|&(from, to)| from != to);
+        tied.sort_by_key(|&(from, _)| from);
+        let mut seen = BTreeSet::new();
+        tied.retain(|&pair| seen.insert(pair));
+        let (tied_offsets, tied_targets) = if tied.is_empty() {
+            (Box::default(), Box::default())
+        } else {
+            let mut tied_offsets = vec![0u32; nodes + 1];
+            for &(from, _) in &tied {
+                tied_offsets[from.index() + 1] += 1;
+            }
+            for node in 0..nodes {
+                tied_offsets[node + 1] += tied_offsets[node];
+            }
+            let tied_targets: Box<[NodeId]> = tied.iter().map(|&(_, to)| to).collect();
+            (tied_offsets.into_boxed_slice(), tied_targets)
+        };
+
         Graph {
             num_nodes,
             offsets: offsets.into_boxed_slice(),
@@ -382,6 +450,8 @@ impl GraphBuilder {
             step_costs: Column::compact(step_costs, Cost::ZERO),
             base_costs: Column::compact(base_costs, Cost::ZERO),
             capacities: Column::compact(capacities, DEFAULT_CAPACITY),
+            tied_offsets,
+            tied_targets,
             bound: ZeroBound,
         }
     }
@@ -449,6 +519,13 @@ fn set_in_lazy_column<T: Copy + PartialEq>(
 /// Stepping to a node consumes that node, and nothing else. Parallel edges between two
 /// nodes share the node they arrive at, and don't compete in any other way.
 ///
+/// # Non-configurable edges
+///
+/// Edges added with [`GraphBuilder::add_non_configurable_edge`] are what
+/// [`non_configurable`](RoutingSpace::non_configurable) lists, in the order they were added.
+/// A graph without them takes nothing more for them, and says so through
+/// [`has_non_configurable`](RoutingSpace::has_non_configurable).
+///
 /// # Lower bound
 ///
 /// The bound comes from the estimator `B`, which by default is [`ZeroBound`]. See
@@ -476,6 +553,7 @@ fn set_in_lazy_column<T: Copy + PartialEq>(
 /// | Target | edge | 4 | 4 | 4 |
 /// | Step cost | edge | 0 | 2 | 8 |
 ///
+/// A graph with non-configurable edges also takes 4 bytes per node and 4 per such edge.
 /// So a graph takes 4 to 16 bytes per node and 4 to 12 per edge, and a typical routing
 /// resource graph takes 4 to 8 per node and 6 per edge. The distinct step costs are the
 /// distinct sums of an edge cost and a base cost. [`heap_bytes`](Graph::heap_bytes)
@@ -524,6 +602,10 @@ pub struct Graph<B = ZeroBound> {
     step_costs: Column<Cost>,
     base_costs: Column<Cost>,
     capacities: Column<u32>,
+    /// The non-configurable edges of node `n` lead to `tied_targets[tied_offsets[n]..
+    /// tied_offsets[n + 1]]`. Both are empty in a graph without any.
+    tied_offsets: Box<[u32]>,
+    tied_targets: Box<[NodeId]>,
     bound: B,
 }
 
@@ -544,6 +626,8 @@ impl<B> Graph<B> {
             step_costs: self.step_costs,
             base_costs: self.base_costs,
             capacities: self.capacities,
+            tied_offsets: self.tied_offsets,
+            tied_targets: self.tied_targets,
             bound,
         }
     }
@@ -626,6 +710,20 @@ impl<B> Graph<B> {
             + self.step_costs.heap_bytes()
             + self.base_costs.heap_bytes()
             + self.capacities.heap_bytes()
+            + size_of::<u32>() * self.tied_offsets.len()
+            + size_of::<NodeId>() * self.tied_targets.len()
+    }
+
+    /// Appends the nodes that a route on `node` must also reach, which is what
+    /// [`RoutingSpace::non_configurable`] answers, whatever the estimator.
+    #[inline]
+    fn tied_to(&self, node: NodeId, out: &mut Vec<NodeId>) {
+        if self.tied_targets.is_empty() || !self.contains(node) {
+            return;
+        }
+        let start = self.tied_offsets[node.index()] as usize;
+        let end = self.tied_offsets[node.index() + 1] as usize;
+        out.extend_from_slice(&self.tied_targets[start..end]);
     }
 
     /// Returns whether `node` is in the graph, which is what
@@ -728,6 +826,16 @@ impl<B: LowerBound> RoutingSpace for Graph<B> {
             0
         }
     }
+
+    #[inline]
+    fn non_configurable(&self, _net: NetId, from: NodeId, out: &mut Vec<NodeId>) {
+        self.tied_to(from, out);
+    }
+
+    #[inline]
+    fn has_non_configurable(&self) -> bool {
+        !self.tied_targets.is_empty()
+    }
 }
 
 /// A [`Graph`] with a delay for each of its edges: a space for timing-driven routing.
@@ -827,6 +935,16 @@ impl<B: LowerBound, D> RoutingSpace for TimedGraph<'_, B, D> {
     #[inline]
     fn capacity(&self, resource: NodeId) -> u32 {
         self.graph.capacity(resource)
+    }
+
+    #[inline]
+    fn non_configurable(&self, net: NetId, from: NodeId, out: &mut Vec<NodeId>) {
+        self.graph.non_configurable(net, from, out);
+    }
+
+    #[inline]
+    fn has_non_configurable(&self) -> bool {
+        self.graph.has_non_configurable()
     }
 }
 

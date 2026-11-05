@@ -79,6 +79,8 @@ correctly; identical output across thread counts and OSes, enforced in CI.
 First real domain and the first test of the abstraction.
 
 - Import VTR routing resource graphs and pre-placed designs.
+- Non-configurable edges (shorts), taken as a whole set by the engine and checked by the
+  validator. Done, through `RoutingSpace::non_configurable`.
 - Static timing analysis with a pluggable delay model.
 - Timing-driven routing using net criticality.
 - Fixed pins and pre-routed nets (clocks, for example). Done in the engine:

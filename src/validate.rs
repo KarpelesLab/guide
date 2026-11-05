@@ -26,6 +26,9 @@
 //!   as a route of a single node has no edge to be found wanting, and spaces report no
 //!   resources for a node they do not have.
 //! - Each edge is a step that [`RoutingSpace::expand`] offers that net.
+//! - Each node of a route that has nodes [tied](RoutingSpace::non_configurable) to it, by
+//!   steps that can't be switched off, has those nodes on the route as well. Whether the
+//!   tying step is one of the route's edges doesn't matter, only that the node is there.
 //! - No resource is used by more nets than its [capacity](RoutingSpace::capacity). Usage
 //!   comes from [`RoutingSpace::resources`], for every edge and for the root. It counts
 //!   distinct nets, so a net can use a resource along as many of its edges as it likes.
@@ -82,7 +85,9 @@
 //! 5. By ascending net, [`InvalidRoute`](Fault::InvalidRoute), then
 //!    [`RootNotOnDriver`](Fault::RootNotOnDriver), then
 //!    [`NodeNotInSpace`](Fault::NodeNotInSpace) in the order the route lists its nodes, then
-//!    [`NotAStep`](Fault::NotAStep) in edge order.
+//!    [`NotAStep`](Fault::NotAStep) in edge order, then
+//!    [`NonConfigurableNotTaken`](Fault::NonConfigurableNotTaken) in the order the route
+//!    lists its nodes and then the order the space lists what is tied to each.
 //! 6. [`Overuse`](Fault::Overuse), by ascending resource, each listing nets in ascending
 //!    order.
 //! 7. [`FixedRouteNotKept`](Fault::FixedRouteNotKept), by ascending net, from
@@ -206,6 +211,17 @@ pub enum Fault<N, R> {
         /// The edge.
         edge: Edge<N>,
     },
+    /// A route has a node, `from`, without a node, `to`, that is
+    /// [tied](RoutingSpace::non_configurable) to it, so that the route can't be what it
+    /// claims to be: using `from` uses `to`.
+    NonConfigurableNotTaken {
+        /// The net.
+        net: NetId,
+        /// The node on the route.
+        from: N,
+        /// The node tied to it, which is not on the route.
+        to: N,
+    },
     /// More nets use a resource than its capacity allows.
     Overuse {
         /// The resource.
@@ -271,6 +287,11 @@ impl<N: fmt::Debug, R: fmt::Debug> fmt::Display for Fault<N, R> {
                 }
                 Ok(())
             }
+            Fault::NonConfigurableNotTaken { net, from, to } => write!(
+                f,
+                "net {}: route uses {from:?} without {to:?}, which is tied to it",
+                net.0
+            ),
             Fault::FixedRouteNotKept { net } => {
                 write!(f, "net {}: route does not keep its fixed route", net.0)
             }
@@ -399,6 +420,8 @@ struct Scratch<N, R> {
     nodes: HashSet<N>,
     /// The resources of the current route.
     resources: Vec<R>,
+    /// The nodes tied to one node of the current route.
+    tied: Vec<N>,
 }
 
 /// Checks a routing result against its problem, and reports everything wrong with it.
@@ -463,6 +486,7 @@ pub fn check<S: RoutingSpace>(
         expansion: Vec::new(),
         nodes: HashSet::new(),
         resources: Vec::new(),
+        tied: Vec::new(),
     };
     for net in &sorted {
         let status = match routes.outcome(net.id) {
@@ -643,6 +667,27 @@ fn check_route<S: RoutingSpace>(
                     net: net.id,
                     index,
                     edge,
+                });
+                sound = false;
+            }
+        }
+    }
+
+    // Asked of every space, as the validator takes no one's word for whether it has any.
+    scratch.expanded.clear();
+    let ends = route.edges().iter().flat_map(|edge| [edge.from, edge.to]);
+    for node in route.root().into_iter().chain(ends) {
+        if !scratch.expanded.insert(node) || !space.contains(node) {
+            continue;
+        }
+        scratch.tied.clear();
+        space.non_configurable(net.id, node, &mut scratch.tied);
+        for &to in &scratch.tied {
+            if !scratch.nodes.contains(&to) {
+                faults.push(Fault::NonConfigurableNotTaken {
+                    net: net.id,
+                    from: node,
+                    to,
                 });
                 sound = false;
             }

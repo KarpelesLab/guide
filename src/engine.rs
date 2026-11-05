@@ -67,6 +67,30 @@
 //! resources it already holds are charged at nothing but the step's base cost, since using
 //! them again takes nothing more from anyone.
 //!
+//! # Non-configurable steps
+//!
+//! A space can tie nodes together through
+//! [`non_configurable`](RoutingSpace::non_configurable), as VPR's non-configurable edges do for
+//! shorted wires: a route that enters one node of a set has all of the nodes that its steps
+//! lead to, as many steps on as they go. The engine handles them in three places, and only
+//! for a space whose [`has_non_configurable`](RoutingSpace::has_non_configurable) is true, so
+//! that no other space pays anything for them:
+//!
+//! - **Pricing.** A step into a node is priced with the resources of every node tied to it,
+//!   leaving out the node the step came from. So a search sees what entering a set takes from
+//!   others before it decides, from the first iteration, as VPR's `get_rr_cong_cost` does.
+//! - **Trees.** When a path joins the tree, each new node brings along every node tied to it
+//!   that the tree does not have yet, by the tying steps, which become edges of the route.
+//!   They hold their resources, count in the cost, and connect any terminal on them. A later
+//!   search can start from them, as from any node of the tree.
+//! - **Fixed routes** have to have every node tied to each of their own, or
+//!   [`fix_routes`](Engine::fix_routes) refuses them.
+//!
+//! A search does not know that a set it passed through is already its own further along the
+//! same path, so a path that enters a set twice is priced for it twice. This only makes such
+//! paths look dearer than they are. The [validator](crate::validate) checks the result: every
+//! node of a route has what is tied to it on the route too.
+//!
 //! # Fixed and pre-routed nets
 //!
 //! [`Engine::fix_routes`] takes routes that the caller has already decided on, such as clock
@@ -246,15 +270,15 @@
 //! search, its lower bound and its optimality are as they are without timing, and because the
 //! router and the timing analysis then agree exactly on every delay.
 //!
-//! ## Non-configurable edges
+//! ## Non-configurable steps
 //!
-//! These are not handled yet: see the `fpga` module. When they are, a set of nodes tied together
-//! will be taken as a whole when one of them is entered. The design here will meet that in two
-//! places. The congestion side is weighted by `1 - c`, so whatever a set is priced at is
-//! weighted like any other price, and the bound stays admissible as long as that price is at
-//! least the base cost. On the delay side, a step through a short is a step like any other,
-//! with its own delay, but the members of a set that the path does not go through add load
-//! that a fixed delay does not see, which is one more way for it to be an approximation.
+//! A set of [tied nodes](#non-configurable-steps) meets timing in two places. The congestion
+//! side is weighted by `1 - c`, so whatever a set is priced at is weighted like any other price,
+//! and the bound stays admissible, as that price is at least the base cost. On the delay side, a
+//! tied node's delay is that of the path to the node it is tied to, plus the delay of the tying
+//! step, and a sink can be reached that way. A search does not count the delay of a tie, which
+//! is only there once the path is taken. The members of a set that a path does not go through
+//! add load that a fixed delay does not see, which is one more way for it to be an approximation.
 //!
 //! # Determinism
 //!
@@ -688,6 +712,9 @@ pub enum FixedRouteProblem {
     NodeNotInSpace,
     /// The net needs no routing, and the route does not reach its terminal.
     MissingTerminal,
+    /// The route has a node without a node that is [tied](RoutingSpace::non_configurable) to
+    /// it.
+    NonConfigurableMissing,
     /// An edge of the route, by its position in [`Route::edges`], is not a step that the
     /// space offers the net.
     NotAStep {
@@ -709,6 +736,9 @@ impl fmt::Display for FixedRouteProblem {
             }
             FixedRouteProblem::NodeNotInSpace => {
                 f.write_str("the route uses a node outside the space")
+            }
+            FixedRouteProblem::NonConfigurableMissing => {
+                f.write_str("the route leaves out a node that is tied to one of its own")
             }
             FixedRouteProblem::MissingTerminal => {
                 f.write_str("the route does not reach the net's terminal")
@@ -1222,9 +1252,83 @@ struct Priced<'a, S: RoutingSpace> {
     /// The route this net is replacing, when it is routed in a batch. The table still counts
     /// it, since other searches are reading the table, and a net must not compete with itself.
     replacing: &'a FastSet<S::Resource>,
+    /// Room for working out which nodes a step ties in, for a space with [non-configurable
+    /// steps](self#non-configurable-steps), and otherwise `None`.
+    tied: Option<&'a RefCell<TiedScratch<S::Node>>>,
+}
+
+/// Buffers for [`tied_closure`].
+struct TiedScratch<N> {
+    /// The non-configurable steps found, as `(from, to)`.
+    edges: Vec<(N, N)>,
+    /// One answer of [`RoutingSpace::non_configurable`].
+    found: Vec<N>,
+}
+
+impl<N> TiedScratch<N> {
+    fn new() -> Self {
+        TiedScratch {
+            edges: Vec::new(),
+            found: Vec::new(),
+        }
+    }
+}
+
+/// Puts in `scratch.edges`, as `(from, to)`, the non-configurable steps that reach every node
+/// tied to `start`, through any number of them, each node once and in the order found. `came
+/// from`, the node a step to `start` comes from, counts as reached already.
+///
+/// Sets of tied nodes are small, so a scan stands in for a set.
+fn tied_closure<S: RoutingSpace>(
+    space: &S,
+    net: NetId,
+    start: S::Node,
+    came_from: Option<S::Node>,
+    scratch: &mut TiedScratch<S::Node>,
+) {
+    let TiedScratch { edges, found } = scratch;
+    edges.clear();
+    let mut from = start;
+    let mut next = 0;
+    loop {
+        found.clear();
+        space.non_configurable(net, from, found);
+        for &to in found.iter() {
+            let reached = to == start
+                || came_from == Some(to)
+                || edges.iter().any(|&(_, already)| already == to);
+            if !reached {
+                edges.push((from, to));
+            }
+        }
+        let Some(&(_, after)) = edges.get(next) else {
+            break;
+        };
+        from = after;
+        next += 1;
+    }
 }
 
 impl<S: RoutingSpace> Priced<'_, S> {
+    /// Adds the resources of everything tied to `to`, entered from `from`, to `resources`.
+    #[inline]
+    fn add_tied(
+        &self,
+        net: NetId,
+        from: Option<S::Node>,
+        to: S::Node,
+        resources: &mut Vec<S::Resource>,
+    ) {
+        let Some(tied) = self.tied else {
+            return;
+        };
+        let mut tied = tied.borrow_mut();
+        tied_closure(self.inner, net, to, from, &mut tied);
+        for &(a, b) in &tied.edges {
+            self.inner.resources(net, a, b, resources);
+        }
+    }
+
     /// Applies the module's price formula to a step that consumes `resources`.
     #[inline]
     fn price(&self, base: Cost, resources: &mut Vec<S::Resource>) -> Cost {
@@ -1273,6 +1377,7 @@ impl<S: RoutingSpace> Priced<'_, S> {
         let mut buffer = self.buffer.borrow_mut();
         buffer.clear();
         self.inner.resources(net, node, node, &mut buffer);
+        self.add_tied(net, None, node, &mut buffer);
         self.price(access, &mut buffer)
     }
 }
@@ -1304,6 +1409,7 @@ impl<S: RoutingSpace> RoutingSpace for Priced<'_, S> {
         for step in &mut out[start..] {
             buffer.clear();
             self.inner.resources(net, from, step.to, &mut buffer);
+            self.add_tied(net, Some(from), step.to, &mut buffer);
             step.cost = self.price(step.cost, &mut buffer);
         }
     }
@@ -1319,6 +1425,14 @@ impl<S: RoutingSpace> RoutingSpace for Priced<'_, S> {
 
     fn capacity(&self, resource: S::Resource) -> u32 {
         self.inner.capacity(resource)
+    }
+
+    fn non_configurable(&self, net: NetId, from: S::Node, out: &mut Vec<S::Node>) {
+        self.inner.non_configurable(net, from, out);
+    }
+
+    fn has_non_configurable(&self) -> bool {
+        self.inner.has_non_configurable()
     }
 }
 
@@ -1404,6 +1518,14 @@ impl<S: RoutingSpace> RoutingSpace for Blended<'_, '_, S> {
     fn capacity(&self, resource: S::Resource) -> u32 {
         self.priced.capacity(resource)
     }
+
+    fn non_configurable(&self, net: NetId, from: S::Node, out: &mut Vec<S::Node>) {
+        self.priced.non_configurable(net, from, out);
+    }
+
+    fn has_non_configurable(&self) -> bool {
+        self.priced.has_non_configurable()
+    }
 }
 
 /// Why a net's routing stopped early.
@@ -1468,6 +1590,10 @@ struct Worker<S: RoutingSpace> {
     arrival: FastMap<S::Node, u32>,
     /// The delay to each terminal, by index, when timing-driven.
     terminal_delays: Vec<u32>,
+    /// For working out what is tied to a node.
+    tied: RefCell<TiedScratch<S::Node>>,
+    /// The nodes that the most recent path tied in, besides its own.
+    tied_added: Vec<S::Node>,
     searches: u64,
     expanded: u64,
 }
@@ -1489,6 +1615,8 @@ impl<S: RoutingSpace> Worker<S> {
             delay_buffer: RefCell::new(Vec::new()),
             arrival: FastMap::default(),
             terminal_delays: Vec::new(),
+            tied: RefCell::new(TiedScratch::new()),
+            tied_added: Vec::new(),
             searches: 0,
             expanded: 0,
         }
@@ -1553,7 +1681,58 @@ impl<S: RoutingSpace> Worker<S> {
             }
             self.hold(space, net, from, to);
         }
+
+        self.tied_added.clear();
+        if space.has_non_configurable() {
+            let first = if starting { 0 } else { from_index + 1 };
+            for index in first..self.path.len() {
+                let node = self.path[index];
+                cost = cost + self.add_tied(space, net, route, node, step_delays);
+            }
+        }
         (cost, from_index)
+    }
+
+    /// Adds to the tree every node tied to `node` that it does not have yet, through the
+    /// non-configurable steps that reach them, and returns their cost.
+    fn add_tied(
+        &mut self,
+        space: &S,
+        net: NetId,
+        route: &mut Route<S::Node>,
+        node: S::Node,
+        step_delays: Option<StepDelays<S>>,
+    ) -> Cost {
+        let mut tied = core::mem::replace(self.tied.get_mut(), TiedScratch::new());
+        tied_closure(space, net, node, None, &mut tied);
+        let mut cost = Cost::ZERO;
+        for &(from, to) in &tied.edges {
+            // On the tree already, by the path or by another node's ties.
+            if route.contains(to) {
+                continue;
+            }
+            route
+                .add_path(&[from, to])
+                .expect("a tied node is found from one on the tree");
+            self.steps.clear();
+            space.expand(net, from, &mut self.steps);
+            let position = self.steps.iter().position(|step| step.to == to);
+            if let Some(position) = position {
+                cost = cost + self.steps[position].cost;
+            }
+            if let Some(step_delays) = step_delays {
+                let delays = self.delay_buffer.get_mut();
+                delays.clear();
+                step_delays(space, net, from, delays);
+                let delay = position.and_then(|p| delays.get(p).copied()).unwrap_or(0);
+                let before = self.arrival.get(&from).copied().unwrap_or(0);
+                self.arrival.insert(to, before.saturating_add(delay));
+            }
+            self.hold(space, net, from, to);
+            self.tied_added.push(to);
+        }
+        *self.tied.get_mut() = tied;
+        cost
     }
 
     /// Takes the terminals connected by the most recent path off the list, and returns
@@ -1561,6 +1740,7 @@ impl<S: RoutingSpace> Worker<S> {
     fn connect_terminals(&mut self, net: &Net<S::Node>, from_index: usize, timed: bool) -> Cost {
         self.new_nodes.clear();
         self.new_nodes.extend(&self.path[from_index..]);
+        self.new_nodes.extend(&self.tied_added);
         let new_nodes = &self.new_nodes;
         let arrival = &self.arrival;
         let terminal_delays = &mut self.terminal_delays;
@@ -1696,6 +1876,7 @@ fn route_net<S: RoutingSpace>(
                 held: &worker.held,
                 buffer: &worker.buffer,
                 replacing: &worker.replacing,
+                tied: space.has_non_configurable().then_some(&worker.tied),
             };
             // A critical connection is routed on its own, most critical first, as in VPR, so
             // that it gets its own weight on delay and the first choice of the tree. Those of
@@ -2473,6 +2654,16 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
         // Looked up and never iterated.
         let arrival_at: FastMap<S::Node, u32> = arrivals.iter().copied().collect();
         let on_route: FastSet<S::Node> = route.nodes().collect();
+        if space.has_non_configurable() {
+            let mut tied = Vec::new();
+            for node in route.nodes() {
+                tied.clear();
+                space.non_configurable(net.id, node, &mut tied);
+                if tied.iter().any(|to| !on_route.contains(to)) {
+                    return Err(FixedRouteProblem::NonConfigurableMissing);
+                }
+            }
+        }
 
         if !net.needs_routing()
             && let Some(only) = net.terminals.first()
@@ -3329,6 +3520,9 @@ mod timing_tests;
 
 #[cfg(test)]
 mod fixed_tests;
+
+#[cfg(test)]
+mod tied_tests;
 
 #[cfg(test)]
 mod tests {
@@ -4672,6 +4866,7 @@ mod tests {
             held: &held,
             buffer: &buffer,
             replacing: &FastSet::default(),
+            tied: None,
         };
 
         let mut out = vec![Step {
@@ -4699,6 +4894,7 @@ mod tests {
             held: &held,
             buffer: &buffer,
             replacing: &FastSet::default(),
+            tied: None,
         };
         let mut out = Vec::new();
         priced.expand(NetId(0), NodeId(0), &mut out);
@@ -4727,6 +4923,7 @@ mod tests {
             held: &held,
             buffer: &buffer,
             replacing: &FastSet::default(),
+            tied: None,
         };
         let mut out = Vec::new();
         priced.expand(NetId(0), NodeId(0), &mut out);
@@ -4755,6 +4952,7 @@ mod tests {
                             held: &held,
                             buffer: &buffer,
                             replacing: &FastSet::default(),
+                            tied: None,
                         };
                         let price = priced.price(Cost::from(base), &mut vec![NodeId(0)]);
                         assert!(price >= Cost::from(base));
@@ -4776,6 +4974,7 @@ mod tests {
             held: &held,
             buffer: &buffer,
             replacing: &FastSet::default(),
+            tied: None,
         };
         let mut out = Vec::new();
         priced.expand(NetId(0), (0, 0), &mut out);
@@ -4811,6 +5010,7 @@ mod tests {
             held: &held,
             buffer: &buffer,
             replacing: &FastSet::default(),
+            tied: None,
         };
         let mut out = Vec::new();
         priced.expand(NetId(0), NodeId(0), &mut out);
@@ -4830,6 +5030,7 @@ mod tests {
             held: &held,
             buffer: &buffer,
             replacing: &FastSet::default(),
+            tied: None,
         };
         let mut out = Vec::new();
         priced.expand(NetId(0), NodeId(0), &mut out);

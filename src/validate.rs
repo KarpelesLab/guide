@@ -36,6 +36,9 @@
 //! [`Report::is_legal`] means there are no faults, and [`Report::is_complete`] means that
 //! the result is legal and that every net has a route.
 //!
+//! [`check_fixed`] does all of this, and also checks that a result kept the routes that were
+//! [fixed](crate::net::FixedRoute) for its nets.
+//!
 //! Three choices follow from wanting every fault that can be trusted:
 //!
 //! - Edges that are not steps still have their resources counted. A bogus edge claims its
@@ -82,6 +85,8 @@
 //!    [`NotAStep`](Fault::NotAStep) in edge order.
 //! 6. [`Overuse`](Fault::Overuse), by ascending resource, each listing nets in ascending
 //!    order.
+//! 7. [`FixedRouteNotKept`](Fault::FixedRouteNotKept), by ascending net, from
+//!    [`check_fixed`] only.
 //!
 //! Hash maps are used for lookups and never iterated.
 //!
@@ -135,7 +140,7 @@ use std::error::Error;
 
 use crate::cost::Cost;
 use crate::id::NetId;
-use crate::net::{Edge, Net, NetOutcome, Route, RouteError, RouteSet, UnroutedReason};
+use crate::net::{Edge, FixedRoute, Net, NetOutcome, Route, RouteError, RouteSet, UnroutedReason};
 use crate::space::{RoutingSpace, Step};
 
 /// Something that makes a routing result illegal.
@@ -210,6 +215,12 @@ pub enum Fault<N, R> {
         /// The nets using it, in ascending order.
         nets: Vec<NetId>,
     },
+    /// A net's route does not keep the route that was fixed for it: it has another root, or
+    /// leaves out one of the fixed edges. Only [`check_fixed`] reports this.
+    FixedRouteNotKept {
+        /// The net.
+        net: NetId,
+    },
 }
 
 impl<N: fmt::Debug, R: fmt::Debug> fmt::Display for Fault<N, R> {
@@ -259,6 +270,9 @@ impl<N: fmt::Debug, R: fmt::Debug> fmt::Display for Fault<N, R> {
                     write!(f, "{separator}{}", net.0)?;
                 }
                 Ok(())
+            }
+            Fault::FixedRouteNotKept { net } => {
+                write!(f, "net {}: route does not keep its fixed route", net.0)
             }
         }
     }
@@ -500,6 +514,79 @@ pub fn check<S: RoutingSpace>(
     }
 }
 
+/// Checks a result as [`check`] does, and also that it kept the routes that were fixed for
+/// its nets.
+///
+/// A [`FixedRoute`] is kept if the net's route has the same root and every one of its edges,
+/// in any order, which allows for a net that was only partially pre-routed and grown from
+/// there. A net with no route is not a fault, as for [`check`], and neither is a fixed route
+/// for a net outside the problem, which [`check`] has nothing to say about either. Faults of
+/// this kind come after all others, by ascending net.
+///
+/// # Examples
+///
+/// ```
+/// use guide::id::{NetId, NodeId};
+/// use guide::net::{FixedRoute, Net, Route, RouteSet, Terminal};
+/// use guide::space::grid::Grid;
+/// use guide::validate::{check_fixed, Fault};
+///
+/// let grid = Grid::new(3, 2, 1)?;
+/// let net = Net { id: NetId(0), terminals: vec![Terminal::at(NodeId(0)), Terminal::at(NodeId(2))] };
+/// let mut fixed = Route::new();
+/// fixed.add_path(&[NodeId(0), NodeId(1), NodeId(2)]).unwrap();
+///
+/// // Another route between the same terminals is legal, but it is not the fixed one.
+/// let mut other = Route::new();
+/// other.add_path(&[NodeId(0), NodeId(3), NodeId(4), NodeId(5), NodeId(2)]).unwrap();
+/// let mut routes = RouteSet::new();
+/// routes.set_route(NetId(0), other);
+///
+/// let report = check_fixed(&grid, &[net], &routes, &[FixedRoute { net: NetId(0), route: fixed }]);
+/// assert_eq!(report.faults(), [Fault::FixedRouteNotKept { net: NetId(0) }]);
+/// # Ok::<(), guide::space::grid::GridError>(())
+/// ```
+#[must_use]
+pub fn check_fixed<S: RoutingSpace>(
+    space: &S,
+    nets: &[Net<S::Node>],
+    routes: &RouteSet<S::Node>,
+    fixed: &[FixedRoute<S::Node>],
+) -> Report<S::Node, S::Resource> {
+    let mut report = check(space, nets, routes);
+    let known: HashSet<NetId> = nets.iter().map(|net| net.id).collect();
+    let mut not_kept: Vec<NetId> = fixed
+        .iter()
+        .filter(|fixed| known.contains(&fixed.net))
+        .filter(|fixed| {
+            routes
+                .route(fixed.net)
+                .is_some_and(|route| !keeps(route, &fixed.route))
+        })
+        .map(|fixed| fixed.net)
+        .collect();
+    not_kept.sort_unstable();
+    not_kept.dedup();
+    report.faults.extend(
+        not_kept
+            .into_iter()
+            .map(|net| Fault::FixedRouteNotKept { net }),
+    );
+    report
+}
+
+/// Returns whether `route` has the root and every edge of `fixed`.
+fn keeps<N: Copy + Eq + Hash>(route: &Route<N>, fixed: &Route<N>) -> bool {
+    if fixed.is_empty() {
+        return true;
+    }
+    if route.root() != fixed.root() {
+        return false;
+    }
+    let edges: HashSet<Edge<N>> = route.edges().iter().copied().collect();
+    fixed.edges().iter().all(|edge| edges.contains(edge))
+}
+
 /// Reports the faults of a single route, and returns its cost if it has none.
 fn check_route<S: RoutingSpace>(
     space: &S,
@@ -702,6 +789,82 @@ mod tests {
                 .unwrap();
         }
         builder.build()
+    }
+
+    // Fixed routes.
+
+    fn fixed(id: u32, route: Route<NodeId>) -> FixedRoute<NodeId> {
+        FixedRoute {
+            net: NetId(id),
+            route,
+        }
+    }
+
+    #[test]
+    fn a_route_that_grew_from_its_fixed_part_keeps_it() {
+        let space = row(5);
+        let nets = [net(0, vec![at(0), at(2), at(4)])];
+        // The fixed part comes after the rest here, as order does not matter.
+        let routes = set(vec![(0, route(0, &[(2, 3), (3, 4), (0, 1), (1, 2)]))]);
+        let report = check_fixed(&space, &nets, &routes, &[fixed(0, path(&[0, 1, 2]))]);
+        assert!(report.is_complete());
+        assert_eq!(report, check(&space, &nets, &routes));
+    }
+
+    #[test]
+    fn a_route_without_a_fixed_edge_or_root_does_not_keep_it() {
+        let space = Grid::new(3, 2, 1).unwrap();
+        let nets = [
+            net(0, vec![at(0), at(2)]),
+            net(1, vec![either(&[(3, 0), (5, 0)]), at(4)]),
+        ];
+        let routes = set(vec![(0, path(&[0, 1, 2])), (1, path(&[5, 4]))]);
+        let given = [fixed(1, path(&[3, 4])), fixed(0, path(&[0, 3, 4, 5, 2]))];
+        let report = check_fixed(&space, &nets, &routes, &given);
+        assert!(!report.is_legal());
+        assert_eq!(
+            report.faults(),
+            [
+                Fault::FixedRouteNotKept { net: NetId(0) },
+                Fault::FixedRouteNotKept { net: NetId(1) },
+            ]
+        );
+        assert_eq!(
+            report.faults()[0].to_string(),
+            "net 0: route does not keep its fixed route"
+        );
+    }
+
+    #[test]
+    fn unrouted_and_unknown_nets_and_empty_fixed_routes_are_no_fault() {
+        let space = row(3);
+        let nets = [net(0, vec![at(0), at(2)]), net(1, vec![at(1)])];
+        let mut routes = set(vec![(1, Route::new())]);
+        routes.set_unrouted(NetId(0), UnroutedReason::NoPath);
+        let given = [
+            fixed(0, path(&[0, 1, 2])),
+            fixed(1, Route::new()),
+            fixed(7, path(&[0, 1])),
+        ];
+        let report = check_fixed(&space, &nets, &routes, &given);
+        assert!(report.is_legal());
+        assert!(!report.is_complete());
+    }
+
+    #[test]
+    fn fixed_faults_come_after_every_other_fault() {
+        let space = row(3);
+        let nets = [net(0, vec![at(0), at(2)]), net(1, vec![at(0), at(1)])];
+        let routes = set(vec![(0, path(&[0, 1, 2])), (1, path(&[0, 1]))]);
+        let report = check_fixed(&space, &nets, &routes, &[fixed(0, path(&[0]))]);
+        assert!(matches!(report.faults()[0], Fault::Overuse { .. }));
+        assert_eq!(report.faults().len(), 2);
+        // A root on its own is kept by any route from it.
+        let report = check_fixed(&space, &nets, &routes, &[fixed(1, path(&[1]))]);
+        assert_eq!(
+            report.faults().last(),
+            Some(&Fault::FixedRouteNotKept { net: NetId(1) })
+        );
     }
 
     #[test]

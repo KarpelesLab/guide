@@ -588,6 +588,38 @@ impl<N: fmt::Debug> fmt::Display for PathError<N> {
 
 impl<N: fmt::Debug> Error for PathError<N> {}
 
+/// A route that the caller has already decided on for a net, such as a clock tree or a hand
+/// route, and that an engine must keep exactly as it is.
+///
+/// If the route reaches every terminal, the net is **fixed**: it is never routed again. If
+/// it does not, the net is **partially pre-routed**: an engine grows the route to the
+/// terminals it is missing, and may change what it added, but never the given part. Either
+/// way the route occupies its resources from the start, so that every other net sees them
+/// as taken.
+///
+/// [`validate::check_fixed`](crate::validate::check_fixed) checks that a result kept them.
+///
+/// # Examples
+///
+/// ```
+/// use guide::id::NetId;
+/// use guide::net::{FixedRoute, Route};
+///
+/// let mut route = Route::new();
+/// route.add_path(&[1, 2, 3])?;
+/// let clock = FixedRoute { net: NetId(0), route };
+/// assert_eq!(clock.route.edges().len(), 2);
+/// # Ok::<(), guide::net::PathError<u32>>(())
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct FixedRoute<N> {
+    /// The net the route belongs to.
+    pub net: NetId,
+    /// The route, rooted at an access point of the net's driver if the net
+    /// [needs routing](Net::needs_routing).
+    pub route: Route<N>,
+}
+
 /// Why a net has no route.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]

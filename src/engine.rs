@@ -67,6 +67,44 @@
 //! resources it already holds are charged at nothing but the step's base cost, since using
 //! them again takes nothing more from anyone.
 //!
+//! # Fixed and pre-routed nets
+//!
+//! [`Engine::fix_routes`] takes routes that the caller has already decided on, such as clock
+//! trees or hand routes, as [`FixedRoute`]s. A fixed route holds its resources from before the
+//! first iteration to the end, and other nets pay for them as for anything another net holds.
+//! It is never ripped up. Results have it as the net's route, or as the start of it, and
+//! [`validate::check_fixed`](crate::validate::check_fixed) checks that it is still there.
+//!
+//! - A route that reaches every terminal **fixes the net**, which is then never routed.
+//! - A route that does not is a **partial pre-route**. The net's tree grows from all of it,
+//!   with nothing to pay for what it holds, to the terminals it does not reach. When the net
+//!   is routed again, only what the engine added is replaced. A net only routes again for an
+//!   overused resource that is not in its fixed part, as moving can't settle the others.
+//!
+//! A partial pre-route that can't be completed, as no path leads from it to a terminal it
+//! misses, is reported as [`NoPath`](UnroutedReason::NoPath), and **its fixed part is given
+//! up with it**: a result holds whole routes or none, and the validator would not count a part
+//! that no result shows. The same goes for a net with a terminal outside the space. Until a
+//! partial net is first completed it is unrouted, and its fixed part is held all the same.
+//!
+//! ## When fixed routes conflict
+//!
+//! Fixed routes are taken as they are, even when they overuse something between them, or on
+//! their own, such as a resource of capacity 0. That overuse can't be settled, so it is kept
+//! apart from the rest:
+//!
+//! - A run **converges** once the only overuse left is what fixed routes cause by themselves:
+//!   the amount by which a resource's fixed routes alone exceed its capacity. It does not run on
+//!   to the iteration limit.
+//! - History only grows by the rest, which is all of the overuse in a run without fixed routes.
+//! - The conflict is **reported, not hidden**. [`Outcome::overused`] lists the resource with
+//!   all of its nets, [`OverusedResource::fixed`] says how many hold it through a fixed route,
+//!   and [`IterationReport::fixed_overuse`] has the amount. [`Outcome::is_success`] is false,
+//!   as the validator would find the overuse too.
+//!
+//! [`Engine::overused`] shows these conflicts as soon as the routes are fixed, before any
+//! iteration.
+//!
 //! # Budgets and cancellation
 //!
 //! A run ends at [`max_iterations`](EngineOptions::max_iterations), at
@@ -383,7 +421,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::cost::Cost;
 use crate::id::NetId;
-use crate::net::{Net, Route, RouteSet, RouteStats, UnroutedReason};
+use crate::net::{FixedRoute, Net, Route, RouteSet, RouteStats, Terminal, UnroutedReason};
 use crate::rng::Rng;
 use crate::search::{Search, SearchLimits, SearchOutcome, Source, Target};
 use crate::space::{DelaySpace, FastMap, FastSet, NodeSlots, RoutingSpace, Step};
@@ -620,6 +658,66 @@ pub enum EngineError {
         /// The terminal of the second one.
         terminal: u32,
     },
+    /// A [`FixedRoute`] could not be taken: see [`Engine::fix_routes`].
+    InvalidFixedRoute {
+        /// The net it is for.
+        net: NetId,
+        /// What is wrong with it.
+        problem: FixedRouteProblem,
+    },
+}
+
+/// What is wrong with a [`FixedRoute`] given to [`Engine::fix_routes`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum FixedRouteProblem {
+    /// The net is not among those being routed.
+    UnknownNet,
+    /// The net already has a fixed route.
+    Repeated,
+    /// The engine has already run an iteration, and fixed routes have to be there from the
+    /// start.
+    AlreadyStarted,
+    /// The route has no nodes, so there is nothing to fix.
+    Empty,
+    /// The route is not a tree directed away from its root: see [`Route::validate_tree`].
+    NotATree,
+    /// The net needs routing and the route's root is not an access point of its driver.
+    RootNotOnDriver,
+    /// The route uses a node that the space does not contain.
+    NodeNotInSpace,
+    /// The net needs no routing, and the route does not reach its terminal.
+    MissingTerminal,
+    /// An edge of the route, by its position in [`Route::edges`], is not a step that the
+    /// space offers the net.
+    NotAStep {
+        /// The edge's position.
+        index: usize,
+    },
+}
+
+impl fmt::Display for FixedRouteProblem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FixedRouteProblem::UnknownNet => f.write_str("the net is not being routed"),
+            FixedRouteProblem::Repeated => f.write_str("the net already has a fixed route"),
+            FixedRouteProblem::AlreadyStarted => f.write_str("the engine has already started"),
+            FixedRouteProblem::Empty => f.write_str("the route is empty"),
+            FixedRouteProblem::NotATree => f.write_str("the route is not a tree"),
+            FixedRouteProblem::RootNotOnDriver => {
+                f.write_str("the route does not start at the net's driver")
+            }
+            FixedRouteProblem::NodeNotInSpace => {
+                f.write_str("the route uses a node outside the space")
+            }
+            FixedRouteProblem::MissingTerminal => {
+                f.write_str("the route does not reach the net's terminal")
+            }
+            FixedRouteProblem::NotAStep { index } => {
+                write!(f, "edge {index} of the route is not a step of the space")
+            }
+        }
+    }
 }
 
 impl fmt::Display for EngineError {
@@ -640,6 +738,9 @@ impl fmt::Display for EngineError {
                 "terminal {terminal} of net {} repeats a sink or an arc of another connection",
                 net.0
             ),
+            EngineError::InvalidFixedRoute { net, problem } => {
+                write!(f, "the fixed route of net {}: {problem}", net.0)
+            }
         }
     }
 }
@@ -685,6 +786,10 @@ pub struct IterationReport {
     pub overused_resources: u32,
     /// The sum over resources of how far each is beyond its capacity.
     pub total_overuse: u64,
+    /// The part of [`total_overuse`](IterationReport::total_overuse) that [fixed
+    /// routes](self#fixed-and-pre-routed-nets) cause among themselves, which no routing can
+    /// remove. It is 0 without fixed routes.
+    pub fixed_overuse: u64,
     /// The total cost of all routes, as defined at [`Outcome::total_cost`].
     pub total_cost: Cost,
     /// How many batches of searches ran, which at a batch size of 1 is one for each net.
@@ -710,6 +815,10 @@ pub struct OverusedResource<R> {
     pub capacity: u32,
     /// The nets that hold it, in ascending order.
     pub nets: Vec<NetId>,
+    /// How many of those hold it through the fixed part of their route, and so cannot
+    /// leave it. If this is above `capacity`, the conflict is between [fixed
+    /// routes](self#fixed-and-pre-routed-nets) and no routing can settle it.
+    pub fixed: u32,
 }
 
 /// The result of a run: the best iteration seen, and the plain truth about it.
@@ -968,6 +1077,10 @@ struct ResourceTable<S: RoutingSpace> {
     occupied_slots: Vec<usize>,
     /// The resource in each of `occupied_slots`, since a space's mapping only goes one way.
     occupied_resources: Vec<S::Resource>,
+    /// How many fixed routes hold each slot, as long as the highest slot one holds. Empty in
+    /// a run without them, which is then exactly as it was before they existed. Kept apart
+    /// from `states` so that pricing, which never reads it, has no more to load.
+    fixed: Vec<u32>,
 }
 
 impl<S: RoutingSpace> ResourceTable<S> {
@@ -978,6 +1091,38 @@ impl<S: RoutingSpace> ResourceTable<S> {
             listed: Vec::new(),
             occupied_slots: Vec::new(),
             occupied_resources: Vec::new(),
+            fixed: Vec::new(),
+        }
+    }
+
+    /// How many fixed routes hold `slot`.
+    #[inline]
+    fn fixed_at(&self, slot: usize) -> u32 {
+        self.fixed.get(slot).copied().unwrap_or(0)
+    }
+
+    /// How far beyond capacity `slot` is through nets that could leave it: the overuse that
+    /// is left once fixed routes are allowed whatever they take.
+    #[inline]
+    fn avoidable_overuse(&self, slot: usize) -> u32 {
+        let state = self.states[slot];
+        let allowed = state.capacity.max(self.fixed_at(slot));
+        state.occupancy.saturating_sub(allowed)
+    }
+
+    /// Records that a fixed route holds each of `slots`, or with `add` false that it no
+    /// longer does.
+    fn mark_fixed(&mut self, slots: &[usize], add: bool) {
+        for &slot in slots {
+            if slot >= self.fixed.len() {
+                self.fixed.resize(slot + 1, 0);
+            }
+            let count = &mut self.fixed[slot];
+            *count = if add {
+                count.saturating_add(1)
+            } else {
+                count.saturating_sub(1)
+            };
         }
     }
 
@@ -1029,26 +1174,32 @@ impl<S: RoutingSpace> ResourceTable<S> {
         }
     }
 
-    /// Returns how many resources are overused, and by how much in total.
-    fn overuse(&self) -> (u32, u64) {
+    /// Returns how many resources are overused, by how much in total, and how much of that
+    /// total fixed routes cause among themselves.
+    fn overuse(&self) -> (u32, u64, u64) {
         let mut resources = 0;
         let mut total = 0;
+        let mut fixed = 0;
         for &slot in &self.occupied_slots {
-            let overuse = self.states[slot].overuse();
+            let state = self.states[slot];
+            let overuse = state.overuse();
             if overuse > 0 {
                 resources += 1;
                 total += u64::from(overuse);
+                fixed += u64::from(self.fixed_at(slot).saturating_sub(state.capacity));
             }
         }
-        (resources, total)
+        (resources, total, fixed)
     }
 
-    /// Charges every overused resource for the iteration just finished.
+    /// Charges every overused resource for the iteration just finished, by the overuse that
+    /// nets could have avoided. That is all of it without fixed routes.
     fn add_history(&mut self, factor: Cost) {
-        for &slot in &self.occupied_slots {
-            let state = &mut self.states[slot];
-            let overuse = state.overuse();
+        for index in 0..self.occupied_slots.len() {
+            let slot = self.occupied_slots[index];
+            let overuse = self.avoidable_overuse(slot);
             if overuse > 0 {
+                let state = &mut self.states[slot];
                 state.history = state.history + factor * Cost::from(overuse);
             }
         }
@@ -1493,13 +1644,14 @@ fn most_critical(pending: &[usize], criticality: &[f64]) -> Option<(usize, f64)>
 ///
 /// `budget` is how many expansions it may use, and `dead_roots` lists the driver's access
 /// points known not to reach every terminal. `criticality` has the criticality of each of the
-/// net's terminals when the run is timing-driven.
+/// net's terminals when the run is timing-driven. A net with a `fixed` part grows from it.
 fn route_net<S: RoutingSpace>(
     context: &RouteContext<'_, S>,
     net: &Net<S::Node>,
     criticality: &[f64],
     budget: u64,
     dead_roots: &mut Vec<S::Node>,
+    fixed: Option<&FixedPart<S::Node, S::Resource>>,
     worker: &mut Worker<S>,
 ) -> Attempt<S::Node, S::Resource> {
     let space = context.space;
@@ -1514,7 +1666,6 @@ fn route_net<S: RoutingSpace>(
         worker.held.clear();
         worker.held_list.clear();
         worker.pending.clear();
-        worker.pending.extend(1..net.terminals.len());
         worker.arrival.clear();
         worker.terminal_delays.clear();
         if timing.is_some() {
@@ -1522,6 +1673,20 @@ fn route_net<S: RoutingSpace>(
         }
         let mut route = Route::new();
         let mut cost = Cost::ZERO;
+        match fixed {
+            None => worker.pending.extend(1..net.terminals.len()),
+            Some(fixed) => {
+                route.clone_from(&fixed.route);
+                cost = fixed.cost;
+                worker.pending.extend_from_slice(&fixed.pending);
+                worker.held.extend(fixed.resources.iter().copied());
+                worker.held_list.extend_from_slice(&fixed.resources);
+                worker.arrival.extend(fixed.arrivals.iter().copied());
+                if timing.is_some() {
+                    worker.terminal_delays.clone_from(&fixed.delays);
+                }
+            }
+        }
 
         while !worker.pending.is_empty() {
             let priced = Priced {
@@ -1626,8 +1791,10 @@ fn route_net<S: RoutingSpace>(
             match end {
                 Ok(true) => {}
                 Ok(false) => match route.root() {
-                    // With no tree yet, every root that remains has been searched from.
+                    // With no tree yet, every root that remains has been searched from, and a
+                    // fixed part has the only root there can be.
                     None => return Attempt::NoPath,
+                    Some(_) if fixed.is_some() => return Attempt::NoPath,
                     Some(root) => {
                         dead_roots.push(root);
                         continue 'roots;
@@ -1696,6 +1863,7 @@ fn route_in_batch<S: RoutingSpace>(
         criticality,
         context.budget,
         &mut dead_roots,
+        state.fixed.as_deref(),
         worker,
     );
     worker.replacing.clear();
@@ -1743,6 +1911,35 @@ struct NetState<N, R> {
     /// Whether the net can never be routed, because no root reaches every terminal or
     /// because a terminal is entirely outside the space.
     no_path: bool,
+    /// The part of the route that the caller fixed, if any.
+    fixed: Option<Box<FixedPart<N, R>>>,
+}
+
+impl<N, R> NetState<N, R> {
+    /// Whether the whole route is fixed, so that the net is never routed.
+    fn is_fixed(&self) -> bool {
+        self.fixed.as_ref().is_some_and(|fixed| fixed.complete)
+    }
+}
+
+/// A route given by the caller, and what the engine worked out from it once, at the start.
+struct FixedPart<N, R> {
+    route: Route<N>,
+    /// Everything it consumes, in ascending order and without repeats.
+    resources: Vec<R>,
+    /// The table slots of those, in ascending order, for lookups.
+    slots: Vec<usize>,
+    /// Its cost, as [`Outcome::total_cost`] counts it.
+    cost: Cost,
+    /// Whether it reaches every terminal.
+    complete: bool,
+    /// The terminals it does not reach, in ascending order.
+    pending: Vec<usize>,
+    /// The delay from the root to each of its nodes, when timing-driven.
+    arrivals: Vec<(N, u32)>,
+    /// The delay to each terminal it reaches, by index, when timing-driven, and 0 for the
+    /// others.
+    delays: Vec<u32>,
 }
 
 /// What came of giving every net its turn.
@@ -2067,6 +2264,7 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
                 delays: Vec::new(),
                 dead_roots: Vec::new(),
                 no_path: has_terminal_outside(space, net),
+                fixed: None,
             })
             .collect();
         Ok(Engine {
@@ -2089,6 +2287,241 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
             best: None,
             stop: None,
             timing: None,
+        })
+    }
+
+    /// Fixes routes that the caller has decided on, before the first iteration. See [fixed and
+    /// pre-routed nets](self#fixed-and-pre-routed-nets).
+    ///
+    /// A route that reaches every terminal of its net fixes the net, which is never routed.
+    /// One that does not is grown to the rest by the engine, which only ever changes what it
+    /// added. Either way the route holds its resources from now on, at the price of present
+    /// usage for every other net, and appears in the results. In a timing-driven run, the
+    /// delays along it replace the estimates of its connections, and criticalities are worked
+    /// out again.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::InvalidFixedRoute`] for the first route that cannot be taken, in
+    /// the order given, and then takes none of them. A route has to be a tree directed away from
+    /// its root, rooted at an access point of the driver if the net needs routing, and made of
+    /// steps of the space. A net needing no routing has to have its terminal on the route. Each
+    /// net can have one fixed route, and they have to be given before the first iteration.
+    ///
+    /// # Examples
+    ///
+    /// A clock net fixed along the middle row of a grid, and a net that has to cross it. The
+    /// crossing net goes around through the second layer, and the clock is untouched.
+    ///
+    /// ```
+    /// use guide::engine::{Engine, EngineOptions};
+    /// use guide::id::NetId;
+    /// use guide::net::{FixedRoute, Net, Route, Terminal};
+    /// use guide::space::grid::Grid;
+    ///
+    /// let grid = Grid::new(5, 5, 2)?;
+    /// let node = |x, y| grid.node_at(x, y, 0).unwrap();
+    /// let nets = [
+    ///     Net { id: NetId(0), terminals: vec![Terminal::at(node(0, 2)), Terminal::at(node(4, 2))] },
+    ///     Net { id: NetId(1), terminals: vec![Terminal::at(node(2, 0)), Terminal::at(node(2, 4))] },
+    /// ];
+    /// let mut clock = Route::new();
+    /// clock.add_path(&(0..5).map(|x| node(x, 2)).collect::<Vec<_>>()).unwrap();
+    ///
+    /// let mut engine = Engine::new(&grid, &nets, EngineOptions::default()).unwrap();
+    /// engine.fix_routes([FixedRoute { net: NetId(0), route: clock.clone() }]).unwrap();
+    /// let outcome = engine.run();
+    ///
+    /// assert!(outcome.is_success());
+    /// assert_eq!(outcome.routes.route(NetId(0)), Some(&clock));
+    /// assert!(!outcome.routes.route(NetId(1)).unwrap().contains(node(2, 2)));
+    /// # Ok::<(), guide::space::grid::GridError>(())
+    /// ```
+    pub fn fix_routes(
+        &mut self,
+        routes: impl IntoIterator<Item = FixedRoute<S::Node>>,
+    ) -> Result<(), EngineError> {
+        // Looked up and never iterated.
+        let index_of: FastMap<NetId, usize> = self
+            .nets
+            .iter()
+            .enumerate()
+            .map(|(index, net)| (net.id, index))
+            .collect();
+        let mut given = vec![false; self.nets.len()];
+        let mut parts = Vec::new();
+        for FixedRoute { net, route } in routes {
+            let invalid = |problem| EngineError::InvalidFixedRoute { net, problem };
+            if self.iteration > 0 {
+                return Err(invalid(FixedRouteProblem::AlreadyStarted));
+            }
+            let index = *index_of
+                .get(&net)
+                .ok_or(invalid(FixedRouteProblem::UnknownNet))?;
+            if given[index] || self.states[index].fixed.is_some() {
+                return Err(invalid(FixedRouteProblem::Repeated));
+            }
+            given[index] = true;
+            let part = self
+                .prepare_fixed(&self.nets[index], route)
+                .map_err(invalid)?;
+            parts.push((index, part));
+        }
+        if parts.is_empty() {
+            return Ok(());
+        }
+
+        for (index, mut part) in parts {
+            let state = &mut self.states[index];
+            // A terminal outside the space can't be reached by a route, fixed or not, so the
+            // net has no path and its fixed part goes with it, as for any that can't be
+            // completed.
+            if state.no_path {
+                continue;
+            }
+            let slots: Vec<usize> = part
+                .resources
+                .iter()
+                .map(|&resource| self.table.intern(self.space, resource))
+                .collect();
+            self.table.acquire(&slots);
+            self.table.mark_fixed(&slots, true);
+            part.slots.clone_from(&slots);
+            part.slots.sort_unstable();
+            state.held = slots;
+            state.resources.clone_from(&part.resources);
+            if part.complete {
+                state.route = Some(part.route.clone());
+                state.cost = part.cost;
+                state.delays.clone_from(&part.delays);
+            }
+            state.fixed = Some(Box::new(part));
+        }
+        if let Some(timing) = &mut self.timing {
+            timing.analyse(&self.states);
+            timing.refresh_criticality();
+        }
+        Ok(())
+    }
+
+    /// Checks a fixed route of `net`, and works out what the engine needs to know about it.
+    fn prepare_fixed(
+        &self,
+        net: &Net<S::Node>,
+        route: Route<S::Node>,
+    ) -> Result<FixedPart<S::Node, S::Resource>, FixedRouteProblem> {
+        let space = self.space;
+        let Some(root) = route.root() else {
+            return Err(FixedRouteProblem::Empty);
+        };
+        route
+            .validate_tree()
+            .map_err(|_| FixedRouteProblem::NotATree)?;
+        let driver = net.driver().map_or(&[][..], Terminal::access_points);
+        let root_access = driver
+            .iter()
+            .filter(|point| point.node == root)
+            .map(|point| point.cost)
+            .min();
+        if net.needs_routing() && root_access.is_none() {
+            return Err(FixedRouteProblem::RootNotOnDriver);
+        }
+        if route.nodes().any(|node| !space.contains(node)) {
+            return Err(FixedRouteProblem::NodeNotInSpace);
+        }
+
+        let step_delays = self.timing.as_ref().map(|timing| timing.step_delays);
+        let mut cost = root_access.unwrap_or(Cost::ZERO);
+        let mut resources = Vec::new();
+        space.resources(net.id, root, root, &mut resources);
+        let (mut steps, mut delays) = (Vec::new(), Vec::new());
+        let mut edge_delays = Vec::new();
+        for (index, edge) in route.edges().iter().enumerate() {
+            steps.clear();
+            space.expand(net.id, edge.from, &mut steps);
+            let Some(position) = steps.iter().position(|step| step.to == edge.to) else {
+                return Err(FixedRouteProblem::NotAStep { index });
+            };
+            cost = cost + steps[position].cost;
+            space.resources(net.id, edge.from, edge.to, &mut resources);
+            if let Some(step_delays) = step_delays {
+                delays.clear();
+                step_delays(space, net.id, edge.from, &mut delays);
+                edge_delays.push(delays.get(position).copied().unwrap_or(0));
+            }
+        }
+        resources.sort_unstable();
+        resources.dedup();
+
+        // In a tree, each node but the root has one parent edge, so a walk down from the root
+        // reaches every node once, after its parent, whatever the order of the edges.
+        let mut arrivals = Vec::new();
+        if step_delays.is_some() {
+            let mut children: FastMap<S::Node, Vec<usize>> = FastMap::default();
+            for (index, edge) in route.edges().iter().enumerate() {
+                children.entry(edge.from).or_default().push(index);
+            }
+            let mut stack = vec![(root, 0u32)];
+            while let Some((node, arrival)) = stack.pop() {
+                arrivals.push((node, arrival));
+                for &index in children.get(&node).map_or(&[][..], Vec::as_slice) {
+                    let delay = arrival.saturating_add(edge_delays[index]);
+                    stack.push((route.edges()[index].to, delay));
+                }
+            }
+        }
+        // Looked up and never iterated.
+        let arrival_at: FastMap<S::Node, u32> = arrivals.iter().copied().collect();
+        let on_route: FastSet<S::Node> = route.nodes().collect();
+
+        if !net.needs_routing()
+            && let Some(only) = net.terminals.first()
+            && !only
+                .access_points()
+                .iter()
+                .any(|point| on_route.contains(&point.node))
+        {
+            return Err(FixedRouteProblem::MissingTerminal);
+        }
+        let mut pending = Vec::new();
+        let mut terminal_delays = vec![
+            0;
+            if step_delays.is_some() {
+                net.terminals.len()
+            } else {
+                0
+            }
+        ];
+        for (index, terminal) in net.terminals.iter().enumerate().skip(1) {
+            let reached = || {
+                terminal
+                    .access_points()
+                    .iter()
+                    .filter(|point| on_route.contains(&point.node))
+            };
+            match reached().map(|point| point.cost).min() {
+                Some(access) => {
+                    cost = cost + access;
+                    if step_delays.is_some() {
+                        let delay = reached()
+                            .filter_map(|point| arrival_at.get(&point.node))
+                            .min();
+                        terminal_delays[index] = delay.copied().unwrap_or(0);
+                    }
+                }
+                None => pending.push(index),
+            }
+        }
+
+        Ok(FixedPart {
+            route,
+            resources,
+            slots: Vec::new(),
+            cost,
+            complete: pending.is_empty(),
+            pending,
+            arrivals,
+            delays: terminal_delays,
         })
     }
 
@@ -2332,6 +2765,11 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
                 state.cost = Cost::ZERO;
                 state.delays.clear();
                 state.no_path = true;
+                // A fixed part that cannot be completed goes with the net: see the module
+                // documentation.
+                if let Some(fixed) = state.fixed.take() {
+                    self.table.mark_fixed(&fixed.slots, false);
+                }
             }
             // Budgets stop before this, and a cancelled route is not committed.
             Attempt::Interrupted(_) => unreachable!("an interrupted route is not committed"),
@@ -2381,7 +2819,7 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
         } = turns;
         self.stats.iterations += 1;
 
-        let (overused_resources, total_overuse) = self.table.overuse();
+        let (overused_resources, total_overuse, fixed_overuse) = self.table.overuse();
         let unrouted = self.unrouted_count();
         // Summed in net order, not turn order, so that shuffling cannot change the rounding
         // of the total for the same set of routes.
@@ -2412,6 +2850,7 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
             unrouted,
             overused_resources,
             total_overuse,
+            fixed_overuse,
             total_cost,
             batches,
             discarded,
@@ -2421,7 +2860,9 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
 
         if let Some(interrupt) = interrupted {
             self.stop = Some(interrupt.stop());
-        } else if total_overuse == 0 {
+        } else if total_overuse == fixed_overuse {
+            // What is left, if anything, is between fixed routes, which no iteration can
+            // change.
             self.stop = Some(StopReason::Converged);
         } else if self.iteration >= self.options.max_iterations {
             self.stop = Some(StopReason::IterationLimit);
@@ -2531,16 +2972,22 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
     /// Returns whether a net should be routed again now.
     fn wants_routing(&self, index: usize) -> bool {
         let state = &self.states[index];
-        if !self.nets[index].needs_routing() || state.no_path {
+        if !self.nets[index].needs_routing() || state.no_path || state.is_fixed() {
             return false;
         }
         if state.route.is_none() || self.options.reroute_all {
             return true;
         }
-        state
-            .held
-            .iter()
-            .any(|&slot| self.table.states[slot].overuse() > 0)
+        match &state.fixed {
+            None => state
+                .held
+                .iter()
+                .any(|&slot| self.table.avoidable_overuse(slot) > 0),
+            // Routing again can't move what is fixed.
+            Some(fixed) => state.held.iter().any(|&slot| {
+                self.table.avoidable_overuse(slot) > 0 && fixed.slots.binary_search(&slot).is_err()
+            }),
+        }
     }
 
     /// Rips up a net and routes it again, or puts it back if interrupted.
@@ -2564,6 +3011,7 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
             criticality,
             budget.saturating_sub(self.stats.nodes_expanded),
             &mut state.dead_roots,
+            state.fixed.as_deref(),
             &mut self.workers[0],
         );
         let worker = &mut self.workers[0];
@@ -2597,6 +3045,9 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
                 state.cost = Cost::ZERO;
                 state.delays.clear();
                 state.no_path = true;
+                if let Some(fixed) = state.fixed.take() {
+                    self.table.mark_fixed(&fixed.slots, false);
+                }
                 Ok(())
             }
             Attempt::Interrupted(interrupt) => {
@@ -2645,7 +3096,7 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
         for (net, state) in self.nets.iter().zip(&self.states) {
             if state.no_path {
                 routes.set_unrouted(net.id, UnroutedReason::NoPath);
-            } else if !net.needs_routing() {
+            } else if !net.needs_routing() && state.route.is_none() {
                 routes.set_route(net.id, Route::new());
             } else if let Some(route) = &state.route {
                 routes.set_route(net.id, route.clone());
@@ -2671,6 +3122,7 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
                     occupancy: state.occupancy,
                     capacity: state.capacity,
                     nets: Vec::new(),
+                    fixed: table.fixed_at(slot),
                 });
             }
         }
@@ -2874,6 +3326,9 @@ mod parallel_tests;
 
 #[cfg(test)]
 mod timing_tests;
+
+#[cfg(test)]
+mod fixed_tests;
 
 #[cfg(test)]
 mod tests {
@@ -4395,9 +4850,9 @@ mod tests {
         table.acquire(&[slot]);
         assert_eq!(table.occupied_slots, [slot]);
         assert_eq!(table.occupied_resources, [NodeId(1)]);
-        assert_eq!(table.overuse(), (0, 0));
+        assert_eq!(table.overuse(), (0, 0, 0));
         table.acquire(&[slot]);
-        assert_eq!(table.overuse(), (1, 1));
+        assert_eq!(table.overuse(), (1, 1, 0));
     }
 
     #[test]

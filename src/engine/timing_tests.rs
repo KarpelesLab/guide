@@ -605,6 +605,7 @@ proptest! {
             listed: table.listed.clone(),
             occupied_slots: table.occupied_slots.clone(),
             occupied_resources: table.occupied_resources.clone(),
+            fixed: Vec::new(),
         };
         let bound_priced = Priced {
             inner: &bound_space,

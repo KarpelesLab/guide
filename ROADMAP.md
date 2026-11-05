@@ -81,7 +81,9 @@ First real domain and the first test of the abstraction.
 - Import VTR routing resource graphs and pre-placed designs.
 - Static timing analysis with a pluggable delay model.
 - Timing-driven routing using net criticality.
-- Fixed pins and pre-routed nets (clocks, for example).
+- Fixed pins and pre-routed nets (clocks, for example). Done in the engine:
+  `Engine::fix_routes` takes whole or partial routes, and `validate::check_fixed` checks
+  that a result kept them.
 
 **Exit:** the VTR benchmarks route legally, and first results are published
 against VPR for channel width, delay and runtime.

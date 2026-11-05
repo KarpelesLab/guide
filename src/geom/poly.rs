@@ -11,7 +11,7 @@
 //! - `polyclip_stays_private` in the tests fails if any other file under `src/geom` names
 //!   polyclip in code, or if this one has an item plainly `pub` or a trait impl.
 
-use polyclip::{ArcTol, Curve, Geometry, Polygon, Ring, Side};
+use polyclip::{ArcTol, Curve, FillRule, Geometry, Polygon, Ring, Side};
 
 use super::types::{GeomError, Point};
 
@@ -62,6 +62,26 @@ impl Core {
             reason: e.to_string(),
         })?;
         Ok(Core::Polygon(polygon))
+    }
+
+    /// The polygons, with their holes, that rings enclose under the non-zero winding rule:
+    /// one for each connected piece. The rings may have any orientation, and touch,
+    /// overlap or cross themselves and each other.
+    ///
+    /// polyclip's union rounds each new crossing to the nearest integer point, moving
+    /// edges through it by at most `sqrt(2)/2`. Rings that only touch along shared edges,
+    /// as KiCad's fractured fills do, have no new crossings, and come out exact.
+    pub(crate) fn region(rings: &[&[Point]]) -> Result<Vec<Core>, GeomError> {
+        let rings: Vec<Ring> = rings
+            .iter()
+            .map(|r| Ring(r.iter().copied().map(to_poly).collect()))
+            .collect();
+        let set = polyclip::union_all(&rings, FillRule::NonZero).map_err(|e| {
+            GeomError::InvalidPolygon {
+                reason: e.to_string(),
+            }
+        })?;
+        Ok(set.into_iter().map(Core::Polygon).collect())
     }
 
     /// The centerline of the arc from `start` through `mid` to `end`, as a polyline.

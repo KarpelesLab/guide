@@ -58,11 +58,15 @@
 //!
 //! [`RuleSpec`] holds the design rules as plain data, and [`Rules`] validates them and
 //! answers what applies where, by the [precedence](Rules#precedence) it documents.
-//! [`drc::check`] checks tracks, vias, pads and keepouts against them, and reports every
-//! violation in a fixed order. It shares no code with any router. It is exact by default,
-//! where KiCad lets a clearance fall 500 nm short:
-//! [`clearance_slack`](drc::Board::clearance_slack) set to
-//! [`KICAD_CLEARANCE_SLACK`](drc::KICAD_CLEARANCE_SLACK) decides as KiCad does.
+//! [`drc::check`] checks tracks, vias, pads, zones and keepouts against them: clearances
+//! between nets, with those of pairs of nets and of items of their own, shorts, hole
+//! clearances and holes too close, widths, drills and rings. It reports every violation in
+//! a fixed order, and shares no code with any router. It is exact by default, where KiCad
+//! lets a clearance fall 500 nm short: [`clearance_slack`](drc::Board::clearance_slack) set
+//! to [`KICAD_CLEARANCE_SLACK`](drc::KICAD_CLEARANCE_SLACK) decides as KiCad does. With the
+//! `kicad` feature, `kicad::read` reads KiCad's boards for it, and on nine real boards it
+//! agrees with KiCad's own check, but for differences that are each explained in
+//! `docs/benchmarks.md`.
 
 #![deny(private_interfaces, private_bounds)]
 

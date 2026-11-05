@@ -1,9 +1,9 @@
-//! A design rule check over tracks, vias, pads and keepouts.
+//! A design rule check over tracks, vias, pads, zones and keepouts.
 //!
 //! This is the independent check that PCB routing will be judged by, so it shares no code
 //! with any router: only the geometry, the index and the rules.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use super::clearance::Gap;
@@ -54,13 +54,30 @@ pub struct Pad {
     pub shape: Shape,
     /// The layers it has copper on.
     pub layers: LayerSet,
-    /// The hole, round or a slot, if it is drilled.
+    /// The hole, round or a slot, if it is drilled. A hole goes through every layer of
+    /// the stack, whichever layers the pad has copper on.
     pub hole: Option<Shape>,
     /// The net, or `None`.
     pub net: Option<NetId>,
+    /// A clearance of the pad's own, which replaces the rules' between it and anything
+    /// else. See [`clearance`] for how it combines with the other item's.
+    pub clearance: Option<i64>,
 }
 
-/// An area that some kinds of copper must stay out of.
+/// Copper filling an area of one layer, such as a piece of a zone's fill.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Zone {
+    /// The area.
+    pub shape: Shape,
+    /// The layer.
+    pub layer: LayerId,
+    /// The net, or `None`.
+    pub net: Option<NetId>,
+    /// A clearance of the zone's own, as for [`Pad::clearance`].
+    pub clearance: Option<i64>,
+}
+
+/// An area that some kinds of copper must stay out of. Zones are not checked against it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Keepout {
     /// The area.
@@ -84,6 +101,8 @@ pub struct Board {
     pub vias: Vec<Via>,
     /// The pads.
     pub pads: Vec<Pad>,
+    /// The zones.
+    pub zones: Vec<Zone>,
     /// The keepouts.
     pub keepouts: Vec<Keepout>,
     /// The tolerance for approximating arc tracks: see [`Shape::arc_track`].
@@ -108,6 +127,7 @@ impl Default for Board {
             tracks: Vec::new(),
             vias: Vec::new(),
             pads: Vec::new(),
+            zones: Vec::new(),
             keepouts: Vec::new(),
             arc_tolerance: DEFAULT_ARC_TOLERANCE,
             clearance_slack: 0,
@@ -126,6 +146,8 @@ pub enum Item {
     Via(usize),
     /// `Board::pads[i]`.
     Pad(usize),
+    /// `Board::zones[i]`.
+    Zone(usize),
     /// `Board::keepouts[i]`.
     Keepout(usize),
 }
@@ -192,6 +214,22 @@ pub enum Violation {
         /// The gap between the holes.
         gap: Gap,
     },
+    /// Copper is closer to a hole than the hole clearance, and is not of the hole's net.
+    /// A hole with no net, such as a mounting hole's, is of no net at all. A pad's hole is
+    /// not reported against copper that its pad is already reported against, by a
+    /// [short](Violation::Short) or a [clearance](Violation::Clearance), as KiCad does.
+    HoleClearance {
+        /// The via or pad with the hole.
+        hole: Item,
+        /// The copper.
+        item: Item,
+        /// Where, the first layer from the top if there are several.
+        layer: LayerId,
+        /// The clearance.
+        required: i64,
+        /// The gap between the hole and the copper.
+        gap: Gap,
+    },
     /// An item touches or enters a keepout it should stay out of.
     Keepout {
         /// The keepout's position in `Board::keepouts`.
@@ -213,7 +251,8 @@ impl Violation {
             Violation::Drill { via, .. } => (3, Item::Via(via), None),
             Violation::AnnularRing { via, .. } => (4, Item::Via(via), None),
             Violation::HoleToHole { a, b, .. } => (5, a, Some(b)),
-            Violation::Keepout { keepout, item, .. } => (6, Item::Keepout(keepout), Some(item)),
+            Violation::HoleClearance { hole, item, .. } => (6, hole, Some(item)),
+            Violation::Keepout { keepout, item, .. } => (7, Item::Keepout(keepout), Some(item)),
         }
     }
 }
@@ -237,6 +276,13 @@ pub enum DrcError {
     /// The board's `clearance_slack` is negative or beyond
     /// [`MAX_COORD`].
     Slack(i64),
+    /// An item's own clearance is negative or beyond [`MAX_COORD`].
+    Clearance {
+        /// The item.
+        item: Item,
+        /// The clearance.
+        value: i64,
+    },
 }
 
 impl fmt::Display for DrcError {
@@ -245,18 +291,73 @@ impl fmt::Display for DrcError {
             DrcError::Geometry { item, error } => write!(f, "{item:?}: {error}"),
             DrcError::Layer { item } => write!(f, "{item:?} is on layers not in the stack"),
             DrcError::Slack(slack) => write!(f, "invalid clearance slack: {slack}"),
+            DrcError::Clearance { item, value } => {
+                write!(f, "{item:?} has an invalid clearance of its own: {value}")
+            }
         }
     }
 }
 
 impl std::error::Error for DrcError {}
 
-/// Copper on the board: its shape, layers and net.
+/// Copper on the board: its shape, layers, net and own clearance.
 struct Copper {
     item: Item,
     shape: Shape,
     layers: LayerSet,
     net: Option<NetId>,
+    own: Option<i64>,
+}
+
+/// The clearance between two pieces of copper of different nets on `layer`, given their
+/// nets and their own clearances, if they have any.
+///
+/// If neither has one of its own, this is [`Rules::clearance_between`] the nets. If either
+/// has, it is the larger of their own clearances, and at least
+/// [`min_clearance`](super::RuleSpec::min_clearance), whatever the nets' rules say: a
+/// pad's own clearance can be smaller than its class's. This is how KiCad treats the
+/// clearances that pads, footprints and zones override.
+///
+/// Hole clearances work the same way, with
+/// [`hole_clearance`](super::RuleSpec::hole_clearance) for both the rule and the floor.
+///
+/// ```
+/// use guide::geom::drc::clearance;
+/// use guide::geom::{LayerId, RuleSpec, Rules};
+/// use guide::id::NetId;
+///
+/// let mut spec = RuleSpec::new(&["F.Cu"], 100, 200);
+/// spec.min_clearance = 150;
+/// let rules = Rules::new(spec)?;
+/// let (a, b, top) = (Some(NetId(1)), Some(NetId(2)), LayerId(0));
+/// assert_eq!(clearance(&rules, (a, None), (b, None), top), 200);
+/// assert_eq!(clearance(&rules, (a, Some(100)), (b, None), top), 150);
+/// assert_eq!(clearance(&rules, (a, Some(100)), (b, Some(300)), top), 300);
+/// # Ok::<(), guide::geom::RuleError>(())
+/// ```
+pub fn clearance(
+    rules: &Rules,
+    a: (Option<NetId>, Option<i64>),
+    b: (Option<NetId>, Option<i64>),
+    layer: LayerId,
+) -> i64 {
+    match (a.1, b.1) {
+        (None, None) => rules.clearance_between(a.0, b.0, layer),
+        (x, y) => x
+            .unwrap_or(0)
+            .max(y.unwrap_or(0))
+            .max(rules.spec().min_clearance),
+    }
+}
+
+/// The hole clearance between a hole and copper, given their own clearances: see
+/// [`clearance`].
+fn hole_clearance_between(rules: &Rules, a: Option<i64>, b: Option<i64>) -> i64 {
+    let floor = rules.spec().hole_clearance;
+    match (a, b) {
+        (None, None) => floor,
+        (x, y) => x.unwrap_or(0).max(y.unwrap_or(0)).max(floor),
+    }
 }
 
 /// Whether two items are of one net, and so can't violate a clearance between them. Copper
@@ -305,8 +406,10 @@ pub fn check(board: &Board, rules: &Rules) -> Result<Vec<Violation>, DrcError> {
     let mut out = Vec::new();
     single_items(board, rules, &mut out);
     let by_layer = layer_indexes(&copper, rules.layer_count());
-    copper_pairs(&copper, &by_layer, rules, slack, &mut out)?;
-    holes(board, rules, slack, &mut out)?;
+    let close = copper_pairs(&copper, &by_layer, rules, slack, &mut out)?;
+    let holes = holes(board, stack)?;
+    hole_to_hole(&holes, rules, slack, &mut out)?;
+    hole_clearances(&holes, &copper, &by_layer, rules, slack, &close, &mut out)?;
     keepouts(board, &copper, &by_layer, stack, &mut out);
     // Stable, so that equal keys keep the order they were found in, which is fixed too.
     out.sort_by_key(Violation::key);
@@ -331,6 +434,7 @@ fn copper(board: &Board, stack: LayerSet) -> Result<Vec<Copper>, DrcError> {
             shape,
             layers,
             net: t.net,
+            own: None,
         });
     }
     for (i, v) in board.vias.iter().enumerate() {
@@ -347,6 +451,7 @@ fn copper(board: &Board, stack: LayerSet) -> Result<Vec<Copper>, DrcError> {
             shape,
             layers: LayerSet::span(v.from, v.to),
             net: v.net,
+            own: None,
         });
     }
     for (i, p) in board.pads.iter().enumerate() {
@@ -359,6 +464,20 @@ fn copper(board: &Board, stack: LayerSet) -> Result<Vec<Copper>, DrcError> {
             shape: p.shape.clone(),
             layers: p.layers,
             net: p.net,
+            own: own_clearance(item, p.clearance)?,
+        });
+    }
+    for (i, z) in board.zones.iter().enumerate() {
+        let item = Item::Zone(i);
+        if !stack.contains(z.layer) {
+            return Err(DrcError::Layer { item });
+        }
+        copper.push(Copper {
+            item,
+            shape: z.shape.clone(),
+            layers: LayerSet::EMPTY.with(z.layer),
+            net: z.net,
+            own: own_clearance(item, z.clearance)?,
         });
     }
     for (i, k) in board.keepouts.iter().enumerate() {
@@ -412,6 +531,13 @@ fn layer_indexes(copper: &[Copper], layers: usize) -> Vec<(Vec<usize>, SpatialIn
         .collect()
 }
 
+fn own_clearance(item: Item, value: Option<i64>) -> Result<Option<i64>, DrcError> {
+    match value {
+        Some(v) if !(0..=MAX_COORD).contains(&v) => Err(DrcError::Clearance { item, value: v }),
+        _ => Ok(value),
+    }
+}
+
 fn geometry_error(item: Item) -> impl FnOnce(GeomError) -> DrcError {
     move |error| DrcError::Geometry { item, error }
 }
@@ -423,10 +549,13 @@ fn copper_pairs(
     rules: &Rules,
     slack: i64,
     out: &mut Vec<Violation>,
-) -> Result<(), DrcError> {
+) -> Result<BTreeSet<(Item, Item)>, DrcError> {
     // By pair, the first finding, which a short on a later layer replaces.
     let mut found: BTreeMap<(usize, usize), Violation> = BTreeMap::new();
-    let reach = rules.max_clearance();
+    let reach = copper
+        .iter()
+        .filter_map(|c| c.own)
+        .fold(rules.max_clearance(), i64::max);
     let mut near = Vec::new();
     for (l, (on, index)) in by_layer.iter().enumerate() {
         let layer = LayerId(l as u8);
@@ -443,7 +572,7 @@ fn copper_pairs(
                     continue;
                 }
                 let b = &copper[j];
-                let required = rules.clearance_between(a.net, b.net, layer);
+                let required = clearance(rules, (a.net, a.own), (b.net, b.own), layer);
                 // What the gap has to reach, which is all that a short needs checking
                 // under: touching copper is closer than any positive clearance.
                 let limit = (required - slack).max(0);
@@ -478,13 +607,55 @@ fn copper_pairs(
             }
         }
     }
+    let close = found
+        .keys()
+        .map(|&(i, j)| (copper[i].item, copper[j].item))
+        .collect();
     out.extend(found.into_values());
-    Ok(())
+    Ok(close)
+}
+
+/// A drilled hole: what has it, its shape, the layers it goes through, and the net and own
+/// clearance of what has it.
+struct Hole {
+    item: Item,
+    shape: Shape,
+    layers: LayerSet,
+    net: Option<NetId>,
+    own: Option<i64>,
+}
+
+/// Every hole on the board, vias' first, then pads'.
+fn holes(board: &Board, stack: LayerSet) -> Result<Vec<Hole>, DrcError> {
+    let mut holes = Vec::new();
+    for (i, v) in board.vias.iter().enumerate() {
+        let item = Item::Via(i);
+        holes.push(Hole {
+            item,
+            shape: Shape::circle(v.at, v.drill).map_err(geometry_error(item))?,
+            layers: LayerSet::span(v.from, v.to),
+            net: v.net,
+            own: None,
+        });
+    }
+    for (i, p) in board.pads.iter().enumerate() {
+        if let Some(hole) = &p.hole {
+            let item = Item::Pad(i);
+            holes.push(Hole {
+                item,
+                shape: hole.clone(),
+                layers: stack,
+                net: p.net,
+                own: own_clearance(item, p.clearance)?,
+            });
+        }
+    }
+    Ok(holes)
 }
 
 /// Holes closer to each other than the hole-to-hole clearance.
-fn holes(
-    board: &Board,
+fn hole_to_hole(
+    holes: &[Hole],
     rules: &Rules,
     slack: i64,
     out: &mut Vec<Violation>,
@@ -494,35 +665,90 @@ fn holes(
     if limit <= 0 {
         return Ok(());
     }
-    let mut holes: Vec<(Item, Shape)> = Vec::new();
-    for (i, v) in board.vias.iter().enumerate() {
-        let item = Item::Via(i);
-        holes.push((
-            item,
-            Shape::circle(v.at, v.drill).map_err(geometry_error(item))?,
-        ));
-    }
-    for (i, p) in board.pads.iter().enumerate() {
-        if let Some(hole) = &p.hole {
-            holes.push((Item::Pad(i), hole.clone()));
-        }
-    }
-    let index = SpatialIndex::bulk_load(holes.iter().map(|(_, s)| s.bbox()));
+    let index = SpatialIndex::bulk_load(holes.iter().map(|h| h.shape.bbox()));
     let mut near = Vec::new();
-    for (i, (a, hole)) in holes.iter().enumerate() {
-        index.query(&hole.bbox().expand(limit), &mut near);
+    for (i, a) in holes.iter().enumerate() {
+        index.query(&a.shape.bbox().expand(limit), &mut near);
         for id in &near {
             let j = id.slot() as usize;
-            let (b, other) = &holes[j];
-            if j > i && hole.violates(other, limit).map_err(geometry_error(*a))? {
+            let b = &holes[j];
+            if j > i
+                && a.shape
+                    .violates(&b.shape, limit)
+                    .map_err(geometry_error(a.item))?
+            {
                 out.push(Violation::HoleToHole {
-                    a: *a,
-                    b: *b,
+                    a: a.item,
+                    b: b.item,
                     required,
-                    gap: hole.distance(other),
+                    gap: a.shape.distance(&b.shape),
                 });
             }
         }
+    }
+    Ok(())
+}
+
+/// Copper of other nets closer to holes than the hole clearance, leaving out pairs whose
+/// copper is `close` already.
+fn hole_clearances(
+    holes: &[Hole],
+    copper: &[Copper],
+    by_layer: &[(Vec<usize>, SpatialIndex)],
+    rules: &Rules,
+    slack: i64,
+    close: &BTreeSet<(Item, Item)>,
+    out: &mut Vec<Violation>,
+) -> Result<(), DrcError> {
+    let reach = holes
+        .iter()
+        .filter_map(|h| h.own)
+        .chain(copper.iter().filter_map(|c| c.own))
+        .fold(rules.spec().hole_clearance, i64::max);
+    if reach <= slack {
+        return Ok(());
+    }
+    let mut near = Vec::new();
+    for hole in holes {
+        // By item, the first finding, from the top layer down.
+        let mut found: BTreeMap<Item, Violation> = BTreeMap::new();
+        for layer in hole.layers.iter() {
+            let Some((on, index)) = by_layer.get(usize::from(layer.0)) else {
+                continue;
+            };
+            index.query(&hole.shape.bbox().expand(reach), &mut near);
+            for id in &near {
+                let c = &copper[on[id.slot() as usize]];
+                let pair = (hole.item.min(c.item), hole.item.max(c.item));
+                if c.item == hole.item
+                    || same_net(hole.net, c.net)
+                    || found.contains_key(&c.item)
+                    || close.contains(&pair)
+                {
+                    continue;
+                }
+                let required = hole_clearance_between(rules, hole.own, c.own);
+                let limit = required - slack;
+                if limit > 0
+                    && hole
+                        .shape
+                        .violates(&c.shape, limit)
+                        .map_err(geometry_error(hole.item))?
+                {
+                    found.insert(
+                        c.item,
+                        Violation::HoleClearance {
+                            hole: hole.item,
+                            item: c.item,
+                            layer,
+                            required,
+                            gap: hole.shape.distance(&c.shape),
+                        },
+                    );
+                }
+            }
+        }
+        out.extend(found.into_values());
     }
     Ok(())
 }
@@ -548,7 +774,7 @@ fn keepouts(
                     Item::Track(_) => keepout.tracks,
                     Item::Via(_) => keepout.vias,
                     Item::Pad(_) => keepout.pads,
-                    Item::Keepout(_) => false,
+                    Item::Zone(_) | Item::Keepout(_) => false,
                 };
                 if forbidden && !found.contains_key(&c.item) && c.shape.touches(&keepout.shape) {
                     found.insert(c.item, layer);

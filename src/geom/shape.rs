@@ -125,6 +125,44 @@ impl Shape {
         Ok(Shape::new(Core::polygon(outer, holes)?, 2 * radius, 0))
     }
 
+    /// The area that `rings` enclose under the non-zero winding rule, as one polygon
+    /// shape for each connected piece, with its holes, in a fixed order.
+    ///
+    /// Unlike [`polygon`](Shape::polygon), this takes rings in any orientation that
+    /// touch, overlap and cross themselves and each other, such as the fractured outlines
+    /// KiCad saves zone fills as: a hole joined to the outline by a cut of zero width. It
+    /// is exact where rings only meet along shared edges and at their vertices, as those
+    /// do. Where edges cross between vertices, the crossing is rounded to the nearest
+    /// integer point, which moves the edges through it by up to `sqrt(2)/2`.
+    ///
+    /// ```
+    /// use guide::geom::{Point, Shape};
+    ///
+    /// // A square with a square hole, joined along y = 4 from the hole to the edge. The
+    /// // hole runs the other way round from the outline.
+    /// let ring: Vec<Point> = [
+    ///     (0, 0), (10, 0), (10, 4), (7, 4), (7, 3), (3, 3), (3, 7), (7, 7), (7, 4), (10, 4),
+    ///     (10, 10), (0, 10),
+    /// ]
+    /// .iter()
+    /// .map(|&(x, y)| Point::new(x, y))
+    /// .collect();
+    /// let pieces = Shape::region(&[&ring])?;
+    /// assert_eq!(pieces.len(), 1);
+    /// let inside_hole = Shape::circle(Point::new(5, 5), 2)?;
+    /// assert!(!pieces[0].touches(&inside_hole));
+    /// # Ok::<(), guide::geom::GeomError>(())
+    /// ```
+    pub fn region(rings: &[&[Point]]) -> Result<Vec<Shape>, GeomError> {
+        for p in rings.iter().copied().flatten() {
+            p.check()?;
+        }
+        Ok(Core::region(rings)?
+            .into_iter()
+            .map(|core| Shape::new(core, 0, 0))
+            .collect())
+    }
+
     /// A filled rectangle, whose sides must have positive length. Exact.
     pub fn rect(rect: Rect) -> Result<Shape, GeomError> {
         Shape::round_rect(rect, 0)

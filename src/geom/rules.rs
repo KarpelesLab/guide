@@ -165,6 +165,19 @@ pub struct RuleSpec {
     /// The gap that drilled holes must keep from each other, whatever their nets. Zero for
     /// no limit.
     pub hole_to_hole: i64,
+    /// The smallest clearance there is: every clearance between copper of two nets is at
+    /// least this, whatever the classes and layers say, and so are the clearances that
+    /// [pads and zones of their own](super::drc::Pad::clearance) set. Zero for none. This
+    /// is KiCad's minimum clearance, from its board setup.
+    pub min_clearance: i64,
+    /// The gap that copper must keep from the holes of other nets, and from holes with no
+    /// net, such as mounting holes. Zero for no limit.
+    pub hole_clearance: i64,
+    /// Clearances between particular pairs of nets, which replace whatever their classes
+    /// and layers say, larger or smaller, though not [`min_clearance`](Self::min_clearance).
+    /// Each pair at most once, in either order. KiCad uses this for the two nets of a
+    /// differential pair, kept apart by their class's gap.
+    pub pairs: Vec<(NetId, NetId, i64)>,
 }
 
 impl RuleSpec {
@@ -181,6 +194,9 @@ impl RuleSpec {
             min_drill: 0,
             min_annular_ring: 0,
             hole_to_hole: 0,
+            min_clearance: 0,
+            hole_clearance: 0,
+            pairs: Vec::new(),
         }
     }
 }
@@ -232,6 +248,13 @@ pub enum RuleError {
         /// The via.
         via: ViaId,
     },
+    /// A pair of nets has two clearances of its own, or is one net twice.
+    InvalidPair {
+        /// One net.
+        a: NetId,
+        /// The other.
+        b: NetId,
+    },
     /// A net is in two classes.
     NetInTwoClasses {
         /// The net.
@@ -270,6 +293,13 @@ impl fmt::Display for RuleError {
             RuleError::UnknownVia { what, via } => {
                 write!(f, "{what} names via {}, which is not defined", via.0)
             }
+            RuleError::InvalidPair { a, b } => {
+                write!(
+                    f,
+                    "nets {} and {} are not a valid pair, or are given twice",
+                    a.0, b.0
+                )
+            }
             RuleError::NetInTwoClasses { net, first, second } => {
                 write!(f, "net {} is in classes {first:?} and {second:?}", net.0)
             }
@@ -294,6 +324,7 @@ impl std::error::Error for RuleError {}
 /// class keeps its clearance on every layer, however small inner layers' are. A net in no
 /// class, or copper with no net, goes straight to 3. Between copper of two nets, the
 /// clearance is the larger of the two nets', which is what KiCad does with net classes.
+/// A clearance is never less than [`RuleSpec::min_clearance`].
 ///
 /// ```
 /// use guide::geom::{LayerId, NetClass, Overrides, RuleSpec, Rules};
@@ -326,6 +357,8 @@ pub struct Rules {
     /// Overrides by layer, for the board and then each class, indexed by layer.
     board_layers: Vec<Overrides>,
     class_layers: Vec<Vec<Overrides>>,
+    /// The clearances of pairs of nets, by the pair with the lesser net first.
+    pairs: BTreeMap<(NetId, NetId), i64>,
     max_clearance: i64,
 }
 
@@ -417,6 +450,8 @@ impl Rules {
             false,
         )?;
         check_value(|| "hole-to-hole clearance".into(), spec.hole_to_hole, false)?;
+        check_value(|| "minimum clearance".into(), spec.min_clearance, false)?;
+        check_value(|| "hole clearance".into(), spec.hole_clearance, false)?;
         let board_layers = layer_table("the board", n, &spec.layer_overrides)?;
 
         for via in &spec.vias {
@@ -458,7 +493,20 @@ impl Rules {
             }
         }
 
-        let clearances = core::iter::once(spec.clearance)
+        let mut pairs = BTreeMap::new();
+        for &(a, b, clearance) in &spec.pairs {
+            check_value(
+                || format!("clearance of nets {} and {}", a.0, b.0),
+                clearance,
+                false,
+            )?;
+            if a == b || pairs.insert((a.min(b), a.max(b)), clearance).is_some() {
+                return Err(RuleError::InvalidPair { a, b });
+            }
+        }
+        let clearances = [spec.clearance, spec.min_clearance]
+            .into_iter()
+            .chain(spec.pairs.iter().map(|p| p.2))
             .chain(board_layers.iter().filter_map(|o| o.clearance))
             .chain(spec.classes.iter().filter_map(|c| c.overrides.clearance))
             .chain(class_layers.iter().flatten().filter_map(|o| o.clearance));
@@ -468,6 +516,7 @@ impl Rules {
             class_of,
             board_layers,
             class_layers,
+            pairs,
             max_clearance,
         })
     }
@@ -524,13 +573,21 @@ impl Rules {
         self.resolve(net, layer, |o| o.track_width, self.spec.track_width)
     }
 
-    /// The gap copper of `net` must keep from other nets' on `layer`.
+    /// The gap copper of `net` must keep from other nets' on `layer`, never less than
+    /// [`RuleSpec::min_clearance`].
     pub fn clearance(&self, net: Option<NetId>, layer: LayerId) -> i64 {
         self.resolve(net, layer, |o| o.clearance, self.spec.clearance)
+            .max(self.spec.min_clearance)
     }
 
-    /// The gap copper of two different nets must keep on `layer`: the larger of the two.
+    /// The gap copper of two different nets must keep on `layer`: the pair's own, if
+    /// [`RuleSpec::pairs`] gives it one, or else the larger of the two nets'.
     pub fn clearance_between(&self, a: Option<NetId>, b: Option<NetId>, layer: LayerId) -> i64 {
+        if let (Some(a), Some(b)) = (a, b)
+            && let Some(&own) = self.pairs.get(&(a.min(b), a.max(b)))
+        {
+            return own.max(self.spec.min_clearance);
+        }
         self.clearance(a, layer).max(self.clearance(b, layer))
     }
 

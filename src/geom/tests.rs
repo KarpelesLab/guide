@@ -6,7 +6,7 @@ use core::cmp::Ordering;
 use proptest::prelude::*;
 
 use super::clearance::{Filter, exact_below, filter};
-use super::drc::{self, Board, Item, Keepout, Pad, Track, Via, Violation};
+use super::drc::{self, Board, DrcError, Item, Keepout, Pad, Track, Via, Violation};
 use super::*;
 use crate::cost::Cost;
 use crate::id::NetId;
@@ -813,6 +813,7 @@ fn drc_reports_every_kind() {
         layers: LayerSet::first(2),
         hole: None,
         net: Some(NetId(9)),
+        clearance: None,
     }];
     board.keepouts = vec![Keepout {
         shape: rect(9_000, -1000, 11_000, 1000),
@@ -931,6 +932,7 @@ fn drc_pairs_are_reported_once_on_the_first_layer() {
         layers: LayerSet::first(2),
         hole: None,
         net: Some(NetId(1)),
+        clearance: None,
     }];
     board.tracks[0].start.y = 520;
     board.tracks[0].end.y = 520;
@@ -994,12 +996,14 @@ fn drc_pairs_are_reported_once_on_the_first_layer() {
         layers: LayerSet::first(1),
         hole: None,
         net: Some(NetId(2)),
+        clearance: None,
     }];
     board.pads.push(Pad {
         shape: rect(300, -100, 400, 100),
         layers: LayerSet::EMPTY.with(LayerId(1)),
         hole: None,
         net: Some(NetId(2)),
+        clearance: None,
     });
     let found = drc::check(&board, &rules).unwrap();
     assert!(
@@ -1063,6 +1067,7 @@ fn drc_keepouts_by_kind_and_boundary() {
         layers: LayerSet::first(1),
         hole: None,
         net: Some(NetId(2)),
+        clearance: None,
     }];
     board.vias = vec![
         v(1301, 500, 300, 600, Some(3)),
@@ -1092,12 +1097,14 @@ fn drc_pad_holes_and_arcs() {
             layers: LayerSet::first(2),
             hole: Some(circle(0, 0, 600)),
             net: Some(NetId(1)),
+            clearance: None,
         },
         Pad {
             shape: circle(5000, 0, 1000),
             layers: LayerSet::first(2),
             hole: Some(track((5000, -100), (5000, 100), 400)),
             net: Some(NetId(2)),
+            clearance: None,
         },
     ];
     // A via 249 from the round hole, and an arc track around the slotted pad.
@@ -1276,6 +1283,7 @@ proptest! {
             layers: LayerSet(layers),
             hole: None,
             net: n.map(NetId),
+            clearance: None,
         }).collect();
         let found = drc::check(&board, &rules).unwrap();
         let pairs: Vec<Violation> = found
@@ -1429,7 +1437,8 @@ fn kicad_uuid(item: Item) -> String {
         Item::Track(i) => (0, i),
         Item::Via(i) => (1, i),
         Item::Pad(i) => (2, i),
-        Item::Keepout(i) => (3, i),
+        Item::Zone(i) => (3, i),
+        Item::Keepout(i) => (4, i),
     };
     format!("00000000-0000-0000-{kind:04x}-{:012x}", i + 1)
 }
@@ -1649,4 +1658,219 @@ fn agrees_with_kicad_on_random_boards() {
     }
     eprintln!("compared {compared} findings on {boards} boards");
     assert!(differences.is_empty(), "{}", differences.join("\n"));
+}
+
+#[test]
+fn rules_for_pairs_and_minimum_clearance() {
+    let mut spec = RuleSpec::new(&["F.Cu"], 100, 200);
+    spec.min_clearance = 150;
+    spec.classes = vec![NetClass {
+        name: "low".into(),
+        nets: vec![NetId(3)],
+        overrides: overrides(None, Some(100)),
+        ..NetClass::default()
+    }];
+    spec.pairs = vec![(NetId(2), NetId(1), 120), (NetId(1), NetId(4), 400)];
+    let rules = Rules::new(spec.clone()).unwrap();
+    let (n1, n2, n3, n4) = (
+        Some(NetId(1)),
+        Some(NetId(2)),
+        Some(NetId(3)),
+        Some(NetId(4)),
+    );
+    let top = LayerId(0);
+    // A class below the minimum is raised to it.
+    assert_eq!(rules.clearance(n3, top), 150);
+    // A pair's own clearance replaces the nets', larger or smaller, in either order, but
+    // not below the minimum.
+    assert_eq!(rules.clearance_between(n1, n2, top), 150);
+    assert_eq!(rules.clearance_between(n4, n1, top), 400);
+    assert_eq!(rules.clearance_between(n2, n4, top), 200);
+    assert_eq!(rules.max_clearance(), 400);
+
+    let mut twice = spec.clone();
+    twice.pairs.push((NetId(1), NetId(2), 300));
+    assert_eq!(
+        Rules::new(twice).unwrap_err(),
+        RuleError::InvalidPair {
+            a: NetId(1),
+            b: NetId(2)
+        }
+    );
+    let mut itself = spec.clone();
+    itself.pairs = vec![(NetId(1), NetId(1), 300)];
+    assert!(matches!(
+        Rules::new(itself),
+        Err(RuleError::InvalidPair { .. })
+    ));
+    let mut negative = spec;
+    negative.min_clearance = -1;
+    assert!(matches!(
+        Rules::new(negative),
+        Err(RuleError::InvalidValue { .. })
+    ));
+}
+
+#[test]
+fn drc_zones_and_own_clearances() {
+    let mut spec = RuleSpec::new(&["F.Cu", "B.Cu"], 100, 200);
+    spec.min_clearance = 150;
+    let rules = Rules::new(spec).unwrap();
+    let pad = |x: i64, net: u32, clearance: Option<i64>| Pad {
+        shape: rect(x, 0, x + 1000, 1000),
+        layers: LayerSet::first(1),
+        hole: None,
+        net: Some(NetId(net)),
+        clearance,
+    };
+    let mut board = Board::default();
+    // Pads 160 apart: within the classes' 200, but a pad's own 100 replaces it, raised to
+    // the minimum of 150, which 160 keeps.
+    board.pads = vec![pad(0, 1, Some(100)), pad(1160, 2, None)];
+    assert!(drc::check(&board, &rules).unwrap().is_empty());
+    // The larger of two own clearances applies.
+    board.pads[1].clearance = Some(300);
+    let found = drc::check(&board, &rules).unwrap();
+    assert!(
+        matches!(found[..], [Violation::Clearance { required: 300, .. }]),
+        "{found:?}"
+    );
+    // A zone of a third net, 100 below both pads: nothing on the other layer, and on
+    // theirs, a violation of each pad's clearance.
+    board.pads[1].clearance = None;
+    board.pads[1].shape = rect(2000, 0, 3000, 1000);
+    let zone = |layer: u8| drc::Zone {
+        shape: rect(-500, -500, 3500, -100),
+        layer: LayerId(layer),
+        net: Some(NetId(3)),
+        clearance: None,
+    };
+    board.zones = vec![zone(1)];
+    assert!(drc::check(&board, &rules).unwrap().is_empty());
+    board.zones = vec![zone(0)];
+    let found = drc::check(&board, &rules).unwrap();
+    assert!(
+        matches!(
+            found[..],
+            [
+                Violation::Clearance {
+                    a: Item::Pad(0),
+                    b: Item::Zone(0),
+                    required: 150,
+                    ..
+                },
+                Violation::Clearance {
+                    a: Item::Pad(1),
+                    b: Item::Zone(0),
+                    required: 200,
+                    ..
+                },
+            ]
+        ),
+        "{found:?}"
+    );
+    // A zone on a layer the stack doesn't have is an error, as is a negative clearance.
+    board.zones[0].layer = LayerId(2);
+    assert_eq!(
+        drc::check(&board, &rules).unwrap_err(),
+        DrcError::Layer {
+            item: Item::Zone(0)
+        }
+    );
+    board.zones.clear();
+    board.pads[0].clearance = Some(-5);
+    assert_eq!(
+        drc::check(&board, &rules).unwrap_err(),
+        DrcError::Clearance {
+            item: Item::Pad(0),
+            value: -5
+        }
+    );
+}
+
+#[test]
+fn drc_hole_clearance() {
+    let mut spec = RuleSpec::new(&["F.Cu", "B.Cu"], 100, 100);
+    spec.hole_clearance = 300;
+    let rules = Rules::new(spec).unwrap();
+    let mut board = Board::default();
+    // A mounting hole of no net, with no copper, 200 from a track of net 1 on the bottom.
+    board.pads = vec![Pad {
+        shape: circle(0, 0, 1000),
+        layers: LayerSet::EMPTY,
+        hole: Some(circle(0, 0, 1000)),
+        net: None,
+        clearance: None,
+    }];
+    // A via whose copper is 300 from that track, and its hole 500: both are allowed.
+    board.vias = vec![v(5000, 0, 400, 800, Some(2))];
+    board.tracks = vec![
+        t((-2000, 800), (8000, 800), 200, 1, Some(1)),
+        // A track of the via's own net, which its hole may meet.
+        t((5000, 0), (5000, -3000), 200, 0, Some(2)),
+    ];
+    let found = drc::check(&board, &rules).unwrap();
+    let holes: Vec<(Item, Item, LayerId, i64)> = found
+        .iter()
+        .filter_map(|v| match *v {
+            Violation::HoleClearance {
+                hole,
+                item,
+                layer,
+                required,
+                ..
+            } => Some((hole, item, layer, required)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        holes,
+        [(Item::Pad(0), Item::Track(0), LayerId(1), 300)],
+        "{found:?}"
+    );
+    // Copper that already violates the clearance against a pad isn't reported against the
+    // pad's hole as well.
+    board.pads[0].layers = LayerSet::first(2);
+    board.pads[0].net = Some(NetId(3));
+    board.tracks[0] = t((-2000, 560), (8000, 560), 100, 1, Some(1));
+    let found = drc::check(&board, &rules).unwrap();
+    assert!(
+        matches!(
+            found[..],
+            [Violation::Clearance {
+                a: Item::Track(0),
+                b: Item::Pad(0),
+                ..
+            }]
+        ),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn regions_unfracture_outlines() {
+    // Two squares meeting at a corner, saved as one ring that visits it twice.
+    let ring: Vec<Point> = [
+        (0, 0),
+        (10, 0),
+        (10, 10),
+        (20, 10),
+        (20, 20),
+        (10, 20),
+        (10, 10),
+        (0, 10),
+    ]
+    .iter()
+    .map(|&(x, y)| p(x, y))
+    .collect();
+    let pieces = Shape::region(&[&ring]).unwrap();
+    assert_eq!(pieces.len(), 2);
+    assert!(pieces.iter().all(Shape::is_exact));
+    assert!(pieces[0].touches(&pieces[1]));
+    // Out of range is an error, not a wrong answer.
+    let far = [p(0, 0), p(MAX_COORD + 1, 0), p(0, 1)];
+    assert!(matches!(
+        Shape::region(&[&far]),
+        Err(GeomError::CoordinateOutOfRange { .. })
+    ));
 }

@@ -8,6 +8,7 @@
 //! | Packed netlist (`.net`) | [`read_netlist`] | [`PackedNetlist`] |
 //! | Placement (`.place`) | [`read_placement`] | [`Placement`] |
 //! | The last three together | [`resolve_nets`] | [`Design`], holding [`Net`]s |
+//! | The packed netlist again, and delays inside blocks | [`build_timing`] | [`DesignTiming`], holding a [`TimingGraph`] and the engine's [`Connection`]s |
 //! | Routes (`.route`) | [`write_route`] | VPR's text format |
 //!
 //! Everything reads from a [`BufRead`] or writes to a [`Write`] passed in by the caller, and
@@ -110,6 +111,11 @@
 //!   that VPR's route tree gives a step through a buffered switch, fixed per step. That is an
 //!   approximation behind unbuffered switches and where a tree branches: see
 //!   [`RrGraph::step_delay`]. No delay here has been compared with VPR's.
+//! - **Timing graphs** from [`build_timing`] follow the structure that the packed netlist
+//!   records inside each block, which was checked against `mult_4x4`, `multiclock` and
+//!   `unconnected`. The delays inside blocks are the caller's, as the architecture file
+//!   isn't read, and all clocks are timed as one. See [what VPR does
+//!   differently](build_timing#what-vpr-does-differently).
 //!
 //! # Limitations
 //!
@@ -140,6 +146,8 @@
 //! [`Graph`]: crate::space::graph::Graph
 //! [`Net`]: crate::net::Net
 //! [`Route`]: crate::net::Route
+//! [`TimingGraph`]: crate::timing::TimingGraph
+//! [`Connection`]: crate::engine::Connection
 
 use core::fmt;
 use std::error::Error;
@@ -150,18 +158,26 @@ mod netlist;
 mod place;
 mod route_file;
 mod rr_graph;
+mod timing;
 mod xml;
 
 #[cfg(test)]
 mod tests;
 
 pub use design::{Design, GlobalPort, NetInfo, NetOptions, NetPin, NetStatus, resolve_nets};
-pub use netlist::{PackedBlock, PackedNet, PackedNetlist, PackedPin, read_netlist};
+pub use netlist::{
+    Interconnect, InternalPath, InternalPin, PackedBlock, PackedNet, PackedNetlist, PackedPin,
+    PackedPrimitive, PortPin, read_netlist,
+};
 pub use place::{PlacedBlock, Placement, read_placement};
 pub use route_file::{RouteFileError, RouteHeader, RouteSummary, write_route};
 pub use rr_graph::{
     BlockType, ChannelDirection, GridTile, LocationBound, NodeKind, NodeLocation, Pin, PinClass,
     PinClassKind, RrDelayBound, RrGraph, RrStats, Segment, Switch, SwitchKind, read_rr_graph,
+};
+pub use timing::{
+    ClockDomain, ClockSelection, DesignTiming, Fallback, LogicDelays, SequentialDelays,
+    TimingOptions, TimingReport, build_timing,
 };
 
 /// Why a file could not be imported.

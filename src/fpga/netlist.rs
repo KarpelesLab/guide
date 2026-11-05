@@ -5,6 +5,11 @@
 //! filled in. Only the children of the root connect to the routing, so only they become part
 //! of the result, but their outputs have to be traced through what's below them to find out
 //! which nets they carry.
+//!
+//! What's below them is kept too, in a reduced form, for timing: the primitives at the leaves
+//! of each placed block ([`PackedPrimitive`]), and for each primitive pin the chain of
+//! interconnect inside the block that reaches it ([`InternalPath`]). That's what
+//! [`build_timing`](super::build_timing) needs to time a path through a block.
 
 use std::collections::HashMap;
 use std::io::BufRead;
@@ -21,7 +26,7 @@ pub(crate) enum PinRole {
 }
 
 /// A pin of a block that connects to a net.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PackedPin {
     /// The block, as an index in [`PackedNetlist::blocks`].
     pub block: u32,
@@ -55,6 +60,86 @@ pub struct PackedBlock {
     pub pb_type: String,
 }
 
+/// A pin of a primitive, by port and position.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PortPin {
+    /// The port, as an index in [`PackedNetlist::ports`].
+    pub port: u32,
+    /// The pin within the port.
+    pub bit: u32,
+}
+
+/// A primitive: a leaf of the hierarchy inside a placed block, such as a LUT, a flip-flop or
+/// an I/O pad.
+///
+/// Only pins that connect to something are listed. A `.net` file doesn't say what a
+/// primitive does (the architecture file does), so this is only its name, its type and its
+/// pins. [`build_timing`](super::build_timing) says how it tells registers, pads and logic
+/// apart.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PackedPrimitive {
+    /// The placed block it is in, as an index in [`PackedNetlist::blocks`].
+    pub block: u32,
+    /// Its name, which is the name of the atom that VPR packed into it, as in `n31` or
+    /// `out:p6`.
+    pub name: String,
+    /// Its type, which is its `instance` up to the `[`, as in `lut` or `ff`.
+    pub pb_type: String,
+    /// Its connected input pins.
+    pub inputs: Vec<PortPin>,
+    /// Its connected output pins.
+    pub outputs: Vec<PortPin>,
+    /// Its connected clock pins.
+    pub clocks: Vec<PortPin>,
+}
+
+/// One end of an [`InternalPath`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum InternalPin {
+    /// A pin of a placed block, which is where nets between blocks connect.
+    Block(PackedPin),
+    /// A pin of a primitive.
+    Primitive {
+        /// The primitive, as an index in [`PackedNetlist::primitives`].
+        primitive: u32,
+        /// The pin.
+        pin: PortPin,
+    },
+}
+
+/// A connection inside a placed block: from a pin of the block or the output of a primitive,
+/// through interconnect, to the input of a primitive or an output pin of the block.
+///
+/// Every connected input and clock pin of a primitive has one of these, and so does every
+/// connected output pin of a placed block, except for
+/// [`route_through_outputs`](PackedNetlist::route_through_outputs) and
+/// [`unresolved_pins`](PackedNetlist::unresolved_pins).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InternalPath {
+    /// Where the path starts: a block's input or clock pin, or a primitive's output.
+    pub from: InternalPin,
+    /// Where it ends: a primitive's input or clock pin, or a block's output.
+    pub to: InternalPin,
+    /// Whether it ends on a primitive's clock pin.
+    pub clock: bool,
+    /// Its interconnect, as a range of `PackedNetlist::hops`.
+    hops_start: u32,
+    hops_end: u32,
+}
+
+/// A piece of interconnect inside a block, as `.net` files name it: `crossbar` in
+/// `clb.I[5]->crossbar`.
+///
+/// Names are only unique within the `pb_type` that the architecture file defines them in,
+/// so the type of the block that holds the interconnect is part of its identity.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Interconnect {
+    /// The type of the block that holds it, as in `clb`.
+    pub container: String,
+    /// Its name, as in `crossbar`.
+    pub name: String,
+}
+
 /// A netlist read from a `.net` file.
 ///
 /// Blocks and nets have the same numbers as in VPR: blocks are numbered in file order, and
@@ -70,6 +155,14 @@ pub struct PackedNetlist {
     nets: Vec<PackedNet>,
     ports: Vec<String>,
     route_through_outputs: u64,
+    primary_inputs: Vec<String>,
+    primary_outputs: Vec<String>,
+    clock_nets: Vec<String>,
+    primitives: Vec<PackedPrimitive>,
+    paths: Vec<InternalPath>,
+    interconnects: Vec<Interconnect>,
+    hops: Vec<u32>,
+    unresolved_pins: u64,
 }
 
 impl PackedNetlist {
@@ -111,6 +204,62 @@ impl PackedNetlist {
     pub fn route_through_outputs(&self) -> u64 {
         self.route_through_outputs
     }
+
+    /// Returns the names of the circuit's primary inputs, as the root's `<inputs>` lists
+    /// them. Each is the name of an input pad's primitive and of the net it drives.
+    pub fn primary_inputs(&self) -> &[String] {
+        &self.primary_inputs
+    }
+
+    /// Returns the names of the circuit's primary outputs, as the root's `<outputs>` lists
+    /// them. Each is the name of an output pad's primitive, as in `out:p0`.
+    pub fn primary_outputs(&self) -> &[String] {
+        &self.primary_outputs
+    }
+
+    /// Returns the nets that the root's `<clocks>` lists.
+    pub fn clock_nets(&self) -> &[String] {
+        &self.clock_nets
+    }
+
+    /// Returns the primitives inside the placed blocks, block by block, and in file order
+    /// within each block.
+    pub fn primitives(&self) -> &[PackedPrimitive] {
+        &self.primitives
+    }
+
+    /// Returns the connections inside the placed blocks, block by block.
+    pub fn internal_paths(&self) -> &[InternalPath] {
+        &self.paths
+    }
+
+    /// Returns the interconnect that [`hops`](PackedNetlist::hops) refers to.
+    pub fn interconnects(&self) -> &[Interconnect] {
+        &self.interconnects
+    }
+
+    /// Returns the interconnect that a path goes through, from its start to its end, as
+    /// indices in [`interconnects`](PackedNetlist::interconnects).
+    pub fn hops(&self, path: &InternalPath) -> &[u32] {
+        self.hops
+            .get(path.hops_start as usize..path.hops_end as usize)
+            .unwrap_or(&[])
+    }
+
+    /// Returns how many connected pins inside blocks could not be traced back to what drives
+    /// them, because the file names a pin that doesn't exist. VPR doesn't write such files,
+    /// so this should be 0. Such a pin has no [`InternalPath`], which cuts timing paths
+    /// through it.
+    pub fn unresolved_pins(&self) -> u64 {
+        self.unresolved_pins
+    }
+}
+
+/// Returns the type of an instance, which is the part before the `[`.
+fn type_of(instance: &str) -> &str {
+    instance
+        .split_once('[')
+        .map_or(instance, |(pb_type, _)| pb_type)
 }
 
 /// What kind of element an open one is, in the parts of the file that matter.
@@ -132,6 +281,8 @@ struct PortText {
 struct Frame {
     /// As in `fle[1]`.
     instance: String,
+    /// The block's name, which is `open` for an unused place.
+    name: String,
     /// The block's number in the netlist, if a placer sees it: if it's a child of the root
     /// and it isn't one of the empty places, which are all named `open`.
     placed: Option<u32>,
@@ -144,19 +295,38 @@ struct Frame {
     /// this block's own pins use for them, as in `fle[1].out[0]`. This holds what one placed
     /// block needs, which is small, and is thrown away after it.
     below: HashMap<String, String>,
+    /// The used blocks directly below this one, kept inside a placed block for
+    /// [`trace_internals`].
+    children: Vec<Frame>,
 }
 
 impl Frame {
-    fn new(instance: &str, placed: Option<u32>, is_leaf: bool) -> Frame {
+    fn new(instance: &str, name: &str, placed: Option<u32>, is_leaf: bool) -> Frame {
         Frame {
             instance: instance.to_owned(),
+            name: name.to_owned(),
             placed,
             is_leaf,
             inputs: Vec::new(),
             outputs: Vec::new(),
             clocks: Vec::new(),
             below: HashMap::new(),
+            children: Vec::new(),
         }
+    }
+
+    /// Returns the block's type, which is its instance up to the `[`.
+    fn pb_type(&self) -> &str {
+        type_of(&self.instance)
+    }
+
+    /// Returns whether anything in the block is connected.
+    fn is_used(&self) -> bool {
+        !self.children.is_empty()
+            || [&self.inputs, &self.outputs, &self.clocks]
+                .into_iter()
+                .flatten()
+                .any(|port| port.text.split_ascii_whitespace().any(|pin| pin != "open"))
     }
 
     /// Finds the net on an output pin, written as this block wrote it.
@@ -237,6 +407,9 @@ pub fn read_netlist<R: BufRead>(reader: R) -> Result<PackedNetlist, ImportError>
     let mut netlist = PackedNetlist::default();
     let mut net_numbers = HashMap::new();
     let mut port_numbers = HashMap::new();
+    let mut interconnect_numbers = HashMap::new();
+    // The root's inputs, outputs and clocks, by `PinRole`.
+    let mut root_lists = [String::new(), String::new(), String::new()];
 
     let mut frames: Vec<Frame> = Vec::new();
     let mut open: Vec<Element> = Vec::new();
@@ -283,16 +456,19 @@ pub fn read_netlist<R: BufRead>(reader: R) -> Result<PackedNetlist, ImportError>
                             netlist.atom_netlist_id =
                                 tag.attr("atom_netlist_id").map(str::to_owned);
                         } else if frames.len() == 1 && name != "open" {
-                            let pb_type = instance
-                                .split_once('[')
-                                .map_or(instance, |(pb_type, _)| pb_type);
+                            let pb_type = type_of(instance);
                             placed = Some(netlist.blocks.len() as u32);
                             netlist.blocks.push(PackedBlock {
                                 name: name.to_owned(),
                                 pb_type: pb_type.to_owned(),
                             });
                         }
-                        frames.push(Frame::new(instance, placed, tag.attr("mode").is_none()));
+                        frames.push(Frame::new(
+                            instance,
+                            name,
+                            placed,
+                            tag.attr("mode").is_none(),
+                        ));
                         Element::Block
                     }
                     "inputs" if parent == Some(Element::Block) => Element::Pins(PinRole::Input),
@@ -331,6 +507,11 @@ pub fn read_netlist<R: BufRead>(reader: R) -> Result<PackedNetlist, ImportError>
             Event::Text(text) => {
                 if let Some(port) = &mut port {
                     port.text.push_str(text);
+                } else if let (1, Some(Element::Pins(role))) = (frames.len(), open.last()) {
+                    // The root lists the circuit's own inputs, outputs and clocks as text.
+                    let list = &mut root_lists[*role as usize];
+                    list.push_str(text);
+                    list.push(' ');
                 }
             }
             Event::End => {
@@ -361,11 +542,25 @@ pub fn read_netlist<R: BufRead>(reader: R) -> Result<PackedNetlist, ImportError>
                                         &mut port_numbers,
                                         line,
                                     )?;
+                                    trace_internals(
+                                        &frame,
+                                        block,
+                                        &mut netlist,
+                                        &mut port_numbers,
+                                        &mut interconnect_numbers,
+                                    );
                                 }
                             }
                             _ => {
+                                // Only what's used inside a used placed block is kept. That
+                                // isn't decided by the name: a LUT used as a wire is `open`.
+                                let keep = frame.is_used()
+                                    && frames.get(1).is_some_and(|placed| placed.placed.is_some());
                                 if let Some(parent) = frames.last_mut() {
                                     pass_outputs_up(&frame, parent);
+                                    if keep {
+                                        parent.children.push(frame);
+                                    }
                                 }
                             }
                         }
@@ -375,6 +570,11 @@ pub fn read_netlist<R: BufRead>(reader: R) -> Result<PackedNetlist, ImportError>
             }
         }
     }
+    let [inputs, outputs, clocks] = root_lists;
+    let names = |list: String| list.split_ascii_whitespace().map(str::to_owned).collect();
+    netlist.primary_inputs = names(inputs);
+    netlist.primary_outputs = names(outputs);
+    netlist.clock_nets = names(clocks);
     Ok(netlist)
 }
 
@@ -391,6 +591,282 @@ fn pass_outputs_up(frame: &Frame, parent: &mut Frame) {
             }
         }
     }
+}
+
+/// A block of a placed block's hierarchy, flattened, with the placed block itself first.
+struct FlatBlock<'a> {
+    frame: &'a Frame,
+    parent: Option<usize>,
+    children: Vec<usize>,
+    /// The primitive it is, if it's a leaf.
+    primitive: Option<u32>,
+}
+
+fn flatten<'a>(frame: &'a Frame, parent: Option<usize>, out: &mut Vec<FlatBlock<'a>>) -> usize {
+    let index = out.len();
+    out.push(FlatBlock {
+        frame,
+        parent,
+        children: Vec::new(),
+        primitive: None,
+    });
+    for child in &frame.children {
+        let child = flatten(child, Some(index), out);
+        out[index].children.push(child);
+    }
+    index
+}
+
+/// A pin of a [`FlatBlock`]: the block, the port's name and the position.
+type FlatPin<'a> = (usize, &'a str, u32);
+
+/// Splits `fle[5].out[0]` into `fle[5]`, `out` and 0.
+fn parse_pin_name(text: &str) -> Option<(&str, &str, u32)> {
+    let (instance, pin) = text.split_once('.')?;
+    let (port, rest) = pin.split_once('[')?;
+    let bit = rest.strip_suffix(']')?.parse().ok()?;
+    Some((instance, port, bit))
+}
+
+/// Adds an interconnect to the netlist's numbering, and returns the number.
+fn interconnect_number(
+    netlist: &mut PackedNetlist,
+    numbers: &mut HashMap<(String, String), u32>,
+    container: &str,
+    name: &str,
+) -> u32 {
+    let key = (container.to_owned(), name.to_owned());
+    if let Some(&number) = numbers.get(&key) {
+        return number;
+    }
+    let number = netlist.interconnects.len() as u32;
+    netlist.interconnects.push(Interconnect {
+        container: key.0.clone(),
+        name: key.1.clone(),
+    });
+    numbers.insert(key, number);
+    number
+}
+
+/// Records the primitives inside a placed block and the paths between them and the block's
+/// pins.
+///
+/// Inside a block, each pin is written as what drives it: `clb.I[5]->crossbar` for an input
+/// of a block driven by an input of the block that holds it, through the interconnect
+/// `crossbar` of that block, or `fle[5].out[0]->crossbar` for one driven by the output of a
+/// sibling. An output of a block that isn't a primitive names a block inside it the same way.
+/// So the type alone names the holder, and a type with an index one of its children. The
+/// walk back from a pin ends at a pin of the placed block, which is named after its net, or
+/// at the output of a primitive.
+fn trace_internals(
+    frame: &Frame,
+    block: u32,
+    netlist: &mut PackedNetlist,
+    port_numbers: &mut HashMap<String, u32>,
+    interconnect_numbers: &mut HashMap<(String, String), u32>,
+) {
+    let mut blocks = Vec::new();
+    flatten(frame, None, &mut blocks);
+
+    // What drives each connected pin, as written, and whether it's an output.
+    let mut drivers: HashMap<FlatPin<'_>, (&str, bool)> = HashMap::new();
+    for (index, flat) in blocks.iter().enumerate() {
+        for (ports, is_output) in [
+            (&flat.frame.inputs, false),
+            (&flat.frame.outputs, true),
+            (&flat.frame.clocks, false),
+        ] {
+            for port in ports {
+                for (bit, text) in port.text.split_ascii_whitespace().enumerate() {
+                    if text != "open" {
+                        drivers.insert((index, port.name.as_str(), bit as u32), (text, is_output));
+                    }
+                }
+            }
+        }
+    }
+
+    // The primitives, in file order.
+    for flat in &mut blocks {
+        if !flat.frame.is_leaf {
+            continue;
+        }
+        let frame = flat.frame;
+        let mut pins = |ports: &[PortText]| -> Vec<PortPin> {
+            let mut pins = Vec::new();
+            for port in ports {
+                let port_id = port_number(netlist, port_numbers, &port.name);
+                for (bit, text) in port.text.split_ascii_whitespace().enumerate() {
+                    if text != "open" {
+                        pins.push(PortPin {
+                            port: port_id,
+                            bit: bit as u32,
+                        });
+                    }
+                }
+            }
+            pins
+        };
+        let primitive = PackedPrimitive {
+            block,
+            name: frame.name.clone(),
+            pb_type: frame.pb_type().to_owned(),
+            inputs: pins(&frame.inputs),
+            outputs: pins(&frame.outputs),
+            clocks: pins(&frame.clocks),
+        };
+        flat.primitive = Some(netlist.primitives.len() as u32);
+        netlist.primitives.push(primitive);
+    }
+
+    // Walks back from a pin to its source, collecting the interconnect on the way, from the
+    // sink end. A cycle in a damaged file can't loop forever: no walk is longer than there
+    // are pins.
+    fn walk_back<'a>(
+        blocks: &[FlatBlock<'a>],
+        drivers: &HashMap<FlatPin<'a>, (&'a str, bool)>,
+        start: FlatPin<'a>,
+        hops: &mut Vec<(usize, &'a str)>,
+    ) -> Option<FlatPin<'a>> {
+        let mut current = start;
+        for _ in 0..=drivers.len() {
+            let &(text, is_output) = drivers.get(&current)?;
+            if current != start {
+                if current.0 == 0 && !is_output {
+                    return Some(current);
+                }
+                if is_output && blocks[current.0].frame.is_leaf {
+                    return Some(current);
+                }
+            }
+            let (name, interconnect) = text.split_once("->")?;
+            let holder = if is_output {
+                current.0
+            } else {
+                blocks[current.0].parent?
+            };
+            let (instance, port, bit) = parse_pin_name(name)?;
+            // The holder is usually named by its type alone, but a block used as a wire, such
+            // as a LUT in `wire` mode, names its own inputs with its index.
+            let holder_frame = blocks[holder].frame;
+            let child = blocks[holder]
+                .children
+                .iter()
+                .find(|&&child| blocks[child].frame.instance == instance);
+            let next = match child {
+                Some(&child) => child,
+                None if instance == holder_frame.pb_type() || instance == holder_frame.instance => {
+                    holder
+                }
+                None => return None,
+            };
+            hops.push((holder, interconnect));
+            current = (next, port, bit);
+        }
+        None
+    }
+
+    let mut paths = Vec::new();
+    let mut hops = Vec::new();
+    let mut unresolved = 0;
+    let top_is_leaf = blocks[0].frame.is_leaf;
+    for (index, flat) in blocks.iter().enumerate() {
+        let frame = flat.frame;
+        let roles: &[(&Vec<PortText>, bool, bool)] = if top_is_leaf {
+            // A placed block that is a primitive itself: its pins are the block's, and the
+            // paths between the two go through nothing.
+            &[]
+        } else if index == 0 {
+            &[(&frame.outputs, true, false)]
+        } else if frame.is_leaf {
+            &[(&frame.inputs, false, false), (&frame.clocks, false, true)]
+        } else {
+            &[]
+        };
+        for &(ports, is_output, clock) in roles {
+            for port in ports {
+                for (bit, text) in port.text.split_ascii_whitespace().enumerate() {
+                    if text == "open" {
+                        continue;
+                    }
+                    hops.clear();
+                    let start = (index, port.name.as_str(), bit as u32);
+                    match walk_back(&blocks, &drivers, start, &mut hops) {
+                        // An output fed by one of the block's own inputs, which
+                        // `finish_placed_block` has already counted.
+                        Some(source) if is_output && source.0 == 0 => {}
+                        Some(source) => paths.push((source, start, clock, hops.clone())),
+                        None => unresolved += 1,
+                    }
+                }
+            }
+        }
+    }
+
+    let mut pin = |netlist: &mut PackedNetlist, (index, port, bit): FlatPin<'_>| {
+        let port = port_number(netlist, port_numbers, port);
+        match blocks[index].primitive {
+            Some(primitive) => InternalPin::Primitive {
+                primitive,
+                pin: PortPin { port, bit },
+            },
+            None => InternalPin::Block(PackedPin { block, port, bit }),
+        }
+    };
+    for (source, sink, clock, path_hops) in paths {
+        let from = pin(netlist, source);
+        let to = pin(netlist, sink);
+        let hops_start = netlist.hops.len() as u32;
+        for &(holder, interconnect) in path_hops.iter().rev() {
+            let number = interconnect_number(
+                netlist,
+                interconnect_numbers,
+                blocks[holder].frame.pb_type(),
+                interconnect,
+            );
+            netlist.hops.push(number);
+        }
+        netlist.paths.push(InternalPath {
+            from,
+            to,
+            clock,
+            hops_start,
+            hops_end: netlist.hops.len() as u32,
+        });
+    }
+
+    if top_is_leaf && let Some(primitive) = blocks[0].primitive {
+        // Each pin of the block is a pin of the primitive, with nothing in between.
+        let record = netlist.primitives[primitive as usize].clone();
+        for (pins, outward, clock) in [
+            (&record.inputs, false, false),
+            (&record.clocks, false, true),
+            (&record.outputs, true, false),
+        ] {
+            for &pin in pins {
+                let outer = InternalPin::Block(PackedPin {
+                    block,
+                    port: pin.port,
+                    bit: pin.bit,
+                });
+                let inner = InternalPin::Primitive { primitive, pin };
+                let (from, to) = if outward {
+                    (inner, outer)
+                } else {
+                    (outer, inner)
+                };
+                let at = netlist.hops.len() as u32;
+                netlist.paths.push(InternalPath {
+                    from,
+                    to,
+                    clock,
+                    hops_start: at,
+                    hops_end: at,
+                });
+            }
+        }
+    }
+    netlist.unresolved_pins += unresolved;
 }
 
 /// Adds the pins of a block that a placer can see to the netlist, in VPR's order.
@@ -549,6 +1025,297 @@ mod tests {
             .map(|sink| netlist.blocks()[sink.block as usize].name.as_str())
             .collect();
         assert_eq!(blocks, ["n27", "n22", "n32"]);
+    }
+
+    fn primitive<'a>(
+        netlist: &'a PackedNetlist,
+        name: &str,
+        pb_type: &str,
+    ) -> (u32, &'a PackedPrimitive) {
+        let (index, primitive) = netlist
+            .primitives()
+            .iter()
+            .enumerate()
+            .find(|(_, primitive)| primitive.name == name && primitive.pb_type == pb_type)
+            .unwrap();
+        (index as u32, primitive)
+    }
+
+    fn port(netlist: &PackedNetlist, name: &str) -> u32 {
+        netlist
+            .ports()
+            .iter()
+            .position(|port| port == name)
+            .unwrap() as u32
+    }
+
+    fn hop_names(netlist: &PackedNetlist, path: &InternalPath) -> Vec<String> {
+        netlist
+            .hops(path)
+            .iter()
+            .map(|&hop| {
+                let interconnect = &netlist.interconnects()[hop as usize];
+                format!("{}/{}", interconnect.container, interconnect.name)
+            })
+            .collect()
+    }
+
+    fn path_to(netlist: &PackedNetlist, to: InternalPin) -> &InternalPath {
+        netlist
+            .internal_paths()
+            .iter()
+            .find(|path| path.to == to)
+            .unwrap()
+    }
+
+    #[test]
+    fn keeps_the_primitives_and_the_root_lists() {
+        let netlist = read_netlist(GENUINE.as_bytes()).unwrap();
+        assert_eq!(netlist.primary_inputs()[..2], ["x0", "x1"]);
+        assert_eq!(netlist.primary_outputs().len(), 8);
+        assert_eq!(netlist.primary_outputs()[0], "out:p0");
+        assert!(netlist.clock_nets().is_empty());
+        assert_eq!(netlist.unresolved_pins(), 0);
+
+        let count = |pb_type: &str| {
+            netlist
+                .primitives()
+                .iter()
+                .filter(|primitive| primitive.pb_type == pb_type)
+                .count()
+        };
+        // Three CLBs, one of them with 10 LUTs, and the 16 pads.
+        assert_eq!(count("inpad"), 8);
+        assert_eq!(count("outpad"), 8);
+        assert_eq!(count("ff"), 0);
+        assert_eq!(
+            count("lut"),
+            netlist.primitives().len() - 16,
+            "everything else is a LUT"
+        );
+
+        // `n31` uses five of its six inputs.
+        let (_, n31) = primitive(&netlist, "n31", "lut");
+        assert_eq!(n31.block, 0);
+        assert_eq!(n31.inputs.len(), 5);
+        assert_eq!(n31.outputs.len(), 1);
+        assert!(n31.clocks.is_empty());
+    }
+
+    #[test]
+    fn traces_each_primitive_pin_through_the_interconnect() {
+        let netlist = read_netlist(GENUINE.as_bytes()).unwrap();
+        let (n31, _) = primitive(&netlist, "n31", "lut");
+        let input = |bit| InternalPin::Primitive {
+            primitive: n31,
+            pin: PortPin {
+                port: port(&netlist, "in"),
+                bit,
+            },
+        };
+
+        // `lut[0].in[2]` comes from `lut6.in[2]`, `ble6.in[2]`, `fle.in[2]`, and `clb.I[7]`.
+        let path = path_to(&netlist, input(2));
+        assert_eq!(
+            path.from,
+            InternalPin::Block(PackedPin {
+                block: 0,
+                port: port(&netlist, "I"),
+                bit: 7,
+            })
+        );
+        assert!(!path.clock);
+        assert_eq!(
+            hop_names(&netlist, path),
+            [
+                "clb/crossbar",
+                "fle/direct1",
+                "ble6/direct1",
+                "lut6/direct:lut6"
+            ]
+        );
+        // The unused input has no path.
+        assert!(
+            !netlist
+                .internal_paths()
+                .iter()
+                .any(|path| path.to == input(1))
+        );
+
+        // `p7`'s first input comes from inside the block, from the LUT in `fle[5]`.
+        let (p7, _) = primitive(&netlist, "p7", "lut");
+        let path = path_to(
+            &netlist,
+            InternalPin::Primitive {
+                primitive: p7,
+                pin: PortPin {
+                    port: port(&netlist, "in"),
+                    bit: 0,
+                },
+            },
+        );
+        let InternalPin::Primitive {
+            primitive: from,
+            pin,
+        } = path.from
+        else {
+            panic!("{:?} should come from a primitive", path.from);
+        };
+        assert_eq!(netlist.primitives()[from as usize].block, 0);
+        assert_eq!(netlist.ports()[pin.port as usize], "out");
+        // Up out of `fle[5]`, through the crossbar, and down into `fle[1]`.
+        assert_eq!(
+            hop_names(&netlist, path),
+            [
+                "lut6/direct:lut6",
+                "ble6/mux1",
+                "fle/direct2",
+                "clb/crossbar",
+                "fle/direct1",
+                "ble6/direct1",
+                "lut6/direct:lut6"
+            ]
+        );
+
+        // And `p7` leaves the block on `O[1]`.
+        let path = path_to(
+            &netlist,
+            InternalPin::Block(PackedPin {
+                block: 0,
+                port: port(&netlist, "O"),
+                bit: 1,
+            }),
+        );
+        assert_eq!(
+            path.from,
+            InternalPin::Primitive {
+                primitive: p7,
+                pin: PortPin {
+                    port: port(&netlist, "out"),
+                    bit: 0,
+                },
+            }
+        );
+        assert_eq!(
+            hop_names(&netlist, path),
+            [
+                "lut6/direct:lut6",
+                "ble6/mux1",
+                "fle/direct2",
+                "clb/clbouts1"
+            ]
+        );
+    }
+
+    #[test]
+    fn traces_clock_pins_to_their_clock() {
+        let netlist = read_netlist(MULTICLOCK.as_bytes()).unwrap();
+        assert_eq!(netlist.clock_nets(), ["clk", "clk2"]);
+        let (ffa, record) = primitive(&netlist, "FFA", "ff");
+        assert_eq!(record.clocks.len(), 1);
+        let path = netlist
+            .internal_paths()
+            .iter()
+            .find(|path| {
+                path.clock
+                    && matches!(path.to, InternalPin::Primitive { primitive, .. } if primitive == ffa)
+            })
+            .unwrap();
+        let InternalPin::Block(pin) = path.from else {
+            panic!("the clock should come from the block's pin");
+        };
+        assert_eq!(netlist.ports()[pin.port as usize], "clk");
+        assert!(net(&netlist, "clk").sinks.contains(&pin));
+        assert_eq!(
+            hop_names(&netlist, path),
+            ["clb/clks", "fle/direct3", "ble6/direct3"]
+        );
+
+        // `FFA`'s data comes through a LUT used as a wire, which the file calls `open`.
+        let path = path_to(
+            &netlist,
+            InternalPin::Primitive {
+                primitive: ffa,
+                pin: PortPin {
+                    port: port(&netlist, "D"),
+                    bit: 0,
+                },
+            },
+        );
+        assert_eq!(
+            hop_names(&netlist, path),
+            [
+                "clb/crossbar",
+                "fle/direct1",
+                "ble6/direct1",
+                "lut6/complete:lut6",
+                "ble6/direct2"
+            ]
+        );
+        assert_eq!(netlist.unresolved_pins(), 0);
+    }
+
+    #[test]
+    fn follows_scrambled_multibit_ports_and_skips_open_pins() {
+        let netlist = read_netlist(UNCONNECTED.as_bytes()).unwrap();
+        assert_eq!(netlist.unresolved_pins(), 0);
+        let (bel, record) = primitive(&netlist, "inst", "dsp_bel");
+        // Four of `a`, all eight of `b`, and none of `addsub`.
+        assert_eq!(record.inputs.len(), 12);
+        assert_eq!(record.outputs.len(), 8);
+        // `dsp_bel.a[0]` is `dsp.a[6]`, which is the net `a[0]`.
+        let path = path_to(
+            &netlist,
+            InternalPin::Primitive {
+                primitive: bel,
+                pin: PortPin {
+                    port: port(&netlist, "a"),
+                    bit: 0,
+                },
+            },
+        );
+        let InternalPin::Block(pin) = path.from else {
+            panic!("should come from the block");
+        };
+        assert_eq!(pin.bit, 6);
+        assert!(net(&netlist, "a[0]").sinks.contains(&pin));
+        assert_eq!(hop_names(&netlist, path), ["dsp/xbar_a"]);
+    }
+
+    #[test]
+    fn placed_blocks_that_are_primitives_connect_directly() {
+        let text = "<block name='t' instance='FPGA_packed_netlist[0]'>\
+            <block name='a' instance='lut[0]'>\
+            <inputs><port name='in'>x open y</port></inputs>\
+            <outputs><port name='out'>a</port></outputs></block>\
+            </block>";
+        let netlist = read_netlist(text.as_bytes()).unwrap();
+        assert_eq!(netlist.primitives().len(), 1);
+        assert_eq!(netlist.primitives()[0].inputs.len(), 2);
+        assert_eq!(netlist.internal_paths().len(), 3);
+        for path in netlist.internal_paths() {
+            assert!(netlist.hops(path).is_empty());
+            assert!(matches!(
+                (path.from, path.to),
+                (InternalPin::Block(_), InternalPin::Primitive { .. })
+                    | (InternalPin::Primitive { .. }, InternalPin::Block(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn pins_that_name_nothing_are_counted() {
+        let text = "<block name='t' instance='FPGA_packed_netlist[0]'>\
+            <block name='a' instance='clb[0]' mode='m'>\
+            <inputs><port name='I'>x</port></inputs>\
+            <outputs><port name='O'>lut[0].out[0]-&gt;o</port></outputs>\
+            <block name='a' instance='lut[0]'>\
+            <inputs><port name='in'>clb.I[0]-&gt;i clb.I[3]-&gt;i ble.I[0]-&gt;i fle[2].out[0]-&gt;i nonsense</port></inputs>\
+            <outputs><port name='out'>a</port></outputs></block>\
+            </block></block>";
+        let netlist = read_netlist(text.as_bytes()).unwrap();
+        assert_eq!(netlist.unresolved_pins(), 4);
+        assert_eq!(netlist.internal_paths().len(), 2);
     }
 
     #[test]

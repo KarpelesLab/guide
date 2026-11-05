@@ -77,6 +77,41 @@ they come with benchmarks and a reference tool to compare against. FPGA Intercha
 Format and nextpnr integration next, which is the route to real devices through open
 toolchains such as Project X-Ray and Project Trellis device data.
 
+**Where it stands.** The `fpga` feature reads a routing resource graph, a packed
+netlist and a placement, and writes VPR's `.route` files. `fpga::build_timing` turns
+the packed netlist into a timing graph and the engine's connections, so VTR files go to
+a timing-driven route with no glue: `tests/fpga_timing.rs` does exactly that for
+`mult_4x4`, and checks the result with the validator. What that timing knows and
+assumes:
+
+- **Structure from the netlist.** Primitives and the interconnect between them come from
+  the `.net` file's own record of how each block was filled in. Pads are known from the
+  circuit's port lists, registers from a connected clock, and anything else is
+  combinational from every input to every output.
+- **Delays inside blocks from the caller.** Architecture files are not read yet, so
+  `fpga::LogicDelays` takes the numbers they hold (interconnect `delay_constant`, LUT
+  delays, `T_setup`, `T_clock_to_Q`) by the names the netlist uses. Anything not given
+  is 0, or a default the caller sets, and is listed in the result. With nothing given,
+  only routing delay counts, which still says which connections lie on which
+  register-to-register paths.
+- **One ideal clock.** Every clock is timed as one, so paths between unrelated clocks are
+  timed (pessimistically) where VPR's default would not time them. One clock's registers
+  can be timed alone instead. Real multi-clock analysis needs clock domains in
+  `crate::timing` and the engine.
+- **What differs from VPR** in detail, from per-pin delays to hold timing, is listed in
+  the documentation of `fpga::build_timing`'s module.
+
+Measured on `mult_4x4` over a generated island fabric of 8 to 20 tracks (VPR's own
+device graph for it isn't available): with 12 or more tracks, routes with and without
+timing both reach the critical path that every connection would have alone, 1840 ps under
+the test's made-up delays. With 8 and 10 tracks, timing-driven routing came out 3% and
+1.4% slower than routing without timing (2165 against 2100 ps, 1865 against 1840 ps), and
+starting it from exact delays in place of lower bounds changed nothing. The design is
+small, with three logic blocks, so this says little either way about timing-driven
+routing. It does say that, on congested designs, the engine stopping at the first legal
+iteration leaves timing to chance, which is the next thing to look at. Comparing with
+VPR needs VPR's device graphs and architecture delays.
+
 ## ASIC
 
 Very close to both of the above. Global routing is negotiated congestion over a grid

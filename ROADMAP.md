@@ -61,7 +61,7 @@ The vocabulary everything else uses, and single-net routing.
 **Exit:** optimal single-net routes on both spaces, verified against brute force
 by property tests; benchmarks exist for search throughput.
 
-### M2: Multi-net engine
+### M2: Multi-net engine (done)
 
 The heart of the project.
 

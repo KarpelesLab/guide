@@ -8,6 +8,7 @@ ever executed.
 | File | From | Notes |
 | --- | --- | --- |
 | `mult_4x4.net`, `.place`, `.route` | `vpr/test/gui/fixtures/clean/` | Unmodified VPR output, for `mult_4x4` on `k6_N10_40nm.xml` |
+| `k6_N10_40nm.xml` | `vtr_flow/arch/timing/` | Unmodified architecture file, by Jason Luu, Jeff Goeders and Vaughn Betz as its header says. Its SHA-256, `5db51ec7…cb6c5`, is the `architecture_id` that `mult_4x4.net` records, so it is the very file VPR packed `mult_4x4` against |
 | `multiclock.net` | `vtr_flow/tasks/regression_tests/vtr_reg_strong/strong_place/` | Unmodified, for global nets |
 | `unconnected.net` | `vpr/test/` | Unmodified, for multi-bit ports |
 | `z1000_corner.rr_graph.xml` | `vtr_flow/arch/zeroasic/z1000/z1000_rr_graph.zip` | **An excerpt, not the file as distributed**: the tiles up to (2, 2) of the graph, with nodes renumbered, most metadata removed, and the switches, segments and block types that it uses |
@@ -26,6 +27,9 @@ otherwise, and notes its benchmark circuits and ABC as exceptions.
   own. The original circuits of `multiclock` and `unconnected` were not traced. A placement
   of the MCNC benchmark `apex2` was left out for that reason, because VTR's licence excepts
   its benchmark circuits.
+- `k6_N10_40nm.xml` is one of VTR's own architecture files, which `LICENSE.md` doesn't except,
+  so it is under the MIT licence below. Its header names its authors and states no other
+  terms.
 - `z1000_corner.rr_graph.xml` comes from VTR's capture of the Zero ASIC z1000 architecture.
   VTR's `vtr_flow/arch/zeroasic/README.md` traces this to
   [logiklib](https://github.com/siliconcompiler/logiklib), whose repository is under the

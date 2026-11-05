@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use super::design::Design;
-use super::netlist::{InternalPin, PackedNetlist, PackedPin, PortPin};
+use super::netlist::{InternalPin, PackedNetlist, PackedPin, PackedPrimitive, PortPin};
 use crate::cost::Cost;
 use crate::engine::{Connection, TimingDriven};
 use crate::id::{NetId, NodeId};
@@ -32,6 +32,85 @@ struct CombinationalDelays {
     any: Option<u32>,
     /// By input port, then output port.
     pins: BTreeMap<String, BTreeMap<String, u32>>,
+    /// By input port and pin, then output port and pin.
+    bits: BTreeMap<(String, u32), BTreeMap<(String, u32), u32>>,
+}
+
+/// What a primitive does with its ports: which are clocked, and which inputs reach which
+/// outputs without a clock in between. This is what an architecture's `<models>` say, and
+/// [`read_architecture`](super::read_architecture) fills it in from them.
+///
+/// A primitive with a clocked port is a register: its clocked inputs capture paths, and its
+/// clocked outputs launch them. Paths go through it only from an input to an output that the
+/// model connects, whether it is a register or not.
+///
+/// # Examples
+///
+/// ```
+/// use guide::fpga::PrimitiveModel;
+///
+/// // A RAM with a registered write and an asynchronous read.
+/// let ram = PrimitiveModel::new()
+///     .with_clocked("we")
+///     .with_clocked("data")
+///     .with_path("addr", "out");
+/// assert!(ram.is_sequential());
+/// assert!(ram.has_path("addr", "out"));
+/// assert!(!ram.has_path("data", "out"));
+/// assert!(PrimitiveModel::combinational().has_path("in", "out"));
+/// ```
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct PrimitiveModel {
+    clocked: BTreeSet<String>,
+    paths: BTreeSet<(String, String)>,
+    every_path: bool,
+}
+
+impl PrimitiveModel {
+    /// Starts a model with nothing clocked and no path through it.
+    pub fn new() -> PrimitiveModel {
+        PrimitiveModel::default()
+    }
+
+    /// A combinational primitive with a path from every input to every output, such as a
+    /// LUT: VPR's `.names`.
+    pub fn combinational() -> PrimitiveModel {
+        PrimitiveModel {
+            every_path: true,
+            ..PrimitiveModel::default()
+        }
+    }
+
+    /// Makes a port clocked: an input captures paths, and an output launches them.
+    pub fn with_clocked(mut self, port: &str) -> PrimitiveModel {
+        self.clocked.insert(port.to_owned());
+        self
+    }
+
+    /// Adds a path from an input port to an output port, VPR's `combinational_sink_ports`.
+    pub fn with_path(mut self, input: &str, output: &str) -> PrimitiveModel {
+        self.paths.insert((input.to_owned(), output.to_owned()));
+        self
+    }
+
+    /// Returns whether any port is clocked, which makes the primitive a register.
+    pub fn is_sequential(&self) -> bool {
+        !self.clocked.is_empty()
+    }
+
+    /// Returns whether a port is clocked.
+    pub fn is_clocked(&self, port: &str) -> bool {
+        self.clocked.contains(port)
+    }
+
+    /// Returns whether a path goes from an input port to an output port.
+    pub fn has_path(&self, input: &str, output: &str) -> bool {
+        self.every_path
+            || self
+                .paths
+                .iter()
+                .any(|(from, to)| from == input && to == output)
+    }
 }
 
 /// The delays inside blocks, in picoseconds, by the names the architecture file gives them.
@@ -57,8 +136,12 @@ struct CombinationalDelays {
 pub struct LogicDelays {
     /// By the holder's type, then name.
     interconnect: BTreeMap<String, BTreeMap<String, u32>>,
+    /// By the holder's type and name, then the ends, each written `type.port`.
+    interconnect_ports: BTreeMap<(String, String), BTreeMap<(String, String), u32>>,
     combinational: BTreeMap<String, CombinationalDelays>,
     sequential: BTreeMap<String, SequentialDelays>,
+    hold: BTreeMap<String, u32>,
+    models: BTreeMap<String, PrimitiveModel>,
     /// The delay of an interconnect that isn't listed.
     pub default_interconnect: u32,
     /// The delay through a combinational primitive whose type isn't listed.
@@ -92,6 +175,40 @@ impl LogicDelays {
         self.interconnect.get(container)?.get(name).copied()
     }
 
+    /// Sets the delay of an interconnect from one port to another, as a `delay_constant`
+    /// with `in_port` and `out_port` does in VPR. `from` and `to` are written `type.port`,
+    /// as in `clb.I` and `fle.in`, without the indices that VPR allows there.
+    pub fn set_interconnect_ports(
+        &mut self,
+        container: &str,
+        name: &str,
+        from: &str,
+        to: &str,
+        delay: u32,
+    ) {
+        self.interconnect_ports
+            .entry((container.to_owned(), name.to_owned()))
+            .or_default()
+            .insert((from.to_owned(), to.to_owned()), delay);
+    }
+
+    /// Returns the delay of an interconnect from one port to another, by ports first and
+    /// then for the interconnect as a whole, as
+    /// [`set_interconnect`](LogicDelays::set_interconnect) gives it.
+    pub fn interconnect_ports(
+        &self,
+        container: &str,
+        name: &str,
+        from: &str,
+        to: &str,
+    ) -> Option<u32> {
+        self.interconnect_ports
+            .get(&(container.to_owned(), name.to_owned()))
+            .and_then(|ports| ports.get(&(from.to_owned(), to.to_owned())))
+            .copied()
+            .or_else(|| self.interconnect(container, name))
+    }
+
     /// Sets the delay through a combinational primitive's type, from any input to any
     /// output, unless [`set_combinational_ports`](LogicDelays::set_combinational_ports) says
     /// otherwise for a pair of ports.
@@ -120,6 +237,45 @@ impl LogicDelays {
             .insert(output.to_owned(), delay);
     }
 
+    /// Sets the delay through a combinational primitive's type from one pin to another, each
+    /// a port and a position in it, as a `delay_matrix` does in VPR.
+    ///
+    /// A position is where the pin is in its port as the `.net` file writes it, which is the
+    /// physical pin, and so a row or column of the matrix. VPR's `port_rotation_map` says
+    /// which logical input each physical pin of a LUT carries, which doesn't matter here.
+    pub fn set_combinational_pins(
+        &mut self,
+        pb_type: &str,
+        (input, input_bit): (&str, u32),
+        (output, output_bit): (&str, u32),
+        delay: u32,
+    ) {
+        self.combinational
+            .entry(pb_type.to_owned())
+            .or_default()
+            .bits
+            .entry((input.to_owned(), input_bit))
+            .or_default()
+            .insert((output.to_owned(), output_bit), delay);
+    }
+
+    /// Returns the delay set from one pin to another of a combinational type, if one was, by
+    /// pins first, then by ports, then for the type.
+    pub fn combinational_pins(
+        &self,
+        pb_type: &str,
+        (input, input_bit): (&str, u32),
+        (output, output_bit): (&str, u32),
+    ) -> Option<u32> {
+        self.combinational
+            .get(pb_type)?
+            .bits
+            .get(&(input.to_owned(), input_bit))
+            .and_then(|outputs| outputs.get(&(output.to_owned(), output_bit)))
+            .copied()
+            .or_else(|| self.combinational(pb_type, input, output))
+    }
+
     /// Returns the delay set from an input port to an output port of a combinational type, if
     /// one was, by ports first and then for the type.
     pub fn combinational(&self, pb_type: &str, input: &str, output: &str) -> Option<u32> {
@@ -140,6 +296,29 @@ impl LogicDelays {
     /// Returns the delays of a register type, if they were set.
     pub fn sequential(&self, pb_type: &str) -> Option<SequentialDelays> {
         self.sequential.get(pb_type).copied()
+    }
+
+    /// Sets a register type's hold time, VPR's `T_hold`: how long after the clock edge its
+    /// inputs have to stay. It is kept for a hold analysis, which there isn't yet, and has no
+    /// effect on the timing graph.
+    pub fn set_hold(&mut self, pb_type: &str, hold: u32) {
+        self.hold.insert(pb_type.to_owned(), hold);
+    }
+
+    /// Returns a register type's hold time, if it was set.
+    pub fn hold(&self, pb_type: &str) -> Option<u32> {
+        self.hold.get(pb_type).copied()
+    }
+
+    /// Says what a primitive type does with its ports, so that [`build_timing`] doesn't have
+    /// to guess. See [which primitive is what](build_timing#which-primitive-is-what).
+    pub fn set_model(&mut self, pb_type: &str, model: PrimitiveModel) {
+        self.models.insert(pb_type.to_owned(), model);
+    }
+
+    /// Returns the model of a primitive type, if one was set.
+    pub fn model(&self, pb_type: &str) -> Option<&PrimitiveModel> {
+        self.models.get(pb_type)
     }
 }
 
@@ -387,51 +566,62 @@ enum Role {
 ///
 /// # Which primitive is what
 ///
-/// A `.net` file doesn't say what a primitive does. That is in the architecture file, which
-/// this crate doesn't read. So primitives are told apart like this, in this order:
+/// A `.net` file doesn't say what a primitive does. That is in the architecture file's
+/// models, which [`read_architecture`](super::read_architecture) turns into a
+/// [`PrimitiveModel`] for each primitive type. Primitives are told apart like this, in this
+/// order:
 ///
 /// 1. A primitive named in the root's `<inputs>` is an **input pad**, and one named in its
 ///    `<outputs>` an **output pad**. VPR names pads after the circuit's ports, so these lists
 ///    find exactly the pads.
-/// 2. A primitive with a connected clock pin, or whose type is given delays with
-///    [`LogicDelays::set_sequential`], is a **register**. Its clock is the net that reaches
-///    its clock pin, traced through the block.
+/// 2. A primitive whose type has a [model](LogicDelays::set_model) is a **register** if the
+///    model has a clocked port. Without a model, it is one if it has a connected clock pin,
+///    or if its type is given delays with [`LogicDelays::set_sequential`]. Its clock is the
+///    net that reaches its clock pin, traced through the block.
 /// 3. A primitive with no connected input is a **constant generator**, which launches
 ///    nothing. VPR doesn't time constant nets either.
-/// 4. Anything else is **combinational**, from every input to every output.
+/// 4. Anything else is **combinational**.
+///
+/// With a model, a register's clocked inputs capture and its clocked outputs launch, and
+/// paths go through any primitive only from an input to an output that the model connects.
+/// Without one, a register's inputs all capture and its outputs all launch, with nothing
+/// through it, and a combinational primitive connects every input to every output.
 ///
 /// # The delay model
 ///
 /// Every delay inside a block comes from a [`LogicDelays`], in picoseconds, and nothing else.
-/// The default is **zero for everything**: then only the routing between blocks has delay,
-/// and the netlist still decides which connections are on a path between which registers.
-/// That model is for when the architecture's delays aren't known, and it is not VPR's.
+/// [`read_architecture`](super::read_architecture) fills one in from VPR's architecture file,
+/// which is how VPR gets them. Without one, the default is **zero for everything**: then only
+/// the routing between blocks has delay, and the netlist still decides which connections are
+/// on a path between which registers.
 /// Anything that was looked up and not found took the matching default of the
 /// [`LogicDelays`] and is listed in [`TimingReport::fallbacks`], so a missing number never
 /// goes unnoticed.
 ///
 /// The names to give delays under are those the architecture file and the `.net` file share:
 /// an interconnect is named by the `pb_type` that holds it and its `name` (`clb` and
-/// `crossbar` in `clb.I[5]->crossbar`), and a primitive by its `pb_type` and port names.
+/// `crossbar` in `clb.I[5]->crossbar`), and by the ports on either side of each hop through
+/// it (`clb.I` and `fle.in`) for [`LogicDelays::interconnect_ports`]. A primitive is named by
+/// its `pb_type` and port names, and pin positions for
+/// [`LogicDelays::combinational_pins`].
 /// [`PackedNetlist::interconnects`] lists every interconnect a design uses. A block used as a
 /// wire, such as a LUT in VPR's `wire` mode, is interconnect like any other, under the name
 /// the netlist gives it (`lut6` and `complete:lut6` in `k6_N10` architectures).
 ///
 /// # What VPR does differently
 ///
-/// - **Its numbers come from the architecture file**: `delay_constant` and `delay_matrix` on
-///   each `<interconnect>` and primitive `pb_type`, and `T_setup` and `T_clock_to_Q` on
-///   primitive ports. Here they are the caller's, as above.
-/// - **Its delays can differ by pin**, through `delay_matrix`, where these differ only by
-///   port. In the same way, the `port_rotation_map` with which VPR permutes the inputs of a
-///   LUT is ignored, as all inputs of a port have one delay. Only maximum delays are used,
-///   for setup timing, and there is no hold analysis.
-/// - **It knows what each primitive is** from the architecture's models: which ports are
-///   clocked, and which inputs reach which outputs combinationally. Here a primitive with a
-///   clock is a register on all of its ports, so a block with both registered and
-///   combinational paths, such as a memory with an asynchronous read, loses the
-///   combinational ones. A combinational primitive connects every input to every output,
-///   which is right for a LUT but may be pessimistic for a hard block.
+/// - **Its numbers always come from the architecture file.** Here they come from whatever
+///   [`LogicDelays`] is given, which [`read_architecture`](super::read_architecture) reads
+///   from that file with the differences it lists: chiefly that interconnect delays are by
+///   port and not by pin. A primitive's delays can differ by pin, as with VPR's
+///   `delay_matrix`. Only maximum delays are used, for setup timing, and there is no hold
+///   analysis.
+/// - **It always knows what each primitive is**, from the architecture's models. Here that
+///   takes a [`PrimitiveModel`], and without one a primitive with a clock is a register on
+///   all of its ports, so a block with both registered and combinational paths, such as a
+///   memory with an asynchronous read, loses the combinational ones. An unmodelled
+///   combinational primitive connects every input to every output, which is right for a LUT
+///   but may be pessimistic for a hard block.
 /// - **Each clock is its own domain.** VPR's documented default without an SDC file
 ///   constrains every netlist clock separately, and does not time paths between two clocks.
 ///   The engine's timing has one ideal clock, so by default, with [`ClockSelection::All`],
@@ -521,21 +711,47 @@ pub fn build_timing(
     let ports = netlist.ports();
     let port_name = |pin: PortPin| ports.get(pin.port as usize).map_or("", String::as_str);
 
-    let interconnect_delays: Vec<u32> = netlist
-        .interconnects()
-        .iter()
-        .map(|interconnect| {
-            delays
-                .interconnect(&interconnect.container, &interconnect.name)
-                .unwrap_or_else(|| {
-                    fallbacks.insert(Fallback::Interconnect {
-                        container: interconnect.container.clone(),
-                        name: interconnect.name.clone(),
-                    });
-                    delays.default_interconnect
-                })
-        })
-        .collect();
+    // The delay of each interconnect between each pair of ends it is used with. Only looked
+    // up, never iterated.
+    let mut hop_delays: HashMap<(u32, u32), u32> = HashMap::new();
+    let mut hop_delay = |hop: u32, ends: u32| -> u32 {
+        if let Some(&delay) = hop_delays.get(&(hop, ends)) {
+            return delay;
+        }
+        let (Some(interconnect), Some(end)) = (
+            netlist.interconnects().get(hop as usize),
+            netlist.hop_ends().get(ends as usize),
+        ) else {
+            return 0;
+        };
+        let from = format!("{}.{}", end.from_type, end.from_port);
+        let to = format!("{}.{}", end.to_type, end.to_port);
+        let delay = delays
+            .interconnect_ports(&interconnect.container, &interconnect.name, &from, &to)
+            .unwrap_or_else(|| {
+                fallbacks.insert(Fallback::Interconnect {
+                    container: interconnect.container.clone(),
+                    name: interconnect.name.clone(),
+                });
+                delays.default_interconnect
+            });
+        hop_delays.insert((hop, ends), delay);
+        delay
+    };
+    let mut path_delays = Vec::with_capacity(netlist.internal_paths().len());
+    // Clock paths are looked up too, though the clock is ideal, so that every interconnect
+    // without a delay is reported.
+    for path in netlist.internal_paths() {
+        let ends = netlist.path_hop_ends(path);
+        let delay = netlist
+            .hops(path)
+            .iter()
+            .zip(ends)
+            .fold(0u32, |sum, (&hop, &ends)| {
+                sum.saturating_add(hop_delay(hop, ends))
+            });
+        path_delays.push(delay);
+    }
 
     // The net on each pin of a placed block, to name clocks with.
     let mut block_pin_nets: HashMap<PackedPin, u32> = HashMap::new();
@@ -591,6 +807,49 @@ pub fn build_timing(
             Ok(point)
         };
 
+    // Arcs through a primitive, from each input to each output that its model connects, or to
+    // every output without a model.
+    let add_paths = |builder: &mut TimingGraphBuilder,
+                     fallbacks: &mut BTreeSet<Fallback>,
+                     primitive: &PackedPrimitive,
+                     inputs: &[PointId],
+                     outputs: &[PointId]|
+     -> Result<(), TimingError> {
+        let model = delays.model(&primitive.pb_type);
+        for (&input, &from) in primitive.inputs.iter().zip(inputs) {
+            for (&output, &to) in primitive.outputs.iter().zip(outputs) {
+                let (input_port, output_port) = (port_name(input), port_name(output));
+                if model.is_some_and(|model| !model.has_path(input_port, output_port)) {
+                    continue;
+                }
+                let delay = delays
+                    .combinational_pins(
+                        &primitive.pb_type,
+                        (input_port, input.bit),
+                        (output_port, output.bit),
+                    )
+                    .unwrap_or_else(|| {
+                        fallbacks.insert(Fallback::Combinational {
+                            pb_type: primitive.pb_type.clone(),
+                            input: input_port.to_owned(),
+                            output: output_port.to_owned(),
+                        });
+                        delays.default_combinational
+                    });
+                builder.add_cell_arc(from, to, delay)?;
+            }
+        }
+        Ok(())
+    };
+    let sequential_delays = |fallbacks: &mut BTreeSet<Fallback>, primitive: &PackedPrimitive| {
+        delays.sequential(&primitive.pb_type).unwrap_or_else(|| {
+            fallbacks.insert(Fallback::Sequential {
+                pb_type: primitive.pb_type.clone(),
+            });
+            delays.default_sequential
+        })
+    };
+
     let mut clocks: BTreeMap<String, (u32, bool)> = BTreeMap::new();
     for (index, primitive) in netlist.primitives().iter().enumerate() {
         let index = index as u32;
@@ -600,11 +859,15 @@ pub fn build_timing(
         };
         let clock = clock_of[index as usize].as_deref();
         let sequential = delays.sequential(&primitive.pb_type);
+        let model = delays.model(&primitive.pb_type);
         let role = if input_pads.contains(primitive.name.as_str()) {
             Role::InputPad
         } else if output_pads.contains(primitive.name.as_str()) {
             Role::OutputPad
-        } else if !primitive.clocks.is_empty() || sequential.is_some() {
+        } else if model.map_or(
+            !primitive.clocks.is_empty() || sequential.is_some(),
+            PrimitiveModel::is_sequential,
+        ) {
             Role::Register
         } else if primitive.inputs.is_empty() {
             Role::Constant
@@ -647,15 +910,30 @@ pub fn build_timing(
                     }
                     None => report.unclocked_registers += 1,
                 }
+                // Only a model says which paths go through a register, and which of its ports
+                // are clocked. Without one, all are clocked and none go through.
+                if let Some(model) = model {
+                    add_paths(&mut builder, &mut fallbacks, primitive, &inputs, &outputs)?;
+                    if !timed {
+                        continue;
+                    }
+                    let sequential = sequential_delays(&mut fallbacks, primitive);
+                    for (&pin, &point) in primitive.inputs.iter().zip(&inputs) {
+                        if model.is_clocked(port_name(pin)) {
+                            builder.set_capture(point, sequential.setup)?;
+                        }
+                    }
+                    for (&pin, &point) in primitive.outputs.iter().zip(&outputs) {
+                        if model.is_clocked(port_name(pin)) {
+                            builder.set_launch(point, sequential.clock_to_q)?;
+                        }
+                    }
+                    continue;
+                }
                 if !timed {
                     continue;
                 }
-                let sequential = sequential.unwrap_or_else(|| {
-                    fallbacks.insert(Fallback::Sequential {
-                        pb_type: primitive.pb_type.clone(),
-                    });
-                    delays.default_sequential
-                });
+                let sequential = sequential_delays(&mut fallbacks, primitive);
                 for &point in &inputs {
                     builder.set_capture(point, sequential.setup)?;
                 }
@@ -666,33 +944,15 @@ pub fn build_timing(
             Role::Constant => report.constant_generators += 1,
             Role::Combinational => {
                 report.combinational += 1;
-                for (&input, &from) in primitive.inputs.iter().zip(&inputs) {
-                    for (&output, &to) in primitive.outputs.iter().zip(&outputs) {
-                        let (input, output) = (port_name(input), port_name(output));
-                        let delay = delays
-                            .combinational(&primitive.pb_type, input, output)
-                            .unwrap_or_else(|| {
-                                fallbacks.insert(Fallback::Combinational {
-                                    pb_type: primitive.pb_type.clone(),
-                                    input: input.to_owned(),
-                                    output: output.to_owned(),
-                                });
-                                delays.default_combinational
-                            });
-                        builder.add_cell_arc(from, to, delay)?;
-                    }
-                }
+                add_paths(&mut builder, &mut fallbacks, primitive, &inputs, &outputs)?;
             }
         }
     }
 
-    for path in netlist.internal_paths() {
+    for (path, &delay) in netlist.internal_paths().iter().zip(&path_delays) {
         if path.clock {
             continue;
         }
-        let delay = netlist.hops(path).iter().fold(0u32, |sum, &hop| {
-            sum.saturating_add(interconnect_delays.get(hop as usize).copied().unwrap_or(0))
-        });
         let from = point_of(&mut builder, path.from)?;
         let to = point_of(&mut builder, path.to)?;
         builder.add_cell_arc(from, to, delay)?;
@@ -986,6 +1246,99 @@ mod tests {
         let mut analysis = TimingAnalysis::new(untimed.graph());
         analysis.run(untimed.graph(), &Constraints::single_clock(100).unwrap());
         assert_eq!(analysis.worst_slack(), None);
+    }
+
+    const ARCH: &str = include_str!("../../testdata/vtr/k6_N10_40nm.xml");
+
+    #[test]
+    fn the_genuine_architecture_gives_every_delay_mult_4x4_needs() {
+        let arch = crate::fpga::read_architecture(ARCH.as_bytes()).unwrap();
+        let delays = arch.delays();
+        // Spot checks against the file, in picoseconds.
+        assert_eq!(
+            delays.interconnect_ports("clb", "crossbar", "clb.I", "fle.in"),
+            Some(95)
+        );
+        assert_eq!(
+            delays.interconnect_ports("clb", "crossbar", "fle.out", "fle.in"),
+            Some(75)
+        );
+        assert_eq!(
+            delays.interconnect_ports("ble6", "mux1", "ff.Q", "ble6.out"),
+            Some(45)
+        );
+        assert_eq!(
+            delays.interconnect_ports("io", "inpad", "inpad.inpad", "io.inpad"),
+            Some(42)
+        );
+        assert_eq!(
+            delays.interconnect_ports("lut6", "complete:lut6", "lut6.in", "lut6.out"),
+            Some(398)
+        );
+        let lut: Vec<_> = (0..6)
+            .map(|bit| delays.combinational_pins("lut", ("in", bit), ("out", 0)))
+            .collect();
+        let expected = [82, 173, 261, 263, 398, 397].map(Some);
+        assert_eq!(lut, expected);
+        assert!(delays.model("lut").unwrap().has_path("in", "out"));
+        assert!(delays.model("ff").unwrap().is_sequential());
+
+        let netlist = read_netlist(MULT.as_bytes()).unwrap();
+        let timing = build_timing(&netlist, delays, &TimingOptions::default()).unwrap();
+        assert_eq!(timing.report().fallbacks, []);
+        assert_eq!(timing.report().combinational, 21);
+
+        // From a CLB's input to a LUT's input: the crossbar's 95, then three delayless
+        // directs. Out of a LUT to the CLB's output: `mux1`'s 25 from the LUT, then two more
+        // directs. From one LUT to another in the same CLB: 25 and the crossbar's 75 for a
+        // feedback, the 100 ps that the file's comments give. Pads: 42 and 14. The rest are
+        // LUT inputs.
+        let mut cell_delays = BTreeSet::new();
+        for arc in 0..timing.graph().num_arcs() {
+            let arc = timing.graph().arc(ArcId(arc)).unwrap();
+            if arc.kind == ArcKind::Cell {
+                cell_delays.insert(arc.delay);
+            }
+        }
+        let expected: BTreeSet<u32> = [14, 25, 42, 82, 95, 100, 173, 261, 263, 397, 398].into();
+        assert_eq!(cell_delays, expected);
+    }
+
+    #[test]
+    fn a_model_decides_what_is_clocked_and_what_goes_through() {
+        // A register whose `en` input goes straight through to `out` as well.
+        let text = "<block name='t' instance='FPGA_packed_netlist[0]'>\
+            <block name='r' instance='reg[0]'>\
+            <inputs><port name='d'>x</port><port name='en'>y</port></inputs>\
+            <outputs><port name='q'>r</port><port name='out'>s</port></outputs></block>\
+            </block>";
+        let netlist = read_netlist(text.as_bytes()).unwrap();
+        let mut delays = LogicDelays::new();
+        delays.set_model(
+            "reg",
+            PrimitiveModel::new()
+                .with_clocked("d")
+                .with_clocked("q")
+                .with_path("en", "out"),
+        );
+        delays.set_combinational_ports("reg", "en", "out", 7);
+        let timing = build_timing(&netlist, &delays, &TimingOptions::default()).unwrap();
+        assert_eq!(timing.report().registers, 1);
+        let reg = primitive(&netlist, "r", "reg");
+        let point = |port| points_of(&timing, &netlist, reg, port)[0];
+        let graph = timing.graph();
+        assert!(graph.capture_margin(point("d")).is_some());
+        assert!(graph.capture_margin(point("en")).is_none());
+        assert!(graph.launch_offset(point("q")).is_some());
+        assert!(graph.launch_offset(point("out")).is_none());
+        assert_eq!(graph.fanin(point("q")), &[]);
+        let through = graph.fanin(point("out"));
+        assert_eq!(through.len(), 1);
+        assert_eq!(graph.arc(through[0]).unwrap().delay, 7);
+        assert_eq!(graph.arc(through[0]).unwrap().from, point("en"));
+        // Without the model, the clock pin is what made it a register, and there is none.
+        let unmodelled = build_timing(&netlist, &LogicDelays::new(), &TimingOptions::default());
+        assert_eq!(unmodelled.unwrap().report().combinational, 1);
     }
 
     #[test]

@@ -86,14 +86,16 @@ assumes:
 
 - **Structure from the netlist.** Primitives and the interconnect between them come from
   the `.net` file's own record of how each block was filled in. Pads are known from the
-  circuit's port lists, registers from a connected clock, and anything else is
-  combinational from every input to every output.
-- **Delays inside blocks from the caller.** Architecture files are not read yet, so
-  `fpga::LogicDelays` takes the numbers they hold (interconnect `delay_constant`, LUT
-  delays, `T_setup`, `T_clock_to_Q`) by the names the netlist uses. Anything not given
-  is 0, or a default the caller sets, and is listed in the result. With nothing given,
-  only routing delay counts, which still says which connections lie on which
-  register-to-register paths.
+  circuit's port lists, and registers and combinational paths from the architecture's
+  models (or, without them, from a connected clock).
+- **Delays inside blocks from the architecture file.** `fpga::read_architecture` reads
+  VPR's `arch.xml` into `fpga::LogicDelays`: interconnect `delay_constant` and
+  `delay_matrix` by port, primitive delays by pin, `T_setup`, `T_clock_to_Q` and
+  `T_hold`, and the models that say which primitive is a register. Times become whole
+  picoseconds exactly, from the decimal text. VPR's rewriting of LUT and memory classes
+  into made-up blocks is reproduced, since the `.net` file names those. The caller can
+  also give the numbers by hand. Anything not given is 0, or a default the caller sets,
+  and is listed in the result.
 - **One ideal clock.** Every clock is timed as one, so paths between unrelated clocks are
   timed (pessimistically) where VPR's default would not time them. One clock's registers
   can be timed alone instead. Real multi-clock analysis needs clock domains in
@@ -102,15 +104,13 @@ assumes:
   the documentation of `fpga::build_timing`'s module.
 
 Measured on `mult_4x4` over a generated island fabric of 8 to 20 tracks (VPR's own
-device graph for it isn't available): with 12 or more tracks, routes with and without
-timing both reach the critical path that every connection would have alone, 1840 ps under
-the test's made-up delays. With 8 and 10 tracks, timing-driven routing came out 3% and
-1.4% slower than routing without timing (2165 against 2100 ps, 1865 against 1840 ps), and
-starting it from exact delays in place of lower bounds changed nothing. The design is
-small, with three logic blocks, so this says little either way about timing-driven
-routing. It does say that, on congested designs, the engine stopping at the first legal
-iteration leaves timing to chance, which is the next thing to look at. Comparing with
-VPR needs VPR's device graphs and architecture delays.
+device graph for it isn't available), with the delays inside blocks from
+`k6_N10_40nm.xml`, the architecture it was packed for: with 12 or more tracks,
+timing-driven routing reaches the critical path that every connection would have alone,
+2033 ps, against 2097 ps without timing, 3% faster and for less wire. With 8 and 10
+tracks both come out at 2097 ps, and starting from exact delays in place of lower bounds
+changes nothing. The design is small, with three logic blocks, so this says little about
+timing-driven routing in general. Comparing with VPR needs VPR's device graphs.
 
 ## ASIC
 

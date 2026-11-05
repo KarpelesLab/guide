@@ -140,6 +140,23 @@ pub struct Interconnect {
     pub name: String,
 }
 
+/// Where one hop through interconnect comes from and goes to, by the type of each block and
+/// the port: `clb` and `I` to `fle` and `in` for `clb.I[5]->crossbar` on an input of an
+/// `fle`. This is how VPR's `delay_constant` tells the edges of one interconnect apart, with
+/// its `in_port` and `out_port`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct HopEnds {
+    /// The type of the block the hop comes from: the block that holds the interconnect, or
+    /// one inside it.
+    pub from_type: String,
+    /// The port it comes from.
+    pub from_port: String,
+    /// The type of the block it goes to.
+    pub to_type: String,
+    /// The port it goes to.
+    pub to_port: String,
+}
+
 /// A netlist read from a `.net` file.
 ///
 /// Blocks and nets have the same numbers as in VPR: blocks are numbered in file order, and
@@ -162,6 +179,9 @@ pub struct PackedNetlist {
     paths: Vec<InternalPath>,
     interconnects: Vec<Interconnect>,
     hops: Vec<u32>,
+    /// By hop, an index in `hop_ends`.
+    hop_end_of: Vec<u32>,
+    hop_ends: Vec<HopEnds>,
     unresolved_pins: u64,
 }
 
@@ -244,6 +264,20 @@ impl PackedNetlist {
         self.hops
             .get(path.hops_start as usize..path.hops_end as usize)
             .unwrap_or(&[])
+    }
+
+    /// Returns where each hop of [`hops`](PackedNetlist::hops) comes from and goes to, as
+    /// indices in [`hop_ends`](PackedNetlist::hop_ends), in the same order.
+    pub fn path_hop_ends(&self, path: &InternalPath) -> &[u32] {
+        self.hop_end_of
+            .get(path.hops_start as usize..path.hops_end as usize)
+            .unwrap_or(&[])
+    }
+
+    /// Returns the ends of hops that [`path_hop_ends`](PackedNetlist::path_hop_ends) refers
+    /// to, each once, in the order they were first met.
+    pub fn hop_ends(&self) -> &[HopEnds] {
+        &self.hop_ends
     }
 
     /// Returns how many connected pins inside blocks could not be traced back to what drives
@@ -408,6 +442,7 @@ pub fn read_netlist<R: BufRead>(reader: R) -> Result<PackedNetlist, ImportError>
     let mut net_numbers = HashMap::new();
     let mut port_numbers = HashMap::new();
     let mut interconnect_numbers = HashMap::new();
+    let mut hop_end_numbers = HashMap::new();
     // The root's inputs, outputs and clocks, by `PinRole`.
     let mut root_lists = [String::new(), String::new(), String::new()];
 
@@ -548,6 +583,7 @@ pub fn read_netlist<R: BufRead>(reader: R) -> Result<PackedNetlist, ImportError>
                                         &mut netlist,
                                         &mut port_numbers,
                                         &mut interconnect_numbers,
+                                        &mut hop_end_numbers,
                                     );
                                 }
                             }
@@ -648,6 +684,31 @@ fn interconnect_number(
     number
 }
 
+/// Adds the ends of a hop to the netlist's numbering, and returns the number.
+fn hop_end_number(
+    netlist: &mut PackedNetlist,
+    numbers: &mut HashMap<HopEnds, u32>,
+    ends: HopEnds,
+) -> u32 {
+    if let Some(&number) = numbers.get(&ends) {
+        return number;
+    }
+    let number = netlist.hop_ends.len() as u32;
+    netlist.hop_ends.push(ends.clone());
+    numbers.insert(ends, number);
+    number
+}
+
+/// One hop of a walk back from a pin: the block holding the interconnect, its name, and the
+/// block and port on either side.
+#[derive(Clone)]
+struct Hop<'a> {
+    holder: usize,
+    interconnect: &'a str,
+    from: (usize, &'a str),
+    to: (usize, &'a str),
+}
+
 /// Records the primitives inside a placed block and the paths between them and the block's
 /// pins.
 ///
@@ -664,6 +725,7 @@ fn trace_internals(
     netlist: &mut PackedNetlist,
     port_numbers: &mut HashMap<String, u32>,
     interconnect_numbers: &mut HashMap<(String, String), u32>,
+    hop_end_numbers: &mut HashMap<HopEnds, u32>,
 ) {
     let mut blocks = Vec::new();
     flatten(frame, None, &mut blocks);
@@ -726,7 +788,7 @@ fn trace_internals(
         blocks: &[FlatBlock<'a>],
         drivers: &HashMap<FlatPin<'a>, (&'a str, bool)>,
         start: FlatPin<'a>,
-        hops: &mut Vec<(usize, &'a str)>,
+        hops: &mut Vec<Hop<'a>>,
     ) -> Option<FlatPin<'a>> {
         let mut current = start;
         for _ in 0..=drivers.len() {
@@ -760,7 +822,12 @@ fn trace_internals(
                 }
                 None => return None,
             };
-            hops.push((holder, interconnect));
+            hops.push(Hop {
+                holder,
+                interconnect,
+                from: (next, port),
+                to: (current.0, current.1),
+            });
             current = (next, port, bit);
         }
         None
@@ -817,14 +884,22 @@ fn trace_internals(
         let from = pin(netlist, source);
         let to = pin(netlist, sink);
         let hops_start = netlist.hops.len() as u32;
-        for &(holder, interconnect) in path_hops.iter().rev() {
+        for hop in path_hops.iter().rev() {
             let number = interconnect_number(
                 netlist,
                 interconnect_numbers,
-                blocks[holder].frame.pb_type(),
-                interconnect,
+                blocks[hop.holder].frame.pb_type(),
+                hop.interconnect,
             );
             netlist.hops.push(number);
+            let ends = HopEnds {
+                from_type: blocks[hop.from.0].frame.pb_type().to_owned(),
+                from_port: hop.from.1.to_owned(),
+                to_type: blocks[hop.to.0].frame.pb_type().to_owned(),
+                to_port: hop.to.1.to_owned(),
+            };
+            let ends = hop_end_number(netlist, hop_end_numbers, ends);
+            netlist.hop_end_of.push(ends);
         }
         netlist.paths.push(InternalPath {
             from,

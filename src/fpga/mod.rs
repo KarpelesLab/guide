@@ -8,6 +8,7 @@
 //! | Packed netlist (`.net`) | [`read_netlist`] | [`PackedNetlist`] |
 //! | Placement (`.place`) | [`read_placement`] | [`Placement`] |
 //! | The last three together | [`resolve_nets`] | [`Design`], holding [`Net`]s |
+//! | Architecture (`arch.xml`), for the delays inside blocks | [`read_architecture`] | [`Architecture`], holding [`LogicDelays`] |
 //! | The packed netlist again, and delays inside blocks | [`build_timing`] | [`DesignTiming`], holding a [`TimingGraph`] and the engine's [`Connection`]s |
 //! | Routes (`.route`) | [`write_route`] | VPR's text format |
 //!
@@ -113,8 +114,9 @@
 //!   [`RrGraph::step_delay`]. No delay here has been compared with VPR's.
 //! - **Timing graphs** from [`build_timing`] follow the structure that the packed netlist
 //!   records inside each block, which was checked against `mult_4x4`, `multiclock` and
-//!   `unconnected`. The delays inside blocks are the caller's, as the architecture file
-//!   isn't read, and all clocks are timed as one. See [what VPR does
+//!   `unconnected`. The delays inside blocks come from [`read_architecture`], which was
+//!   checked against `k6_N10_40nm.xml`, the architecture `mult_4x4` was packed for, and
+//!   against VPR's source for what it makes of LUT and memory classes. See [what VPR does
 //!   differently](build_timing#what-vpr-does-differently).
 //!
 //! # Limitations
@@ -157,6 +159,7 @@ use core::fmt;
 use std::error::Error;
 use std::io;
 
+mod arch;
 mod design;
 mod netlist;
 mod place;
@@ -168,10 +171,11 @@ mod xml;
 #[cfg(test)]
 mod tests;
 
+pub use arch::{ArchPrimitive, Architecture, PrimitiveKind, read_architecture};
 pub use design::{Design, GlobalPort, NetInfo, NetOptions, NetPin, NetStatus, resolve_nets};
 pub use netlist::{
-    Interconnect, InternalPath, InternalPin, PackedBlock, PackedNet, PackedNetlist, PackedPin,
-    PackedPrimitive, PortPin, read_netlist,
+    HopEnds, Interconnect, InternalPath, InternalPin, PackedBlock, PackedNet, PackedNetlist,
+    PackedPin, PackedPrimitive, PortPin, read_netlist,
 };
 pub use place::{PlacedBlock, Placement, read_placement};
 pub use route_file::{RouteFileError, RouteHeader, RouteSummary, write_route};
@@ -180,8 +184,8 @@ pub use rr_graph::{
     PinClassKind, RrDelayBound, RrGraph, RrStats, Segment, Switch, SwitchKind, read_rr_graph,
 };
 pub use timing::{
-    ClockDomain, ClockSelection, DesignTiming, Fallback, LogicDelays, SequentialDelays,
-    TimingOptions, TimingReport, build_timing,
+    ClockDomain, ClockSelection, DesignTiming, Fallback, LogicDelays, PrimitiveModel,
+    SequentialDelays, TimingOptions, TimingReport, build_timing,
 };
 
 /// Why a file could not be imported.

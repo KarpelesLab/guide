@@ -79,6 +79,8 @@ correctly; identical output across thread counts and OSes, enforced in CI.
 First real domain and the first test of the abstraction.
 
 - Import VTR routing resource graphs and pre-placed designs.
+- Delays inside blocks, and which primitives are registers, from VTR architecture files.
+  Done, through `fpga::read_architecture`.
 - Non-configurable edges (shorts), taken as a whole set by the engine and checked by the
   validator. Done, through `RoutingSpace::non_configurable`.
 - Static timing analysis with a pluggable delay model.

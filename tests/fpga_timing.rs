@@ -1,10 +1,10 @@
 //! From VTR's files to a timing-driven route and back, with no glue in between.
 //!
-//! `mult_4x4`'s netlist and placement are VPR's own. The device graph isn't in VTR's
-//! repository, since VPR builds it when it runs, so this generates one in VPR's format: the
-//! same grid, tile types and pin names as `k6_N10_40nm.xml`, which `mult_4x4` was packed for,
-//! with channels, switch boxes and delays of its own. None of its numbers come from that
-//! architecture.
+//! `mult_4x4`'s netlist and placement are VPR's own, and so are the delays inside its blocks,
+//! read from `k6_N10_40nm.xml`, which `mult_4x4` was packed for. The device graph isn't in
+//! VTR's repository, since VPR builds it when it runs, so this generates one in VPR's format:
+//! the same grid, tile types and pin names as that architecture, with channels, switch boxes
+//! and routing delays of its own. None of the routing's numbers come from the architecture.
 
 #![cfg(feature = "fpga")]
 
@@ -15,8 +15,8 @@ use std::collections::{BinaryHeap, HashMap};
 use guide::engine::{EngineOptions, Outcome, route_timed, route_timed_parallel};
 use guide::fpga::{
     Design, DesignTiming, LogicDelays, NetOptions, RouteHeader, RrGraph, SequentialDelays,
-    TimingOptions, build_timing, read_netlist, read_placement, read_rr_graph, resolve_nets,
-    write_route,
+    TimingOptions, build_timing, read_architecture, read_netlist, read_placement, read_rr_graph,
+    resolve_nets, write_route,
 };
 use guide::id::NodeId;
 use guide::net::Net;
@@ -26,6 +26,7 @@ use guide::validate::check;
 
 const NET: &str = include_str!("../testdata/vtr/mult_4x4.net");
 const PLACE: &str = include_str!("../testdata/vtr/mult_4x4.place");
+const ARCH: &str = include_str!("../testdata/vtr/k6_N10_40nm.xml");
 
 /// The tile types of `k6_N10_40nm.xml` as VPR writes them in a graph: an `io` is 8
 /// positions of `outpad`, `inpad` and `clock`, each its own class, and a `clb` has 40
@@ -264,31 +265,18 @@ fn island_device(size: u32, tracks: u32) -> String {
     )
 }
 
-/// Delays inside the blocks for this test, in picoseconds. They are of a plausible size for
-/// a 40 nm part, but they are made up, and are not those of `k6_N10_40nm.xml`.
+/// The delays inside the blocks, from `k6_N10_40nm.xml` itself: the very file that VPR packed
+/// `mult_4x4` against, as the netlist's `architecture_id` says.
 fn test_delays() -> LogicDelays {
-    let mut delays = LogicDelays::new();
-    delays.set_combinational("lut", 250);
-    delays.set_sequential(
-        "ff",
-        SequentialDelays {
-            clock_to_q: 120,
-            setup: 60,
-        },
+    let arch = read_architecture(ARCH.as_bytes()).unwrap();
+    let delays = arch.into_delays();
+    assert_eq!(
+        delays.sequential("ff"),
+        Some(SequentialDelays {
+            clock_to_q: 124,
+            setup: 66,
+        })
     );
-    for (container, name, delay) in [
-        ("clb", "crossbar", 90),
-        ("clb", "clbouts1", 0),
-        ("fle", "direct1", 0),
-        ("fle", "direct2", 0),
-        ("ble6", "direct1", 0),
-        ("ble6", "mux1", 25),
-        ("lut6", "direct:lut6", 0),
-        ("io", "inpad", 0),
-        ("io", "outpad", 0),
-    ] {
-        delays.set_interconnect(container, name, delay);
-    }
     delays
 }
 
@@ -482,7 +470,7 @@ fn fastest(timed: &impl DelaySpace<Node = NodeId>, net: &Net<NodeId>, sink: usiz
 /// bounds, to see whether better first estimates matter.
 ///
 /// This only asserts what must hold: every run is legal and no faster than the second
-/// reference. On this design it doesn't show timing helping: see `docs/domains.md`.
+/// reference. `docs/domains.md` has what it printed.
 #[test]
 fn measure_timing_on_mult_4x4() {
     for tracks in [8, 10, 12, 16, 20] {

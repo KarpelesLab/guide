@@ -30,7 +30,7 @@ regressions fail review. The metrics:
 | --- | --- | --- | --- |
 | FPGA routing | Routability, minimum channel width, critical-path delay, wirelength, runtime | VPR, nextpnr | VTR benchmarks, Titan23 |
 | FPGA placement | Post-route wirelength and delay, legality, runtime | VPR, nextpnr | VTR benchmarks, ISPD 2016/2017 contest sets |
-| PCB routing | Completion, DRC violations, via count, track length, runtime | Freerouting | Open-source KiCad boards (no standard suite exists, so we will have to curate one) |
+| PCB routing | Completion, DRC violations, via count, track length, runtime | Freerouting | Open-source KiCad boards (no standard suite exists, so we curate one: [testdata/kicad](testdata/kicad/README.md)) |
 | PCB placement | Routed completion and length on the result, courtyard legality | Hand-placed originals | Same curated boards |
 | ASIC global routing | Overflow, wirelength | Published contest results | ISPD 2007/2008 |
 
@@ -97,7 +97,7 @@ First real domain and the first test of the abstraction.
 **Exit:** the VTR benchmarks route legally, and first results are published
 against VPR for channel width, delay and runtime.
 
-### M4: Geometry layer
+### M4: Geometry layer (done)
 
 Everything PCB routing needs that FPGA routing did not, as an optional feature.
 polyclip already provides polygons with arcs, offsetting, booleans and exact distance
@@ -108,8 +108,15 @@ queries, so this milestone builds on it instead of reimplementing them.
 - Design rule model: widths, clearances, via definitions, per-net-class and
   per-layer overrides.
 
+- Reading KiCad boards and their rules, to check them (`kicad` feature).
+
 **Exit:** a clearance checker that agrees with KiCad's DRC on the curated boards
 (differences investigated, each one explained or fixed).
+
+Met on nine [curated boards](testdata/kicad/README.md), under their own rules and with raised
+clearances: of KiCad 10.0.3's 3450 findings we make 3448, and all 23 differences, 2 of KiCad's
+and 21 of ours, are explained, mostly by limits of KiCad's own check
+([results](docs/benchmarks.md#pcb-clearance-checks-against-kicad)).
 
 ### M5: PCB routing MVP
 
@@ -134,7 +141,8 @@ Each item is independently useful, and they can land in any order.
 - Blind, buried and micro vias; impedance-driven width per layer stack.
 - Copper zones and plane-aware routing.
 - Net topology constraints (daisy chain, star, T).
-- Direct KiCad board-file reading.
+- Direct KiCad board-file reading for routing, and writing routes back. Reading for
+  clearance checks came with M4.
 
 **Exit:** a real high-density board (DDR memory or equivalent) routes with its
 constraints satisfied; results beat Freerouting on the curated suite.

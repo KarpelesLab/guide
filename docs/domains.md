@@ -46,7 +46,9 @@ to stress the `RoutingSpace` abstraction
 
 **Interchange.** Specctra DSN/SES comes first, since it is the established autorouter
 interface and is how KiCad talks to Freerouting. Direct KiCad files follow, and
-IPC-2581 or ODB++ on demand.
+IPC-2581 or ODB++ on demand. Reading KiCad boards for clearance checks exists already, behind
+the `kicad` feature: the copper, the nets, and the rules from the project, as KiCad's own DRC
+sees them.
 
 ## FPGA
 

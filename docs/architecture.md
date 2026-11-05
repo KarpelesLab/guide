@@ -30,7 +30,8 @@ have no geometry (FPGA) do not pay for the geometry layer.
 
 These start as modules in the single `guide` crate, with optional domains and
 interchange formats behind Cargo features. We can split into a workspace later if
-compile times or release cadence call for it.
+compile times or release cadence call for it. So far: `fpga` for VTR's formats, `pcb` for
+the geometry layer, and `kicad`, which implies `pcb`, for reading KiCad boards into it.
 
 ## Target consumers
 
@@ -179,7 +180,8 @@ retrofitting it is close to impossible.
 
 **The validator is independent.** A bug shared by router and checker is invisible,
 so the validator shares the problem model only. On PCBs, we also cross-check against
-KiCad's own DRC.
+KiCad's own DRC: the clearance check agrees with KiCad's on nine real boards, but for
+differences that are each explained ([results](benchmarks.md#pcb-clearance-checks-against-kicad)).
 
 **Struct-of-arrays and indices, not pointers.** Large FPGA graphs make cache
 behaviour a first-order concern. Nodes and nets are newtyped integer indices, which
@@ -187,7 +189,8 @@ also keeps the borrow checker out of graph algorithms.
 
 **No dependencies in the core.** The default build has no external crates and no
 external solver, which keeps it usable from reticle. Parsers and optional
-integrations go behind features.
+integrations go behind features, and are written here, with no dependencies either: the
+KiCad reader has its own S-expression and JSON parsers.
 
 **Geometry uses polyclip, but does not expose it.** polyclip already provides polygon
 booleans, offsetting, arcs and exact distance queries, so a feature-gated geometry

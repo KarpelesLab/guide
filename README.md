@@ -70,6 +70,9 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 ```
 
+With `kicad-cli` 10.0.3 installed, `GUIDE_KICAD=1 cargo test --release --all-features` also
+compares the PCB clearance check with KiCad's own, live.
+
 Commits follow [Conventional Commits](https://www.conventionalcommits.org/).
 [release-plz](https://release-plz.dev/) derives versions and the changelog from
 them: pushing to `master` opens or updates a release PR, and merging that PR

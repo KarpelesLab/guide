@@ -1,10 +1,11 @@
 # Benchmarks
 
-This is the start of the benchmark report that the [roadmap](../ROADMAP.md) asks for. So far
-it covers only the engine, on synthetic instances that this repository generates. Those are
+This is the start of the benchmark report that the [roadmap](../ROADMAP.md) asks for. Most of
+it covers the engine, on synthetic instances that this repository generates. Those are
 useful for tuning, for catching regressions and for checking what the docs say. They are **not
 evidence about real designs**, and the [comparisons that would be](#fpga-and-pcb-comparisons)
-have not been done.
+have not been done. The one comparison on real designs so far is of the
+[clearance check against KiCad's](#pcb-clearance-checks-against-kicad), on real boards.
 
 ## Running
 
@@ -518,13 +519,150 @@ path and can pay for it. On these instances, 10 iterations at 0.9 is a reasonabl
 
 ## FPGA and PCB comparisons
 
-**Not yet done.** None of the comparisons in the
-[roadmap](../ROADMAP.md#measuring-best) has been run, so there are no results for these rows.
+**Not yet done**, but for the first row. None of the comparisons of results in the
+[roadmap](../ROADMAP.md#measuring-best) has been run, so there are no results for the others.
 
 | Domain | Compared against | Benchmarks | Status |
 | --- | --- | --- | --- |
 | FPGA routing | VPR, nextpnr | VTR benchmarks, Titan23 | Not yet done |
 | FPGA placement | VPR, nextpnr | VTR benchmarks, ISPD 2016/2017 contest sets | Not yet done |
-| PCB routing | Freerouting | Curated open-source KiCad boards | Not yet done |
+| PCB clearance checks | KiCad 10.0.3 | [Curated open-source KiCad boards](../testdata/kicad/README.md) | [Done](#pcb-clearance-checks-against-kicad) |
+| PCB routing | Freerouting | The same boards | Not yet done |
 | PCB placement | Hand-placed originals | The same boards | Not yet done |
 | ASIC global routing | Published contest results | ISPD 2007/2008 | Not yet done |
+
+## PCB clearance checks against KiCad
+
+This is the comparison that M4's exit criterion asks for: `geom::drc::check`, on the
+[curated boards](../testdata/kicad/README.md) as `kicad::read` reads them, against
+`kicad-cli pcb drc` from KiCad 10.0.3, finding by finding.
+
+### How
+
+Nine real boards, of two to four layers, from 38 items to over 1200. Each is checked
+under its own rules, and again with every net class's clearance raised by up to 0.5 mm, which
+leaves the copper alone and turns it into many more findings: fine-pitch pins, zone fills
+around pads, arcs next to vias. The raise stops where KiCad would report 499 clearance
+violations, as KiCad then stops looking (`EXTENDED_ERROR_LIMIT` in its `drc_engine.cpp`), and
+which ones it has found by then depends on its threads. Its other checks stop at 199.
+
+A finding is a kind (a clearance violation, a short, a hole clearance violation or holes too
+close) and the UUIDs of the two items. Ours are made with
+[`KICAD_CLEARANCE_SLACK`](../src/geom/drc.rs) and an arc tolerance of 10 nm. KiCad runs with
+`--severity-all --all-track-errors`, so that it reports every violation of every track, and the
+violations that the projects exclude.
+
+```text
+cargo test --features kicad curated_boards_match              # against KiCad's recorded results
+GUIDE_KICAD=1 cargo test --release --features kicad curated   # against kicad-cli, live, 30 s
+```
+
+The second also checks that KiCad's results are still those recorded, re-checks the arcs
+described below, and reads each board again after `kicad-cli pcb upgrade` has saved it in
+KiCad 10's format, which must give the same board.
+
+### Results
+
+| Board | Rules | KiCad's findings | Ours | Both | Explained differences | Unexplained |
+| --- | --- | --- | --- | --- | --- | --- |
+| GB-BRK-LINK-A | own | 0 | 0 | 0 | - | 0 |
+| GB-BRK-LINK-A | +0.1 mm | 3 | 3 | 3 | - | 0 |
+| GB-BRK-LINK-A | +0.3 mm | 19 | 19 | 19 | - | 0 |
+| GB-BRK-LINK-A | +0.5 mm | 30 | 30 | 30 | - | 0 |
+| GB-LIVE32 | own | 0 | 0 | 0 | - | 0 |
+| GB-LIVE32 | +0.05 mm | 339 | 339 | 339 | - | 0 |
+| TS4231-BOB | own | 0 | 0 | 0 | - | 0 |
+| TS4231-BOB | +0.1 mm | 12 | 12 | 12 | - | 0 |
+| TS4231-BOB | +0.3 mm | 78 | 78 | 78 | - | 0 |
+| TS4231-BOB | +0.5 mm | 141 | 141 | 141 | - | 0 |
+| lisn | own | 0 | 0 | 0 | - | 0 |
+| lisn | +0.1 mm | 43 | 43 | 43 | - | 0 |
+| lisn | +0.3 mm | 256 | 261 | 256 | 5 zone sweep | 0 |
+| lisn | +0.5 mm | 357 | 362 | 357 | 5 zone sweep | 0 |
+| placebo | own | 2 | 2 | 2 | - | 0 |
+| placebo | +0.1 mm | 122 | 123 | 122 | 1 arc | 0 |
+| placebo | +0.2 mm | 272 | 274 | 272 | 2 arc | 0 |
+| flea | own | 199 | 199 | 199 | - | 0 |
+| flea | +0.05 mm | 477 | 477 | 477 | - | 0 |
+| nk3-nrf-mini | own | 1 | 5 | 1 | 4 pad holes | 0 |
+| nk3-nrf-mini | +0.05 mm | 418 | 420 | 416 | 4 pad holes, 2 text | 0 |
+| udb-s | own | 4 | 4 | 4 | - | 0 |
+| udb-s | +0.1 mm | 281 | 281 | 281 | - | 0 |
+| udb-s | +0.3 mm | 392 | 392 | 392 | - | 0 |
+| isi-channel | own | 0 | 0 | 0 | - | 0 |
+| isi-channel | +0.5 mm | 4 | 4 | 4 | - | 0 |
+
+In all, 26 checks: KiCad made 3450 findings and we made 3469, of which 3448 are the same. Of
+the 23 differences, 2 are KiCad's only and 21 ours only, and each is explained below, from
+KiCad's source at tag `10.0.3`. None is unexplained. The boards with findings under their own rules are as
+their designers left them: about half of `flea`'s 199 are between pads of no net in one
+footprint, `U1`, which KiCad checks against each other.
+
+### The differences
+
+**Zone sweep** (10, on `lisn`: ours only). KiCad's `testZonesToZones` compares the fills of two
+zones only if their bounding boxes meet, with no margin for the clearance, so it never compares
+fills side by side across a gap. Where it does compare them, it sorts their edges from left to
+right and stops measuring at the first edge that starts beyond the end of the one it measures
+from, however close that is. The test emulates this code, and it finds none of the ten, which
+are five pairs of fills about 0.5 mm apart, under clearances of 0.7 mm and then 0.9 mm.
+
+**Arc** (3, on `placebo`: ours only). KiCad's `SHAPE_ARC::NearestPoints`, in `shape_arc.cpp`,
+gets two cases wrong. Against a circle, such as a via or a round pad, it considers each end of
+the arc only if `sliceContainsPoint` accepts it, which tests the end's angle in floating point
+and can refuse the arc's own end. Against another arc, the loops that measure each arc's ends
+against the other arc assign the running minimum without comparing with it, so a later, farther
+candidate replaces a nearer one. The three are an arc and a round pad 0.2753 mm apart, under
+two sets of rules, and two arcs 0.3856 mm apart, under a clearance of 0.4 mm. For the first,
+KiCad measures 0.4723 mm, which is the distance from the arc's start, where its end is nearer;
+with the same arc written the other way round, KiCad measures 0.2753 mm. Each of the three is
+checked again by KiCad itself, with those arcs split into segments within 5 nm of them, and
+KiCad then reports it.
+
+**Pad holes** (8, on `nk3-nrf-mini`: ours only). KiCad's `testPadClearances` checks each pair of
+pads once per layer, from whichever of the two its threads reach first, and `testPadAgainstItem`
+then checks only the other pad's hole against this one's copper, and only where this one has
+copper on the layer. So a pad's hole can go unchecked against another pad, depending on the
+order. These are two non-plated mounting holes, 0.11 mm from the edge of the custom touch pad on
+each side of the board, under a hole clearance of 0.15 mm. KiCad does report a third mounting
+hole of the board against a pad, test pad `TP1`.
+
+**Text** (2, on `nk3-nrf-mini`: KiCad's only). Text on copper, here layer numbers on the inner
+layers, too close to a zone. `kicad::read` doesn't read text, which needs KiCad's fonts, and
+says so in its warnings.
+
+### What agreeing took
+
+Most of the work was in finding what KiCad checks, rather than in geometry. In the order they
+were found:
+
+- KiCad stops at 499 clearance violations, as above, which first looked like it missed pads.
+- Two nets of a differential pair, such as `D+` and `D-`, may come as close as their class's gap,
+  when that is less than its clearance; a larger gap changes nothing. This is
+  [`RuleSpec::pairs`](../src/geom/rules.rs).
+- A zone's own clearance is what it was filled with, and not a rule. Pads' and footprints' own
+  clearances are, and replace the classes' (`drc::clearance`).
+- Copper of no net is two things to KiCad: tracks, vias and graphics of no net are one net,
+  never checked against each other, but pads and zones of no net are checked against each
+  other. And KiCad calls copper touching a short only where it can name two nets.
+- KiCad gives tracks the net of the pads they touch, whatever the file says, as it loads a
+  board, which `kicad::read` does too.
+- KiCad doesn't report a hole as too close to copper that the hole's own pad is already reported
+  against.
+- Arcs: our own arc tolerance of 100 nm made two findings within KiCad's slack; at 10 nm there
+  are none.
+
+### What this does not show
+
+- The boards were mostly clean, as released boards are, so most findings come from raised
+  clearances. That tests the geometry and the rules, but not every way a real board goes wrong:
+  none of them has a short between two nets, so no short is compared with KiCad's. (The random
+  boards of `geom`'s own KiCad test avoid shorts too, as KiCad gives copper with no pad the
+  net of what it touches, which hides them.)
+- Both checks read the same files, through different code: an item we read wrong in the same
+  way KiCad does would not show here. Reading each board again in KiCad 10's format, as the
+  live test does, catches some of that.
+- Custom rules (`.kicad_dru` files) are not read, and none of these boards has one. Neither are
+  padstacks with other shapes on other layers, text, Bézier curves, nor pads and vias without
+  copper where nothing connects to them; `kicad::read` warns of each.
+- Copper edge clearance, solder mask and silkscreen checks are KiCad's, and not compared.

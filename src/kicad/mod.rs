@@ -191,4 +191,6 @@ impl fmt::Display for KicadError {
 impl std::error::Error for KicadError {}
 
 #[cfg(test)]
+mod curated_tests;
+#[cfg(test)]
 mod tests;

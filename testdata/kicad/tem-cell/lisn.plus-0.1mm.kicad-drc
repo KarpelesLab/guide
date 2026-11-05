@@ -1,0 +1,47 @@
+# The clearance findings of kicad-cli pcb drc 10.0.3 on this board, with every net
+# class's clearance raised by 0.1 mm: the kind of finding, and the UUIDs of its items.
+# Lines starting with `arc` are findings that KiCad misses on arcs, but makes once
+# those arcs are split into segments within 5 nm of them.
+clearance 02b9ee0d-5110-42f3-b31f-1ae802d5cca4 ace9a9ed-47fd-4f46-a94e-04c180814942
+clearance 03864bc4-00ae-4c46-9225-75eeb67296d2 7b2ecd52-94e8-47c5-89cb-3f7abbcc9321
+clearance 03864bc4-00ae-4c46-9225-75eeb67296d2 bc683ba2-f36d-43ef-91b7-cc12f790e392
+clearance 057b8212-fc5c-4acf-87ec-76e7f676b21c 6304cbd4-463d-4620-b090-2f42289ee9c5
+clearance 06ccebd6-c718-4023-a957-df9de9be96b0 63ba4ffa-bbb7-4f32-9159-d24cae3c2ec7
+clearance 09ee863e-b7c0-441c-a7ef-4f917d44ed40 47f311c1-d089-495b-91a2-3f50b780d74f
+clearance 16cb5ef4-afeb-4f42-b910-af5ddbb88f57 9bcb07df-a800-482a-a76a-e52f68101fc4
+clearance 16cb5ef4-afeb-4f42-b910-af5ddbb88f57 bb3d0263-cbad-4fd3-84b2-f802a6c9d755
+clearance 16cb5ef4-afeb-4f42-b910-af5ddbb88f57 d783b38b-1963-40a2-93e5-7607ace04f83
+clearance 182fa6af-ba8e-4a89-a13d-892af224c8be 2787e5fa-acba-4d05-8c82-18d51ae07249
+clearance 182fa6af-ba8e-4a89-a13d-892af224c8be 71220b4e-df55-4a35-bb27-2420b655a66d
+clearance 182fa6af-ba8e-4a89-a13d-892af224c8be b02d4dc2-f518-4911-a524-b42966af7c7d
+clearance 182fa6af-ba8e-4a89-a13d-892af224c8be e0780eed-8412-4cf3-8257-7bd2f6c54f5d
+clearance 182fa6af-ba8e-4a89-a13d-892af224c8be ebe57807-d79e-4e14-b7c6-4c3832eec353
+clearance 191ae15b-5f58-43ca-8179-a4869bf4c818 f78f9082-9be2-4283-948f-a06fdd875393
+clearance 23fffd62-3e11-446b-a521-31f791e1a91d 7abf0209-4655-424f-b707-33ec8a2019fc
+clearance 2787e5fa-acba-4d05-8c82-18d51ae07249 8cfb2182-000b-4864-8cf8-0b5425c65e4c
+clearance 2ed8ddb3-d608-4d13-94f2-4a97ba1b2b60 6304cbd4-463d-4620-b090-2f42289ee9c5
+clearance 3878ec77-821d-450a-b1b0-9b8d9e37b0f4 ace9a9ed-47fd-4f46-a94e-04c180814942
+clearance 3878ec77-821d-450a-b1b0-9b8d9e37b0f4 e30a9f27-31a4-42a6-8176-b34e6422def4
+clearance 44a9bf13-67d2-45ca-90a7-1a9c9ab41fa6 9bcb07df-a800-482a-a76a-e52f68101fc4
+clearance 4b2d26b1-504b-49e0-ac45-668f1fc66024 d783b38b-1963-40a2-93e5-7607ace04f83
+clearance 4b4916e3-0397-43bd-a09e-8a913aa3edcb 88066573-d0ee-4a74-8662-9560063a1068
+clearance 4b4916e3-0397-43bd-a09e-8a913aa3edcb e5d29f4a-8afa-44a7-a40b-df44d0809065
+clearance 62ac5ef0-0420-4fa4-8eeb-8e55965ac3d4 b02d4dc2-f518-4911-a524-b42966af7c7d
+clearance 63ba4ffa-bbb7-4f32-9159-d24cae3c2ec7 88066573-d0ee-4a74-8662-9560063a1068
+clearance 63ba4ffa-bbb7-4f32-9159-d24cae3c2ec7 bf3ef28b-6e27-4597-8661-75033c8b9c2f
+clearance 6dd46b35-f487-4d58-a522-74a41094152f 7abf0209-4655-424f-b707-33ec8a2019fc
+clearance 71220b4e-df55-4a35-bb27-2420b655a66d d783b38b-1963-40a2-93e5-7607ace04f83
+clearance 7606ed64-8b2c-40ea-945f-c73247e6052b 7b2ecd52-94e8-47c5-89cb-3f7abbcc9321
+clearance 78c439e3-9bd3-43dd-9355-c0d921193a52 7b2ecd52-94e8-47c5-89cb-3f7abbcc9321
+clearance 78c439e3-9bd3-43dd-9355-c0d921193a52 bc683ba2-f36d-43ef-91b7-cc12f790e392
+clearance 7b32eecb-ce07-4619-ae4b-f6727d8f9403 d783b38b-1963-40a2-93e5-7607ace04f83
+clearance 88066573-d0ee-4a74-8662-9560063a1068 f78f9082-9be2-4283-948f-a06fdd875393
+clearance 95a36e90-30c5-49e4-93b9-36401ff5c6db bb3d0263-cbad-4fd3-84b2-f802a6c9d755
+clearance ace9a9ed-47fd-4f46-a94e-04c180814942 bb3d0263-cbad-4fd3-84b2-f802a6c9d755
+clearance ace9a9ed-47fd-4f46-a94e-04c180814942 faca284d-e3bf-4fad-afa5-66c60288a1e5
+clearance ace9a9ed-47fd-4f46-a94e-04c180814942 fd861e8e-79fd-4d5c-867a-75291c467020
+clearance bb3d0263-cbad-4fd3-84b2-f802a6c9d755 e30a9f27-31a4-42a6-8176-b34e6422def4
+clearance be94097f-2bf7-45df-bcbd-9cb5bb1a0f58 d783b38b-1963-40a2-93e5-7607ace04f83
+clearance e30a9f27-31a4-42a6-8176-b34e6422def4 faca284d-e3bf-4fad-afa5-66c60288a1e5
+clearance e30a9f27-31a4-42a6-8176-b34e6422def4 fd861e8e-79fd-4d5c-867a-75291c467020
+clearance e5d29f4a-8afa-44a7-a40b-df44d0809065 f78f9082-9be2-4283-948f-a06fdd875393

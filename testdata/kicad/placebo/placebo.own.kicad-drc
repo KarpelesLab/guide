@@ -1,0 +1,6 @@
+# The clearance findings of kicad-cli pcb drc 10.0.3 on this board, with every net
+# class's clearance raised by 0 mm: the kind of finding, and the UUIDs of its items.
+# Lines starting with `arc` are findings that KiCad misses on arcs, but makes once
+# those arcs are split into segments within 5 nm of them.
+clearance 02f494d3-877d-4f0c-8721-bbc2fd875f6f 70a4628c-97de-4fe1-8f26-b42825dfc84f
+clearance 41889f09-8f7a-4b96-8c0c-f53fa9491701 70a4628c-97de-4fe1-8f26-b42825dfc84f

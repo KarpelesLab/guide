@@ -1,0 +1,16 @@
+# The clearance findings of kicad-cli pcb drc 10.0.3 on this board, with every net
+# class's clearance raised by 0.1 mm: the kind of finding, and the UUIDs of its items.
+# Lines starting with `arc` are findings that KiCad misses on arcs, but makes once
+# those arcs are split into segments within 5 nm of them.
+clearance 0150b603-dc31-4114-b748-a0d20775c773 a4e0b6e0-7c61-48fe-a389-60363cee8cae
+clearance 0150b603-dc31-4114-b748-a0d20775c773 b1899552-d622-413f-bbe3-2924d89e6dd7
+clearance 0150b603-dc31-4114-b748-a0d20775c773 fc7a11f1-6f68-4d85-84cd-de55ef9be0ec
+clearance 1b6191fd-d274-421f-95b3-9d6a41255fc2 c76ef2b7-0022-4b1e-b8f2-9dcd6524ca9d
+clearance 216f9ae4-93af-4951-b0bb-91760888c5b0 791f9876-8612-424f-a950-9cc8b07c8072
+clearance 216f9ae4-93af-4951-b0bb-91760888c5b0 b1899552-d622-413f-bbe3-2924d89e6dd7
+clearance 216f9ae4-93af-4951-b0bb-91760888c5b0 fc7a11f1-6f68-4d85-84cd-de55ef9be0ec
+clearance 340ce7bd-6c77-4f18-8307-32c07a228bfe 791f9876-8612-424f-a950-9cc8b07c8072
+clearance 340ce7bd-6c77-4f18-8307-32c07a228bfe c1669b69-996e-4217-affd-d6aa6bfd6afe
+clearance 69008a10-bb67-4299-bf5e-375476427f1d a4e0b6e0-7c61-48fe-a389-60363cee8cae
+clearance 69008a10-bb67-4299-bf5e-375476427f1d c1669b69-996e-4217-affd-d6aa6bfd6afe
+clearance 69008a10-bb67-4299-bf5e-375476427f1d fc7a11f1-6f68-4d85-84cd-de55ef9be0ec

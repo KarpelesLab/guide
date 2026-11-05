@@ -15,7 +15,7 @@ use crate::id::NodeId;
 use crate::net::Terminal;
 use crate::search::Search;
 use crate::space::graph::{DelayBound, Graph, GraphBuilder, LowerBound, TimedGraph};
-use crate::timing::{PointId, TimingGraphBuilder};
+use crate::timing::{ClockId, PointId, TimingGraphBuilder};
 use proptest::prelude::*;
 
 fn net(id: u32, nodes: &[u32]) -> Net<NodeId> {
@@ -206,6 +206,72 @@ fn a_critical_net_takes_the_fast_dear_path_and_an_uncritical_one_the_cheap_slow_
     assert_eq!(timing.metrics.critical_path_delay, Some(200));
     assert_eq!(timing.metrics.worst_slack, Some(-200));
     assert_eq!(timing.metrics.total_negative_slack, -200);
+}
+
+/// The diamonds of [`two_diamonds`] with a register at each end: net 0 goes from clock 1 to
+/// clock 2, and net 1 stays within clock 2.
+fn two_clocked_diamonds(constraints: Constraints) -> (Graph, Vec<Net<NodeId>>, TimingDriven) {
+    let (graph, nets, _) = two_diamonds(0.99);
+    let mut builder = TimingGraphBuilder::new();
+    let mut register_pair = |launch: u32, capture: u32| {
+        let (q, d) = (builder.add_point().unwrap(), builder.add_point().unwrap());
+        builder.set_launch_on(q, ClockId(launch), 0).unwrap();
+        builder.set_capture_on(d, ClockId(capture), 0).unwrap();
+        builder.add_net_arc(q, d, 0).unwrap()
+    };
+    let across = register_pair(1, 2);
+    let within = register_pair(2, 2);
+    let connections = vec![
+        Connection {
+            net: NetId(0),
+            terminal: 1,
+            arc: across,
+        },
+        Connection {
+            net: NetId(1),
+            terminal: 1,
+            arc: within,
+        },
+    ];
+    let timing = TimingDriven::new(builder.build(), constraints, connections, cost(0.01));
+    (graph, nets, timing)
+}
+
+#[test]
+fn paths_between_clocks_are_only_critical_when_constrained() {
+    let per_clock = Constraints::per_clock(&[(ClockId(1), 0), (ClockId(2), 0)]).unwrap();
+    let cases = [
+        // As one clock, both are critical, and both take the fast way.
+        (Constraints::single_clock(0).unwrap(), [0.99, 0.99], [2, 6]),
+        // Per clock, the crossing isn't timed, so it goes for cost.
+        (per_clock.clone(), [0.0, 0.99], [1, 6]),
+        // Unless it is constrained.
+        (
+            per_clock
+                .constrain_by_edges(ClockId(1), ClockId(2))
+                .unwrap(),
+            [0.99, 0.99],
+            [2, 6],
+        ),
+    ];
+    for (constraints, criticality, through) in cases {
+        let (graph, nets, timing) = two_clocked_diamonds(constraints.clone());
+        let space = graph.with_step_delays(diamond_delay);
+        let engine = Engine::with_timing(&space, &nets, EngineOptions::default(), timing.clone());
+        let engine = engine.unwrap();
+        assert_eq!(engine.connection_criticality(0), Some(criticality[0]));
+        assert_eq!(engine.connection_criticality(1), Some(criticality[1]));
+
+        let outcome = route_checked(&space, &nets, EngineOptions::default(), &timing);
+        assert!(outcome.is_success());
+        for (net, node) in [(0, through[0]), (1, through[1])] {
+            let route = outcome.routes.route(NetId(net)).unwrap();
+            assert!(route.contains(NodeId(node)), "{constraints:?}: net {net}");
+        }
+        // The fast way is 200 ps, so the worst slack is -200 whatever is timed.
+        let metrics = outcome.timing.unwrap().metrics;
+        assert_eq!(metrics.worst_slack, Some(-200), "{constraints:?}");
+    }
 }
 
 #[test]

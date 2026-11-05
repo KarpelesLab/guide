@@ -353,7 +353,7 @@ fn mult_4x4_routes_timing_driven_from_vtr_files() {
     let timed = flow.device.timed_graph();
     // No SDC: as VPR does without one, ask for the fastest circuit.
     let constraints = Constraints::single_clock(0).unwrap();
-    let driven = flow.timing.timing_driven(&flow.design, constraints);
+    let driven = flow.timing.timing_driven(&flow.design, constraints.clone());
     let connections = driven.connections.clone();
     assert_eq!(
         connections.len(),
@@ -506,7 +506,7 @@ fn measure_timing_on_mult_4x4() {
             ("timing-driven from the best alone", &alone, 0.99),
         ];
         for (label, start, max_criticality) in runs {
-            let mut driven = start.timing_driven(&flow.design, constraints);
+            let mut driven = start.timing_driven(&flow.design, constraints.clone());
             // A maximum of 0 makes every connection uncritical, which routes exactly as
             // without timing but still measures the result.
             driven.criticality = CriticalityOptions::new(1, max_criticality).unwrap();

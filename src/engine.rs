@@ -170,8 +170,8 @@
 //! 48% more expansions.
 //!
 //! Each connection, from a driver to one of its sinks, has a criticality `c`, from a
-//! [`TimingAnalysis`] of the routes so far as [`crate::timing`] describes, and the search for
-//! it pays for a step
+//! [`TimingAnalysis`] of the routes so far as [`crate::timing`] describes, against one clock
+//! or [per clock](crate::timing#clock-domains), and the search for it pays for a step
 //!
 //! ```text
 //! (1 - c) * price + c * delay_cost * delay
@@ -630,7 +630,10 @@ pub struct TimingDriven {
     /// iteration's criticalities come, and the engine replaces those of the connections it
     /// routes. Other net arcs keep their delays throughout.
     pub graph: TimingGraph,
-    /// What the timing graph is checked against.
+    /// What the timing graph is checked against: one clock for every path, or a constraint
+    /// per pair of clocks, in which case each connection's criticality is the highest over
+    /// the pairs it is on, each against its own constraint. See [clock
+    /// domains](crate::timing#clock-domains).
     pub constraints: Constraints,
     /// The connections that routes decide the delays of. A sink that is not listed has a
     /// criticality of 0, and a net arc that is not listed keeps its delay.

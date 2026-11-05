@@ -84,6 +84,9 @@ First real domain and the first test of the abstraction.
 - Non-configurable edges (shorts), taken as a whole set by the engine and checked by the
   validator. Done, through `RoutingSpace::non_configurable`.
 - Static timing analysis with a pluggable delay model.
+- Multiple clock domains, each against its own constraint, with paths between clocks
+  untimed unless constrained, as VPR does without an SDC file. Done, through
+  `timing::Constraints::per_clock` and `fpga::DesignTiming::vpr_constraints`.
 - Timing-driven routing using net criticality, optionally going on after the first legal
   result to shorten the critical path (`EngineOptions::timing_iterations`, measured in
   `docs/benchmarks.md`).

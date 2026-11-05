@@ -15,7 +15,9 @@ use crate::cost::Cost;
 use crate::engine::{Connection, TimingDriven};
 use crate::id::{NetId, NodeId};
 use crate::space::DelaySpace;
-use crate::timing::{ArcId, Constraints, PointId, TimingError, TimingGraph, TimingGraphBuilder};
+use crate::timing::{
+    ArcId, ClockId, Constraints, PointId, TimingError, TimingGraph, TimingGraphBuilder,
+};
 
 /// The delays of a register, in picoseconds.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -323,10 +325,15 @@ impl LogicDelays {
 }
 
 /// Which clocks' registers to time.
+///
+/// Either way, each register is on its clock's [`ClockId`], and the pads are on a clock of
+/// their own: see [clock domains](build_timing#clock-domains). The
+/// [`Constraints`] decide which of those are timed against what.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ClockSelection {
-    /// All of them, as if they were one clock.
+    /// All of them: as if they were one clock with [`Constraints::single_clock`], and each
+    /// on its own with [`DesignTiming::vpr_constraints`] or other constraints per clock.
     #[default]
     All,
     /// Only the registers of the clock net with this name, and the pads. Other registers
@@ -338,7 +345,7 @@ pub enum ClockSelection {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct TimingOptions {
-    /// Which registers to time. The default is all of them, under one clock.
+    /// Which registers to time. The default is all of them, each on its own clock domain.
     pub clocks: ClockSelection,
 }
 
@@ -420,12 +427,78 @@ pub struct DesignTiming {
     net_offsets: Vec<u32>,
     net_arcs: Vec<ArcId>,
     report: TimingReport,
+    /// Every clock's name and domain, in order of name.
+    clock_ids: Vec<(String, ClockId)>,
+    /// The domain of registers without a clock, if there are any.
+    unclocked: Option<ClockId>,
 }
+
+/// The clock domain of the pads: VPR's `virtual_io_clock`.
+const IO_CLOCK: ClockId = ClockId(0);
 
 impl DesignTiming {
     /// Returns the timing graph.
     pub fn graph(&self) -> &TimingGraph {
         &self.graph
+    }
+
+    /// Returns the clock domain of the pads, which is VPR's `virtual_io_clock`: always
+    /// `ClockId(0)`.
+    pub fn io_clock(&self) -> ClockId {
+        IO_CLOCK
+    }
+
+    /// Returns the clock domain of the registers on a clock net, by the net's name as
+    /// [`TimingReport::clocks`] has it.
+    pub fn clock(&self, name: &str) -> Option<ClockId> {
+        self.clock_ids
+            .binary_search_by(|(known, _)| known.as_str().cmp(name))
+            .ok()
+            .map(|index| self.clock_ids[index].1)
+    }
+
+    /// Returns the clock domain of the registers that have no clock, if there are any. No
+    /// constraints from [`vpr_constraints`](DesignTiming::vpr_constraints) time it.
+    pub fn unclocked(&self) -> Option<ClockId> {
+        self.unclocked
+    }
+
+    /// Returns the constraints that VPR uses without an SDC file, with every clock at
+    /// `period` picoseconds. VPR's default is 0, the fastest circuit.
+    ///
+    /// | Netlist clocks | Constraints |
+    /// | --- | --- |
+    /// | None | The pads, on the I/O clock |
+    /// | One | The pads and the registers, as one clock |
+    /// | More | Each clock on its own, and the pads on the I/O clock, which is timed with each, at the [closest edges](Constraints::constrain_by_edges). Paths between two netlist clocks are not timed |
+    ///
+    /// That is VPR's documented default, from its `timing_constraints` page. Only the clocks
+    /// that [`TimingReport::clocks`] says are timed count, so with
+    /// [`ClockSelection::Only`], one clock and the pads are timed together, as VPR's
+    /// single-clock default has it.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the period is above [`MAX_CLOCK_PERIOD`](crate::timing::MAX_CLOCK_PERIOD).
+    pub fn vpr_constraints(&self, period: u64) -> Result<Constraints, TimingError> {
+        let clocks: Vec<ClockId> = self
+            .report
+            .clocks
+            .iter()
+            .filter(|clock| clock.timed)
+            .filter_map(|clock| self.clock(&clock.name))
+            .collect();
+        let mut periods = vec![(IO_CLOCK, period)];
+        periods.extend(clocks.iter().map(|&clock| (clock, period)));
+        let mut constraints = Constraints::per_clock(&periods)?;
+        // With one period for all, the closest edges are a period apart, so the pads are timed
+        // with one netlist clock exactly as if they were on it.
+        for &clock in &clocks {
+            constraints = constraints
+                .constrain_by_edges(IO_CLOCK, clock)?
+                .constrain_by_edges(clock, IO_CLOCK)?;
+        }
+        Ok(constraints)
     }
 
     /// Returns the timing graph, to change its delays.
@@ -622,15 +695,11 @@ enum Role {
 ///   memory with an asynchronous read, loses the combinational ones. An unmodelled
 ///   combinational primitive connects every input to every output, which is right for a LUT
 ///   but may be pessimistic for a hard block.
-/// - **Each clock is its own domain.** VPR's documented default without an SDC file
-///   constrains every netlist clock separately, and does not time paths between two clocks.
-///   The engine's timing has one ideal clock, so by default, with [`ClockSelection::All`],
-///   every register and pad is timed against that one clock, and paths from one clock's
-///   registers to another's are timed as if they had the same clock. That is pessimistic,
-///   never optimistic, for a circuit whose clocks are unrelated. [`ClockSelection::Only`]
-///   times one clock's registers (and the pads) and leaves the others untimed, which is what
-///   VPR's analysis of that one domain sees. [`TimingReport::clocks`] says which clocks there
-///   are.
+/// - **Clocks take constraints to be told apart.** VPR's default without an SDC file times
+///   each netlist clock separately, and does not time paths between two of them. That is
+///   what [`DesignTiming::vpr_constraints`] gives: see [clock domains](#clock-domains).
+///   [`Constraints::single_clock`] instead times everything as one clock, paths between
+///   clocks included, which is pessimistic, never optimistic, for unrelated clocks.
 /// - **The clock is ideal**, as with VPR's default `--clock_modeling ideal`: it reaches every
 ///   register at once, and clock nets have no delay. Like other global nets, they are not
 ///   routed by default; see [`NetOptions`](super::NetOptions).
@@ -638,6 +707,27 @@ enum Role {
 ///   `--router_initial_timing`. Here they are 0, or the delay lower bound of the space after
 ///   [`estimate_delays`](DesignTiming::estimate_delays). A lower bound is optimistic, so the
 ///   first iteration's criticalities are a little low.
+///
+/// # Clock domains
+///
+/// Each register launches and captures on the [`ClockId`] of its clock, and the pads on
+/// `ClockId(0)`, VPR's `virtual_io_clock`: see [`DesignTiming::io_clock`] and
+/// [`DesignTiming::clock`]. Clocks are numbered from 1 in order of name, which is the order of
+/// [`TimingReport::clocks`], and registers without a clock come after them, as
+/// [`DesignTiming::unclocked`] says.
+///
+/// What is timed against what is then up to the [`Constraints`]:
+///
+/// - [`Constraints::single_clock`] times every path against one period, whatever its clocks,
+///   which is how everything was timed before there were clock domains.
+/// - [`DesignTiming::vpr_constraints`] gives VPR's defaults without an SDC file: each clock
+///   on its own, the pads with each, and nothing between two netlist clocks.
+/// - [`Constraints::per_clock`] takes any other periods, and pairs of clocks can be
+///   constrained on top, at the [closest edges](Constraints::constrain_by_edges) or by hand.
+///
+/// [`ClockSelection::Only`] times one clock's registers and the pads, whatever the
+/// constraints, and leaves the other registers untimed. [`TimingReport::clocks`] says which
+/// clocks there are.
 ///
 /// # Determinism
 ///
@@ -850,6 +940,24 @@ pub fn build_timing(
         })
     };
 
+    // The pads are on clock 0, each clock by name on the next, and registers without one on
+    // the clock after those.
+    let clock_names: BTreeSet<&str> = clock_of.iter().flatten().map(String::as_str).collect();
+    let clock_ids: Vec<(String, ClockId)> = clock_names
+        .iter()
+        .zip(1..)
+        .map(|(&name, id)| (name.to_owned(), ClockId(id)))
+        .collect();
+    let unclocked_id = ClockId(clock_ids.len() as u32 + 1);
+    let clock_id = |name: Option<&str>| {
+        name.and_then(|name| {
+            clock_ids
+                .binary_search_by(|(known, _)| known.as_str().cmp(name))
+                .ok()
+        })
+        .map_or(unclocked_id, |index| clock_ids[index].1)
+    };
+
     let mut clocks: BTreeMap<String, (u32, bool)> = BTreeMap::new();
     for (index, primitive) in netlist.primitives().iter().enumerate() {
         let index = index as u32;
@@ -858,6 +966,7 @@ pub fn build_timing(
             pin,
         };
         let clock = clock_of[index as usize].as_deref();
+        let domain = clock_id(clock);
         let sequential = delays.sequential(&primitive.pb_type);
         let model = delays.model(&primitive.pb_type);
         let role = if input_pads.contains(primitive.name.as_str()) {
@@ -888,13 +997,13 @@ pub fn build_timing(
             Role::InputPad => {
                 report.input_pads += 1;
                 for &point in &outputs {
-                    builder.set_launch(point, delays.input_delay)?;
+                    builder.set_launch_on(point, IO_CLOCK, delays.input_delay)?;
                 }
             }
             Role::OutputPad => {
                 report.output_pads += 1;
                 for &point in &inputs {
-                    builder.set_capture(point, delays.output_delay)?;
+                    builder.set_capture_on(point, IO_CLOCK, delays.output_delay)?;
                 }
             }
             Role::Register => {
@@ -920,12 +1029,12 @@ pub fn build_timing(
                     let sequential = sequential_delays(&mut fallbacks, primitive);
                     for (&pin, &point) in primitive.inputs.iter().zip(&inputs) {
                         if model.is_clocked(port_name(pin)) {
-                            builder.set_capture(point, sequential.setup)?;
+                            builder.set_capture_on(point, domain, sequential.setup)?;
                         }
                     }
                     for (&pin, &point) in primitive.outputs.iter().zip(&outputs) {
                         if model.is_clocked(port_name(pin)) {
-                            builder.set_launch(point, sequential.clock_to_q)?;
+                            builder.set_launch_on(point, domain, sequential.clock_to_q)?;
                         }
                     }
                     continue;
@@ -935,10 +1044,10 @@ pub fn build_timing(
                 }
                 let sequential = sequential_delays(&mut fallbacks, primitive);
                 for &point in &inputs {
-                    builder.set_capture(point, sequential.setup)?;
+                    builder.set_capture_on(point, domain, sequential.setup)?;
                 }
                 for &point in &outputs {
-                    builder.set_launch(point, sequential.clock_to_q)?;
+                    builder.set_launch_on(point, domain, sequential.clock_to_q)?;
                 }
             }
             Role::Constant => report.constant_generators += 1,
@@ -988,7 +1097,9 @@ pub fn build_timing(
         pins,
         net_offsets,
         net_arcs,
+        unclocked: (report.unclocked_registers > 0).then_some(unclocked_id),
         report,
+        clock_ids,
     })
 }
 
@@ -996,7 +1107,7 @@ pub fn build_timing(
 mod tests {
     use super::*;
     use crate::fpga::read_netlist;
-    use crate::timing::{ArcKind, TimingAnalysis};
+    use crate::timing::{ArcKind, CriticalityOptions, TimingAnalysis};
 
     const MULT: &str = include_str!("../../testdata/vtr/mult_4x4.net");
     const MULTICLOCK: &str = include_str!("../../testdata/vtr/multiclock.net");
@@ -1302,6 +1413,118 @@ mod tests {
         }
         let expected: BTreeSet<u32> = [14, 25, 42, 82, 95, 100, 173, 261, 263, 397, 398].into();
         assert_eq!(cell_delays, expected);
+    }
+
+    /// `multiclock` has two clocks, and paths between them both ways: from `FFA` on `clk`
+    /// through `to_FFD` to `FFD` on `clk2`, and from `FFB` on `clk2` through `to_FFC` to `FFC`
+    /// on `clk`. Its blocks have the names of `k6_N10_40nm`, though it wasn't packed against
+    /// that very file, so those delays stand in for its own.
+    #[test]
+    fn each_clock_of_multiclock_is_its_own_domain() {
+        let netlist = read_netlist(MULTICLOCK.as_bytes()).unwrap();
+        let arch = crate::fpga::read_architecture(ARCH.as_bytes()).unwrap();
+        let mut timing = build_timing(&netlist, arch.delays(), &TimingOptions::default()).unwrap();
+        assert_eq!(timing.report().fallbacks, []);
+        set_all_net_delays(&mut timing, 100);
+        let (clk, clk2) = (timing.clock("clk").unwrap(), timing.clock("clk2").unwrap());
+        assert_eq!(
+            (timing.io_clock(), clk, clk2),
+            (ClockId(0), ClockId(1), ClockId(2))
+        );
+        assert_eq!(timing.clock("in1"), None);
+        assert_eq!(timing.unclocked(), None);
+        let graph = timing.graph();
+        for (name, clock) in [("FFA", clk), ("FFC", clk), ("FFB", clk2), ("FFD", clk2)] {
+            let ff = primitive(&netlist, name, "ff");
+            let d = points_of(&timing, &netlist, ff, "D")[0];
+            let q = points_of(&timing, &netlist, ff, "Q")[0];
+            assert_eq!(graph.capture_clock(d), Some(clock), "{name}");
+            assert_eq!(graph.launch_clock(q), Some(clock), "{name}");
+        }
+        let pad = primitive(&netlist, "in1", "inpad");
+        let pad = points_of(&timing, &netlist, pad, "inpad")[0];
+        assert_eq!(graph.launch_clock(pad), Some(timing.io_clock()));
+
+        let vpr = timing.vpr_constraints(1000).unwrap();
+        assert_eq!(vpr.constraint(clk, clk), Some(1000));
+        assert_eq!(vpr.constraint(clk, clk2), None);
+        assert_eq!(vpr.constraint(clk2, clk), None);
+        assert_eq!(vpr.constraint(timing.io_clock(), clk2), Some(1000));
+        assert_eq!(vpr.constraint(clk2, timing.io_clock()), Some(1000));
+        let single = Constraints::single_clock(1000).unwrap();
+        let both = vpr
+            .clone()
+            .constrain_by_edges(clk, clk2)
+            .unwrap()
+            .constrain_by_edges(clk2, clk)
+            .unwrap();
+
+        let analyse = |constraints: &Constraints| {
+            let mut analysis = TimingAnalysis::new(graph);
+            analysis.run(graph, constraints);
+            analysis
+        };
+        let (single, vpr, both) = (analyse(&single), analyse(&vpr), analyse(&both));
+        // The worst path is within `clk`, from `FFA` to `FFC`, whatever the constraints.
+        for analysis in [&single, &vpr, &both] {
+            assert_eq!(analysis.worst_slack(), Some(292));
+            let path = analysis.critical_path().unwrap();
+            let end = timing.pin(path.end()).unwrap();
+            let ffc = primitive(&netlist, "FFC", "ff");
+            assert!(matches!(end, InternalPin::Primitive { primitive, .. } if primitive == ffc));
+        }
+
+        // The two connections between the logic blocks only carry paths between the clocks.
+        // VPR's default leaves them untimed, and so uncritical.
+        let options = CriticalityOptions::default();
+        let crossing: Vec<ArcId> = graph
+            .net_arcs()
+            .iter()
+            .copied()
+            .filter(|&arc| vpr.arc_slack(arc).is_none() && single.arc_slack(arc).is_some())
+            .collect();
+        assert_eq!(crossing.len(), 2);
+        for &arc in &crossing {
+            let info = graph.arc(arc).unwrap();
+            let blocks = [info.from, info.to].map(|point| match timing.pin(point) {
+                Some(InternalPin::Block(pin)) => {
+                    netlist.blocks()[pin.block as usize].pb_type.clone()
+                }
+                _ => String::new(),
+            });
+            assert_eq!(blocks, ["clb", "clb"]);
+            assert_eq!(vpr.arc_criticality(arc, &options), 0.0);
+            assert!(single.arc_criticality(arc, &options) > 0.0);
+            // Timed again once the crossings are constrained: 1000 - 66 - 627. Its pair's
+            // only path is this one, whose capture point is required at 1000 - 66, and the
+            // criticality is against that, not against the worst path of `clk`.
+            assert_eq!(both.arc_slack(arc), Some(307));
+            let raw = CriticalityOptions::new(1, 1.0).unwrap();
+            assert_eq!(both.arc_criticality(arc, &raw), 627.0 / 934.0);
+            // As one clock, against the output pads, which are required at 1000.
+            assert_eq!(single.arc_criticality(arc, &raw), 693.0 / 1000.0);
+        }
+        // With the arcs inside the blocks on those paths, 8 arcs are only timed as one clock.
+        // Every other arc is timed alike either way, as all the periods are the same.
+        let mut untimed = 0;
+        for arc in 0..graph.num_arcs() {
+            let arc = ArcId(arc);
+            match (vpr.arc_slack(arc), single.arc_slack(arc)) {
+                (None, Some(_)) => untimed += 1,
+                (per_clock, one_clock) => assert_eq!(per_clock, one_clock, "{arc:?}"),
+            }
+        }
+        assert_eq!(untimed, 8);
+
+        // `Only` leaves `clk2`'s registers untimed, and then VPR's default for one clock
+        // times the pads with `clk`.
+        let only = TimingOptions {
+            clocks: ClockSelection::Only("clk".into()),
+        };
+        let timing = build_timing(&netlist, arch.delays(), &only).unwrap();
+        let constraints = timing.vpr_constraints(0).unwrap();
+        assert_eq!(constraints.constraint(clk, timing.io_clock()), Some(0));
+        assert_eq!(constraints.constraint(clk2, clk2), None);
     }
 
     #[test]

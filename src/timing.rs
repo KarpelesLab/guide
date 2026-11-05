@@ -134,6 +134,44 @@
 //! fastest circuit. With no capture margins, the shift then turns the raw criticality of an
 //! arc into `longest path through it / longest path of all`.
 //!
+//! # Clock domains
+//!
+//! Every launch and capture point is on a clock, a [`ClockId`]: `ClockId(0)` unless
+//! [`set_launch_on`](TimingGraphBuilder::set_launch_on) or
+//! [`set_capture_on`](TimingGraphBuilder::set_capture_on) says otherwise. What a path is
+//! checked against depends on the [`Constraints`]:
+//!
+//! - [`Constraints::single_clock`] ignores the clocks, and checks every path against one
+//!   period, as if they were all one clock. A graph with one clock gives the same results
+//!   either way, to the bit.
+//! - [`Constraints::per_clock`] gives each clock a period, and checks a path launched on one
+//!   clock and captured by another only if that pair was constrained, with
+//!   [`constrain`](Constraints::constrain) or
+//!   [`constrain_by_edges`](Constraints::constrain_by_edges). By default, then, paths
+//!   between two clocks are not timed, which is what VPR does without an SDC file. A pair's
+//!   constraint takes the place of `T` in [the model](#the-model).
+//!
+//! Per clock, the analysis follows VPR's, as Tatum, its timing analyser, tags arrival times
+//! by launching clock and required times by capturing clock:
+//!
+//! - Arrival times are propagated once for each clock that launches in a timed pair, and
+//!   required times once for each clock that captures in one, against a constraint of 0,
+//!   which a pair's constraint then shifts. So propagation costs a pass per such clock,
+//!   and working out slacks and criticalities a pass per pair.
+//! - The slack of a point or arc is the worst over the timed pairs, the worst slack is the
+//!   worst over all of them, and the total negative slack adds up each pair's capture points
+//!   on their own, as VPR's `find_setup_tns` does.
+//! - **Criticality is per pair**: with the formula above, each pair's `worst_slack` and
+//!   `max_required` are its own, and a point or arc takes the highest criticality over the
+//!   pairs it is on. That is VPR's `calc_relaxed_criticality`, and it means each clock is
+//!   pushed against its own constraint: the worst path of a slow clock is as critical as the
+//!   worst path of a fast one.
+//! - The critical path is the worst path of any pair, the lowest capture point winning ties
+//!   as before and then the first pair in order of launch and capture clock.
+//!   [`arrival`](TimingAnalysis::arrival) and [`required`](TimingAnalysis::required) are the
+//!   latest and earliest over the pairs, so a point's slack can be higher than the one minus
+//!   the other.
+//!
 //! # Determinism
 //!
 //! Results are a pure function of the graph, its delays and the constraints, and no hash
@@ -164,8 +202,10 @@
 //! # Performance
 //!
 //! A run is a linear pass in each direction over one flat array of arcs sorted by level,
-//! then one more to work out arc slacks. After [`TimingAnalysis::new`],
-//! [`run`](TimingAnalysis::run) does not allocate.
+//! then one more to work out arc slacks. After [`TimingAnalysis::new`], a
+//! [`run`](TimingAnalysis::run) on single-clock constraints does not allocate. Constraints per
+//! clock take a pass per clock or pair, as [clock domains](#clock-domains) says, and allocate
+//! on their first run. The measurements below are for one clock.
 //!
 //! There is no incremental mode, because a full run is not what limits a router. See the
 //! [measurements](#measurements).
@@ -200,11 +240,10 @@
 //!
 //! # What is not handled
 //!
-//! - **Multiple clocks, generated clocks, clock uncertainty and skew.** All launch and
-//!   capture points share one ideal clock. Launch and capture records are private, and
-//!   [`Constraints`] has private fields, so a clock can be added to each without breaking
-//!   callers. Per-clock analysis would then keep separate worst slacks and maximum required
-//!   times per launch and capture pair, as VPR does.
+//! - **Generated clocks, clock uncertainty, skew and phase.** Every clock is ideal, with an
+//!   edge at 0 and then one every period, and reaches its registers at once. A constraint
+//!   between two clocks can stand in for a known phase, as [`Constraints::constrain`] takes
+//!   any number.
 //! - **False paths and multicycle paths.** These would also arrive through [`Constraints`].
 //!   Until then, the coarse way to remove a path is to leave its arcs out of the graph.
 //! - **Hold analysis.** Only the maximum delay is propagated, so this finds setup violations
@@ -296,6 +335,14 @@ define_timing_id! {
     ArcId
 }
 
+define_timing_id! {
+    /// Identifies a clock domain: the clock that a launch or capture point is timed against.
+    /// See [clock domains](self#clock-domains).
+    ///
+    /// The numbers are the caller's to choose. Points added without one are on `ClockId(0)`.
+    ClockId
+}
+
 /// The largest clock period [`Constraints`] accepts, in picoseconds: 2^61 ps, about 27 days.
 pub const MAX_CLOCK_PERIOD: u64 = 1 << 61;
 
@@ -334,12 +381,12 @@ pub enum TimingError {
         /// The rejected arc.
         arc: ArcId,
     },
-    /// A point already launches paths. There is only one clock, so one offset per point.
+    /// A point already launches paths. A point launches on one clock, with one offset.
     DuplicateLaunch {
         /// The rejected point.
         point: PointId,
     },
-    /// A point already captures paths. There is only one clock, so one margin per point.
+    /// A point already captures paths. A point captures on one clock, with one margin.
     DuplicateCapture {
         /// The rejected point.
         point: PointId,
@@ -358,6 +405,19 @@ pub enum TimingError {
         /// The rejected value.
         max: f64,
     },
+    /// A clock was given two periods.
+    DuplicateClock {
+        /// The clock.
+        clock: ClockId,
+    },
+    /// A constraint needs the period of a clock that has none.
+    UnknownClock {
+        /// The clock.
+        clock: ClockId,
+    },
+    /// A pair of clocks was constrained on [`Constraints::single_clock`], which times every
+    /// path against one clock already.
+    NotPerClock,
 }
 
 impl fmt::Display for TimingError {
@@ -390,6 +450,15 @@ impl fmt::Display for TimingError {
             TimingError::InvalidMaxCriticality { max } => {
                 write!(f, "maximum criticality {max} is not between 0 and 1")
             }
+            TimingError::DuplicateClock { clock } => {
+                write!(f, "clock {} has more than one period", clock.0)
+            }
+            TimingError::UnknownClock { clock } => {
+                write!(f, "clock {} has no period", clock.0)
+            }
+            TimingError::NotPerClock => {
+                f.write_str("single-clock constraints have no pairs of clocks to constrain")
+            }
         }
     }
 }
@@ -416,22 +485,21 @@ pub struct Register {
     pub q: PointId,
 }
 
-/// A point that paths start from, with the time they start at.
-///
-/// A clock would be a field here, once there is more than one.
+/// A point that paths start from, with the time they start at and the clock they start on.
 #[derive(Clone, Copy, Debug)]
 struct Launch {
     point: PointId,
     offset: u32,
+    clock: ClockId,
 }
 
-/// A point that paths end at, with how long before the clock edge they have to.
-///
-/// A clock would be a field here, once there is more than one.
+/// A point that paths end at, with how long before the clock edge they have to, and the
+/// clock they are captured by.
 #[derive(Clone, Copy, Debug)]
 struct Capture {
     point: PointId,
     margin: u32,
+    clock: ClockId,
 }
 
 /// An arc waiting for [`TimingGraphBuilder::build`] to sort it into place.
@@ -580,12 +648,31 @@ impl TimingGraphBuilder {
     ///
     /// Returns an error if the point does not exist or already launches paths.
     pub fn set_launch(&mut self, point: PointId, offset: u32) -> Result<(), TimingError> {
+        self.set_launch_on(point, ClockId(0), offset)
+    }
+
+    /// Like [`set_launch`](TimingGraphBuilder::set_launch), on a given clock's edge. See
+    /// [clock domains](self#clock-domains).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the point does not exist or already launches paths, on any clock.
+    pub fn set_launch_on(
+        &mut self,
+        point: PointId,
+        clock: ClockId,
+        offset: u32,
+    ) -> Result<(), TimingError> {
         self.check_point(point)?;
         if self.roles[point.index()] & IS_LAUNCH != 0 {
             return Err(TimingError::DuplicateLaunch { point });
         }
         self.roles[point.index()] |= IS_LAUNCH;
-        self.launches.push(Launch { point, offset });
+        self.launches.push(Launch {
+            point,
+            offset,
+            clock,
+        });
         Ok(())
     }
 
@@ -597,12 +684,31 @@ impl TimingGraphBuilder {
     ///
     /// Returns an error if the point does not exist or already captures paths.
     pub fn set_capture(&mut self, point: PointId, margin: u32) -> Result<(), TimingError> {
+        self.set_capture_on(point, ClockId(0), margin)
+    }
+
+    /// Like [`set_capture`](TimingGraphBuilder::set_capture), by a given clock's edge. See
+    /// [clock domains](self#clock-domains).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the point does not exist or already captures paths, on any clock.
+    pub fn set_capture_on(
+        &mut self,
+        point: PointId,
+        clock: ClockId,
+        margin: u32,
+    ) -> Result<(), TimingError> {
         self.check_point(point)?;
         if self.roles[point.index()] & IS_CAPTURE != 0 {
             return Err(TimingError::DuplicateCapture { point });
         }
         self.roles[point.index()] |= IS_CAPTURE;
-        self.captures.push(Capture { point, margin });
+        self.captures.push(Capture {
+            point,
+            margin,
+            clock,
+        });
         Ok(())
     }
 
@@ -1062,7 +1168,7 @@ impl<F: Fn(ArcId) -> u32> DelayModel for F {
 /// An immutable graph of timing points and arcs, except that delays can be changed.
 ///
 /// Built by a [`TimingGraphBuilder`]. Storage is flat arrays with `u32` IDs, at 29 bytes per
-/// arc or fewer, 4 per point, and 8 per launch or capture point.
+/// arc or fewer, 4 per point, and 12 per launch or capture point.
 #[derive(Clone)]
 pub struct TimingGraph {
     num_points: u32,
@@ -1158,14 +1264,45 @@ impl TimingGraph {
 
     /// Returns a point's launch offset, if it launches paths.
     pub fn launch_offset(&self, point: PointId) -> Option<u32> {
-        let found = self.launches.binary_search_by_key(&point, |l| l.point);
-        found.ok().map(|index| self.launches[index].offset)
+        self.launch(point).map(|launch| launch.offset)
     }
 
     /// Returns a point's capture margin, if it captures paths.
     pub fn capture_margin(&self, point: PointId) -> Option<u32> {
+        self.capture(point).map(|capture| capture.margin)
+    }
+
+    /// Returns the clock a point launches paths on, if it launches paths.
+    pub fn launch_clock(&self, point: PointId) -> Option<ClockId> {
+        self.launch(point).map(|launch| launch.clock)
+    }
+
+    /// Returns the clock a point captures paths by, if it captures paths.
+    pub fn capture_clock(&self, point: PointId) -> Option<ClockId> {
+        self.capture(point).map(|capture| capture.clock)
+    }
+
+    /// Returns the clocks that launch or capture any path, in ascending order.
+    pub fn clocks(&self) -> Vec<ClockId> {
+        let mut clocks: Vec<ClockId> = self
+            .launches
+            .iter()
+            .map(|launch| launch.clock)
+            .chain(self.captures.iter().map(|capture| capture.clock))
+            .collect();
+        clocks.sort_unstable();
+        clocks.dedup();
+        clocks
+    }
+
+    fn launch(&self, point: PointId) -> Option<&Launch> {
+        let found = self.launches.binary_search_by_key(&point, |l| l.point);
+        found.ok().map(|index| &self.launches[index])
+    }
+
+    fn capture(&self, point: PointId) -> Option<&Capture> {
         let found = self.captures.binary_search_by_key(&point, |c| c.point);
-        found.ok().map(|index| self.captures[index].margin)
+        found.ok().map(|index| &self.captures[index])
     }
 
     /// Changes one arc's delay. Takes effect at the next [`run`](TimingAnalysis::run).
@@ -1197,18 +1334,69 @@ impl TimingGraph {
     }
 }
 
-/// What a [`TimingAnalysis`] checks a graph against.
+/// What a [`TimingAnalysis`] checks a graph against: one ideal clock for every path, or a
+/// constraint for each pair of [clock domains](self#clock-domains) that is timed.
 ///
-/// For now that is a single ideal clock. Fields are private and this has a constructor rather
-/// than public fields, so that clocks, false paths and multicycle paths can be added through
-/// new methods. See [what is not handled](self#what-is-not-handled).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// Fields are private and this has constructors rather than public fields, so that false
+/// paths and multicycle paths can be added through new methods. See [what is not
+/// handled](self#what-is-not-handled).
+///
+/// # Examples
+///
+/// ```
+/// use guide::timing::{ClockId, Constraints};
+///
+/// let (io, fast, slow) = (ClockId(0), ClockId(1), ClockId(2));
+/// let constraints = Constraints::per_clock(&[(io, 0), (fast, 400), (slow, 1000)])?
+///     // Paths from the slow clock to the fast one, at the closest pair of edges.
+///     .constrain_by_edges(slow, fast)?;
+/// assert_eq!(constraints.constraint(fast, fast), Some(400));
+/// assert_eq!(constraints.constraint(slow, fast), Some(200));
+/// // Not timed, as VPR's default has it.
+/// assert_eq!(constraints.constraint(fast, slow), None);
+/// # Ok::<(), guide::timing::TimingError>(())
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Constraints {
     clock_period: u64,
+    /// `None` for one clock for everything.
+    clocks: Option<PerClock>,
+}
+
+/// Constraints by clock domain.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct PerClock {
+    /// Each clock's period, in ascending order of clock.
+    periods: Vec<(ClockId, u64)>,
+    /// The timed pairs, as launch, capture and constraint, in ascending order of the pair.
+    pairs: Vec<(ClockId, ClockId, u64)>,
+}
+
+fn check_period(period: u64) -> Result<(), TimingError> {
+    if period > MAX_CLOCK_PERIOD {
+        return Err(TimingError::ClockPeriodTooLarge { period });
+    }
+    Ok(())
+}
+
+/// The setup constraint between two ideal clocks whose edges are both at 0 and then every
+/// period: the shortest time from a launch edge to the next capture edge after it, over all
+/// edges. That is the greatest common divisor of the periods, or the period itself for one
+/// clock with itself, and 0 if either period is 0.
+fn edge_separation(launch: u64, capture: u64) -> u64 {
+    if launch == 0 || capture == 0 {
+        return 0;
+    }
+    let (mut a, mut b) = (launch, capture);
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
 }
 
 impl Constraints {
-    /// Checks every path against one clock, with a period in picoseconds.
+    /// Checks every path against one clock, with a period in picoseconds, whatever clock
+    /// its points are on.
     ///
     /// A period of 0 asks for the fastest possible circuit, as VPR does when it has no
     /// constraint: every path with any delay fails, and criticality measures how close each
@@ -1218,17 +1406,137 @@ impl Constraints {
     ///
     /// Returns an error if the period is above [`MAX_CLOCK_PERIOD`].
     pub fn single_clock(period: u64) -> Result<Constraints, TimingError> {
-        if period > MAX_CLOCK_PERIOD {
-            return Err(TimingError::ClockPeriodTooLarge { period });
-        }
+        check_period(period)?;
         Ok(Constraints {
             clock_period: period,
+            clocks: None,
         })
     }
 
-    /// Returns the clock period, in picoseconds.
+    /// Checks the paths within each clock domain against its period, in picoseconds, and
+    /// leaves every other path untimed, as VPR does by default for paths between netlist
+    /// clocks. A clock that isn't listed times nothing. Paths between two clocks can then be
+    /// timed with [`constrain`](Constraints::constrain) or
+    /// [`constrain_by_edges`](Constraints::constrain_by_edges).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a period is above [`MAX_CLOCK_PERIOD`], or a clock is listed
+    /// twice.
+    pub fn per_clock(periods: &[(ClockId, u64)]) -> Result<Constraints, TimingError> {
+        let mut sorted = periods.to_vec();
+        sorted.sort_unstable();
+        for pair in sorted.windows(2) {
+            if pair[0].0 == pair[1].0 {
+                return Err(TimingError::DuplicateClock { clock: pair[0].0 });
+            }
+        }
+        for &(_, period) in &sorted {
+            check_period(period)?;
+        }
+        let pairs = sorted
+            .iter()
+            .map(|&(clock, period)| (clock, clock, period))
+            .collect();
+        Ok(Constraints {
+            clock_period: 0,
+            clocks: Some(PerClock {
+                periods: sorted,
+                pairs,
+            }),
+        })
+    }
+
+    /// Times the paths from `launch`'s registers to `capture`'s: each has to arrive
+    /// `constraint` picoseconds after the launching edge, less the capture margin. For a
+    /// clock with itself, this replaces its period. The clocks need no period of their own.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on [`single_clock`](Constraints::single_clock) constraints, or if
+    /// the constraint is above [`MAX_CLOCK_PERIOD`].
+    pub fn constrain(
+        mut self,
+        launch: ClockId,
+        capture: ClockId,
+        constraint: u64,
+    ) -> Result<Constraints, TimingError> {
+        check_period(constraint)?;
+        let clocks = self.clocks.as_mut().ok_or(TimingError::NotPerClock)?;
+        match clocks
+            .pairs
+            .binary_search_by_key(&(launch, capture), |&(l, c, _)| (l, c))
+        {
+            Ok(index) => clocks.pairs[index].2 = constraint,
+            Err(index) => clocks.pairs.insert(index, (launch, capture, constraint)),
+        }
+        Ok(self)
+    }
+
+    /// Times the paths from `launch`'s registers to `capture`'s against the two periods, as
+    /// VPR does for two ideal clocks: both have an edge at 0 and then one every period, and
+    /// a path launched on one edge is captured by the next capture edge after it. The
+    /// constraint is the closest that any two such edges come, which is the greatest common
+    /// divisor of the periods: 200 for 400 and 1000. It is 0 if either period is 0.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on [`single_clock`](Constraints::single_clock) constraints, or if
+    /// either clock has no period.
+    pub fn constrain_by_edges(
+        self,
+        launch: ClockId,
+        capture: ClockId,
+    ) -> Result<Constraints, TimingError> {
+        let clocks = self.clocks.as_ref().ok_or(TimingError::NotPerClock)?;
+        let period = |clock| {
+            clocks
+                .periods
+                .binary_search_by_key(&clock, |&(c, _)| c)
+                .map(|index| clocks.periods[index].1)
+                .map_err(|_| TimingError::UnknownClock { clock })
+        };
+        let separation = edge_separation(period(launch)?, period(capture)?);
+        self.constrain(launch, capture, separation)
+    }
+
+    /// Returns whether these are constraints per clock, rather than one clock for all.
+    pub fn is_per_clock(&self) -> bool {
+        self.clocks.is_some()
+    }
+
+    /// Returns the clock period of [`single_clock`](Constraints::single_clock) constraints,
+    /// in picoseconds. Constraints [per clock](Constraints::per_clock) have no single period,
+    /// and return 0: see [`period`](Constraints::period) and
+    /// [`constraint`](Constraints::constraint).
     pub fn clock_period(&self) -> u64 {
         self.clock_period
+    }
+
+    /// Returns a clock's period: the one of `single_clock` for any clock, or the one given to
+    /// [`per_clock`](Constraints::per_clock).
+    pub fn period(&self, clock: ClockId) -> Option<u64> {
+        match &self.clocks {
+            None => Some(self.clock_period),
+            Some(clocks) => clocks
+                .periods
+                .binary_search_by_key(&clock, |&(c, _)| c)
+                .ok()
+                .map(|index| clocks.periods[index].1),
+        }
+    }
+
+    /// Returns what paths from `launch`'s registers to `capture`'s are checked against, or
+    /// `None` if they are not timed.
+    pub fn constraint(&self, launch: ClockId, capture: ClockId) -> Option<u64> {
+        match &self.clocks {
+            None => Some(self.clock_period),
+            Some(clocks) => clocks
+                .pairs
+                .binary_search_by_key(&(launch, capture), |&(l, c, _)| (l, c))
+                .ok()
+                .map(|index| clocks.pairs[index].2),
+        }
     }
 }
 
@@ -1347,6 +1655,24 @@ pub struct TimingAnalysis {
     criticality_span: u64,
     path_points: Vec<PointId>,
     path_arcs: Vec<ArcId>,
+    /// When the critical path reaches its end, on the clock it was launched by.
+    path_arrival: u64,
+    /// The rest is only used by a run on constraints per clock, as `per_clock` says.
+    per_clock: bool,
+    /// The worst slack of each point over the pairs of clocks, or `NO_SLACK`.
+    point_slack: Vec<i64>,
+    /// The highest raw criticality of each point and arc over the pairs of clocks.
+    point_raw: Vec<f64>,
+    arc_raw: Vec<f64>,
+    /// The clocks that launch or capture in a timed pair, in ascending order.
+    launch_clocks: Vec<ClockId>,
+    capture_clocks: Vec<ClockId>,
+    /// The arrival time of each point from each launching clock, a table of points after
+    /// another, in the order of `launch_clocks`.
+    clock_arrival: Vec<i64>,
+    /// The required time of each point for each capturing clock, against a constraint of 0,
+    /// in the order of `capture_clocks`.
+    clock_required: Vec<i64>,
 }
 
 impl fmt::Debug for TimingAnalysis {
@@ -1373,16 +1699,36 @@ impl TimingAnalysis {
             criticality_span: 0,
             path_points: Vec::with_capacity(levels),
             path_arcs: Vec::with_capacity(levels),
+            path_arrival: 0,
+            per_clock: false,
+            point_slack: Vec::new(),
+            point_raw: Vec::new(),
+            arc_raw: Vec::new(),
+            launch_clocks: Vec::new(),
+            capture_clocks: Vec::new(),
+            clock_arrival: Vec::new(),
+            clock_required: Vec::new(),
         }
     }
 
     /// Analyses a graph with its current delays, replacing the previous results.
     ///
-    /// This does not allocate when given the graph this was created for. Given another, it
-    /// resizes its buffers and carries on.
+    /// On [`single_clock`](Constraints::single_clock) constraints, this does not allocate
+    /// when given the graph this was created for. Given another, it resizes its buffers and
+    /// carries on. Constraints [per clock](Constraints::per_clock) take 16 bytes more per
+    /// point and 8 per arc, and 8 per point for each clock in a timed pair, which the first
+    /// such run allocates. See [clock domains](self#clock-domains).
     pub fn run(&mut self, graph: &TimingGraph, constraints: &Constraints) {
+        match &constraints.clocks {
+            None => self.run_single(graph, constraints.clock_period),
+            Some(clocks) => self.run_per_clock(graph, clocks),
+        }
+    }
+
+    fn run_single(&mut self, graph: &TimingGraph, period: u64) {
+        self.per_clock = false;
         // At most MAX_CLOCK_PERIOD, which fits.
-        let period = constraints.clock_period as i64;
+        let period = period as i64;
         let live_steps = &graph.steps[..graph.num_live_steps];
 
         // Paths with no launch point have no arrival time, and the sentinels let this keep
@@ -1470,17 +1816,211 @@ impl TimingAnalysis {
         // `max_required + shift`, which the proof at `raw_criticality` shows is not negative.
         self.criticality_span = max_required.abs_diff(worst_slack.min(0));
 
-        trace_back(arrival, graph, worst_end, &mut self.path_arcs);
+        // Real arrival times are never negative.
+        self.path_arrival = arrival[worst_end.index()] as u64;
+        trace_back(arrival, graph, worst_end, &mut self.path_arcs, |point| {
+            graph.launch_offset(point)
+        });
+        self.finish_path(graph, worst_end);
+    }
+
+    /// Fills in the critical path's points from its arcs, which `trace_back` left from the
+    /// end.
+    fn finish_path(&mut self, graph: &TimingGraph, end: PointId) {
         self.path_arcs.reverse();
         let start = match self.path_arcs.first() {
             Some(first) => graph.steps[graph.arc_step[first.index()] as usize].from,
-            None => worst_end,
+            None => end,
         };
         self.path_points.push(start);
         for arc in &self.path_arcs {
             let step = &graph.steps[graph.arc_step[arc.index()] as usize];
             self.path_points.push(step.to);
         }
+    }
+
+    /// A run on constraints per clock. See [clock domains](self#clock-domains).
+    fn run_per_clock(&mut self, graph: &TimingGraph, clocks: &PerClock) {
+        self.per_clock = true;
+        let points = graph.num_points as usize;
+        let live_steps = &graph.steps[..graph.num_live_steps];
+
+        self.launch_clocks.clear();
+        self.capture_clocks.clear();
+        for &(launch, capture, _) in &clocks.pairs {
+            self.launch_clocks.push(launch);
+            self.capture_clocks.push(capture);
+        }
+        self.launch_clocks.sort_unstable();
+        self.launch_clocks.dedup();
+        self.capture_clocks.sort_unstable();
+        self.capture_clocks.dedup();
+
+        // Arrival times from each launching clock, as for one clock but from its own
+        // launch points only.
+        self.clock_arrival.clear();
+        self.clock_arrival
+            .resize(points * self.launch_clocks.len(), NO_ARRIVAL);
+        for (&clock, arrival) in self
+            .launch_clocks
+            .iter()
+            .zip(self.clock_arrival.chunks_exact_mut(points.max(1)))
+        {
+            for launch in graph.launches.iter().filter(|l| l.clock == clock) {
+                arrival[launch.point.index()] = i64::from(launch.offset);
+            }
+            for step in live_steps {
+                let from = arrival[step.from.index()];
+                if from != NO_ARRIVAL {
+                    let candidate = from + i64::from(step.delay);
+                    let to = &mut arrival[step.to.index()];
+                    if candidate > *to {
+                        *to = candidate;
+                    }
+                }
+            }
+        }
+
+        // Required times for each capturing clock, against a constraint of 0. A pair's are
+        // its constraint more, as the constraint only shifts every one of them.
+        self.clock_required.clear();
+        self.clock_required
+            .resize(points * self.capture_clocks.len(), NO_REQUIRED);
+        for (&clock, required) in self
+            .capture_clocks
+            .iter()
+            .zip(self.clock_required.chunks_exact_mut(points.max(1)))
+        {
+            for capture in graph.captures.iter().filter(|c| c.clock == clock) {
+                required[capture.point.index()] = -i64::from(capture.margin);
+            }
+            for step in live_steps.iter().rev() {
+                let to = required[step.to.index()];
+                if to != NO_REQUIRED {
+                    let candidate = to - i64::from(step.delay);
+                    let from = &mut required[step.from.index()];
+                    if candidate < *from {
+                        *from = candidate;
+                    }
+                }
+            }
+        }
+
+        self.arrival.clear();
+        self.arrival.resize(points, NO_ARRIVAL);
+        for arrival in self.clock_arrival.chunks_exact(points.max(1)) {
+            for (combined, &time) in self.arrival.iter_mut().zip(arrival) {
+                *combined = (*combined).max(time);
+            }
+        }
+        self.required.clear();
+        self.required.resize(points, NO_REQUIRED);
+        self.arc_slack.clear();
+        self.arc_slack.resize(graph.steps.len(), NO_SLACK);
+        self.arc_raw.clear();
+        self.arc_raw.resize(graph.steps.len(), 0.0);
+        self.point_slack.clear();
+        self.point_slack.resize(points, NO_SLACK);
+        self.point_raw.clear();
+        self.point_raw.resize(points, 0.0);
+
+        // The worst slack over all pairs, its end, and the pair's launching clock. Ties go to
+        // the lowest end, as with one clock, and then to the first pair.
+        let mut worst: Option<(i64, PointId, usize)> = None;
+        let mut total_negative_slack = 0i128;
+        for &(launch, capture, constraint) in &clocks.pairs {
+            // Both are in the lists, which come from these pairs.
+            let launch_index = self.launch_clocks.binary_search(&launch).unwrap_or(0);
+            let capture_index = self.capture_clocks.binary_search(&capture).unwrap_or(0);
+            let arrival = &self.clock_arrival[launch_index * points..][..points];
+            let required = &self.clock_required[capture_index * points..][..points];
+            // At most MAX_CLOCK_PERIOD, which fits.
+            let constraint = constraint as i64;
+
+            for (combined, &time) in self.required.iter_mut().zip(required) {
+                if time != NO_REQUIRED {
+                    *combined = (*combined).min(constraint + time);
+                }
+            }
+
+            // As with one clock, each capture point counts once, against its own margin, and
+            // the largest required time of the pair is at one of them.
+            let mut pair_worst: Option<i64> = None;
+            let mut max_required = i64::MIN;
+            for capture_point in graph.captures.iter().filter(|c| c.clock == capture) {
+                let arrived = arrival[capture_point.point.index()];
+                if arrived == NO_ARRIVAL {
+                    continue;
+                }
+                let slack = constraint - i64::from(capture_point.margin) - arrived;
+                if pair_worst.is_none_or(|lowest| slack < lowest) {
+                    pair_worst = Some(slack);
+                }
+                if worst.is_none_or(|(lowest, end, _)| {
+                    slack < lowest || (slack == lowest && capture_point.point < end)
+                }) {
+                    worst = Some((slack, capture_point.point, launch_index));
+                }
+                if slack < 0 {
+                    total_negative_slack += i128::from(slack);
+                }
+                max_required = max_required.max(constraint + required[capture_point.point.index()]);
+            }
+            let Some(pair_worst) = pair_worst else {
+                continue;
+            };
+            // As for one clock, and for the same reasons, within the pair.
+            let span = max_required.abs_diff(pair_worst.min(0));
+
+            for step in live_steps {
+                let from = arrival[step.from.index()];
+                let to = required[step.to.index()];
+                if from != NO_ARRIVAL && to != NO_REQUIRED {
+                    let slack = constraint + to - i64::from(step.delay) - from;
+                    let index = step.arc.index();
+                    if slack < self.arc_slack[index] {
+                        self.arc_slack[index] = slack;
+                    }
+                    let raw = raw_ratio(max_required, span, slack);
+                    if raw > self.arc_raw[index] {
+                        self.arc_raw[index] = raw;
+                    }
+                }
+            }
+            for (point, (&from, &to)) in arrival.iter().zip(required).enumerate() {
+                if from != NO_ARRIVAL && to != NO_REQUIRED {
+                    let slack = constraint + to - from;
+                    if slack < self.point_slack[point] {
+                        self.point_slack[point] = slack;
+                    }
+                    let raw = raw_ratio(max_required, span, slack);
+                    if raw > self.point_raw[point] {
+                        self.point_raw[point] = raw;
+                    }
+                }
+            }
+        }
+
+        self.worst_slack = worst.map(|(slack, _, _)| slack);
+        self.total_negative_slack = total_negative_slack;
+        self.max_required = 0;
+        self.criticality_span = 0;
+        self.path_arcs.clear();
+        self.path_points.clear();
+        let Some((_, end, launch_index)) = worst else {
+            return;
+        };
+        let clock = self.launch_clocks[launch_index];
+        let arrival = &self.clock_arrival[launch_index * points..][..points];
+        // Real arrival times are never negative.
+        self.path_arrival = arrival[end.index()] as u64;
+        trace_back(arrival, graph, end, &mut self.path_arcs, |point| {
+            graph
+                .launch(point)
+                .filter(|launch| launch.clock == clock)
+                .map(|launch| launch.offset)
+        });
+        self.finish_path(graph, end);
     }
 
     /// Returns the latest time a path reaches a point, or `None` if none does.
@@ -1499,7 +2039,15 @@ impl TimingAnalysis {
     }
 
     /// Returns a point's slack, or `None` if the point is not constrained.
+    ///
+    /// With constraints per clock, this is the worst over the timed pairs of clocks, which
+    /// may be more than [`required`](TimingAnalysis::required) minus
+    /// [`arrival`](TimingAnalysis::arrival), as those can come from different pairs.
     pub fn slack(&self, point: PointId) -> Option<i64> {
+        if self.per_clock {
+            let slack = *self.point_slack.get(point.index())?;
+            return (slack != NO_SLACK).then_some(slack);
+        }
         let arrival = *self.arrival.get(point.index())?;
         let required = *self.required.get(point.index())?;
         (arrival != NO_ARRIVAL && required != NO_REQUIRED).then(|| required - arrival)
@@ -1532,7 +2080,7 @@ impl TimingAnalysis {
             points: &self.path_points,
             arcs: &self.path_arcs,
             slack,
-            arrival: self.arrival(*self.path_points.last()?)?,
+            arrival: self.path_arrival,
         })
     }
 
@@ -1543,6 +2091,9 @@ impl TimingAnalysis {
     /// The graph must be the one analysed, with the delays analysed, since this retraces the
     /// path from them. The result is `false` with `arcs` possibly empty if the point has no
     /// arrival time or the delays or graph have since changed, and `true` otherwise.
+    ///
+    /// With constraints per clock, the path is the latest from any clock that launches in a
+    /// timed pair.
     pub fn trace_latest_path(
         &self,
         graph: &TimingGraph,
@@ -1553,15 +2104,33 @@ impl TimingAnalysis {
         if self.arrival.len() != graph.num_points as usize || self.arrival(point).is_none() {
             return false;
         }
-        let traced = trace_back(&self.arrival, graph, point, arcs);
+        let traced = if self.per_clock {
+            trace_back(&self.arrival, graph, point, arcs, |point| {
+                graph
+                    .launch(point)
+                    .filter(|launch| self.launch_clocks.binary_search(&launch.clock).is_ok())
+                    .map(|launch| launch.offset)
+            })
+        } else {
+            trace_back(&self.arrival, graph, point, arcs, |point| {
+                graph.launch_offset(point)
+            })
+        };
         arcs.reverse();
         traced
     }
 
     /// Returns the criticality of a net's sink, or of any other arc: the one a router needs.
     /// An arc that is unconstrained or disabled counts as a raw criticality of zero.
+    ///
+    /// With constraints per clock, this is the highest over the timed pairs of clocks, each
+    /// pair's against its own worst slack and largest required time, as VPR does.
     #[inline]
     pub fn arc_criticality(&self, arc: ArcId, options: &CriticalityOptions) -> f64 {
+        if self.per_clock {
+            let raw = self.arc_raw.get(arc.index()).copied().unwrap_or(0.0);
+            return options.sharpen(raw);
+        }
         options.sharpen(self.raw_criticality(self.arc_slack(arc)))
     }
 
@@ -1569,6 +2138,10 @@ impl TimingAnalysis {
     /// unconstrained point counts as a raw criticality of zero.
     #[inline]
     pub fn point_criticality(&self, point: PointId, options: &CriticalityOptions) -> f64 {
+        if self.per_clock {
+            let raw = self.point_raw.get(point.index()).copied().unwrap_or(0.0);
+            return options.sharpen(raw);
+        }
         options.sharpen(self.raw_criticality(self.slack(point)))
     }
 
@@ -1577,6 +2150,10 @@ impl TimingAnalysis {
     /// It does not allocate once `out` has room for every arc.
     pub fn fill_arc_criticalities(&self, options: &CriticalityOptions, out: &mut Vec<f64>) {
         out.clear();
+        if self.per_clock {
+            out.extend(self.arc_raw.iter().map(|&raw| options.sharpen(raw)));
+            return;
+        }
         out.extend(self.arc_slack.iter().map(|&slack| {
             let slack = (slack != NO_SLACK).then_some(slack);
             options.sharpen(self.raw_criticality(slack))
@@ -1597,34 +2174,47 @@ impl TimingAnalysis {
     ///
     /// When the denominator is zero, the numerator is too, so every constrained slack equals
     /// `max_required` and is the worst there is. VPR also calls that fully critical.
+    ///
+    /// With constraints per clock, the same holds within each pair of clocks, with the
+    /// pair's own worst slack and largest required time, and so for `raw_ratio` there.
     #[inline]
     fn raw_criticality(&self, slack: Option<i64>) -> f64 {
         let Some(slack) = slack else { return 0.0 };
-        let span = self.criticality_span;
-        if span == 0 {
-            return 1.0;
-        }
-        // Shifting both the same way keeps the ratio, and leaves the two values exactly
-        // convertible, since a `u64` of at most 53 significant bits is an exact `f64`.
-        let excess = (u64::BITS - span.leading_zeros()).saturating_sub(f64::MANTISSA_DIGITS);
-        let numerator = self.max_required.abs_diff(slack) >> excess;
-        numerator as f64 / (span >> excess) as f64
+        raw_ratio(self.max_required, self.criticality_span, slack)
     }
 }
 
+/// Computes `(max_required - slack) / span`, as [`TimingAnalysis::raw_criticality`] explains,
+/// with 1 for a span of 0.
+#[inline]
+fn raw_ratio(max_required: i64, span: u64, slack: i64) -> f64 {
+    if span == 0 {
+        return 1.0;
+    }
+    // Shifting both the same way keeps the ratio, and leaves the two values exactly
+    // convertible, since a `u64` of at most 53 significant bits is an exact `f64`.
+    let excess = (u64::BITS - span.leading_zeros()).saturating_sub(f64::MANTISSA_DIGITS);
+    let numerator = max_required.abs_diff(slack) >> excess;
+    numerator as f64 / (span >> excess) as f64
+}
+
 /// Walks from `end` back along the arcs that decide its arrival time, pushing them onto `arcs`
-/// starting with the last arc of the path. Returns `false` if the walk could not get back to
-/// a launch point, which only happens with delays that do not match the arrival times.
+/// starting with the last arc of the path. `launch` gives the offset of a point that starts
+/// paths in `arrival`. Returns `false` if the walk could not get back to a launch point, which
+/// only happens with delays that do not match the arrival times.
 ///
 /// Levels fall with every step, so this ends, and the path holds at most one arc per level.
-fn trace_back(arrival: &[i64], graph: &TimingGraph, end: PointId, arcs: &mut Vec<ArcId>) -> bool {
+fn trace_back(
+    arrival: &[i64],
+    graph: &TimingGraph,
+    end: PointId,
+    arcs: &mut Vec<ArcId>,
+    launch: impl Fn(PointId) -> Option<u32>,
+) -> bool {
     let mut current = end;
     'walk: loop {
         let time = arrival[current.index()];
-        if graph
-            .launch_offset(current)
-            .is_some_and(|offset| i64::from(offset) == time)
-        {
+        if launch(current).is_some_and(|offset| i64::from(offset) == time) {
             return true;
         }
         for &arc in graph.fanin(current) {
@@ -1685,7 +2275,7 @@ impl<'a> CriticalPath<'a> {
 mod tests {
     use super::*;
     use proptest::prelude::*;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     fn run(graph: &TimingGraph, period: u64) -> TimingAnalysis {
         let mut analysis = TimingAnalysis::new(graph);
@@ -2999,6 +3589,488 @@ mod tests {
             prop_assert_eq!(graph.loops(), shuffled_graph.loops());
             let (one, other) = (run(&graph, case.period), run(&shuffled_graph, case.period));
             prop_assert_eq!(one.critical_path(), other.critical_path());
+        }
+    }
+
+    /// Two registers on each of two clocks, with a path within each clock and one across.
+    ///
+    /// ```text
+    /// a1 -(100)-> a2    on clock 1, registers of clock-to-Q 10 and setup 5
+    /// b1 -(300)-> b2    on clock 2
+    /// a1 -(50)--> b2    from clock 1 to clock 2
+    /// ```
+    fn two_clocks() -> (TimingGraph, [ArcId; 3], [PointId; 4]) {
+        let mut builder = TimingGraphBuilder::new();
+        let mut register = |clock: u32| {
+            let d = builder.add_point().unwrap();
+            let q = builder.add_point().unwrap();
+            builder.set_capture_on(d, ClockId(clock), 5).unwrap();
+            builder.set_launch_on(q, ClockId(clock), 10).unwrap();
+            (d, q)
+        };
+        let (_, a1) = register(1);
+        let (a2, _) = register(1);
+        let (_, b1) = register(2);
+        let (b2, _) = register(2);
+        let within_a = builder.add_net_arc(a1, a2, 100).unwrap();
+        let within_b = builder.add_net_arc(b1, b2, 300).unwrap();
+        let across = builder.add_net_arc(a1, b2, 50).unwrap();
+        (
+            builder.build(),
+            [within_a, within_b, across],
+            [a1, a2, b1, b2],
+        )
+    }
+
+    #[test]
+    fn each_clock_is_timed_against_its_own_period_and_crossings_are_not() {
+        let (graph, [within_a, within_b, across], [a1, a2, _, b2]) = two_clocks();
+        assert_eq!(graph.clocks(), [ClockId(1), ClockId(2)]);
+        assert_eq!(graph.launch_clock(a1), Some(ClockId(1)));
+        assert_eq!(graph.capture_clock(b2), Some(ClockId(2)));
+        assert_eq!(graph.capture_clock(a1), None);
+
+        let constraints = Constraints::per_clock(&[(ClockId(1), 200), (ClockId(2), 500)]).unwrap();
+        let mut analysis = TimingAnalysis::new(&graph);
+        analysis.run(&graph, &constraints);
+        // 200 - 5 - 110 and 500 - 5 - 310. The crossing isn't timed at all.
+        assert_eq!(analysis.arc_slack(within_a), Some(85));
+        assert_eq!(analysis.arc_slack(within_b), Some(185));
+        assert_eq!(analysis.arc_slack(across), None);
+        assert_eq!(analysis.worst_slack(), Some(85));
+        assert_eq!(analysis.total_negative_slack(), 0);
+        let path = analysis.critical_path().unwrap();
+        assert_eq!(path.points(), &[a1, a2]);
+        assert_eq!(path.arrival(), 110);
+        // `b2` is reached at 310 from clock 2, and later than `a2`'s 110 from clock 1.
+        assert_eq!(analysis.arrival(b2), Some(310));
+        assert_eq!(analysis.slack(b2), Some(185));
+        assert_eq!(analysis.slack(a1), Some(85));
+
+        // Each clock's criticality is against its own largest required time: 195 and 495.
+        let options = CriticalityOptions::new(1, 1.0).unwrap();
+        assert_eq!(analysis.arc_criticality(within_a, &options), 110.0 / 195.0);
+        assert_eq!(analysis.arc_criticality(within_b, &options), 310.0 / 495.0);
+        assert_eq!(analysis.arc_criticality(across, &options), 0.0);
+        let mut all = Vec::new();
+        analysis.fill_arc_criticalities(&options, &mut all);
+        assert_eq!(all, [110.0 / 195.0, 310.0 / 495.0, 0.0]);
+
+        // As one clock of 200, the slower clock's path fails, and the crossing is timed.
+        let mut merged = TimingAnalysis::new(&graph);
+        merged.run(&graph, &Constraints::single_clock(200).unwrap());
+        assert_eq!(merged.worst_slack(), Some(-115));
+        assert_eq!(merged.arc_slack(across), Some(135));
+
+        // Timing the crossing at the closest edges, 100 apart: 100 - 5 - 60.
+        let crossing = constraints
+            .constrain_by_edges(ClockId(1), ClockId(2))
+            .unwrap();
+        assert_eq!(crossing.constraint(ClockId(1), ClockId(2)), Some(100));
+        analysis.run(&graph, &crossing);
+        assert_eq!(analysis.arc_slack(across), Some(35));
+        assert_eq!(analysis.worst_slack(), Some(35));
+        assert_eq!(analysis.critical_path().unwrap().points(), &[a1, b2]);
+        // `a1` launches into both clocks, and its worst is the crossing.
+        assert_eq!(analysis.slack(a1), Some(35));
+        // The crossing's own pair: `b2` is its only capture point, at 95.
+        assert_eq!(analysis.arc_criticality(across, &options), 60.0 / 95.0);
+        // `b2` is in two pairs, and the higher wins: 60 / 95 across, over 310 / 495 within.
+        assert_eq!(analysis.point_criticality(b2, &options), 60.0 / 95.0);
+
+        // Failing pairs add to the total each on their own.
+        let tight = Constraints::per_clock(&[(ClockId(1), 100), (ClockId(2), 300)])
+            .unwrap()
+            .constrain(ClockId(1), ClockId(2), 0)
+            .unwrap();
+        analysis.run(&graph, &tight);
+        // -15 within clock 1, -15 within clock 2 and -65 across, all at their own ends.
+        assert_eq!(analysis.worst_slack(), Some(-65));
+        assert_eq!(analysis.total_negative_slack(), -95);
+        // Each pair's worst path is fully critical against its own worst slack.
+        for arc in [within_a, within_b, across] {
+            assert_eq!(analysis.arc_criticality(arc, &options), 1.0);
+        }
+
+        // A clock without a period, and nothing timed at all.
+        let none = Constraints::per_clock(&[(ClockId(7), 10)]).unwrap();
+        analysis.run(&graph, &none);
+        assert_eq!(analysis.worst_slack(), None);
+        assert_eq!(analysis.critical_path(), None);
+        assert_eq!(analysis.arc_criticality(within_a, &options), 0.0);
+        assert_eq!(analysis.slack(a1), None);
+        // And back to one clock, which answers as before.
+        analysis.run(&graph, &Constraints::single_clock(200).unwrap());
+        assert_eq!(analysis.worst_slack(), Some(-115));
+    }
+
+    #[test]
+    fn constraints_per_clock_are_checked_and_answer_queries() {
+        let (one, two) = (ClockId(1), ClockId(2));
+        assert_eq!(
+            Constraints::per_clock(&[(one, 1), (two, 2), (one, 3)]),
+            Err(TimingError::DuplicateClock { clock: one }),
+        );
+        assert_eq!(
+            Constraints::per_clock(&[(one, MAX_CLOCK_PERIOD + 1)]),
+            Err(TimingError::ClockPeriodTooLarge {
+                period: MAX_CLOCK_PERIOD + 1
+            }),
+        );
+        let single = Constraints::single_clock(40).unwrap();
+        assert!(!single.is_per_clock());
+        assert_eq!(single.period(two), Some(40));
+        assert_eq!(single.constraint(one, two), Some(40));
+        assert_eq!(
+            single.clone().constrain(one, two, 5),
+            Err(TimingError::NotPerClock)
+        );
+        assert_eq!(
+            single.constrain_by_edges(one, two),
+            Err(TimingError::NotPerClock)
+        );
+
+        let per = Constraints::per_clock(&[(two, 600), (one, 0)]).unwrap();
+        assert!(per.is_per_clock());
+        assert_eq!(per.clock_period(), 0);
+        assert_eq!((per.period(one), per.period(two)), (Some(0), Some(600)));
+        assert_eq!(per.period(ClockId(3)), None);
+        assert_eq!(per.constraint(two, one), None);
+        assert_eq!(
+            per.clone().constrain_by_edges(two, ClockId(3)),
+            Err(TimingError::UnknownClock { clock: ClockId(3) })
+        );
+        assert_eq!(
+            per.clone().constrain(one, two, MAX_CLOCK_PERIOD + 1),
+            Err(TimingError::ClockPeriodTooLarge {
+                period: MAX_CLOCK_PERIOD + 1
+            })
+        );
+        // A period of 0 asks for the fastest, across clocks too.
+        let edges = per.clone().constrain_by_edges(two, one).unwrap();
+        assert_eq!(edges.constraint(two, one), Some(0));
+        // A pair of a clock with itself can be overridden.
+        let own = per.constrain(two, two, 50).unwrap();
+        assert_eq!(own.constraint(two, two), Some(50));
+    }
+
+    #[test]
+    fn edges_are_closest_at_the_greatest_common_divisor() {
+        for (launch, capture, expected) in [
+            (10, 10, 10),
+            (10, 4, 2),
+            (4, 10, 2),
+            (400, 1000, 200),
+            (20, 10, 10),
+            (10, 20, 10),
+            (7, 13, 1),
+            (0, 5, 0),
+            (5, 0, 0),
+        ] {
+            assert_eq!(edge_separation(launch, capture), expected);
+            // By listing every pair of edges over the least common multiple.
+            if launch > 0 && capture > 0 {
+                let lcm = launch * capture / expected;
+                let closest = (0..lcm / launch)
+                    .map(|k| {
+                        let edge = k * launch;
+                        let next = (edge / capture + 1) * capture;
+                        next - edge
+                    })
+                    .min()
+                    .unwrap();
+                assert_eq!(closest, expected, "{launch} and {capture}");
+            }
+        }
+    }
+
+    /// A [`Case`] with a clock on each of its launch and capture points, and the timed pairs.
+    #[derive(Clone, Debug)]
+    struct ClockedCase {
+        case: Case,
+        /// By launch point, then capture point, in the order of the case's lists.
+        launch_clocks: Vec<u32>,
+        capture_clocks: Vec<u32>,
+        pairs: BTreeMap<(u32, u32), u64>,
+    }
+
+    impl ClockedCase {
+        fn graph(&self) -> TimingGraph {
+            let case = &self.case;
+            let mut builder = TimingGraphBuilder::new();
+            for _ in 0..case.points {
+                builder.add_point().unwrap();
+            }
+            for &(from, to, delay, is_net) in &case.arcs {
+                let (from, to) = (PointId(from), PointId(to));
+                if is_net {
+                    builder.add_net_arc(from, to, delay).unwrap();
+                } else {
+                    builder.add_cell_arc(from, to, delay).unwrap();
+                }
+            }
+            for (&(point, offset), &clock) in case.launches.iter().zip(&self.launch_clocks) {
+                builder
+                    .set_launch_on(PointId(point), ClockId(clock), offset)
+                    .unwrap();
+            }
+            for (&(point, margin), &clock) in case.captures.iter().zip(&self.capture_clocks) {
+                builder
+                    .set_capture_on(PointId(point), ClockId(clock), margin)
+                    .unwrap();
+            }
+            builder.build()
+        }
+
+        fn constraints(&self) -> Constraints {
+            let mut constraints = Constraints::per_clock(&[]).unwrap();
+            for (&(launch, capture), &constraint) in &self.pairs {
+                constraints = constraints
+                    .constrain(ClockId(launch), ClockId(capture), constraint)
+                    .unwrap();
+            }
+            constraints
+        }
+
+        fn launch_clock(&self, point: u32) -> Option<u32> {
+            let index = self.case.launches.iter().position(|l| l.0 == point)?;
+            Some(self.launch_clocks[index])
+        }
+
+        fn capture_clock(&self, point: u32) -> Option<u32> {
+            let index = self.case.captures.iter().position(|c| c.0 == point)?;
+            Some(self.capture_clocks[index])
+        }
+
+        /// A path's pair of clocks and its slack, if it ends at a capture point and the pair
+        /// is timed.
+        fn complete(&self, path: &Path) -> Option<((u32, u32), i64)> {
+            let launch = self.launch_clock(path.start)?;
+            let capture = self.capture_clock(path.end)?;
+            let constraint = *self.pairs.get(&(launch, capture))?;
+            let margin = self.case.margin(path.end)?;
+            let slack = constraint as i64 - i64::from(margin) - path.total as i64;
+            Some(((launch, capture), slack))
+        }
+
+        /// The required time at a point for a pair, from every path on to its capture clock.
+        fn required(&self, point: u32, capture: u32, constraint: u64) -> Option<i64> {
+            fn walk(
+                this: &ClockedCase,
+                at: u32,
+                spent: i64,
+                wanted: (u32, i64),
+                best: &mut Option<i64>,
+            ) {
+                if this.capture_clock(at) == Some(wanted.0) {
+                    let margin = i64::from(this.case.margin(at).unwrap());
+                    let required = wanted.1 - margin - spent;
+                    *best = Some(best.map_or(required, |known: i64| known.min(required)));
+                }
+                for &(from, to, delay, _) in &this.case.arcs {
+                    if from == at {
+                        walk(this, to, spent + i64::from(delay), wanted, best);
+                    }
+                }
+            }
+            let mut best = None;
+            walk(self, point, 0, (capture, constraint as i64), &mut best);
+            best
+        }
+    }
+
+    fn clocked_case() -> impl Strategy<Value = ClockedCase> {
+        let pairs = prop::collection::btree_map((0u32..3, 0u32..3), 0u64..80, 0..7);
+        (
+            dag_case(),
+            prop::collection::vec(0u32..3, 8),
+            prop::collection::vec(0u32..3, 8),
+            pairs,
+        )
+            .prop_map(|(case, launch_clocks, capture_clocks, pairs)| ClockedCase {
+                launch_clocks: launch_clocks[..case.launches.len()].to_vec(),
+                capture_clocks: capture_clocks[..case.captures.len()].to_vec(),
+                case,
+                pairs,
+            })
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(1000))]
+
+        /// With every point on one clock, constraints for that clock alone give exactly what
+        /// a single clock does, to the bit.
+        #[test]
+        fn one_clock_per_clock_matches_a_single_clock(case in dag_case(), clock in 0u32..3) {
+            let mut clocked = ClockedCase {
+                launch_clocks: vec![clock; case.launches.len()],
+                capture_clocks: vec![clock; case.captures.len()],
+                pairs: BTreeMap::new(),
+                case,
+            };
+            clocked.pairs.insert((clock, clock), clocked.case.period);
+            let graph = clocked.graph();
+            let single = run(&graph, clocked.case.period);
+            let mut per = TimingAnalysis::new(&graph);
+            per.run(&graph, &clocked.constraints());
+
+            prop_assert_eq!(per.worst_slack(), single.worst_slack());
+            prop_assert_eq!(per.total_negative_slack(), single.total_negative_slack());
+            prop_assert_eq!(per.critical_path(), single.critical_path());
+            for options in [CriticalityOptions::default(), CriticalityOptions::new(3, 1.0).unwrap()] {
+                let (mut a, mut b) = (Vec::new(), Vec::new());
+                per.fill_arc_criticalities(&options, &mut a);
+                single.fill_arc_criticalities(&options, &mut b);
+                let bits = |values: &[f64]| values.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+                prop_assert_eq!(bits(&a), bits(&b));
+                for point in 0..clocked.case.points {
+                    let id = PointId(point);
+                    prop_assert_eq!(
+                        per.point_criticality(id, &options).to_bits(),
+                        single.point_criticality(id, &options).to_bits()
+                    );
+                }
+            }
+            let (mut a, mut b) = (Vec::new(), Vec::new());
+            for point in 0..clocked.case.points {
+                let id = PointId(point);
+                prop_assert_eq!(per.arrival(id), single.arrival(id));
+                prop_assert_eq!(per.required(id), single.required(id));
+                prop_assert_eq!(per.slack(id), single.slack(id));
+                prop_assert_eq!(
+                    per.trace_latest_path(&graph, id, &mut a),
+                    single.trace_latest_path(&graph, id, &mut b)
+                );
+                prop_assert_eq!(&a, &b);
+            }
+            for arc in 0..graph.num_arcs() {
+                prop_assert_eq!(per.arc_slack(ArcId(arc)), single.arc_slack(ArcId(arc)));
+            }
+        }
+
+        /// Every result against every path, listed with its pair of clocks.
+        #[test]
+        fn clock_pairs_match_every_path(clocked in clocked_case()) {
+            let graph = clocked.graph();
+            let mut analysis = TimingAnalysis::new(&graph);
+            analysis.run(&graph, &clocked.constraints());
+            let paths = clocked.case.all_paths();
+            let timed: Vec<((u32, u32), i64, &Path)> = paths
+                .iter()
+                .filter_map(|path| clocked.complete(path).map(|(pair, slack)| (pair, slack, path)))
+                .collect();
+
+            for point in 0..clocked.case.points {
+                let through = timed
+                    .iter()
+                    .filter(|(_, _, path)| clocked.case.points_of(path).contains(&point))
+                    .map(|&(_, slack, _)| slack)
+                    .min();
+                prop_assert_eq!(analysis.slack(PointId(point)), through, "point {}", point);
+            }
+            for arc in 0..clocked.case.arcs.len() as u32 {
+                let through = timed
+                    .iter()
+                    .filter(|(_, _, path)| path.arcs.contains(&arc))
+                    .map(|&(_, slack, _)| slack)
+                    .min();
+                prop_assert_eq!(analysis.arc_slack(ArcId(arc)), through, "arc {}", arc);
+            }
+            let worst = timed.iter().map(|&(_, slack, _)| slack).min();
+            prop_assert_eq!(analysis.worst_slack(), worst);
+
+            // Per pair, one value per capture point, at its worst path.
+            let mut total = 0i128;
+            for &pair in clocked.pairs.keys() {
+                for &(point, _) in &clocked.case.captures {
+                    let lowest = timed
+                        .iter()
+                        .filter(|(p, _, path)| *p == pair && path.end == point)
+                        .map(|&(_, slack, _)| slack)
+                        .min();
+                    total += i128::from(lowest.map_or(0, |slack| slack.min(0)));
+                }
+            }
+            prop_assert_eq!(analysis.total_negative_slack(), total);
+
+            // The critical path is a worst one, of a timed pair, ending at the lowest such end.
+            match (analysis.critical_path(), worst) {
+                (None, None) => {}
+                (Some(path), Some(worst)) => {
+                    prop_assert_eq!(path.slack(), worst);
+                    let end = timed
+                        .iter()
+                        .filter(|&&(_, slack, _)| slack == worst)
+                        .map(|(_, _, path)| path.end)
+                        .min()
+                        .unwrap();
+                    prop_assert_eq!(path.end().0, end);
+                    let start = path.start().0;
+                    let mut total = u64::from(clocked.case.offset(start).unwrap());
+                    for arc in path.arcs() {
+                        total += u64::from(clocked.case.arcs[arc.index()].2);
+                    }
+                    prop_assert_eq!(path.arrival(), total);
+                    let found = Path {
+                        start,
+                        arcs: path.arcs().iter().map(|arc| arc.0).collect(),
+                        end,
+                        total,
+                    };
+                    prop_assert_eq!(clocked.complete(&found).map(|c| c.1), Some(worst));
+                }
+                (found, expected) => prop_assert!(false, "{:?} against {:?}", found, expected),
+            }
+
+            // Raw criticality: the highest over pairs, each against its own worst slack and
+            // largest required time.
+            let raw = |on_path: &dyn Fn(&Path) -> bool| -> f64 {
+                let mut highest = 0.0f64;
+                for (&(launch, capture), &constraint) in &clocked.pairs {
+                    let of_pair: Vec<_> = timed
+                        .iter()
+                        .filter(|(pair, _, _)| *pair == (launch, capture))
+                        .collect();
+                    let Some(pair_worst) = of_pair.iter().map(|&&(_, slack, _)| slack).min() else {
+                        continue;
+                    };
+                    let max_required = of_pair
+                        .iter()
+                        .map(|(_, _, path)| clocked.required(path.end, capture, constraint).unwrap())
+                        .max()
+                        .unwrap();
+                    let Some(slack) = of_pair
+                        .iter()
+                        .filter(|(_, _, path)| on_path(path))
+                        .map(|&&(_, slack, _)| slack)
+                        .min()
+                    else {
+                        continue;
+                    };
+                    let denominator = max_required + (-pair_worst).max(0);
+                    let value = if denominator == 0 {
+                        1.0
+                    } else {
+                        (max_required - slack) as f64 / denominator as f64
+                    };
+                    highest = highest.max(value);
+                }
+                highest
+            };
+            let options = CriticalityOptions::new(1, 1.0).unwrap();
+            for arc in 0..clocked.case.arcs.len() as u32 {
+                let expected = raw(&|path: &Path| path.arcs.contains(&arc));
+                prop_assert_eq!(analysis.arc_criticality(ArcId(arc), &options), expected, "arc {}", arc);
+            }
+            for point in 0..clocked.case.points {
+                let expected = raw(&|path: &Path| clocked.case.points_of(path).contains(&point));
+                prop_assert_eq!(
+                    analysis.point_criticality(PointId(point), &options),
+                    expected,
+                    "point {}",
+                    point
+                );
+            }
         }
     }
 

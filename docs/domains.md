@@ -96,10 +96,12 @@ assumes:
   into made-up blocks is reproduced, since the `.net` file names those. The caller can
   also give the numbers by hand. Anything not given is 0, or a default the caller sets,
   and is listed in the result.
-- **One ideal clock.** Every clock is timed as one, so paths between unrelated clocks are
-  timed (pessimistically) where VPR's default would not time them. One clock's registers
-  can be timed alone instead. Real multi-clock analysis needs clock domains in
-  `crate::timing` and the engine.
+- **Ideal clocks, each its own domain.** Each register is on its clock's domain and the
+  pads on a virtual I/O clock, as VPR has them. `crate::timing` times each pair of
+  domains against its own constraint, with VPR's per-pair criticality, and leaves paths
+  between two netlist clocks untimed unless they are constrained, which is VPR's default
+  without an SDC file (`DesignTiming::vpr_constraints`). Everything can still be timed as
+  one clock instead. The engine takes either through the same `TimingDriven`.
 - **What differs from VPR** in detail, from per-pin delays to hold timing, is listed in
   the documentation of `fpga::build_timing`'s module.
 

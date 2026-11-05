@@ -36,6 +36,48 @@ Inclusion means "worth evaluating"; benchmarks decide what stays.
 | Layer assignment | PCB, ASIC | Project to 2D, route, then assign layers while minimizing vias. |
 | Conflict-based search | Multi-agent | Optimal search over conflicts. Possibly interesting for small, very dense PCB regions. |
 
+## Tree-dependent (Elmore) delays: a design, not yet built
+
+Today each step has a fixed delay (`DelaySpace::step_delays`), and a connection's delay is the
+sum along the tree. VPR's delay is an Elmore delay over the route tree: a node's delay depends
+on the capacitance downstream of it, which grows as branches are added. Behind an unbuffered
+switch, it also depends on the resistance back to the last buffer. The fixed delay is exact on
+a fully buffered device for a tree that does not branch. Otherwise it is too low, by the
+internal capacitance of the switches a branch adds and by what unbuffered switches pass on.
+
+**Why it was not built now.** Inside a search, an Elmore delay is not a property of a step: a
+branch added later changes the delay of sinks connected earlier. A search that priced it would
+no longer be a shortest path over fixed costs, and would lose its lower bound and optimality. So
+the delay used to *route* stays fixed per step, as in VPR, whose searches also use a per-node
+estimate and only compute the tree's Elmore delay after a net is routed. What can change is the
+delay used to *analyse*. That needs RC data, which only the `fpga` domain has.
+
+**The design.**
+
+1. A trait beside `DelaySpace`, say `TreeDelaySpace`, with one method that takes a net's
+   finished route and fills the delay from the root to each of its nodes. A default computes the
+   sum of step delays, which is today's behaviour, so that the engine needs one code path.
+2. `RrGraph` implements it from what it already reads: each node's `R` and `C`, and each
+   switch's `R`, `Cin`, `Cout`, `Cinternal`, `Tdel` and whether it is buffered. Two passes over
+   the tree, as VPR's `load_new_subtree_R_upstream`, `load_new_subtree_C_downstream` and
+   `load_route_tree_Tdel` do. First, downstream capacitance from the leaves up, stopping at
+   buffers. Second, upstream resistance and delay from the root down. Both are linear in the
+   size of the tree. All of it is `f64` multiplication and addition in a fixed order, so it is
+   deterministic, and it ends in picoseconds rounded as `RrGraph::step_delay` rounds them.
+3. A delay-model option on `TimingDriven`: fixed per step (the default, as now), or the tree's.
+   With the tree's, the engine replaces `Worker::arrival` after a net is routed with what the
+   trait computes, and that is what goes into `TimingOutcome::connection_delays`, the timing
+   graph and the criticalities. Searches keep the fixed step delays and their bound.
+4. Fixed routes and non-configurable sets fit as they are. A fixed route's delays come from the
+   same trait. The members of a tied set are nodes of the tree, so their capacitance is counted
+   downstream, which is exactly the load the fixed delay misses.
+
+**What to measure before making it the default.** How far the fixed and tree delays disagree
+on real VTR graphs, by critical path and per connection. Whether criticalities from tree
+delays change routes enough to matter. What the two passes cost per iteration, since they run
+for every rerouted net. And the validator would need an independent implementation of the same
+formulas to check reported delays, as the timing tests already do for fixed delays.
+
 ## Post-processing
 
 Via removal, corner smoothing, track pulling (rubber-banding), length tuning through

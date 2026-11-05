@@ -301,7 +301,8 @@
 //! which `RrGraph::step_delay`, in the `fpga` feature, says more about. It was
 //! chosen because it keeps a search a plain shortest path over fixed step costs, so that the
 //! search, its lower bound and its optimality are as they are without timing, and because the
-//! router and the timing analysis then agree exactly on every delay.
+//! router and the timing analysis then agree exactly on every delay. `docs/algorithms.md` has a
+//! design for analysing with the tree's Elmore delay while still searching with fixed ones.
 //!
 //! ## Non-configurable steps
 //!

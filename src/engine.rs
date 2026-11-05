@@ -251,11 +251,44 @@
 //! as in VPR. [`Outcome::timing`] has the timing of the best iteration, with the delay of each
 //! connection.
 //!
-//! A run still stops as soon as nothing is overused. VPR does the same by default, with a
-//! `--router_max_convergence_count` of 1. A net that holds nothing overused is not rerouted,
-//! so a connection that grew slow is only rerouted if its net is in a conflict. VPR's
-//! `--incremental_reroute_delay_ripup` would also reroute critical connections that are much
-//! slower than the best they have had. That is not here yet.
+//! By default a run still stops as soon as nothing is overused. VPR does the same by default,
+//! with a `--router_max_convergence_count` of 1. A net that holds nothing overused is not
+//! rerouted, so a connection that grew slow is only rerouted if its net is in a conflict,
+//! unless the run goes on as the next section describes.
+//!
+//! ## Improving timing after a legal result
+//!
+//! With [`timing_iterations`](EngineOptions::timing_iterations) above 0, a run goes on for up
+//! to that many iterations after its first legal result, to shorten its critical path:
+//!
+//! - Each of them routes again every net with a connection whose criticality is at least
+//!   [`timing_reroute_criticality`](EngineOptions::timing_reroute_criticality), as well as every
+//!   net on an overused resource, as always.
+//! - After an iteration that leaves nothing overused, the present factor starts again from
+//!   [`initial_present`](EngineOptions::initial_present), so that critical nets can take what
+//!   others hold, at a price, and the others negotiate their way around them. Without that,
+//!   prices are as high as the negotiation left them, a critical net finds the route it had,
+//!   and nothing changes. Overuse in between adds history as usual.
+//! - The best iteration is kept, ranked as above with the critical-path delay after the
+//!   slacks, so that a shorter path counts once timing is met. A legal result is never traded
+//!   for one that is not, and the critical path is never longer than at the first legal result.
+//! - It stops when the extra iterations run out, when nothing counts as critical, or when a
+//!   legal iteration changed no route, since the next would find the same routes again. It
+//!   stops as [`Converged`](StopReason::Converged) then, or at
+//!   [`max_iterations`](EngineOptions::max_iterations), as there is a legal result. Budgets
+//!   and cancellation stop it as they stop any run.
+//!
+//! This is close in spirit to VPR's `--incremental_reroute_delay_ripup`, which reroutes critical
+//! connections that are much slower than they have been, though VPR does it during negotiation.
+//!
+//! On the generated fabrics of `docs/benchmarks.md`, 18 instances in three groups, 10 extra
+//! iterations shortened the critical path of 2 instances, by 7% and 23%, and 30 shortened 5,
+//! by 3% to 23%. The others were already at, or close to, the fastest each connection could be
+//! on its own. Summed over each group, that is 1.2% and 4.5% shorter on the two narrow groups at
+//! 10, and 3.3% and 5.9% at 30, for 1.2 to 2.3 times the expansions of plain timing-driven
+//! routing, and nothing on the group with room to spare. That is why it is off by default.
+//! At 10 iterations, criticalities of 0.5, 0.8 and 0.9 found the same critical paths, 0.95
+//! missed the gain on the small group, and the lower the criticality, the more work it took.
 //!
 //! ## What a delay is
 //!
@@ -536,6 +569,18 @@ pub struct EngineOptions<'c> {
     /// and speed. Nothing runs in parallel at the default, so a caller who wants threads has to
     /// choose a batch size too. 32 is a good start. A value of 0 means 1.
     pub batch_size: u32,
+    /// How many more iterations a [timing-driven](self#timing-driven-routing) run may take
+    /// after its first legal result, rerouting the nets of critical connections to shorten its
+    /// critical path. The default is 0, which stops at the first legal result. A run without
+    /// timing ignores this.
+    ///
+    /// The best result is kept, so a legal one is never traded for one that is not. See
+    /// [improving timing after a legal result](self#improving-timing-after-a-legal-result),
+    /// which has what this did on the fabrics measured.
+    pub timing_iterations: u32,
+    /// The criticality from which a connection counts as critical in those iterations, so that
+    /// its net is routed again. The default is 0.9.
+    pub timing_reroute_criticality: f64,
 }
 
 impl Default for EngineOptions<'_> {
@@ -552,6 +597,8 @@ impl Default for EngineOptions<'_> {
             reroute_all: false,
             shuffle_seed: None,
             batch_size: 1,
+            timing_iterations: 0,
+            timing_reroute_criticality: 0.9,
         }
     }
 }
@@ -782,7 +829,10 @@ impl Error for EngineError {}
 #[non_exhaustive]
 pub enum StopReason {
     /// Nothing is overused, so there is nothing left to negotiate. Nets with no path may
-    /// still be unrouted: see [`Outcome::is_success`].
+    /// still be unrouted: see [`Outcome::is_success`]. Overuse that [fixed
+    /// routes](self#fixed-and-pre-routed-nets) cause among themselves can't be negotiated, and
+    /// may be left. A run that [improves timing](self#improving-timing-after-a-legal-result)
+    /// after a legal result stops this way once it is done, whatever its last iteration did.
     Converged,
     /// [`max_iterations`](EngineOptions::max_iterations) ran out with conflicts left.
     IterationLimit,
@@ -2148,22 +2198,37 @@ struct Best<N, R> {
 /// which ranks legal routings by worst negative slack, then total negative slack, then
 /// wirelength. Here every iteration is ranked, legal or not, so legality comes first. Without
 /// timing, both slacks are 0 and the order is as it always was.
-type Rank = (u32, u64, i64, i128, Cost);
+///
+/// A run that [improves timing](EngineOptions::timing_iterations) after its first legal result
+/// also ranks by critical-path delay after the slacks, so that a shorter critical path counts
+/// once timing is met. Otherwise that is 0, which keeps the order as it was.
+type Rank = (u32, u64, i64, i128, u64, Cost);
 
 /// The rank of an iteration with the given state.
-fn rank(unrouted: u32, total_overuse: u64, timing: Option<&TimingMetrics>, cost: Cost) -> Rank {
+fn rank(
+    unrouted: u32,
+    total_overuse: u64,
+    timing: Option<&TimingMetrics>,
+    by_delay: bool,
+    cost: Cost,
+) -> Rank {
     let (worst, total) = timing.map_or((0, 0), |metrics| {
         (
             metrics.worst_negative_slack(),
             metrics.total_negative_slack.min(0),
         )
     });
+    let delay = timing
+        .filter(|_| by_delay)
+        .and_then(|metrics| metrics.critical_path_delay)
+        .unwrap_or(0);
     // Negated so that less is better, as for the rest.
     (
         unrouted,
         total_overuse,
         worst.saturating_neg(),
         total.saturating_neg(),
+        delay,
         cost,
     )
 }
@@ -2199,6 +2264,10 @@ struct TimingState<S: RoutingSpace> {
     arc_delays: Vec<u32>,
     /// A buffer for the analysis's criticalities, by [`ArcId`].
     arc_criticality: Vec<f64>,
+    /// The criticality from which a net counts as critical.
+    critical_from: f64,
+    /// For each net, whether a connection of it is at least `critical_from`.
+    critical_nets: Vec<bool>,
     metrics: TimingMetrics,
 }
 
@@ -2209,6 +2278,7 @@ impl<S: RoutingSpace> TimingState<S> {
         timing: TimingDriven,
         step_delays: StepDelays<S>,
         delay_bound: DelayLowerBound<S>,
+        critical_from: f64,
     ) -> Result<Self, EngineError> {
         let TimingDriven {
             graph,
@@ -2271,6 +2341,8 @@ impl<S: RoutingSpace> TimingState<S> {
             criticality: vec![0.0; total as usize],
             arc_delays,
             arc_criticality: Vec::new(),
+            critical_from,
+            critical_nets: vec![false; nets.len()],
             metrics: TimingMetrics {
                 critical_path_delay: None,
                 worst_slack: None,
@@ -2310,9 +2382,19 @@ impl<S: RoutingSpace> TimingState<S> {
     fn refresh_criticality(&mut self) {
         self.analysis
             .fill_arc_criticalities(&self.options, &mut self.arc_criticality);
-        for (connection, &(_, _, slot)) in self.connections.iter().zip(&self.places) {
-            self.criticality[slot] = self.arc_criticality[connection.arc.index()];
+        self.critical_nets.fill(false);
+        for (connection, &(net, _, slot)) in self.connections.iter().zip(&self.places) {
+            let criticality = self.arc_criticality[connection.arc.index()];
+            self.criticality[slot] = criticality;
+            if criticality >= self.critical_from {
+                self.critical_nets[net] = true;
+            }
         }
+    }
+
+    /// Whether any net counts as critical.
+    fn any_critical(&self) -> bool {
+        self.critical_nets.contains(&true)
     }
 
     /// Returns the timing of the current routes, as last analysed.
@@ -2406,6 +2488,10 @@ pub struct Engine<'a, S: RoutingSpace> {
     best: Option<Best<S::Node, S::Resource>>,
     stop: Option<StopReason>,
     timing: Option<TimingState<S>>,
+    /// The first iteration that left nothing overused but what fixed routes cause.
+    first_legal: Option<u32>,
+    /// Whether the current iteration has changed any route, which is all that it needs to know.
+    changed: bool,
 }
 
 impl<S: RoutingSpace> fmt::Debug for Engine<'_, S> {
@@ -2468,6 +2554,8 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
             best: None,
             stop: None,
             timing: None,
+            first_legal: None,
+            changed: false,
         })
     }
 
@@ -2753,6 +2841,7 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
 
         self.iteration += 1;
         self.present = self.next_present();
+        self.changed = false;
         if self.iteration > 1
             && let Some(rng) = &mut self.rng
         {
@@ -2946,6 +3035,7 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
                 }
                 self.table.acquire(&state.held);
                 state.resources = resources;
+                self.changed |= state.route.as_ref() != Some(&route);
                 state.route = Some(route);
                 state.cost = cost;
                 state.delays = delays;
@@ -3049,18 +3139,41 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
         };
         self.reports.push(report);
 
+        // What is left, if anything, is between fixed routes, which no iteration can change.
+        let legal = total_overuse == fixed_overuse;
+        let improving = self.improves_timing();
+        if legal && interrupted.is_none() && self.first_legal.is_none() {
+            self.first_legal = Some(self.iteration);
+        }
+        // Once nothing changes, nothing will: the next iteration would route the same nets
+        // against the same table, and find the same routes.
+        let improved_enough = self.first_legal.is_some_and(|first| {
+            self.iteration - first >= self.options.timing_iterations
+                || (legal
+                    && (!self.changed
+                        || !self.timing.as_ref().is_some_and(TimingState::any_critical)))
+        });
         if let Some(interrupt) = interrupted {
             self.stop = Some(interrupt.stop());
-        } else if total_overuse == fixed_overuse {
-            // What is left, if anything, is between fixed routes, which no iteration can
-            // change.
+        } else if (legal && !improving) || (improving && improved_enough) {
             self.stop = Some(StopReason::Converged);
         } else if self.iteration >= self.options.max_iterations {
-            self.stop = Some(StopReason::IterationLimit);
-        } else {
+            // A run that found a legal result has one, whatever this iteration did.
+            let found = improving && self.first_legal.is_some();
+            self.stop = Some(if found {
+                StopReason::Converged
+            } else {
+                StopReason::IterationLimit
+            });
+        } else if !legal {
             self.table.add_history(self.options.history_factor);
         }
         report
+    }
+
+    /// Whether the run goes on after its first legal result, to improve its timing.
+    fn improves_timing(&self) -> bool {
+        self.timing.is_some() && self.options.timing_iterations > 0
     }
 
     /// Steps until the engine stops, and returns the result.
@@ -3152,9 +3265,15 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
     /// Returns the present factor for the iteration about to start.
     fn next_present(&self) -> Cost {
         let options = &self.options;
+        let restart = self.first_legal.is_some()
+            && self
+                .reports
+                .last()
+                .is_some_and(|report| report.total_overuse == report.fixed_overuse);
         let present = match self.iteration {
             0 | 1 => options.first_present,
             2 => options.initial_present,
+            _ if restart => options.initial_present,
             _ => self.present * options.present_growth,
         };
         present.min(options.max_present)
@@ -3167,6 +3286,15 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
             return false;
         }
         if state.route.is_none() || self.options.reroute_all {
+            return true;
+        }
+        if self.first_legal.is_some()
+            && self.improves_timing()
+            && self
+                .timing
+                .as_ref()
+                .is_some_and(|timing| timing.critical_nets[index])
+        {
             return true;
         }
         match &state.fixed {
@@ -3224,6 +3352,7 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
                 }
                 self.table.acquire(&state.held);
                 state.resources = resources;
+                self.changed |= state.route.as_ref() != Some(&route);
                 state.route = Some(route);
                 state.cost = cost;
                 state.delays = delays;
@@ -3265,7 +3394,13 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
         total_cost: Cost,
     ) {
         let metrics = self.timing.as_ref().map(|timing| &timing.metrics);
-        let rank = rank(unrouted, total_overuse, metrics, total_cost);
+        let rank = rank(
+            unrouted,
+            total_overuse,
+            metrics,
+            self.improves_timing(),
+            total_cost,
+        );
         let better = self.best.as_ref().is_none_or(|best| rank < best.rank);
         if better {
             let reason = interrupted.map_or(UnroutedReason::BudgetExhausted, Interrupt::reason);
@@ -3407,6 +3542,7 @@ impl<'a, S: DelaySpace> Engine<'a, S> {
             timing,
             S::step_delays,
             S::delay_lower_bound,
+            options.timing_reroute_criticality,
         )?);
         Ok(engine)
     }

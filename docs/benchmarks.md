@@ -453,6 +453,55 @@ to 2.8% slower on four of them and 0.5% faster on the island fabric, and the sam
 by up to 3.5% between rounds. The 2.8%, on the dense grid, is within that, and could be noise or
 a small real cost: this machine can't tell the two apart.
 
+#### Going on after a legal result
+
+Measured on 2026-11-05, on the commit that adds `EngineOptions::timing_iterations`, by the same
+sweep, which now has five more rows. The rows above are unchanged by it, to the digit. "10 more
+at 0.9" goes on for up to 10 iterations after the first legal result, rerouting the nets of
+connections of criticality 0.9 or more. Ratios here are to the "Timing" row, and every instance
+was solved in every row.
+
+| Group | Setting | Critical path, ps | / timing | Wirelength | Iterations | Expansions | / timing |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 16 x 16, 1 track | Timing | 60000 | 1.000 | 10617 | 87 | 921050 | 1.000 |
+| | 10 more at 0.9 | 59290 | 0.988 | 10561 | 147 | 1405646 | 1.526 |
+| | 30 more at 0.9 | 58020 | 0.967 | 10508 | 251 | 2088888 | 2.268 |
+| | 10 more at 0.8 | 59290 | 0.988 | 10557 | 147 | 1446548 | 1.571 |
+| | 10 more at 0.95 | 60000 | 1.000 | 10584 | 147 | 1395280 | 1.515 |
+| | 10 more at 0.5 | 59290 | 0.988 | 10565 | 147 | 1797432 | 1.951 |
+| 32 x 32, 1 track | Timing | 73070 | 1.000 | 43845 | 74 | 3956505 | 1.000 |
+| | 10 more at 0.9 | 69780 | 0.955 | 43685 | 134 | 4998369 | 1.263 |
+| | 30 more at 0.9 | 68740 | 0.941 | 43554 | 254 | 6469531 | 1.635 |
+| | 10 more at 0.8 | 69780 | 0.955 | 43560 | 134 | 5616312 | 1.419 |
+| | 10 more at 0.95 | 69780 | 0.955 | 43679 | 134 | 4745832 | 1.199 |
+| | 10 more at 0.5 | 69780 | 0.955 | 43429 | 134 | 7623642 | 1.927 |
+| 32 x 32, 2 tracks | Timing | 64670 | 1.000 | 38824 | 35 | 1201355 | 1.000 |
+| | 10 more at 0.9 | 64670 | 1.000 | 38822 | 78 | 1437571 | 1.197 |
+| | 30 more at 0.9 | 64670 | 1.000 | 38822 | 130 | 1709584 | 1.423 |
+| | 10 more at 0.8 | 64670 | 1.000 | 38829 | 92 | 1818086 | 1.513 |
+| | 10 more at 0.95 | 64670 | 1.000 | 38822 | 78 | 1415197 | 1.178 |
+| | 10 more at 0.5 | 64670 | 1.000 | 38852 | 95 | 3217096 | 2.678 |
+
+What this shows:
+
+- **It helps few instances, and those a lot.** Per instance, 10 more iterations shortened 2 of
+  the 18 critical paths, by 7.1% and 23%, and 30 shortened 5, by 3.2% to 23%. The other 13
+  were unchanged, and none can get longer, as the first legal result stays a candidate. Over
+  a group, that is 1.2% to 4.5% at 10 and 3.3% to 5.9% at 30, on the two narrow groups. The
+  group with room to spare was already at the floor, so it had nothing to gain.
+- **It costs 1.2 to 2.3 times the expansions** of plain timing-driven routing at a criticality
+  of 0.9. The iterations nearly all run, because rerouting keeps changing routes.
+- **The criticality matters little.** 0.5, 0.8 and 0.9 found the same critical paths, 0.95
+  missed the gain on the small group, and lower values reroute more nets for more work.
+- **Without restarting the present factor**, which was tried first, critical nets were
+  rerouted against the prices that the negotiation had left and found the routes they had. Only
+  one instance changed, from 14190 to 10900 ps, which is the 32 x 32 group's 4.5%, for 0.8% more
+  expansions there, and the small group gained nothing. Runs then stopped as soon as an
+  iteration changed nothing, which the engine still does.
+
+So the default stays at 0: this is for a caller who wants the last few percent of a critical
+path and can pay for it. On these instances, 10 iterations at 0.9 is a reasonable setting.
+
 ## What this does not show
 
 - Nothing here is a real design. Dense permutation problems are a stress test, with terminals

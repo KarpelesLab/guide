@@ -82,7 +82,9 @@ First real domain and the first test of the abstraction.
 - Non-configurable edges (shorts), taken as a whole set by the engine and checked by the
   validator. Done, through `RoutingSpace::non_configurable`.
 - Static timing analysis with a pluggable delay model.
-- Timing-driven routing using net criticality.
+- Timing-driven routing using net criticality, optionally going on after the first legal
+  result to shorten the critical path (`EngineOptions::timing_iterations`, measured in
+  `docs/benchmarks.md`).
 - Fixed pins and pre-routed nets (clocks, for example). Done in the engine:
   `Engine::fix_routes` takes whole or partial routes, and `validate::check_fixed` checks
   that a result kept them.

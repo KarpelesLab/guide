@@ -1665,7 +1665,13 @@ fn timed_family() -> (Vec<String>, Vec<TimedInstance>) {
 
 fn timing_sweep() {
     let (groups, instances) = timed_family();
-    let settings: [(&str, EngineOptions<'static>, bool); 6] = [
+    let improve = |iterations: u32, criticality: f64| {
+        options_with(|o| {
+            o.timing_iterations = iterations;
+            o.timing_reroute_criticality = criticality;
+        })
+    };
+    let settings: [(&str, EngineOptions<'static>, bool); 11] = [
         ("No timing (reference)", EngineOptions::default(), false),
         ("Timing", EngineOptions::default(), true),
         (
@@ -1688,6 +1694,11 @@ fn timing_sweep() {
             options_with(|o| o.batch_size = 32),
             true,
         ),
+        ("Timing, 10 more at 0.9", improve(10, 0.9), true),
+        ("Timing, 30 more at 0.9", improve(30, 0.9), true),
+        ("Timing, 10 more at 0.8", improve(10, 0.8), true),
+        ("Timing, 10 more at 0.95", improve(10, 0.95), true),
+        ("Timing, 10 more at 0.5", improve(10, 0.5), true),
     ];
     let runs: Vec<Vec<TimedRun>> = settings
         .iter()

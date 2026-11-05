@@ -1054,10 +1054,102 @@ fn a_better_critical_path_beats_a_cheaper_route_among_legal_results() {
         worst_slack: Some(80),
         ..met
     };
-    assert!(rank(0, 0, Some(&fast), Cost::from(9)) < rank(0, 0, Some(&slow), Cost::from(1)));
+    let plain = |overuse, metrics, cost| rank(0, overuse, metrics, false, Cost::from(cost));
+    assert!(plain(0, Some(&fast), 9) < plain(0, Some(&slow), 1));
     // Legality first.
-    assert!(rank(0, 1, Some(&fast), Cost::from(1)) > rank(0, 0, Some(&slow), Cost::from(9)));
+    assert!(plain(1, Some(&fast), 1) > plain(0, Some(&slow), 9));
     // Once timing is met, as in VPR, more slack is not better, and cost decides.
-    assert!(rank(0, 0, Some(&more_slack), Cost::from(2)) > rank(0, 0, Some(&met), Cost::from(1)));
-    assert_eq!(rank(0, 0, None, Cost::from(3)), (0, 0, 0, 0, Cost::from(3)));
+    assert!(plain(0, Some(&more_slack), 2) > plain(0, Some(&met), 1));
+    assert_eq!(plain(0, None, 3), (0, 0, 0, 0, 0, Cost::from(3)));
+
+    // When improving timing, a shorter critical path wins once timing is met, but only then.
+    let faster_met = TimingMetrics {
+        critical_path_delay: Some(150),
+        ..met
+    };
+    let by_delay = |metrics, cost| rank(0, 0, metrics, true, Cost::from(cost));
+    assert!(by_delay(Some(&faster_met), 9) < by_delay(Some(&met), 1));
+    assert!(plain(0, Some(&faster_met), 9) > plain(0, Some(&met), 1));
+    // Slack still comes first: a fast path that misses timing loses to a slower one that meets it.
+    assert!(by_delay(Some(&fast), 9) > by_delay(Some(&met), 1));
+    assert_eq!(by_delay(None, 3), plain(0, None, 3));
+}
+
+// Improving timing after a legal result.
+
+/// Options that go on for `iterations` after the first legal result.
+fn improving(iterations: u32) -> EngineOptions<'static> {
+    EngineOptions {
+        timing_iterations: iterations,
+        ..EngineOptions::default()
+    }
+}
+
+#[test]
+fn going_on_after_a_legal_result_never_lengthens_the_critical_path() {
+    // None of these small fabrics has a shorter path to find, as it happens: the benchmarks have
+    // instances that do. So this checks what has to hold whatever the instance.
+    for (tiles, tracks, count) in [(12, 1, 60), (16, 2, 100), (16, 1, 80), (16, 1, 120)] {
+        let (graph, nets, fabric) = fabric_problem(tiles, tracks, count);
+        let space = graph
+            .with_step_delays(fabric_delay(fabric))
+            .with_delay_bound(fabric_delay_bound(fabric));
+        let timing = fabric_timing(fabric, &nets);
+        let plain = route_checked(&space, &nets, EngineOptions::default(), &timing);
+        let better = route_checked(&space, &nets, improving(10), &timing);
+        assert!(plain.is_success() && better.is_success());
+        assert_eq!(better.stop, StopReason::Converged);
+        let delay = |outcome: &Outcome<NodeId, NodeId>| {
+            outcome.timing.as_ref().unwrap().metrics.critical_path_delay
+        };
+        assert!(
+            delay(&better) <= delay(&plain),
+            "{tiles} tiles, {tracks} tracks"
+        );
+        // It never went past its budget, which started at the plain run's legal result.
+        assert!(better.routes.stats.iterations <= plain.routes.stats.iterations + 10);
+        assert!(better.best_iteration >= plain.best_iteration);
+    }
+}
+
+#[test]
+fn the_extra_iterations_are_the_same_on_any_number_of_threads() {
+    let (graph, nets, fabric) = fabric_problem(16, 1, 120);
+    let space = graph
+        .with_step_delays(fabric_delay(fabric))
+        .with_delay_bound(fabric_delay_bound(fabric));
+    let timing = fabric_timing(fabric, &nets);
+    let options = EngineOptions {
+        batch_size: 8,
+        ..improving(6)
+    };
+    let reference = route_timed(&space, &nets, options, timing.clone()).unwrap();
+    check_honest(&space, &nets, &reference).unwrap();
+    for threads in THREAD_COUNTS {
+        let outcome = route_timed_parallel(&space, &nets, options, timing.clone(), threads);
+        assert_eq!(outcome.unwrap(), reference, "on {threads} threads");
+    }
+}
+
+#[test]
+fn a_run_that_cannot_improve_stops_once_nothing_changes() {
+    // The only critical connection is on its fastest route already, and nothing else is in the
+    // way, so the extra iterations find the same routes and stop.
+    let (graph, nets, timing) = two_diamonds(0.99);
+    let space = graph.with_step_delays(diamond_delay);
+    let plain = route_checked(&space, &nets, EngineOptions::default(), &timing);
+    let more = route_checked(&space, &nets, improving(50), &timing);
+    assert_eq!(more.stop, StopReason::Converged);
+    assert!(more.routes.stats.iterations <= plain.routes.stats.iterations + 2);
+    assert_eq!(
+        more.routes.routes().collect::<Vec<_>>(),
+        plain.routes.routes().collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn going_on_needs_timing_and_changes_nothing_without_it() {
+    let (graph, nets, _) = fabric_problem(12, 1, 60);
+    let plain = route(&graph, &nets, EngineOptions::default()).unwrap();
+    assert_eq!(route(&graph, &nets, improving(10)).unwrap(), plain);
 }

@@ -214,13 +214,17 @@ pub(crate) struct Params {
 
 /// Verdicts of the world on steps of one pitch, by node and direction, which hold for as
 /// long as the world and the net's lattice don't change: three bits for each direction,
-/// whether it is known and then the verdict.
+/// whether it is known and then the verdict. And its verdicts on the net's vias, which are
+/// asked about once for every layer.
 #[derive(Debug, Default)]
-pub(crate) struct StepCache(RefCell<FastMap<DNode, u32>>);
+pub(crate) struct StepCache {
+    steps: RefCell<FastMap<DNode, u32>>,
+    vias: RefCell<FastMap<Point, Verdict>>,
+}
 
 impl StepCache {
     fn get(&self, from: DNode, dir: usize) -> Option<Verdict> {
-        let bits = *self.0.borrow().get(&from)? >> (3 * dir);
+        let bits = *self.steps.borrow().get(&from)? >> (3 * dir);
         let verdict = match (bits >> 1) & 3 {
             0 => Verdict::Free,
             1 => Verdict::Routed,
@@ -235,7 +239,7 @@ impl StepCache {
             Verdict::Routed => 1,
             Verdict::Blocked => 2,
         };
-        *self.0.borrow_mut().entry(from).or_insert(0) |= (1 | code << 1) << (3 * dir);
+        *self.steps.borrow_mut().entry(from).or_insert(0) |= (1 | code << 1) << (3 * dir);
     }
 }
 
@@ -248,8 +252,6 @@ pub(crate) struct DetailSpace<'a> {
     corridor: Option<&'a Corridor>,
     rip: Option<RipUp<'a>>,
     layers: usize,
-    /// Vias found legal or not, by point, as each is asked about once for every layer.
-    vias: RefCell<FastMap<Point, Verdict>>,
     near: RefCell<Vec<crate::geom::EntryId>>,
     /// The net's own vias so far, which others of its vias keep the hole-to-hole
     /// clearance from: the world doesn't have them until the net is committed.
@@ -275,7 +277,6 @@ impl<'a> DetailSpace<'a> {
             corridor,
             rip,
             layers: world.rules().layer_count(),
-            vias: RefCell::new(FastMap::default()),
             near: RefCell::new(Vec::new()),
             keep_off: Vec::new(),
             reached: vec![false; ctx.terminals],
@@ -291,17 +292,16 @@ impl<'a> DetailSpace<'a> {
         if a == b {
             return true;
         }
-        h2h > 0
-            && match (Shape::circle(a, drill), Shape::circle(b, drill)) {
-                (Ok(x), Ok(y)) => x.violates(&y, h2h).unwrap_or(true),
-                _ => true,
-            }
+        // Two holes of one size are closer than `h2h` when their centres are closer than
+        // that and their diameter.
+        let (dx, dy) = ((a.x - b.x) as i128, (a.y - b.y) as i128);
+        let reach = i128::from(drill) + i128::from(h2h);
+        h2h > 0 && dx * dx + dy * dy < reach * reach
     }
 
     /// Keeps the net's later vias clear of one at `p`.
     fn keep_off(&mut self, p: Point) {
         self.keep_off.push(p);
-        self.vias.borrow_mut().clear();
     }
 
     /// What a step costs on top of its length, or `None` if it may not be taken.
@@ -471,13 +471,16 @@ impl RoutingSpace for DetailSpace<'_> {
             && self.layers > 1
             && at_pad.is_none()
         {
-            let verdict = *self.vias.borrow_mut().entry(p).or_insert_with(|| {
-                if self.keep_off.iter().any(|&q| self.vias_clash(p, q)) {
-                    Verdict::Blocked
-                } else {
-                    self.world.via(self.ctx.net, p, diameter, drill, None)
-                }
-            });
+            let verdict = if self.keep_off.iter().any(|&q| self.vias_clash(p, q)) {
+                Verdict::Blocked
+            } else {
+                *self
+                    .cache
+                    .vias
+                    .borrow_mut()
+                    .entry(p)
+                    .or_insert_with(|| self.world.via(self.ctx.net, p, diameter, drill, None))
+            };
             if let Some(extra) = self.verdict_cost(verdict, p)
                 && let Some(cost) = Cost::new(self.params.via_cost + extra)
             {

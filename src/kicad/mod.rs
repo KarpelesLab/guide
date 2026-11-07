@@ -235,6 +235,8 @@ impl std::error::Error for KicadError {}
 #[cfg(test)]
 pub(crate) mod curated_tests;
 #[cfg(test)]
+mod freerouting_tests;
+#[cfg(test)]
 mod routing_tests;
 #[cfg(test)]
 mod tests;

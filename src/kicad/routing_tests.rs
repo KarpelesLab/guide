@@ -54,7 +54,7 @@ fn stripped(read: &KicadBoard) -> Design {
 }
 
 /// The length of a board's tracks in millimetres, arcs as two chords through their middle.
-fn length(tracks: &[drc::Track]) -> f64 {
+pub(super) fn length(tracks: &[drc::Track]) -> f64 {
     let d = |a: crate::geom::Point, b: crate::geom::Point| {
         let (x, y) = ((b.x - a.x) as f64, (b.y - a.y) as f64);
         (x * x + y * y).sqrt()

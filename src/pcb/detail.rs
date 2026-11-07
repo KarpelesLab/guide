@@ -205,12 +205,45 @@ pub(crate) struct Params {
     /// Whether a route may go to the centre of a pad it has yet to reach on a layer the pad
     /// isn't on, for a via in the pad.
     pub(crate) under_pads: bool,
+    /// If not zero, how many nodes a search from the terminals not yet reached may expand,
+    /// before each search for one of them, to find that none can be: a terminal shut in by
+    /// other nets' routes is found out by a search from it in far fewer nodes than one to
+    /// it, which has to search everything outside first.
+    pub(crate) precheck: u64,
+}
+
+/// Verdicts of the world on steps of one pitch, by node and direction, which hold for as
+/// long as the world and the net's lattice don't change: three bits for each direction,
+/// whether it is known and then the verdict.
+#[derive(Debug, Default)]
+pub(crate) struct StepCache(RefCell<FastMap<DNode, u32>>);
+
+impl StepCache {
+    fn get(&self, from: DNode, dir: usize) -> Option<Verdict> {
+        let bits = *self.0.borrow().get(&from)? >> (3 * dir);
+        let verdict = match (bits >> 1) & 3 {
+            0 => Verdict::Free,
+            1 => Verdict::Routed,
+            _ => Verdict::Blocked,
+        };
+        (bits & 1 != 0).then_some(verdict)
+    }
+
+    fn set(&self, from: DNode, dir: usize, verdict: Verdict) {
+        let code = match verdict {
+            Verdict::Free => 0,
+            Verdict::Routed => 1,
+            Verdict::Blocked => 2,
+        };
+        *self.0.borrow_mut().entry(from).or_insert(0) |= (1 | code << 1) << (3 * dir);
+    }
 }
 
 /// The space one net is searched in.
 pub(crate) struct DetailSpace<'a> {
     world: &'a World<'a>,
     ctx: &'a NetCtx,
+    cache: &'a StepCache,
     params: Params,
     corridor: Option<&'a Corridor>,
     rip: Option<RipUp<'a>>,
@@ -229,6 +262,7 @@ impl<'a> DetailSpace<'a> {
     pub(crate) fn new(
         world: &'a World<'a>,
         ctx: &'a NetCtx,
+        cache: &'a StepCache,
         params: Params,
         corridor: Option<&'a Corridor>,
         rip: Option<RipUp<'a>>,
@@ -236,6 +270,7 @@ impl<'a> DetailSpace<'a> {
         DetailSpace {
             world,
             ctx,
+            cache,
             params,
             corridor,
             rip,
@@ -306,7 +341,17 @@ impl<'a> DetailSpace<'a> {
         }
     }
 
-    fn track_step(&self, from: DNode, to: Point, out: &mut Vec<Step<DNode>>, snap: bool) {
+    /// A step from `from` to `to`, if it may be taken: in one of [`DIRS`], which
+    /// [`StepCache`] keeps the verdicts of, or a step to a pad's centre or onto its lattice,
+    /// with `snap` if it is to the centre.
+    fn track_step(
+        &self,
+        from: DNode,
+        to: Point,
+        out: &mut Vec<Step<DNode>>,
+        snap: bool,
+        dir: Option<usize>,
+    ) {
         let b = &self.params.bounds;
         if to.x < b.min().x || to.y < b.min().y || to.x > b.max().x || to.y > b.max().y {
             return;
@@ -317,13 +362,29 @@ impl<'a> DetailSpace<'a> {
             self.layer_factor(to, from.l)
         };
         let Some(factor) = factor else { return };
-        let width = self.ctx.widths[usize::from(from.l)];
-        let Ok(shape) = Shape::track(from.point(), to, width) else {
-            return;
+        let verdict = match dir.and_then(|d| self.cache.get(from, d)) {
+            Some(v) => v,
+            None => {
+                let width = self.ctx.widths[usize::from(from.l)];
+                let Ok(shape) = Shape::track(from.point(), to, width) else {
+                    return;
+                };
+                let v = self
+                    .world
+                    .track(self.ctx.net, LayerId(from.l), &shape, None);
+                if let Some(d) = dir {
+                    // The same track, the other way.
+                    self.cache.set(from, d, v);
+                    let back = DNode {
+                        x: to.x,
+                        y: to.y,
+                        l: from.l,
+                    };
+                    self.cache.set(back, (d + 4) % 8, v);
+                }
+                v
+            }
         };
-        let verdict = self
-            .world
-            .track(self.ctx.net, LayerId(from.l), &shape, None);
         let Some(extra) = self.verdict_cost(verdict, to) else {
             return;
         };
@@ -372,9 +433,9 @@ impl RoutingSpace for DetailSpace<'_> {
         }
         let at_pad = self.ctx.through.get(&p);
         let pitch = self.params.pitch;
-        for (dx, dy) in DIRS {
+        for (d, (dx, dy)) in DIRS.into_iter().enumerate() {
             let to = Point::new(p.x + dx * pitch, p.y + dy * pitch);
-            self.track_step(from, to, out, false);
+            self.track_step(from, to, out, false, Some(d));
         }
         // Straight to the centre of a pad nearby, or onto the lattice of its centre, so as
         // to reach it straight.
@@ -394,12 +455,12 @@ impl RoutingSpace for DetailSpace<'_> {
                 }
                 let b = pad.bbox.expand(pitch);
                 if b.intersects(&Rect::new(p, p)) {
-                    self.track_step(from, pad.center, out, true);
+                    self.track_step(from, pad.center, out, true, None);
                 } else {
                     let near = |v: i64, c: i64| c + (v - c + pitch / 2).div_euclid(pitch) * pitch;
                     let m = Point::new(near(p.x, pad.center.x), near(p.y, pad.center.y));
                     if m != p {
-                        self.track_step(from, m, out, false);
+                        self.track_step(from, m, out, false, None);
                     }
                 }
             }
@@ -467,15 +528,19 @@ pub(crate) enum Failure {
 
 /// Routes one net: a tree from its first terminal that reaches all of the others, each
 /// search going from the whole tree so far to the nearest terminal not yet reached.
+///
+/// `cache` may be shared by searches of the net with the same world and pitch.
 pub(crate) fn route_net(
     world: &World<'_>,
     ctx: &NetCtx,
+    cache: &StepCache,
     params: Params,
     corridor: Option<&Corridor>,
     rip: Option<RipUp<'_>>,
 ) -> Result<Tree, (Failure, u64)> {
-    let mut space = DetailSpace::new(world, ctx, params, corridor, rip);
+    let mut space = DetailSpace::new(world, ctx, cache, params, corridor, rip);
     let mut search = Search::new(&space);
+    let mut back = Search::new(&space);
     let mut retries = 0;
     let mut tree = Tree::default();
     let mut connected = vec![false; ctx.terminals];
@@ -497,6 +562,30 @@ pub(crate) fn route_net(
             .filter(|&t| !connected[t])
             .flat_map(|t| ctx.terminal_nodes(t))
             .collect();
+        if params.precheck > 0 {
+            let mut shut_in = true;
+            for t in (0..ctx.terminals).filter(|&t| !connected[t]) {
+                let outcome = back.find_path_with(
+                    &space,
+                    ctx.net,
+                    ctx.terminal_nodes(t).into_iter().map(Source::new),
+                    sources.iter().map(|&n| Target::new(n)),
+                    SearchLimits {
+                        max_expansions: params.precheck,
+                        cancel: None,
+                    },
+                );
+                let open = outcome != SearchOutcome::Unreachable;
+                tree.expanded += back.stats().expanded;
+                if open {
+                    shut_in = false;
+                    break;
+                }
+            }
+            if shut_in {
+                return Err((Failure::NoPath, tree.expanded));
+            }
+        }
         let limits = SearchLimits {
             max_expansions: budget,
             cancel: None,

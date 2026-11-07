@@ -58,8 +58,9 @@ fn fewer_vias(
     } else {
         &attempts[1..]
     };
+    let steps = detail::StepCache::default();
     for &corridor in attempts {
-        match detail::route_net(world, &job.ctx, p, corridor, None) {
+        match detail::route_net(world, &job.ctx, &steps, p, corridor, None) {
             Ok(t) => {
                 expanded += t.expanded;
                 found = Some(t);

@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use super::cleanup;
-use super::detail::{self, Corridor, History, NetCtx, Params, RipUp, TermPad};
+use super::detail::{self, Corridor, Failure, History, NetCtx, Params, RipUp, StepCache, TermPad};
 use super::escape;
 use super::geometry::NetCopper;
 use super::global::{self, GlobalSpace, Probe, TerminalPads};
@@ -26,6 +26,10 @@ pub(crate) struct Job {
 /// conflict adds to its tile's history.
 const RIP_PENALTY: f64 = 10.0;
 const HISTORY_STEP: f64 = 0.5;
+
+/// How many nodes a search from a terminal may expand to find it shut in, before a search
+/// over the whole board for it.
+const PRECHECK: u64 = 50_000;
 
 /// How much finer the lattice of the second pass is.
 const FINE: i64 = 2;
@@ -373,6 +377,7 @@ pub(crate) fn run(design: &Design, options: &Options) -> Result<Routed, RouteErr
         bounds,
         max_expansions: options.max_expansions,
         under_pads: false,
+        precheck: 0,
     };
 
     // Detailed routing, with rip-up.
@@ -410,25 +415,37 @@ pub(crate) fn run(design: &Design, options: &Options) -> Result<Routed, RouteErr
         while let Some(j) = queue.pop_front() {
             let job = &jobs[j];
             let mut tree = None;
+            // The world doesn't change until the net is placed.
+            let steps = StepCache::default();
+            // A search that runs out of nodes in the corridor would over the board too.
+            let mut out_of_budget = false;
             if let Some(corridor) = &job.corridor {
                 let rip = RipUp {
                     penalty: None,
                     history: &history,
                 };
-                match detail::route_net(&world, &job.ctx, params, Some(corridor), Some(rip)) {
+                match detail::route_net(&world, &job.ctx, &steps, params, Some(corridor), Some(rip))
+                {
                     Ok(t) => {
                         stats.expanded += t.expanded;
                         tree = Some(t);
                     }
-                    Err((_, e)) => stats.expanded += e,
+                    Err((f, e)) => {
+                        stats.expanded += e;
+                        out_of_budget = f == Failure::Budget;
+                    }
                 }
             }
-            if tree.is_none() {
+            if tree.is_none() && !out_of_budget {
                 let rip = RipUp {
                     penalty: None,
                     history: &history,
                 };
-                match detail::route_net(&world, &job.ctx, params, None, Some(rip)) {
+                let checked = Params {
+                    precheck: PRECHECK,
+                    ..params
+                };
+                match detail::route_net(&world, &job.ctx, &steps, checked, None, Some(rip)) {
                     Ok(t) => {
                         stats.expanded += t.expanded;
                         outside[j] = job.corridor.is_some();
@@ -442,7 +459,7 @@ pub(crate) fn run(design: &Design, options: &Options) -> Result<Routed, RouteErr
                     penalty: Some(RIP_PENALTY),
                     history: &history,
                 };
-                match detail::route_net(&world, &job.ctx, params, None, Some(rip)) {
+                match detail::route_net(&world, &job.ctx, &steps, params, None, Some(rip)) {
                     Ok(t) => {
                         stats.expanded += t.expanded;
                         let (victims, at) = detail::victims(&world, &job.ctx, &t);

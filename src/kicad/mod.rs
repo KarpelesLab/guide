@@ -1,5 +1,5 @@
-//! Reading KiCad boards for clearance checks. Enabled by the `kicad` feature, which
-//! implies `pcb`.
+//! Reading KiCad boards for clearance checks and routing, and writing routes back. Enabled
+//! by the `kicad` feature, which implies `pcb`.
 //!
 //! [`read`] takes a `.kicad_pcb` file, and the board's `.kicad_pro` if it has one, and
 //! returns a [`drc::Board`] and [`Rules`] for [`drc::check`], with what each item came from.
@@ -23,6 +23,10 @@
 //!   project, or from the board itself for KiCad 5 files and boards without a project.
 //!   KiCad's defaults apply where neither says. Custom rules, in a `.kicad_dru`, are not
 //!   read.
+//!
+//! [`replace_routing`] writes routes back: it takes a board's text, and replaces its
+//! tracks, vias and zone fills with others, such as [`pcb::route`](crate::pcb::route)'s,
+//! keeping everything else as it was, for KiCad to check or carry on with.
 //!
 //! Formats from KiCad 5 (`20171130`) to KiCad 10 are read. Anything the reader can't model
 //! is listed in [`KicadBoard::warnings`], never dropped in silence. See there for what that
@@ -75,6 +79,7 @@ pub(crate) mod json;
 mod project;
 mod sexpr;
 mod units;
+mod write;
 
 use core::fmt;
 
@@ -82,6 +87,7 @@ use crate::geom::Rules;
 use crate::geom::drc::{self, Item};
 
 pub use board::read;
+pub use write::replace_routing;
 
 /// A board read from KiCad's files, ready for [`drc::check`].
 #[derive(Clone, Debug)]
@@ -228,5 +234,7 @@ impl std::error::Error for KicadError {}
 
 #[cfg(test)]
 pub(crate) mod curated_tests;
+#[cfg(test)]
+mod routing_tests;
 #[cfg(test)]
 mod tests;

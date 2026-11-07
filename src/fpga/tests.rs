@@ -438,6 +438,24 @@ fn step_costs_are_the_base_costs_of_vprs_scheme() {
 }
 
 #[test]
+fn engine_options_put_history_in_the_units_of_the_graph() {
+    let (device, _, _) = mult_4x4();
+    let options = device.engine_options();
+    let defaults = crate::engine::EngineOptions::default();
+    // A tile of wire, a quarter of a length-4 wire's base cost, and far from the default of 1.
+    assert_eq!(options.history_factor.get(), device.delay_normalization());
+    assert!(options.history_factor.get() < 1e-9);
+    assert_eq!(defaults.history_factor, Cost::ONE);
+    // Nothing else changes.
+    assert_eq!(options.max_iterations, defaults.max_iterations);
+    assert_eq!(options.first_present, defaults.first_present);
+    assert_eq!(options.initial_present, defaults.initial_present);
+    assert_eq!(options.present_growth, defaults.present_growth);
+    assert_eq!(options.max_present, defaults.max_present);
+    assert_eq!(options.batch_size, defaults.batch_size);
+}
+
+#[test]
 fn capacity_comes_from_the_file() {
     let (device, _, _) = mult_4x4();
     assert_eq!(device.graph().capacity(NodeId(0)), 1);

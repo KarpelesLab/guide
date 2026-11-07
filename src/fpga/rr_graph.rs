@@ -18,6 +18,7 @@ use std::sync::Arc;
 use super::ImportError;
 use super::xml::{Event, Tag, XmlReader};
 use crate::cost::Cost;
+use crate::engine::EngineOptions;
 use crate::id::{NetId, NodeId};
 use crate::space::graph::{DelayBound, Graph, GraphBuilder, LowerBound, TimedGraph};
 use crate::space::{DelaySpace, RoutingSpace, Step};
@@ -777,6 +778,30 @@ impl RrGraph {
     #[inline]
     pub fn delay_normalization(&self) -> f64 {
         self.delay_normalization
+    }
+
+    /// Returns options for routing on this graph: the engine's defaults, but for a
+    /// [`history_factor`](EngineOptions::history_factor) of one tile of wire, the
+    /// [`delay_normalization`](RrGraph::delay_normalization).
+    ///
+    /// The factor is in the units of the space's costs, and the default of 1 suits steps that
+    /// cost about 1. This graph's costs are in seconds, as VPR's are, with a tile of wire at
+    /// about 1e-10, so at the default a node that is overused once costs as much as ten
+    /// billion tiles of wire from then on, and nets go far around it. On VTR's MCNC circuits,
+    /// which `docs/benchmarks.md` has, the default gave 7% to 56% more wire than this at a
+    /// relaxed channel width, critical paths 3% to 120% longer, and needed channels up to 1.9
+    /// times as wide.
+    ///
+    /// VPR's own history multiplies a node's base cost, starting at 1 and adding 1 per unit of
+    /// overuse, which is the same as adding its base cost each time. A tile, a quarter of the
+    /// base cost of the length-4 wires in those circuits, did slightly better there than a
+    /// whole wire.
+    pub fn engine_options(&self) -> EngineOptions<'static> {
+        let mut options = EngineOptions::default();
+        if let Some(factor) = Cost::new(self.delay_normalization) {
+            options.history_factor = factor;
+        }
+        options
     }
 
     /// Returns the device's size in tiles, as a width and a height.

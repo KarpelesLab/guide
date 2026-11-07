@@ -547,6 +547,9 @@ pub struct EngineOptions<'c> {
     /// and reticle, which suits a space whose typical step costs about 1. Scale it with the
     /// step costs of other spaces, because history adds to them. On dense grids, both 0.2
     /// and 5 did worse. At zero, a step that costs nothing can never become dear.
+    ///
+    /// On a VPR routing resource graph, whose costs are in seconds, the default is far too
+    /// high: `fpga::RrGraph::engine_options` scales it to the graph.
     pub history_factor: Cost,
     /// Whether to route every net in every iteration, and not only those holding an overused
     /// resource. The default is false. On dense grids this solved fewer problems within the

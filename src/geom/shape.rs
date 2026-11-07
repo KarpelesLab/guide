@@ -195,6 +195,13 @@ impl Shape {
         Ok(Shape::new(core, 2 * radius, 0))
     }
 
+    /// The vertices of a track's centerline, in order, as [`arc_track`](Shape::arc_track)
+    /// approximates an arc: maybe from its end to its start. `None` for other shapes.
+    #[cfg_attr(not(feature = "dsn"), allow(dead_code))]
+    pub(crate) fn centerline(&self) -> Option<Vec<Point>> {
+        self.core.polyline()
+    }
+
     /// Whether distances to this shape are exact. Only arcs' are not.
     #[inline]
     pub fn is_exact(&self) -> bool {

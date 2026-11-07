@@ -68,7 +68,7 @@
 //!   hole-to-hole clearance are then zero.
 
 mod board;
-mod json;
+pub(crate) mod json;
 mod project;
 mod sexpr;
 mod units;
@@ -148,14 +148,8 @@ pub struct KicadError {
 impl KicadError {
     /// An error at a byte offset of a file.
     pub(crate) fn syntax(text: &str, offset: usize, message: &str) -> KicadError {
-        let offset = offset.min(text.len());
-        let line = text.as_bytes()[..offset]
-            .iter()
-            .filter(|&&b| b == b'\n')
-            .count()
-            + 1;
         KicadError {
-            line: Some(line),
+            line: Some(crate::sexpr::line_of(text, offset)),
             message: message.to_string(),
         }
     }
@@ -191,6 +185,6 @@ impl fmt::Display for KicadError {
 impl std::error::Error for KicadError {}
 
 #[cfg(test)]
-mod curated_tests;
+pub(crate) mod curated_tests;
 #[cfg(test)]
 mod tests;

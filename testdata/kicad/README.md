@@ -44,3 +44,23 @@ GUIDE_KICAD=1 GUIDE_KICAD_UPDATE=1 cargo test --release --features kicad curated
 
 [`docs/benchmarks.md`](../../docs/benchmarks.md#pcb-clearance-checks-against-kicad) has the
 results.
+
+## DSN files
+
+The `*.dsn` files beside each board are not from the source projects either: they are derived
+from the boards, as their licences allow, by KiCad 10.0.3's own Specctra exporter
+(`pcbnew.ExportSpecctraDSN`, as "Export Specctra DSN" does for Freerouting), and are under
+the boards' licences. Two changes were made for it: the first line, which names the file, is cut from an
+absolute path to the file's name, and on `nk3-nrf-mini`, whose three mounting holes share the
+reference `REF**`, which the exporter refuses, two of them were renamed `REF**_2` and `REF**_3`
+first, in memory. `src/dsn/curated_tests.rs` reads them and compares them with the boards, and
+imports sessions back into KiCad:
+
+```text
+cargo test --release --all-features curated_dsn                                # compare
+GUIDE_KICAD=1 cargo test --release --all-features -- curated_dsn curated_sessions  # with KiCad
+GUIDE_KICAD=1 GUIDE_KICAD_UPDATE=1 cargo test --release --all-features curated_dsn_files  # rewrite
+```
+
+[`docs/benchmarks.md`](../../docs/benchmarks.md#pcb-dsn-designs-against-kicad-boards) has the
+results.

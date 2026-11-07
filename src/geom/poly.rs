@@ -136,6 +136,16 @@ impl Core {
         Ok(Core::Path(polyclip::Path(points)))
     }
 
+    /// The vertices of a segment or a polyline, in order. `None` for points and polygons.
+    #[cfg_attr(not(feature = "dsn"), allow(dead_code))]
+    pub(crate) fn polyline(&self) -> Option<Vec<Point>> {
+        match self {
+            Core::Segment(s) => Some(vec![from_poly(s.a), from_poly(s.b)]),
+            Core::Path(path) => Some(path.0.iter().copied().map(from_poly).collect()),
+            Core::Point(_) | Core::Polygon(_) => None,
+        }
+    }
+
     /// Whether this is a polygon, which has an inside.
     pub(crate) fn is_polygon(&self) -> bool {
         matches!(self, Core::Polygon(_))

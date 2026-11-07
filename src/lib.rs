@@ -9,12 +9,15 @@
 //!
 //! The `fpga` feature adds support for FPGA routing problems, and the `pcb` feature adds
 //! the geometry layer, `geom`, that PCB routing will build on. The `kicad` feature, which
-//! implies `pcb`, reads KiCad boards into it, for clearance checks.
+//! implies `pcb`, reads KiCad boards into it, for clearance checks, and the `dsn` feature,
+//! which implies `pcb` too, reads Specctra DSN designs into it and writes SES sessions.
 //!
 //! [roadmap]: https://github.com/KarpelesLab/guide/blob/master/ROADMAP.md
 //! [architecture notes]: https://github.com/KarpelesLab/guide/blob/master/docs/architecture.md
 
 pub mod cost;
+#[cfg(feature = "dsn")]
+pub mod dsn;
 pub mod engine;
 #[cfg(feature = "fpga")]
 pub mod fpga;
@@ -27,7 +30,11 @@ pub mod math;
 pub mod net;
 pub mod rng;
 pub mod search;
+#[cfg(any(feature = "kicad", feature = "dsn"))]
+mod sexpr;
 pub mod space;
 pub mod steiner;
 pub mod timing;
+#[cfg(any(feature = "kicad", feature = "dsn"))]
+mod units;
 pub mod validate;

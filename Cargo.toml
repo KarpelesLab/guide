@@ -22,6 +22,8 @@ fpga = []
 pcb = ["dep:polyclip"]
 # Reading KiCad boards and their rules into the geometry layer, for clearance checks.
 kicad = ["pcb"]
+# Reading Specctra DSN designs into the geometry layer, and writing SES sessions.
+dsn = ["pcb"]
 
 [lints.rust]
 unsafe_code = "forbid"

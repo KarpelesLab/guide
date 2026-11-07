@@ -24,7 +24,7 @@ use crate::geom::drc::{KICAD_CLEARANCE_SLACK, Violation};
 /// The curated boards: their directory under `testdata/kicad`, their name, and by how much
 /// each scenario raises every net class's clearance, in nanometres. Scenarios stop where
 /// KiCad would reach its limit of 499 clearance violations, after which it stops looking.
-const BOARDS: &[(&str, &str, &[i64])] = &[
+pub(crate) const BOARDS: &[(&str, &str, &[i64])] = &[
     ("gekkio", "GB-BRK-LINK-A", &[0, 100_000, 300_000, 500_000]),
     ("gekkio", "GB-LIVE32", &[0, 50_000]),
     ("dotbots", "TS4231-BOB", &[0, 100_000, 300_000, 500_000]),
@@ -38,15 +38,15 @@ const BOARDS: &[(&str, &str, &[i64])] = &[
 
 /// KiCad stops reporting a kind of violation once it has this many: 499 for clearances,
 /// and 199 for the rest (`EXTENDED_ERROR_LIMIT` and `ERROR_LIMIT` in `drc_engine.cpp`).
-fn kicad_limit(kind: &str) -> usize {
+pub(crate) fn kicad_limit(kind: &str) -> usize {
     if kind == "clearance" { 499 } else { 199 }
 }
 
 /// The arc tolerance for comparisons, 10 nm, which keeps our arcs' error far inside
 /// KiCad's slack of 500 nm.
-const ARC_TOLERANCE: i64 = 10;
+pub(crate) const ARC_TOLERANCE: i64 = 10;
 
-fn scenario_name(extra: i64) -> String {
+pub(crate) fn scenario_name(extra: i64) -> String {
     if extra == 0 {
         "own".into()
     } else {
@@ -54,12 +54,12 @@ fn scenario_name(extra: i64) -> String {
     }
 }
 
-fn testdata() -> PathBuf {
+pub(crate) fn testdata() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/kicad")
 }
 
 /// A finding: its kind, and the UUIDs of its two items, sorted.
-type Finding = (String, String, String);
+pub(crate) type Finding = (String, String, String);
 
 fn finding(kind: &str, a: &str, b: &str) -> Finding {
     let (a, b) = if a <= b { (a, b) } else { (b, a) };
@@ -73,7 +73,7 @@ fn mm(v: i64) -> String {
 }
 
 /// The project with every net class's clearance raised by `extra`.
-fn raise_clearances(project: &str, extra: i64) -> String {
+pub(crate) fn raise_clearances(project: &str, extra: i64) -> String {
     let mut root = json::parse(project).unwrap();
     if let Json::Object(members) = &mut root
         && let Some((_, Json::Object(settings))) =
@@ -94,7 +94,7 @@ fn raise_clearances(project: &str, extra: i64) -> String {
     out
 }
 
-fn load(dir: &str, board: &str) -> (String, String) {
+pub(crate) fn load(dir: &str, board: &str) -> (String, String) {
     let base = testdata().join(dir).join(board);
     let pcb = std::fs::read_to_string(base.with_extension("kicad_pcb")).unwrap();
     let pro = std::fs::read_to_string(base.with_extension("kicad_pro")).unwrap();
@@ -264,7 +264,7 @@ fn kicad_kind(kind: &str) -> Option<&'static str> {
 
 /// The findings of a KiCad DRC report, and its descriptions of them, after checking that
 /// KiCad didn't reach any limit if `complete`.
-fn kicad_findings(report: &str, complete: bool) -> BTreeMap<Finding, String> {
+pub(crate) fn kicad_findings(report: &str, complete: bool) -> BTreeMap<Finding, String> {
     let root = json::parse(report).unwrap();
     let mut out = BTreeMap::new();
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
@@ -301,8 +301,12 @@ fn kicad_findings(report: &str, complete: bool) -> BTreeMap<Finding, String> {
 }
 
 /// Runs `kicad-cli pcb drc` on a board with a project, and returns its report.
-fn run_kicad(pcb: &str, project: &str, name: &str) -> String {
-    let dir = std::env::temp_dir().join(format!("guide-kicad-boards-{}", std::process::id()));
+pub(crate) fn run_kicad(pcb: &str, project: &str, name: &str) -> String {
+    // A directory for each run, as tests run in parallel.
+    static RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let run = RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let pid = std::process::id();
+    let dir = std::env::temp_dir().join(format!("guide-kicad-boards-{pid}-{run}"));
     std::fs::create_dir_all(&dir).unwrap();
     let board = dir.join(format!("{name}.kicad_pcb"));
     let report = dir.join(format!("{name}.json"));

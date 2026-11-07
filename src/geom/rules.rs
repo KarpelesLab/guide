@@ -591,6 +591,15 @@ impl Rules {
         self.clearance(a, layer).max(self.clearance(b, layer))
     }
 
+    /// The clearance of a pair of nets of its own, if [`RuleSpec::pairs`] gives it one, not
+    /// yet raised to [`RuleSpec::min_clearance`].
+    pub(crate) fn pair_clearance(&self, a: NetId, b: NetId) -> Option<i64> {
+        if self.pairs.is_empty() {
+            return None;
+        }
+        self.pairs.get(&(a.min(b), a.max(b))).copied()
+    }
+
     /// The largest clearance anything may need.
     pub fn max_clearance(&self) -> i64 {
         self.max_clearance

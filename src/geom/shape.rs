@@ -202,6 +202,20 @@ impl Shape {
         self.core.polyline()
     }
 
+    /// The shape as pieces that together are the same points: an approximated arc as one
+    /// track for each edge of its polyline, with the same error, and anything else as
+    /// itself. A distance to the shape is the least distance to a piece, and each piece has
+    /// a bounding box of its own, which a spatial index can tell apart.
+    pub(crate) fn pieces(&self) -> Vec<Shape> {
+        match self.core.path_segments() {
+            Some(cores) => cores
+                .into_iter()
+                .map(|core| Shape::new(core, self.radius2, self.error2))
+                .collect(),
+            None => vec![self.clone()],
+        }
+    }
+
     /// Whether distances to this shape are exact. Only arcs' are not.
     #[inline]
     pub fn is_exact(&self) -> bool {

@@ -136,6 +136,14 @@ fn route_board(dir: &str, name: &'static str) -> (Row, String, Routed, String) {
         missing.is_empty(),
         "{name}: routed but not connected: {missing:?}"
     );
+    if !routed.unrouted.is_empty() {
+        let names: Vec<&str> = routed
+            .unrouted
+            .iter()
+            .map(|n| read.nets[n.index()].as_str())
+            .collect();
+        eprintln!("{name}: unrouted {names:?}");
+    }
     let s = routed.stats;
     let row = Row {
         name,
@@ -204,7 +212,8 @@ fn kicad_check(text: &str, project: &str, name: &str) -> (Vec<String>, usize) {
 /// Routes all nine boards, and prints the table of `docs/benchmarks.md`. Runs only with
 /// `GUIDE_ROUTE=1`, and is meant for a release build. With `GUIDE_KICAD=1` as well, it writes
 /// each routed board and checks that `kicad-cli pcb drc` finds no violation of a routed
-/// item, and a missing connection only where a net could not be routed.
+/// item, and a missing connection only where a net could not be routed. `GUIDE_BOARDS`, a
+/// list of board names separated by commas, routes only those.
 #[test]
 fn curated_boards_route() {
     if std::env::var_os("GUIDE_ROUTE").is_none() {
@@ -214,8 +223,15 @@ fn curated_boards_route() {
     let kicad = std::env::var_os("GUIDE_KICAD").is_some();
     println!("| Board | Nets | Connections | DRC | Vias | Length, mm | Seconds |");
     println!("| --- | --- | --- | --- | --- | --- | --- |");
+    let only = std::env::var("GUIDE_BOARDS").ok();
     let mut failures = Vec::new();
     for &(dir, name) in &BOARDS {
+        if only
+            .as_ref()
+            .is_some_and(|o| !o.split(',').any(|b| b == name))
+        {
+            continue;
+        }
         let (row, text, routed, pro) = route_board(dir, name);
         print!("{}", row.markdown());
         if kicad {

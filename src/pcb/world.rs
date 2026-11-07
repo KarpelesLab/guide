@@ -42,6 +42,9 @@ struct Meta {
     net: Option<NetId>,
     own: Option<i64>,
     owner: Owner,
+    /// The clearance of its net on its layer, as [`Rules::clearance`] gives it, so that
+    /// queries need not resolve it again.
+    clearance: i64,
 }
 
 /// A handle on what one routed item added, to take it out again.
@@ -73,6 +76,9 @@ pub(crate) struct World<'r> {
     /// By net, whether its routes may no longer be ripped up, so that they block like
     /// fixed copper.
     locked: Vec<bool>,
+    /// By net and then layer, [`Rules::clearance`], for the nets of the board's items,
+    /// which costs more to resolve than many a query.
+    clearances: Vec<i64>,
 }
 
 impl<'r> World<'r> {
@@ -108,13 +114,30 @@ impl<'r> World<'r> {
             reach,
             scratch: RefCell::new(Vec::new()),
             locked: Vec::new(),
+            clearances: Vec::new(),
         };
+        let nets = board
+            .pads
+            .iter()
+            .map(|p| p.net)
+            .chain(board.tracks.iter().map(|t| t.net))
+            .chain(board.vias.iter().map(|v| v.net))
+            .chain(board.zones.iter().map(|z| z.net))
+            .flatten()
+            .map(|n| n.index() + 1)
+            .max()
+            .unwrap_or(0);
+        world.clearances = (0..nets)
+            .flat_map(|i| (0..n).map(move |l| (NetId(i as u32), LayerId(l as u8))))
+            .map(|(net, l)| rules.clearance(Some(net), l))
+            .collect();
         let all = rules.layers();
         let fixed = |kind, net, own| Meta {
             kind,
             net,
             own,
             owner: Owner::Fixed,
+            clearance: 0,
         };
         for t in &board.tracks {
             let shape = match t.mid {
@@ -190,6 +213,14 @@ impl<'r> World<'r> {
         self.rules
     }
 
+    /// [`Rules::clearance`], from the table where it can.
+    fn clearance(&self, net: Option<NetId>, layer: LayerId) -> i64 {
+        let n = self.layers.len();
+        net.and_then(|net| self.clearances.get(net.index() * n + usize::from(layer.0)))
+            .copied()
+            .unwrap_or_else(|| self.rules.clearance(net, layer))
+    }
+
     /// Makes a net's routes block like fixed copper, or not.
     pub(crate) fn set_locked(&mut self, net: NetId, locked: bool) {
         if net.index() >= self.locked.len() {
@@ -200,19 +231,31 @@ impl<'r> World<'r> {
 
     fn add(&mut self, layers: LayerSet, shape: Shape, meta: Meta) -> Placed {
         let mut placed = Placed::default();
+        // An arc is indexed by its edges, which are each near far less than the whole.
+        let pieces = if meta.owner == Owner::Fixed {
+            shape.pieces()
+        } else {
+            vec![shape]
+        };
         for l in layers.iter() {
             let i = usize::from(l.0);
+            let meta = Meta {
+                clearance: self.clearance(meta.net, l),
+                ..meta
+            };
             let Some(index) = self.layers.get_mut(i) else {
                 continue;
             };
-            let id = index.insert(shape.clone());
-            let slot = id.slot() as usize;
-            let meta_l = &mut self.meta[i];
-            if slot >= meta_l.len() {
-                meta_l.resize(slot + 1, meta);
+            for piece in &pieces {
+                let id = index.insert(piece.clone());
+                let slot = id.slot() as usize;
+                let meta_l = &mut self.meta[i];
+                if slot >= meta_l.len() {
+                    meta_l.resize(slot + 1, meta);
+                }
+                meta_l[slot] = meta;
+                placed.entries.push((l.0, id));
             }
-            meta_l[slot] = meta;
-            placed.entries.push((l.0, id));
         }
         placed
     }
@@ -224,6 +267,7 @@ impl<'r> World<'r> {
             net: Some(net),
             own: None,
             owner: Owner::Routed(net),
+            clearance: 0,
         };
         self.add(LayerSet::EMPTY.with(layer), shape, meta)
     }
@@ -239,6 +283,7 @@ impl<'r> World<'r> {
                 net: Some(net),
                 own: None,
                 owner,
+                clearance: 0,
             };
             let hole_meta = Meta {
                 kind: Kind::Hole,
@@ -278,13 +323,14 @@ impl<'r> World<'r> {
         let mut near = self.scratch.borrow_mut();
         index.query(&shape.bbox().expand(self.reach), &mut near);
         let mut verdict = Verdict::Free;
+        let ours = self.clearance(Some(net), layer);
         for &id in near.iter() {
             let meta = self.meta[l][id.slot() as usize];
             let Some(other) = index.get(id) else { continue };
             let hit = match meta.kind {
                 Kind::Copper => {
                     !same_net(Some(net), meta.net)
-                        && self.copper_hit(shape, other, (Some(net), None), meta, layer)
+                        && self.copper_hit(shape, other, (net, ours), meta, layer)
                 }
                 Kind::Hole => {
                     !same_net(Some(net), meta.net) && self.hole_hit(shape, other, None, meta.own)
@@ -318,6 +364,7 @@ impl<'r> World<'r> {
         let mut near = self.scratch.borrow_mut();
         for (l, index) in self.layers.iter().enumerate() {
             let layer = LayerId(l as u8);
+            let ours = self.clearance(Some(net), layer);
             index.query(&copper.bbox().expand(self.reach), &mut near);
             for &id in near.iter() {
                 let meta = self.meta[l][id.slot() as usize];
@@ -326,7 +373,7 @@ impl<'r> World<'r> {
                 let hit = match meta.kind {
                     Kind::Copper => {
                         other_net
-                            && (self.copper_hit(&copper, other, (Some(net), None), meta, layer)
+                            && (self.copper_hit(&copper, other, (net, ours), meta, layer)
                                 || self.hole_hit(other, &hole, None, meta.own))
                     }
                     // Holes go through every layer, so the first one is enough.
@@ -387,16 +434,35 @@ impl<'r> World<'r> {
         }
     }
 
-    /// Whether copper is too close to copper of another net, as the check decides.
+    /// Whether copper of `ours`, a net and its clearance on `layer`, is too close to copper
+    /// of another net, as the check decides.
     fn copper_hit(
         &self,
         shape: &Shape,
         other: &Shape,
-        ours: (Option<NetId>, Option<i64>),
+        ours: (NetId, i64),
         meta: Meta,
         layer: LayerId,
     ) -> bool {
-        let required = drc::clearance(self.rules, ours, (meta.net, meta.own), layer);
+        // What `drc::clearance` comes to, with ours resolved once for the query and theirs
+        // when they were added.
+        let required = match (meta.own, meta.net) {
+            (Some(own), _) => own.max(self.rules.spec().min_clearance),
+            (None, Some(theirs)) => match self.rules.pair_clearance(ours.0, theirs) {
+                Some(pair) => pair.max(self.rules.spec().min_clearance),
+                None => ours.1.max(meta.clearance),
+            },
+            (None, None) => ours.1.max(meta.clearance),
+        };
+        debug_assert_eq!(
+            required,
+            drc::clearance(
+                self.rules,
+                (Some(ours.0), None),
+                (meta.net, meta.own),
+                layer
+            )
+        );
         violates(shape, other, required)
     }
 

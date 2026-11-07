@@ -167,6 +167,19 @@ impl Core {
         }
     }
 
+    /// A polyline's edges, each as a segment, or `None` for any other core.
+    pub(crate) fn path_segments(&self) -> Option<Vec<Core>> {
+        match self {
+            Core::Path(path) => Some(
+                path.0
+                    .windows(2)
+                    .map(|w| Core::Segment(polyclip::Segment { a: w[0], b: w[1] }))
+                    .collect(),
+            ),
+            _ => None,
+        }
+    }
+
     /// The corners of the bounding box of the vertices.
     pub(crate) fn bounds(&self) -> (Point, Point) {
         // Constructors never make an empty core, so the fallback is never used.

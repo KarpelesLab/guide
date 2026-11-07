@@ -42,7 +42,8 @@ pub enum RouteFileError {
         /// What's wrong with the route.
         fault: RouteError<NodeId>,
     },
-    /// A route isn't rooted on its net's `SOURCE`.
+    /// A route isn't rooted on its net's `SOURCE`, or on one of the `OPIN`s of a driver that
+    /// [`Design::driver_source`] has a `SOURCE` for.
     WrongRoot {
         /// The net.
         net: NetId,
@@ -184,8 +185,7 @@ pub struct RouteSummary {
 /// This goes through all of `design`'s nets, in order, whether they have a route or not.
 /// Routes have to have been found on `device`'s graph.
 ///
-/// This hasn't been run past VPR, which wasn't available: see the [module
-/// documentation](super).
+/// VPR 9.0.0 accepts what this writes, as the [module documentation](super) says.
 ///
 /// # Errors
 ///
@@ -309,14 +309,20 @@ impl NetWriter<'_> {
             return Ok(());
         };
 
-        let on_source = self.device.node_kind(root) == Some(NodeKind::Source)
-            && net.driver().is_some_and(|driver| {
-                driver
-                    .access_points()
-                    .iter()
-                    .any(|point| point.node == root)
-            });
-        if !on_source {
+        let on_driver = net.driver().is_some_and(|driver| {
+            driver
+                .access_points()
+                .iter()
+                .any(|point| point.node == root)
+        });
+        // A driver on its `OPIN`s has its `SOURCE` written first: see `Design::driver_source`.
+        let source = self.design.driver_source(id);
+        let root_kind = if source.is_some() {
+            NodeKind::Opin
+        } else {
+            NodeKind::Source
+        };
+        if !on_driver || self.device.node_kind(root) != Some(root_kind) {
             return Err(RouteFileError::WrongRoot {
                 net: id,
                 node: root,
@@ -339,6 +345,17 @@ impl NetWriter<'_> {
             HashMap::with_capacity(route.edges().len());
         for edge in route.edges() {
             children.entry(edge.from).or_default().push(edge.to);
+        }
+
+        if let Some(source) = source {
+            let Some(switch) = self.device.edge_switch_with(source, root, &mut self.steps) else {
+                return Err(RouteFileError::MissingEdge {
+                    net: id,
+                    from: source,
+                    to: root,
+                });
+            };
+            self.write_node(out, id, source, Some(switch), None)?;
         }
 
         let mut stack = vec![Visit {

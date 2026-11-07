@@ -14,9 +14,9 @@ use std::collections::{BinaryHeap, HashMap};
 
 use guide::engine::{EngineOptions, Outcome, route_timed, route_timed_parallel};
 use guide::fpga::{
-    Design, DesignTiming, LogicDelays, NetOptions, RouteHeader, RrGraph, SequentialDelays,
-    TimingOptions, build_timing, read_architecture, read_netlist, read_placement, read_rr_graph,
-    resolve_nets, write_route,
+    Design, DesignTiming, LogicDelays, NetOptions, NodeKind, RouteHeader, RrGraph,
+    SequentialDelays, TimingOptions, build_timing, read_architecture, read_netlist, read_placement,
+    read_rr_graph, resolve_nets, write_route,
 };
 use guide::id::NodeId;
 use guide::net::Net;
@@ -371,6 +371,25 @@ fn mult_4x4_routes_timing_driven_from_vtr_files() {
     let report = check(&timed, flow.design.nets(), &outcome.routes);
     assert!(report.is_complete(), "{:?}", report.faults());
     assert!(report.faults().is_empty());
+
+    // Each net leaves its block through a single output pin, as VPR requires of a CLB's
+    // outputs, which are equivalent by instance in `k6_N10_40nm.xml`.
+    let mut lifted = 0;
+    for net in flow.design.nets() {
+        let route = outcome.routes.route(net.id).unwrap();
+        let opins = route
+            .nodes()
+            .filter(|&node| flow.device.node_kind(node) == Some(NodeKind::Opin))
+            .count();
+        assert_eq!(opins, 1, "net {}", net.id.0);
+        if let Some(source) = flow.design.driver_source(net.id) {
+            lifted += 1;
+            let root = route.root().unwrap();
+            assert_eq!(flow.device.node_kind(root), Some(NodeKind::Opin));
+            assert!(flow.device.edge_switch(source, root).is_some());
+        }
+    }
+    assert!(lifted > 0);
 
     // The engine's delays are the device's, step by step.
     let timing = outcome.timing.as_ref().unwrap();

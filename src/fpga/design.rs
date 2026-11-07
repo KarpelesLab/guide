@@ -28,6 +28,7 @@ use super::rr_graph::{NodeKind, PinClassKind, RrGraph};
 use crate::cost::Cost;
 use crate::id::{NetId, NodeId};
 use crate::net::{AccessPoint, Net, Terminal};
+use crate::space::{RoutingSpace, Step};
 
 /// A port that VPR's architecture file marks as a global, and that isn't a clock.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -97,6 +98,25 @@ pub struct NetInfo {
 }
 
 /// A design resolved against a device, ready for a router.
+///
+/// # One output pin per net
+///
+/// A driver's `SOURCE` reaches every output pin of its class, so a tree rooted there could
+/// leave the block through two of them at once. VPR doesn't allow that for an output class
+/// that is equivalent by `instance`, which is what VTR's architectures give a cluster's
+/// outputs: it reserves every output pin of such a class that carries no net leaving the
+/// block (`reserve_locally_used_opins` in VPR's `route_common.cpp`), so a net that takes two
+/// of them overuses a pin, and VPR rejects the route. The graph doesn't say how a class is
+/// equivalent, so this applies to every class.
+///
+/// So where a driver's `SOURCE` leads to more than one `OPIN`, the driver's access points
+/// are those `OPIN`s, each at the cost of the step to it, and a route is rooted on one of
+/// them. [`write_route`](super::write_route) puts the `SOURCE` back in front, and
+/// [`driver_source`](Design::driver_source) says which it is. Where the `SOURCE` leads to a
+/// single `OPIN`, as on an I/O pad, the driver stays on the `SOURCE`.
+///
+/// The step from `SOURCE` to `OPIN` goes through VPR's delayless switch in graphs that VPR
+/// builds. A delay on it would be left out of timing-driven routing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Design {
     nets: Vec<Net<NodeId>>,
@@ -105,6 +125,8 @@ pub struct Design {
     /// Blocks by location, which a route file has to name for the pins it passes through.
     by_location: HashMap<(u32, u32, u32, u32), u32>,
     shared_sink_nets: Vec<NetId>,
+    /// The `SOURCE` of each net whose driver is on its `OPIN`s, by net, in ascending order.
+    driver_sources: Vec<(NetId, NodeId)>,
 }
 
 /// What a route file needs to say about a block.
@@ -122,7 +144,10 @@ impl Design {
     ///
     /// A net's ID is its number in VPR, including all nets that aren't here, so that it
     /// can name the same net in a route file. So the [`NetId`] of an entry is not necessarily
-    /// its position in this list. The driver is the first terminal of each.
+    /// its position in this list. The driver is the first terminal of each: its `SOURCE`, or
+    /// the `OPIN`s that the `SOURCE` leads to if there are several, so that a route leaves the
+    /// block through only one of them, as [one output pin per net](Design#one-output-pin-per-net)
+    /// explains.
     pub fn nets(&self) -> &[Net<NodeId>] {
         &self.nets
     }
@@ -154,6 +179,16 @@ impl Design {
     /// routed, but [`write_route`](super::write_route) won't write it.
     pub fn shared_sink_nets(&self) -> &[NetId] {
         &self.shared_sink_nets
+    }
+
+    /// Returns the `SOURCE` of a net whose driver's access points are `OPIN`s, which a route
+    /// file starts the net's route from. `None` for a net whose driver is its `SOURCE`, or that
+    /// isn't routed. See [one output pin per net](Design#one-output-pin-per-net).
+    pub fn driver_source(&self, net: NetId) -> Option<NodeId> {
+        self.driver_sources
+            .binary_search_by_key(&net, |&(id, _)| id)
+            .ok()
+            .map(|index| self.driver_sources[index].1)
     }
 
     fn with_status(&self, status: NetStatus) -> impl Iterator<Item = (NetId, &NetInfo)> {
@@ -342,6 +377,8 @@ pub fn resolve_nets(
     let mut nets = Vec::new();
     let mut infos = Vec::with_capacity(netlist.nets().len());
     let mut shared_sink_nets = Vec::new();
+    let mut driver_sources = Vec::new();
+    let mut steps: Vec<Step<NodeId>> = Vec::new();
     for (index, net) in netlist.nets().iter().enumerate() {
         let id = NetId(index as u32);
         let global = net.on_clock_port
@@ -385,6 +422,9 @@ pub fn resolve_nets(
                 };
                 terminals.push(access_points(pin, kind)?);
             }
+            if let Some(source) = lift_driver(device, id, &mut terminals[0], &mut steps) {
+                driver_sources.push((id, source));
+            }
             // Only sinks can be reached twice, and only a repeated one is any trouble.
             let mut sinks = HashSet::with_capacity(terminals.len());
             let shared = terminals.iter().skip(1).any(|terminal| {
@@ -412,5 +452,35 @@ pub fn resolve_nets(
         blocks,
         by_location,
         shared_sink_nets,
+        driver_sources,
     })
+}
+
+/// Moves a driver from its `SOURCE` to the `OPIN`s it leads to, if there are several, and
+/// returns the `SOURCE`. See [one output pin per net](Design#one-output-pin-per-net).
+///
+/// A driver with several `SOURCE` nodes, or one that leads to a single node, stays as it is.
+fn lift_driver(
+    device: &RrGraph,
+    net: NetId,
+    driver: &mut Terminal<NodeId>,
+    steps: &mut Vec<Step<NodeId>>,
+) -> Option<NodeId> {
+    let &[point] = driver.access_points() else {
+        return None;
+    };
+    steps.clear();
+    device.graph().expand(net, point.node, steps);
+    if steps.len() < 2 {
+        return None;
+    }
+    let points = steps
+        .iter()
+        .map(|step| AccessPoint {
+            node: step.to,
+            cost: point.cost + step.cost,
+        })
+        .collect();
+    *driver = Terminal::new(points).ok()?;
+    Some(point.node)
 }

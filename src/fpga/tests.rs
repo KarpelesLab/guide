@@ -99,6 +99,23 @@ fn route_from_lines(net: &RouteNet) -> Route<NodeId> {
     Route::from_edges(root, edges)
 }
 
+/// The route of a net's lines as the engine would have it: rooted on the `OPIN` if the
+/// design's driver is on its `OPIN`s, with the `SOURCE` that VPR writes first left out.
+fn engine_route(design: &Design, net: &RouteNet) -> Route<NodeId> {
+    let route = route_from_lines(net);
+    let Some(source) = design.driver_source(NetId(net.id)) else {
+        return route;
+    };
+    assert_eq!(route.root(), Some(source));
+    let edges: Vec<Edge<NodeId>> = route
+        .edges()
+        .iter()
+        .copied()
+        .filter(|edge| edge.from != source)
+        .collect();
+    Route::from_edges(NodeId(net.lines[1].0), edges)
+}
+
 /// Builds the architecture's `block_types` and the grid for `mult_4x4`, which used
 /// `vtr_flow/arch/timing/k6_N10_40nm.xml`, as VPR would write them.
 ///
@@ -259,17 +276,31 @@ fn nets_match_those_vpr_routed() {
 
 #[test]
 fn drivers_and_sinks_match_vprs_nodes_and_pin_indices() {
-    let (_, design, nets) = mult_4x4();
+    let (device, design, nets) = mult_4x4();
     assert_eq!(design.nets().len(), 25);
     let mut sinks_checked = 0;
+    let mut lifted = 0;
     for (net, vpr) in design.nets().iter().zip(&nets) {
-        // Its route starts at the driver, the first terminal.
-        assert_eq!(
-            net.terminals[0].access_points()[0].node,
-            NodeId(vpr.lines[0].0),
-            "driver of {}",
-            vpr.name
-        );
+        // Its route starts at the driver, the first terminal: the SOURCE, or one of the OPINs
+        // that it leads to if there are several.
+        let driver: Vec<NodeId> = net.terminals[0]
+            .access_points()
+            .iter()
+            .map(|point| point.node)
+            .collect();
+        match design.driver_source(net.id) {
+            None => assert_eq!(driver, [NodeId(vpr.lines[0].0)], "driver of {}", vpr.name),
+            Some(source) => {
+                lifted += 1;
+                assert_eq!(source, NodeId(vpr.lines[0].0), "driver of {}", vpr.name);
+                assert!(driver.len() > 1);
+                assert!(driver.contains(&NodeId(vpr.lines[1].0)), "{}", vpr.name);
+                for &opin in &driver {
+                    assert_eq!(device.node_kind(opin), Some(NodeKind::Opin));
+                    assert!(device.edge_switch(source, opin).is_some());
+                }
+            }
+        }
         // Every terminal is where VPR says that pin went.
         let mut seen = vec![false; net.terminals.len()];
         for (id, node) in &vpr.lines {
@@ -293,6 +324,51 @@ fn drivers_and_sinks_match_vprs_nodes_and_pin_indices() {
         assert!(seen[1..].iter().all(|&reached| reached), "{}", vpr.name);
     }
     assert!(sinks_checked >= 25);
+    // The logic blocks drive several nets each, through OPINs of the same class.
+    assert!(lifted > 0);
+}
+
+#[test]
+fn a_driver_on_its_opins_costs_what_the_step_from_its_source_did() {
+    let (device, design, _) = mult_4x4();
+    let mut steps = Vec::new();
+    for net in design.nets() {
+        let Some(source) = design.driver_source(net.id) else {
+            continue;
+        };
+        steps.clear();
+        device.graph().expand(net.id, source, &mut steps);
+        let points: Vec<(NodeId, Cost)> = net.terminals[0]
+            .access_points()
+            .iter()
+            .map(|point| (point.node, point.cost))
+            .collect();
+        let expected: Vec<(NodeId, Cost)> = steps.iter().map(|step| (step.to, step.cost)).collect();
+        assert_eq!(points, expected);
+        assert!(points.iter().all(|&(_, cost)| cost > Cost::ZERO));
+    }
+}
+
+#[test]
+fn a_route_from_the_source_of_a_driver_on_its_opins_is_refused() {
+    // VPR rejects a net that leaves its block through two OPINs, and a route rooted on the
+    // SOURCE is how that would come about.
+    let (device, design, nets) = mult_4x4();
+    let vpr = nets
+        .iter()
+        .find(|net| design.driver_source(NetId(net.id)).is_some())
+        .unwrap();
+    let mut routes = RouteSet::new();
+    routes.set_route(NetId(vpr.id), route_from_lines(vpr));
+    let header = RouteHeader {
+        placement_file: "mult_4x4.place",
+        placement_id: placement_id(),
+    };
+    let error = write_route(Vec::new(), &device, &design, &routes, &header).unwrap_err();
+    assert!(
+        matches!(error, RouteFileError::WrongRoot { net, node } if net == NetId(vpr.id) && node == NodeId(vpr.lines[0].0)),
+        "{error}"
+    );
 }
 
 #[test]
@@ -300,7 +376,8 @@ fn writes_vprs_route_file_byte_for_byte() {
     let (device, design, nets) = mult_4x4();
     let mut routes = RouteSet::new();
     for net in &nets {
-        routes.set_route(NetId(net.id), route_from_lines(net));
+        // Rooted where the engine would root them, so that the SOURCE has to be put back.
+        routes.set_route(NetId(net.id), engine_route(&design, net));
     }
     let header = RouteHeader {
         placement_file: "mult_4x4.place",
@@ -317,7 +394,7 @@ fn writes_vprs_route_file_byte_for_byte() {
 fn every_route_in_the_vpr_file_validates_as_a_route_on_the_graph() {
     let (device, design, nets) = mult_4x4();
     for (net, vpr) in design.nets().iter().zip(&nets) {
-        let route = route_from_lines(vpr);
+        let route = engine_route(&design, vpr);
         assert_eq!(route.validate(net), Ok(()), "{}", vpr.name);
         for edge in route.edges() {
             assert!(device.edge_switch(edge.from, edge.to).is_some());

@@ -199,7 +199,7 @@ for run in "one 1 1" "many $THREADS 32"; do
     label=$1
     guide_at "$W_RELAXED" "$label" --threads "$2" --batch "$3"
     TXT=w$W_RELAXED/$label.txt
-    for key in legal iterations wirelength critical_path_ps route_s read_s; do
+    for key in legal iterations wirelength critical_path_ps route_s read_s lookahead_s expansions; do
         record "guide_${label}_$key" "$(tr ' ' '\n' < "$TXT" | grep "^$key=" | cut -d= -f2)"
     done
     if vpr_check "$W_RELAXED" "$label"; then

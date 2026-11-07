@@ -156,6 +156,7 @@ def main():
                 show(number(r, "vpr_lookahead_s"), 2),
                 r.get("vpr_iterations", "-"),
                 show(one, 2),
+                show(number(r, "guide_one_lookahead_s"), 2),
                 r.get("guide_one_iterations", "-"),
                 show(one_ratios[-1], 2),
                 show(many, 2),
@@ -171,6 +172,7 @@ def main():
             "VPR's lookahead, s",
             "VPR iterations",
             "guide, 1 thread, s",
+            "guide's lookahead, s",
             "guide iterations",
             "/ VPR",
             "guide, threads, s",
@@ -181,6 +183,7 @@ def main():
         rows,
         [
             "Geomean",
+            "",
             "",
             "",
             "",

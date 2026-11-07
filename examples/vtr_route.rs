@@ -29,6 +29,10 @@
 //! | `--initial-present F` | `EngineOptions::initial_present` | The default, 0.5 |
 //! | `--present-growth F` | `EngineOptions::present_growth` | The default, 1.8 |
 //! | `--no-timing` | Route for cost alone | Timing-driven |
+//! | `--lookahead KIND` | `map` for `RrGraph::use_map_lookahead`, `location` for the graph's own bound | `map` |
+//! | `--lookahead-samples N` | `LookaheadOptions::samples_per_axis` | The default, 2 |
+//! | `--astar F` | `EngineOptions::bound_weight` | From `RrGraph::engine_options` |
+//! | `--incremental on/off` | `EngineOptions::incremental_reroute` | From `RrGraph::engine_options` |
 //!
 //! It prints one line of `key=value` pairs, which the scripts parse, and exits with status 0 if
 //! the routes are legal, 1 if they are not, and 2 on bad input.
@@ -41,8 +45,8 @@ use std::time::Instant;
 use guide::cost::Cost;
 use guide::engine::{Outcome, route_parallel, route_timed_parallel};
 use guide::fpga::{
-    NetOptions, NodeKind, RouteHeader, RrGraph, TimingOptions, build_timing, read_architecture,
-    read_netlist, read_placement, read_rr_graph, resolve_nets, write_route,
+    LookaheadOptions, NetOptions, NodeKind, RouteHeader, RrGraph, TimingOptions, build_timing,
+    read_architecture, read_netlist, read_placement, read_rr_graph, resolve_nets, write_route,
 };
 use guide::id::NodeId;
 use guide::validate::check;
@@ -65,6 +69,10 @@ struct Args {
     first_present: Option<f64>,
     initial_present: Option<f64>,
     present_growth: Option<f64>,
+    map_lookahead: bool,
+    lookahead_samples: Option<u32>,
+    astar: Option<f64>,
+    incremental: Option<bool>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -84,6 +92,10 @@ fn parse_args() -> Result<Args, String> {
         first_present: None,
         initial_present: None,
         present_growth: None,
+        map_lookahead: true,
+        lookahead_samples: None,
+        astar: None,
+        incremental: None,
     };
     let mut given = std::env::args().skip(1);
     while let Some(flag) = given.next() {
@@ -121,6 +133,22 @@ fn parse_args() -> Result<Args, String> {
             "--first-present" => args.first_present = Some(factor(&value)?),
             "--initial-present" => args.initial_present = Some(factor(&value)?),
             "--present-growth" => args.present_growth = Some(factor(&value)?),
+            "--lookahead" => {
+                args.map_lookahead = match value.as_str() {
+                    "map" => true,
+                    "location" => false,
+                    _ => return Err(format!("{flag} is map or location, not {value:?}")),
+                }
+            }
+            "--lookahead-samples" => args.lookahead_samples = Some(number(&value)?),
+            "--astar" => args.astar = Some(factor(&value)?),
+            "--incremental" => {
+                args.incremental = Some(match value.as_str() {
+                    "on" => true,
+                    "off" => false,
+                    _ => return Err(format!("{flag} is on or off, not {value:?}")),
+                })
+            }
             _ => return Err(format!("unknown option {flag}")),
         }
     }
@@ -163,7 +191,7 @@ fn wirelength(device: &RrGraph, outcome: &Outcome<NodeId, NodeId>) -> u64 {
 fn run(args: &Args) -> Result<bool, String> {
     let started = Instant::now();
     let arch = read_architecture(open(&args.arch)?).map_err(|e| format!("{}: {e}", args.arch))?;
-    let device =
+    let mut device =
         read_rr_graph(open(&args.rr_graph)?).map_err(|e| format!("{}: {e}", args.rr_graph))?;
     let netlist = read_netlist(open(&args.net)?).map_err(|e| format!("{}: {e}", args.net))?;
     let placement =
@@ -171,6 +199,16 @@ fn run(args: &Args) -> Result<bool, String> {
     let design = resolve_nets(&device, &netlist, &placement, &NetOptions::default())
         .map_err(|e| format!("resolving nets: {e}"))?;
     let read_seconds = started.elapsed().as_secs_f64();
+
+    let started = Instant::now();
+    if args.map_lookahead {
+        let mut lookahead = LookaheadOptions::default();
+        if let Some(samples) = args.lookahead_samples {
+            lookahead.samples_per_axis = samples;
+        }
+        device.use_map_lookahead(&lookahead);
+    }
+    let lookahead_seconds = started.elapsed().as_secs_f64();
 
     let mut options = device.engine_options();
     options.batch_size = args.batch;
@@ -190,6 +228,12 @@ fn run(args: &Args) -> Result<bool, String> {
     }
     if let Some(value) = args.present_growth {
         options.present_growth = cost(value)?;
+    }
+    if let Some(value) = args.astar {
+        options.bound_weight = value;
+    }
+    if let Some(value) = args.incremental {
+        options.incremental_reroute = value;
     }
 
     let timed = device.timed_graph();
@@ -233,7 +277,8 @@ fn run(args: &Args) -> Result<bool, String> {
     println!(
         "legal={legal} validator_faults={} overused={} iterations={} best_iteration={} \
          stop={:?} nets={} wirelength={} critical_path_ps={} total_cost={:.6e} \
-         expansions={} read_s={read_seconds:.3} route_s={route_seconds:.3} threads={} \
+         expansions={} read_s={read_seconds:.3} lookahead_s={lookahead_seconds:.3} \
+         route_s={route_seconds:.3} threads={} \
          batch={} written={written}",
         report.faults().len(),
         outcome.overused.len(),

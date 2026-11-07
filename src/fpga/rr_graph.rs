@@ -789,7 +789,7 @@ impl RrGraph {
     /// about 1e-10, so at the default a node that is overused once costs as much as ten
     /// billion tiles of wire from then on, and nets go far around it. On VTR's MCNC circuits,
     /// which `docs/benchmarks.md` has, the default gave 7% to 56% more wire than this at a
-    /// relaxed channel width, critical paths 3% to 120% longer, and needed channels up to 1.9
+    /// relaxed channel width, critical paths 3% to 134% longer, and needed channels up to 1.9
     /// times as wide.
     ///
     /// VPR's own history multiplies a node's base cost, starting at 1 and adding 1 per unit of

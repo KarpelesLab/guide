@@ -3,8 +3,8 @@
 This is the start of the benchmark report that the [roadmap](../ROADMAP.md) asks for. Most of
 it covers the engine, on synthetic instances that this repository generates. Those are
 useful for tuning, for catching regressions and for checking what the docs say. They are **not
-evidence about real designs**, and the [comparisons that would be](#fpga-and-pcb-comparisons)
-have not been done. The one comparison on real designs so far is of the
+evidence about real designs**. The comparisons on real designs so far are
+[FPGA routing against VPR](#fpga-routing-against-vpr), on VTR's MCNC circuits, and the
 [clearance check against KiCad's](#pcb-clearance-checks-against-kicad), on real boards.
 
 ## Running
@@ -359,9 +359,9 @@ that these runs come from, which saw fastest times of 142 to 194 ns on the first
 
 Measured on 2026-11-04, on the commit that adds this section, with rustc 1.97.1.
 
-**These are synthetic, and not a comparison with VPR.** No real VTR design can be routed yet:
-the graph of a real VTR architecture needs VPR to generate it, and VPR was not available. So
-the fabric, its delays and its netlist are all made up here, as `benches/engine.rs` describes.
+**These are synthetic, and not a comparison with VPR**, which came later: see [FPGA routing
+against VPR](#fpga-routing-against-vpr). The fabric, its delays and its netlist are all made up
+here, as `benches/engine.rs` describes.
 
 - **The fabrics** are the FPGA-like family above, 16 x 16 and 32 x 32 tiles at 1 track, and a
   third group at 32 x 32 with 2 tracks, which has room to spare. 6 seeds each, the same seeds.
@@ -519,17 +519,240 @@ path and can pay for it. On these instances, 10 iterations at 0.9 is a reasonabl
 
 ## FPGA and PCB comparisons
 
-**Not yet done**, but for the first row. None of the comparisons of results in the
-[roadmap](../ROADMAP.md#measuring-best) has been run, so there are no results for the others.
+Of the comparisons of results in the [roadmap](../ROADMAP.md#measuring-best), the first two
+done are below. There are no results for the others yet.
 
 | Domain | Compared against | Benchmarks | Status |
 | --- | --- | --- | --- |
-| FPGA routing | VPR, nextpnr | VTR benchmarks, Titan23 | Not yet done |
+| FPGA routing | VPR 9.0.0 | VTR's MCNC circuits | [Done](#fpga-routing-against-vpr) |
+| FPGA routing | VPR, nextpnr | VTR's Verilog suite, Titan23 | Not yet done |
 | FPGA placement | VPR, nextpnr | VTR benchmarks, ISPD 2016/2017 contest sets | Not yet done |
 | PCB clearance checks | KiCad 10.0.3 | [Curated open-source KiCad boards](../testdata/kicad/README.md) | [Done](#pcb-clearance-checks-against-kicad) |
 | PCB routing | Freerouting | The same boards | Not yet done |
 | PCB placement | Hand-placed originals | The same boards | Not yet done |
 | ASIC global routing | Published contest results | ISPD 2007/2008 | Not yet done |
+
+## FPGA routing against VPR
+
+This is the comparison that M3's exit criterion asks for: `guide`'s router against VPR's, on
+the same placements and VPR's own device graphs, with VPR checking and timing every route of
+`guide`'s.
+
+Measured on 2026-11-08, on the commit that adds this section (the routes come from its
+parent, `1643bc4`, which has the same code), with rustc 1.97.1, on an AMD Ryzen Threadripper
+PRO 9995WX shared with other work.
+
+### How
+
+- **VPR** is VPR 9.0.0, VTR's tag `v9.0.0`, commit `8cb20aa5293b5ce5f6a05c88b37b38e1305d9b07`,
+  built by [`scripts/vtr/build-vpr.sh`](../scripts/vtr/build-vpr.sh) with nothing but VPR.
+- **The circuits** are the 20 largest MCNC circuits, the set that VPR's papers have used since
+  VPR's first, as VTR's `vpr_reg_mcnc_equiv` regression test has them: technology-mapped to
+  6-input LUTs (`vtr_flow/benchmarks/blif/wiremap6/*.pre-vpr.blif`), on
+  `vtr_flow/arch/timing/k6_N10_40nm.xml`, clusters of ten 6-LUTs with unidirectional
+  wires of length 4. They are not copied here, as VTR's licence excepts its benchmark
+  circuits. VTR's own Verilog suite, with memories and multipliers, needs synthesis (Yosys and
+  ABC) and an architecture with blocks over several tiles, and was not run, nor was Titan23.
+- **The placement** is VPR's, packed and placed once per circuit with seed 1, and both
+  routers start from it.
+- **Minimum channel width.** VPR finds its own by its binary search. `guide` finds its own
+  with the same rules: even widths only, as the wires are unidirectional, at most 50
+  iterations at each, as VPR allows, and a binary search between a width that fails and one
+  that routes, starting from VPR's. Each width's graph is the one VPR writes for it with
+  `--write_rr_graph`.
+- **Delay, wirelength and runtime** are at 1.3 times VPR's minimum width, rounded to an even
+  number as VTR's flow does (`relax_w` in its scripts), on the graph that VPR wrote while
+  routing at that width itself. Delays of both are VPR's timing analysis: each route of
+  `guide`'s is loaded back with `vpr --analysis --route_file`, which checks it as it checks its
+  own (`check_route`, including its reserved output pins) and then times it. Wirelength is
+  VPR's count of tiles of wire, which agrees with `guide`'s own count in every case.
+- **Runtime** is the time inside the router, on one thread for both: VPR's `# Routing took`
+  line with `-j 1`, which leaves out building the graph and VPR's lookahead (shown
+  separately), and `guide`'s route time in `examples/vtr_route.rs`, which leaves out reading
+  the files but includes building the timing graph. "Threads" is `guide` with 16 threads and
+  batches of 32, which gives different routes from batches of 1, so it has its own delay.
+- **`guide`'s options** are `RrGraph::engine_options()`, timing-driven with
+  `DesignTiming::vpr_constraints(0)`, VPR's default without an SDC file.
+
+```text
+scripts/vtr/build-vpr.sh DIR                     # about two minutes on many cores
+JOBS=8 scripts/vtr/compare.sh DIR WORK           # all 20 circuits, a few minutes on many cores
+python3 scripts/vtr/tables.py WORK               # the tables below
+```
+
+### Results
+
+**Every route is legal**, by the validator and by VPR itself: all 20 circuits at `guide`'s
+minimum width and at the relaxed width, single-threaded and threaded, 60 routes in all. Ratios
+are `guide`'s over VPR's, so below 1 is better for `guide`, and the last row is their geometric
+mean.
+
+Minimum channel width:
+
+| Circuit | CLBs | Grid, tiles a side | VPR | guide | guide / VPR | VPR accepts guide's route |
+| --- | --- | --- | --- | --- | --- | --- |
+| alu4 | 106 | 13 | 40 | 38 | 0.950 | yes |
+| apex2 | 126 | 14 | 54 | 54 | 1.000 | yes |
+| apex4 | 105 | 13 | 56 | 54 | 0.964 | yes |
+| bigkey | 92 | 16 | 34 | 34 | 1.000 | yes |
+| clma | 435 | 23 | 72 | 70 | 0.972 | yes |
+| des | 102 | 18 | 34 | 34 | 1.000 | yes |
+| diffeq | 102 | 13 | 30 | 30 | 1.000 | yes |
+| dsip | 93 | 16 | 34 | 36 | 1.059 | yes |
+| elliptic | 242 | 18 | 52 | 48 | 0.923 | yes |
+| ex1010 | 322 | 20 | 86 | 84 | 0.977 | yes |
+| ex5p | 98 | 12 | 44 | 44 | 1.000 | yes |
+| frisc | 251 | 18 | 58 | 56 | 0.966 | yes |
+| misex3 | 100 | 12 | 46 | 44 | 0.957 | yes |
+| pdc | 332 | 21 | 72 | 66 | 0.917 | yes |
+| s298 | 84 | 12 | 40 | 40 | 1.000 | yes |
+| s38417 | 397 | 22 | 34 | 32 | 0.941 | yes |
+| s38584.1 | 360 | 21 | 40 | 40 | 1.000 | yes |
+| seq | 112 | 13 | 54 | 52 | 0.963 | yes |
+| spla | 265 | 19 | 60 | 54 | 0.900 | yes |
+| tseng | 112 | 13 | 26 | 26 | 1.000 | yes |
+| Geomean |  |  |  |  | 0.974 |  |
+
+At the relaxed width, the critical-path delay, by VPR's analysis of each tool's routes, and
+by `guide`'s own analysis of its routes:
+
+| Circuit | W | VPR, ns | guide, ns | guide / VPR | guide's own STA, ns | own / VPR's STA | VPR accepts guide's route |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| alu4 | 52 | 5.318 | 4.780 | 0.899 | 4.775 | 0.999 | yes |
+| apex2 | 70 | 5.807 | 5.776 | 0.995 | 5.770 | 0.999 | yes |
+| apex4 | 72 | 5.386 | 5.443 | 1.010 | 5.438 | 0.999 | yes |
+| bigkey | 44 | 3.307 | 3.261 | 0.986 | 3.234 | 0.992 | yes |
+| clma | 94 | 8.695 | 8.687 | 0.999 | 8.610 | 0.991 | yes |
+| des | 44 | 4.469 | 4.460 | 0.998 | 4.456 | 0.999 | yes |
+| diffeq | 40 | 6.095 | 6.094 | 1.000 | 6.022 | 0.988 | yes |
+| dsip | 44 | 3.179 | 3.176 | 0.999 | 3.148 | 0.991 | yes |
+| elliptic | 68 | 7.581 | 7.516 | 0.991 | 7.442 | 0.990 | yes |
+| ex1010 | 112 | 6.897 | 6.787 | 0.984 | 6.780 | 0.999 | yes |
+| ex5p | 58 | 4.621 | 4.552 | 0.985 | 4.546 | 0.999 | yes |
+| frisc | 76 | 10.007 | 9.475 | 0.947 | 9.401 | 0.992 | yes |
+| misex3 | 60 | 4.821 | 4.756 | 0.987 | 4.751 | 0.999 | yes |
+| pdc | 94 | 7.060 | 6.985 | 0.989 | 6.976 | 0.999 | yes |
+| s298 | 52 | 7.263 | 7.197 | 0.991 | 7.126 | 0.990 | yes |
+| s38417 | 44 | 5.800 | 5.546 | 0.956 | 5.474 | 0.987 | yes |
+| s38584.1 | 52 | 5.056 | 5.026 | 0.994 | 4.979 | 0.991 | yes |
+| seq | 70 | 4.872 | 4.792 | 0.984 | 4.787 | 0.999 | yes |
+| spla | 78 | 6.529 | 6.472 | 0.991 | 6.464 | 0.999 | yes |
+| tseng | 34 | 5.713 | 5.684 | 0.995 | 5.613 | 0.987 | yes |
+| Geomean |  |  |  | 0.984 |  | 0.994 |  |
+
+Wirelength at the relaxed width, in tiles of wire:
+
+| Circuit | VPR | guide | guide / VPR |
+| --- | --- | --- | --- |
+| alu4 | 7291 | 6896 | 0.946 |
+| apex2 | 12151 | 12003 | 0.988 |
+| apex4 | 10212 | 9940 | 0.973 |
+| bigkey | 6415 | 6281 | 0.979 |
+| clma | 44365 | 44821 | 1.010 |
+| des | 6744 | 6659 | 0.987 |
+| diffeq | 5218 | 4754 | 0.911 |
+| dsip | 7198 | 6878 | 0.956 |
+| elliptic | 16865 | 15985 | 0.948 |
+| ex1010 | 40817 | 42528 | 1.042 |
+| ex5p | 6964 | 6672 | 0.958 |
+| frisc | 21617 | 20176 | 0.933 |
+| misex3 | 6920 | 6949 | 1.004 |
+| pdc | 36688 | 37644 | 1.026 |
+| s298 | 5886 | 5453 | 0.926 |
+| s38417 | 18574 | 17796 | 0.958 |
+| s38584.1 | 19108 | 18261 | 0.956 |
+| seq | 10428 | 9970 | 0.956 |
+| spla | 25425 | 25369 | 0.998 |
+| tseng | 4210 | 4094 | 0.972 |
+| Geomean |  |  | 0.971 |
+
+Runtime at the relaxed width:
+
+| Circuit | VPR, s | VPR's lookahead, s | VPR iterations | guide, 1 thread, s | guide iterations | / VPR | guide, threads, s | / VPR | Its delay, ns | VPR accepts it |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| alu4 | 0.17 | 0.01 | 24 | 0.51 | 11 | 3.02 | 0.60 | 3.51 | 5.011 | yes |
+| apex2 | 0.17 | 0.02 | 24 | 0.83 | 9 | 4.88 | 1.02 | 5.98 | 5.780 | yes |
+| apex4 | 0.18 | 0.02 | 27 | 0.70 | 11 | 3.88 | 0.68 | 3.80 | 5.278 | yes |
+| bigkey | 0.11 | 0.02 | 16 | 0.30 | 9 | 2.70 | 0.29 | 2.60 | 3.261 | yes |
+| clma | 0.83 | 0.08 | 23 | 4.94 | 11 | 5.95 | 5.60 | 6.74 | 8.656 | yes |
+| des | 0.07 | 0.02 | 14 | 0.17 | 8 | 2.41 | 0.16 | 2.30 | 4.460 | yes |
+| diffeq | 0.09 | 0.01 | 22 | 0.13 | 8 | 1.49 | 0.17 | 1.89 | 6.087 | yes |
+| dsip | 0.13 | 0.02 | 18 | 0.28 | 12 | 2.15 | 0.29 | 2.22 | 3.330 | yes |
+| elliptic | 0.39 | 0.03 | 24 | 0.88 | 10 | 2.25 | 1.05 | 2.69 | 7.554 | yes |
+| ex1010 | 0.78 | 0.08 | 23 | 9.00 | 11 | 11.53 | 9.36 | 12.00 | 6.788 | yes |
+| ex5p | 0.09 | 0.01 | 19 | 0.44 | 10 | 4.89 | 0.47 | 5.23 | 4.552 | yes |
+| frisc | 0.42 | 0.04 | 25 | 0.99 | 10 | 2.37 | 1.20 | 2.86 | 9.478 | yes |
+| misex3 | 0.12 | 0.01 | 20 | 0.44 | 9 | 3.65 | 0.46 | 3.83 | 4.707 | yes |
+| pdc | 0.62 | 0.06 | 22 | 5.45 | 10 | 8.78 | 6.47 | 10.44 | 6.983 | yes |
+| s298 | 0.09 | 0.01 | 21 | 0.28 | 10 | 3.14 | 0.30 | 3.39 | 7.344 | yes |
+| s38417 | 0.48 | 0.05 | 25 | 0.82 | 8 | 1.72 | 0.85 | 1.77 | 5.509 | yes |
+| s38584.1 | 0.43 | 0.04 | 22 | 0.53 | 11 | 1.22 | 0.54 | 1.26 | 5.028 | yes |
+| seq | 0.20 | 0.02 | 30 | 0.65 | 9 | 3.26 | 0.70 | 3.48 | 4.790 | yes |
+| spla | 0.49 | 0.04 | 24 | 3.29 | 10 | 6.71 | 4.22 | 8.61 | 6.479 | yes |
+| tseng | 0.07 | 0.01 | 17 | 0.11 | 9 | 1.51 | 0.14 | 2.03 | 5.684 | yes |
+| Geomean |  |  |  |  |  | 3.23 |  | 3.58 |  |  |
+
+What this shows:
+
+- **Channel width: `guide` needs 2.6% fewer tracks**, as a geometric mean. It needs fewer on
+  11 circuits, by up to 10% (spla, 54 against 60), the same on 8, and more on one, dsip, 36
+  against 34.
+- **Delay: 1.6% shorter critical paths.** 19 of 20 are as fast or faster, alu4 by 10%, and
+  apex4 is 1% slower. Threaded, with batches of 32, the critical paths are 1.3% shorter than
+  VPR's.
+- **Wirelength: 2.9% less wire**, with 16 circuits better, by up to 8.9%, and 4 worse: ex1010
+  by 4.2%, pdc by 2.6%, clma by 1.0% and misex3 by 0.4%, the larger circuits among them.
+- **Runtime: `guide` is 3.2 times slower than VPR**, from 1.2 times on s38584.1 to 11.5 times
+  on ex1010, and the larger the circuit, the worse. VPR pushes about 40 entries on its heap
+  per connection on ex1010, and `guide` takes about 290 expansions. VPR's lookahead is a table
+  of real costs from a search of the whole device, weighted by 1.2, which makes the search go
+  nearly straight to its target but gives up exactness. `guide`'s bound is admissible, from a
+  cost per tile that only wires reach, so it searches far more widely. Nets of high fanout make
+  it worse: each sink's search starts from the whole tree, and ex1010 has a net of 689 sinks.
+  Most of the gap is here, and an estimate closer to the real cost is the obvious next step.
+  VPR also takes about twice as many iterations, at 14 to 30 against 8 to 12.
+- **Threads do not help here**: 16 threads with batches of 32 took 1.1 times as long as one
+  thread with batches of 1. Nets on these circuits are small and searches short, and batches
+  bring more iterations' worth of rerouting.
+- **`guide`'s own timing analysis agrees with VPR's** to within 0.1% to 1.3%, always slightly
+  optimistic: its delays are fixed per step, where VPR's Elmore delays depend on the tree.
+
+### What it took
+
+Before VPR saw them, `guide`'s routes looked fine to its own validator, and two things were
+wrong.
+
+- **VPR rejected every route** at first: `guide` let a net leave a logic block through two of
+  its output pins, which VPR does not allow when they are equivalent by `instance`, as here.
+  VPR reserves every output pin that carries no net out of the block, so 61 nets of tseng
+  overused 65 pins. A driver whose `SOURCE` leads to several `OPIN`s now has the `OPIN`s as its
+  access points, so that a route takes one of them: see `fpga::Design`.
+- **History was ten orders of magnitude too strong.** `EngineOptions::history_factor` is added
+  to step costs, and its default of 1 suits costs of about 1, while a VPR graph's costs are in
+  seconds, about 1e-10 for a tile of wire. A node overused once became a wall for the rest of
+  the run. With the engine's defaults, over the 18 circuits that finished (clma and ex1010
+  were stopped after more than half an hour), `guide` needed 1.17 times VPR's channel width,
+  gave critical paths 1.44 times as long and 1.32 times the wire, and took 21 times as long.
+  `RrGraph::engine_options` sets the factor to one tile of wire, which gave the results above.
+  Four tiles, a whole wire and closer to VPR's own history, came out slightly worse on all
+  three counts (0.986, 0.988 and 0.994 of VPR's).
+
+Two quirks of VPR 9.0.0 that the scripts work around: it rewrites the placement file on every
+run, with the netlist's path in its header, so the digest that a route file has to name changes
+(`print_place` in `vpr_api.cpp` is outside the `if` of the analytical placer), and with GCC 15
+it only builds with some standard headers forced in.
+
+### What this does not show
+
+- The MCNC circuits are small by today's standards, the largest 435 clusters on a 23 by 23
+  grid, and of LUTs and flip-flops only. VTR's own Verilog suite and Titan23 are larger and
+  have memories, multipliers and carry chains.
+- One placement per circuit, from one seed. VPR's results move with the placement, and so
+  may the comparison.
+- One architecture. VPR's defaults were tuned for architectures like it, and so, now, is
+  `engine_options`.
+- The machine was shared, and times of a few tenths of a second move by tens of percent between
+  runs. The ratios of the larger circuits are steadier.
 
 ## PCB clearance checks against KiCad
 

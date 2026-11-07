@@ -114,7 +114,12 @@ timing-driven routing reaches the critical path that every connection would have
 2033 ps, against 2097 ps without timing, 3% faster and for less wire. With 8 and 10
 tracks both come out at 2097 ps, and starting from exact delays in place of lower bounds
 changes nothing. The design is small, with three logic blocks, so this says little about
-timing-driven routing in general. Comparing with VPR needs VPR's device graphs.
+timing-driven routing in general.
+
+**Against VPR.** On the 20 MCNC circuits of VTR's regression tests, on VPR 9.0.0's own
+graphs and placements, every route is legal by the validator and by VPR itself, which loads
+it back and times it. The [results](benchmarks.md#fpga-routing-against-vpr) have the channel
+widths, delays, wirelengths and runtimes, and what it took to get there.
 
 ## ASIC
 

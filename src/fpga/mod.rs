@@ -98,20 +98,26 @@
 //! # How well this matches VPR
 //!
 //! Each format was pinned against the real thing where one could be found, and this says
-//! where it couldn't. See `testdata/vtr/README.md` for the samples.
+//! where it couldn't. See `testdata/vtr/README.md` for the samples. Since then, VPR 9.0.0 has
+//! checked and timed this crate's routes of the 20 MCNC circuits of VTR's regression tests,
+//! on graphs and placements that it wrote: see the FPGA routing section of
+//! `docs/benchmarks.md`, and `examples/vtr_route.rs` for the code that does it.
 //!
 //! - **Routing resource graphs** were checked against the schema in VTR's source and a
-//!   genuine device graph, the 96 MB Zero ASIC z1000 graph shipped with VTR. Base costs
-//!   follow VPR's source, since VPR wasn't available to compare numbers with.
+//!   genuine device graph, the 96 MB Zero ASIC z1000 graph shipped with VTR, and are read
+//!   from VPR 9.0.0's own output in the benchmarks. Base costs follow VPR's source, and have
+//!   not been compared with the numbers VPR works with.
 //! - **Packed netlists and placements** were checked against files VPR wrote, and against
 //!   the net order, driver, pin indices and sinks in the route VPR wrote from them.
 //! - **Route files** are reproduced byte for byte from a real VPR output, using a graph
-//!   reconstructed from it. VPR itself has not checked anything written here, since it wasn't
-//!   available. Its reader was read closely to know what it checks.
+//!   reconstructed from it. VPR 9.0.0 loads those of the benchmarks with `--analysis`, and
+//!   finds every one legal. That took a change: VPR lets a net leave a logic block through
+//!   only one output pin, which [`Design`](Design#one-output-pin-per-net) now arranges.
 //! - **Delays** for timing-driven routing, from [`RrGraph::timed_graph`], are the Elmore delay
 //!   that VPR's route tree gives a step through a buffered switch, fixed per step. That is an
 //!   approximation behind unbuffered switches and where a tree branches: see
-//!   [`RrGraph::step_delay`]. No delay here has been compared with VPR's.
+//!   [`RrGraph::step_delay`]. On the benchmarks, the critical path that the engine works out
+//!   with these is 0% to 1.3% shorter than VPR's timing analysis of the same routes.
 //! - **Timing graphs** from [`build_timing`] follow the structure that the packed netlist
 //!   records inside each block, which was checked against `mult_4x4`, `multiclock` and
 //!   `unconnected`. The delays inside blocks come from [`read_architecture`], which was

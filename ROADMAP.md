@@ -74,11 +74,12 @@ The heart of the project.
 **Exit:** dense grid and graph problems route legally, or report unroutable nets
 correctly; identical output across thread counts and OSes, enforced in CI.
 
-### M3: FPGA routing
+### M3: FPGA routing (done)
 
 First real domain and the first test of the abstraction.
 
-- Import VTR routing resource graphs and pre-placed designs.
+- Import VTR routing resource graphs and pre-placed designs, and write routes that VPR
+  accepts. Done, through `fpga::resolve_nets` and `fpga::write_route`.
 - Delays inside blocks, and which primitives are registers, from VTR architecture files.
   Done, through `fpga::read_architecture`.
 - Non-configurable edges (shorts), taken as a whole set by the engine and checked by the
@@ -96,6 +97,13 @@ First real domain and the first test of the abstraction.
 
 **Exit:** the VTR benchmarks route legally, and first results are published
 against VPR for channel width, delay and runtime.
+
+Met on the 20 MCNC circuits that VTR's regression tests route on `k6_N10_40nm`, the set VPR's
+papers use, against VPR 9.0.0 on its own placements and graphs
+([results](docs/benchmarks.md#fpga-routing-against-vpr)). Every route is legal by the validator
+and by VPR, which loads and times each one. Against VPR, `guide` needs 2.6% fewer tracks, gives
+critical paths 1.6% shorter and 2.9% less wire, and takes 3.2 times as long. VTR's Verilog
+suite, with memories and multipliers, and Titan23 are still to be run.
 
 ### M4: Geometry layer (done)
 

@@ -79,3 +79,17 @@ GUIDE_ROUTE=1 GUIDE_KICAD=1 cargo test --release --features kicad curated_boards
 
 [`docs/benchmarks.md`](../../docs/benchmarks.md#pcb-routing-of-the-curated-boards) has the
 results.
+
+## Routing them with Freerouting
+
+[`scripts/freerouting/compare.sh`](../../scripts/freerouting/compare.sh) strips each board with
+KiCad's `pcbnew` as the routing test does, exports its DSN, routes it with Freerouting 2.5.0,
+imports the session into the stripped board, routes the same stripped board with `pcb::route`,
+and measures and checks both alike, KiCad's DRC included. Nothing it makes is kept here.
+
+```text
+JAVA=jre/bin/java FREEROUTING_JAR=freerouting-2.5.0.jar scripts/freerouting/compare.sh OUT_DIR
+```
+
+[`docs/benchmarks.md`](../../docs/benchmarks.md#pcb-routing-against-freerouting) has the
+results.

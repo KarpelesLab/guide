@@ -532,7 +532,7 @@ done so far are below. There are no results for the others yet.
 | FPGA placement | VPR, nextpnr | VTR benchmarks, ISPD 2016/2017 contest sets | Not yet done |
 | PCB clearance checks | KiCad 10.0.3 | [Curated open-source KiCad boards](../testdata/kicad/README.md) | [Done](#pcb-clearance-checks-against-kicad) |
 | PCB DSN import, SES export | KiCad 10.0.3's reading of the same boards, and its session import | The same boards | [Done](#pcb-dsn-designs-against-kicad-boards) |
-| PCB routing | Freerouting | The same boards | Not yet done; [our own results](#pcb-routing-of-the-curated-boards), checked by KiCad, are below |
+| PCB routing | Freerouting 2.5.0, both checked by KiCad 10.0.3 | The same boards | [First results](#pcb-routing-against-freerouting) |
 | PCB placement | Hand-placed originals | The same boards | Not yet done |
 | ASIC global routing | Published contest results | ISPD 2007/2008 | Not yet done |
 
@@ -1107,8 +1107,9 @@ jre/bin/java -Djava.awt.headless=true -jar freerouting-2.5.0.jar \
 On `TS4231-BOB` it keeps the existing wiring, routes the two nets left, and writes a session in
 the same form as `write_session`'s, which KiCad imports. It reports one clearance violation that
 neither KiCad nor either reading here finds, between a via of `GND` and pad 2 of `R1`, which it
-calls fixed and leaves alone; that is for the comparison to look into. Nothing here depends on
-Freerouting.
+calls fixed and leaves alone: that is Freerouting's own approximation of a via, [explained
+below](#the-clearance-violation-only-freerouting-finds). The [comparison of
+routers](#pcb-routing-against-freerouting) is below too. Nothing here depends on Freerouting.
 
 ### What this does not show
 
@@ -1208,11 +1209,204 @@ above rest on several boards moving the same way, never on one.
 
 ### What this does not show
 
-- No comparison with Freerouting yet, which M5's exit asks for.
 - Nine boards, all small: the largest has 79 nets. Larger boards would test global routing far
   more than these do.
 - Tracks are octilinear and every via goes through the board. No differential pairs, length
   matching or zones are routed.
 - Times are of one thread, and most of the time on the large boards goes into searches that find
   no path, which a better lower bound or caching of step checks would cut.
+
+## PCB routing against Freerouting
+
+This is the comparison that M5's exit asks for: `pcb::route` and Freerouting 2.5.0 on the nine
+[curated boards](../testdata/kicad/README.md), each given the same stripped board, both results
+measured by the same code and checked by KiCad 10.0.3's own DRC.
+
+Measured on 2026-11-08 with rustc 1.97.1, on commit `8871703` with the harness added, on an AMD
+Ryzen Threadripper PRO 9995WX shared with other work. Freerouting is 2.5.0's jar on Adoptium's
+JRE 25.0.5.
+
+### How
+
+```text
+JAVA=jre/bin/java FREEROUTING_JAR=freerouting-2.5.0.jar scripts/freerouting/compare.sh OUT_DIR
+```
+
+[`scripts/freerouting/compare.sh`](../scripts/freerouting/compare.sh) does it all, and keeps
+every file it makes in `OUT_DIR`:
+
+1. **The same problem.** [`strip.py`](../scripts/freerouting/strip.py) loads each board in
+   KiCad's `pcbnew`, takes out every track, arc and via and every copper zone, teardrops
+   included, keeping rule areas, as the [routing test](#pcb-routing-of-the-curated-boards)
+   does, and saves it. KiCad's own `ExportSpecctraDSN` then writes the DSN of that stripped
+   board, as `testdata/kicad`'s DSN files were made. Copper zones go, not only their fills,
+   because KiCad exports a zone as a plane, which Freerouting would take as poured copper to
+   connect to, while neither router fills zones for the DRC.
+2. **Freerouting** routes the DSN headless, with its settings and logs kept in `OUT_DIR` and
+   analytics off. Its session is imported into the stripped board by KiCad's own
+   `ImportSpecctraSES`, as "Import Specctra Session" does.
+3. **guide** reads the same stripped `.kicad_pcb` with `kicad::read`, routes it with
+   `pcb::route` and the default options, on one thread, and writes it back with
+   `kicad::replace_routing`.
+4. **The same measures.** `curated_boards_against_freerouting` in
+   [`src/kicad/freerouting_tests.rs`](../src/kicad/freerouting_tests.rs) reads both routed
+   boards with `kicad::read` and measures them alike: nets and connections completed, by
+   islands of copper as in the routing test, vias, track length and our DRC. It runs
+   `kicad-cli pcb drc` on both at error severity, and counts the violations that involve a
+   track or a via, which on a stripped board are all the router's, and the missing
+   connections. It runs only when the script sets `GUIDE_FREEROUTING`, so nothing in a normal
+   test run needs Java or Freerouting.
+
+Freerouting's runs:
+
+- **default**: Freerouting's own settings. Its autorouter is single-threaded, and its optimizer
+  here runs on 191 threads, one fewer than the machine has.
+- **1-thread**: the optimizer on one thread too, to compare times with guide's one thread.
+  `-mt 1` doesn't reach the optimizer in 2.5.0, so this sets `router.optimizer.max_threads=1`.
+  Freerouting is deterministic: this run's sessions are the default's, byte for byte, on every
+  board, and only the times differ.
+- **long**: a longer run, on one thread. Freerouting's autorouter stops once its score hasn't
+  improved for 10 passes, whatever `max_passes` says, so the run that can go on is the
+  optimizer's: `router.optimizer.improvement_threshold=0` keeps it going while a pass improves
+  at all, where the default stops below 2.5%.
+- **tuned**: on one thread, with two things the DSN doesn't say given to Freerouting by its
+  settings: the board's clearance between copper and the edge, and no automatic neckdown,
+  which narrows tracks at pads below the board's minimum track width.
+
+Times are of routing alone: for guide, `pcb::route`'s, and for Freerouting, the elapsed time of
+its job, from its log, which leaves out starting Java, two to three seconds.
+
+### What each is given
+
+Both see the same pads, keepouts, edge and nets, but not the same rules. guide reads the
+`.kicad_pcb` and its project; Freerouting reads what the DSN carries, as [the comparison of the
+two readings](#pcb-dsn-designs-against-kicad-boards) lists. What matters here:
+
+- **Not in the DSN**: the board's minimum track width and minimum hole, its edge clearance,
+  pads' own clearances, solder mask openings, and differential pairs' gaps. Freerouting can't
+  keep to rules it isn't given, and KiCad's DRC checks them all the same. Any KiCad user of
+  Freerouting loses them, so they count here, but the `tuned` run gives Freerouting two of
+  them, to see how much is that.
+- **Approximated in the DSN**: custom pads are their convex hulls, rounded pads are polygons
+  reaching a little past their arcs, and non-plated holes are keepouts grown by the hole
+  clearance. These only make Freerouting's problem harder: `flea`'s DSN has 96 pairs of `U1`'s
+  pads that overlap as hulls, and `nk3-nrf-mini`'s curved touch pad covers more than it does.
+- **Only guide** keeps clear of text on copper, which the DSN doesn't have.
+
+### Results
+
+Freerouting's default run against guide. Its sessions are the same on one thread, so both times
+are given. The violations are KiCad's, at error severity, of tracks and vias: guide's results
+have none on any board, and our DRC finds none in them either.
+
+| Board | Router | Nets | Connections | KiCad violations | KiCad unconnected | Vias | Track, mm | Seconds |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `GB-BRK-LINK-A` | guide | 6/6 | 8/8 | 0 | 0 | 0 | 128 | 0.00 |
+| | Freerouting | 6/6 | 8/8 | 0 | 0 | 0 | 137 | 0.35; 0.41 on one thread |
+| `TS4231-BOB` | guide | 8/8 | 13/13 | 0 | 0 | 1 | 43 | 0.02 |
+| | Freerouting | 8/8 | 13/13 | 2 track width | 0 | 1 | 48 | 1.18; 0.99 |
+| `lisn` | guide | 18/18 | 60/60 | 0 | 0 | 12 | 315 | 0.07 |
+| | Freerouting | 18/18 | 60/60 | 0 | 0 | 11 | 421 | 2.30; 4.41 |
+| `isi-channel` | guide | 7/7 | 29/29 | 0 | 0 | 0 | 771 | 0.22 |
+| | Freerouting | 7/7 | 29/29 | 12 drill out of range | 0 | 12 | 794 | 3.60; 8.50 |
+| `placebo` | guide | 23/23 | 50/50 | 0 | 0 | 9 | 321 | 0.63 |
+| | Freerouting | 23/23 | 50/50 | 17: 7 edge clearance, 6 track width, 2 clearance, 2 mask bridge | 0 | 6 | 350 | 6.00; 35.6 |
+| `udb-s` | guide | 8/8 | 33/33 | 0 | 0 | 6 | 171 | 5.62 |
+| | Freerouting | 8/8 | 33/33 | 6 edge clearance | 0 | 9 | 185 | 2.45; 6.01 |
+| `flea` | guide | 24/24 | 79/79 | 0 | 0 | 50 | 1588 | 21.8 |
+| | Freerouting | 23/24 | 78/79 | 43: 41 track width, 2 mask bridge | 1 | 32 | 1668 | 21.6; 20.9 |
+| `GB-LIVE32` | guide | 79/79 | 197/197 | 0 | 0 | 140 | 2720 | 89.7 |
+| | Freerouting | 79/79 | 197/197 | 3 track width | 0 | 133 | 2817 | 120; 915 |
+| `nk3-nrf-mini` | guide | 28/30 | 56/83 | 0 | 27 | 43 | 253 | 95.9 |
+| | Freerouting | 10/30 | 44/83 | 34: 16 track width, 8 clearance, 8 mask bridge, 2 edge clearance | 39 | 19 | 151 | 68.4; 67.6 |
+
+Freerouting's other runs, where they routed differently from the default:
+
+| Board | Run | Nets | Connections | KiCad violations | KiCad unconnected | Vias | Track, mm | Seconds |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `lisn` | long | 18/18 | 60/60 | 0 | 0 | 6 | 406 | 34.1 |
+| `udb-s` | long | 8/8 | 33/33 | 6 edge clearance | 0 | 7 | 174 | 30.0 |
+| `GB-LIVE32` | long | 79/79 | 197/197 | 3 track width | 0 | 132 | 2794 | 2145 |
+| `lisn` | tuned | 18/18 | 60/60 | 0 | 0 | 11 | 420 | 2.73 |
+| `placebo` | tuned | 23/23 | 50/50 | 0 | 0 | 10 | 352 | 10.5 |
+| `udb-s` | tuned | 8/8 | 33/33 | 0 | 0 | 12 | 171 | 20.3 |
+| `flea` | tuned | 23/24 | 78/79 | 8: 6 track width, 2 mask bridge | 1 | 38 | 1657 | 14.6 |
+| `GB-LIVE32` | tuned | 79/79 | 197/197 | 2 track width | 0 | 153 | 2880 | 150 |
+| `nk3-nrf-mini` | tuned | 10/30 | 48/83 | 39: 23 track width, 8 clearance, 8 mask bridge | 35 | 14 | 142 | 62.2 |
+
+KiCad also finds violations of no track or via on some of the stripped boards themselves, such
+as pads too close on `flea`; they are the same for both routers, and left out.
+
+### What the results say
+
+- **Completion.** Both complete seven boards. guide completes `flea` too, where Freerouting
+  leaves one connection of `switch5` in every run. Neither completes `nk3-nrf-mini`, where
+  guide makes 56 of its 83 connections and 28 of its 30 nets, and Freerouting 44 to 48 and 10:
+  its fanout escapes 73 of the 155 SMD pins, with the DSN's hulls of the pads and its own
+  octagonal vias leaving it less room than there is.
+- **KiCad's DRC.** guide's results have no violation on any board. Freerouting's have some on
+  six boards in the default run, 117 in all, and 63 tuned. Nearly all are of rules the DSN
+  doesn't carry. Tracks narrower than the board's minimum are its neckdown at pads, and turning
+  automatic neckdown off removes most of them but not all, 41 to 6 on `flea`. Edge clearances
+  all go once it is given the board's. The clearances are all to the fiducial `FID1`, whose own
+  clearance of 0.25 or 0.5 mm the DSN doesn't have, and the mask bridges are of mask openings it
+  doesn't have either. `isi-channel`'s are its net class's own vias, whose 0.25 mm drill is
+  under the board's minimum hole of 0.3 mm. guide would make the same violation there, as it
+  uses the class's via and doesn't check it against the minimum hole, but it routes that board
+  with no via.
+- **Track length.** On the seven boards both complete, guide's track is 4469 mm, Freerouting's
+  4752 in the default run, 4703 in the long run and 4802 tuned: guide's is 6%, 5% and 7%
+  shorter, and shorter than the default's on every one of the seven, by 25% on `lisn`.
+- **Vias.** Over the same seven boards, guide has 168 vias, and Freerouting 172 in the default
+  run, 164 in the long run and 199 tuned. **guide loses on vias** on `placebo`, 9 to 6, on
+  `lisn` against the long run, 12 to 6, on `GB-LIVE32`, 140 to 132 or 133, and on `flea` by
+  most, 50 to 32, though Freerouting doesn't complete it. Freerouting's 12 on `isi-channel` are
+  where guide has none.
+- **Time, one thread each.** guide is faster on seven boards: by 40 to 60 times on four of the
+  small ones, and by 10 times on `GB-LIVE32`, 90 s to 915 s, where Freerouting's optimizer
+  spends most of its time. On `udb-s` it is barely faster, 5.6 s to 6.0 s. **guide loses on
+  time** on `flea`, 21.8 s to 20.9 s, and on `nk3-nrf-mini`, 95.9 s to 67.6 s, where it
+  searches long for the nets it can't route. With its optimizer on 191 threads, Freerouting is
+  faster than guide's one thread on `udb-s` too, 2.5 s.
+- **The longer run** buys Freerouting little: fewer vias and 1% to 4% less track on three
+  boards, for up to 36 minutes on `GB-LIVE32`.
+
+guide's results here differ a little from the [routing test's](#pcb-routing-of-the-curated-boards)
+on `flea` and `nk3-nrf-mini`: the stripped board here is the file KiCad saved, not the test's own
+stripping in memory, and routing these two is chaotic.
+
+### The clearance violation only Freerouting finds
+
+On `TS4231-BOB` as it comes, with its wiring, Freerouting reports one clearance violation that
+neither KiCad nor our DRC finds: `FixedVia#106 [net GND] <-> R1.2`. The via is at (129.833069,
+50.750919) mm, 0.8 mm across, and pad 2 of `R1` is a 0.8 × 0.95 mm rounded rectangle with
+corners of 0.2 mm, at (130.625, 51.4). The via faces the pad's corner, and the gap between them
+is 0.700228 − 0.2 − 0.4 = 0.100228 mm, 0.2 µm more than the clearance of 0.1 mm. KiCad, our DRC
+and our DSN reading all pass it. The DSN's polygon for the pad reaches 0.761 µm past the corner's
+arc at its vertices but falls short of it between them, and leaves a gap of about 103 µm there.
+
+Freerouting checks clearances on shapes made of tiles, and takes a via as the octagon around its
+circle. The via faces the pad 32° off the axis, where the octagon's diagonal side stands proud
+of the circle, and that side comes within 82.4 µm of the pad polygon's nearest vertex, which
+violates 100 µm. That predicts that the via must move 18 µm away from the pad, along the line
+through the corner, for Freerouting to stop reporting it, where a circle would need nothing.
+Moving it in the DSN, with its wires, step by step: Freerouting still reports it 17 µm away, and
+no longer does 18 µm away. The violation is Freerouting's approximation, not the board's. It
+errs safe, but it costs Freerouting room near every via, which is part of why it routes less of
+`nk3-nrf-mini`.
+
+### What this does not show
+
+- Nine small boards, and one result of each router on each, both deterministic. Another board,
+  or a changed option, can change who wins: routing the two hard boards is chaotic.
+- Freerouting is given a DSN, as KiCad users give it, and most of its violations are of rules
+  the DSN doesn't carry. The `tuned` run gives it two of them, not all: it has no setting for
+  pads' own clearances or masks.
+- Freerouting's settings are its defaults and three variations. Others, such as its via costs
+  or its `-us` and `-is` strategies, might do better. guide's are its defaults, which were
+  tuned on these boards as [above](#what-changes-what), which favours guide.
+- The machine was shared, and times move by 10% to 20% from run to run: guide's on `flea` was
+  26 s in an earlier run.
+- KiCad's DRC is the only judge of validity, and track length and vias the only measures of
+  quality. Neither says how good a board is to make, or how its signals fare.
 

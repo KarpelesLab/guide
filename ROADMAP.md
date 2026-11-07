@@ -101,9 +101,10 @@ against VPR for channel width, delay and runtime.
 Met on the 20 MCNC circuits that VTR's regression tests route on `k6_N10_40nm`, the set VPR's
 papers use, against VPR 9.0.0 on its own placements and graphs
 ([results](docs/benchmarks.md#fpga-routing-against-vpr)). Every route is legal by the validator
-and by VPR, which loads and times each one. Against VPR, `guide` needs 2.6% fewer tracks, gives
-critical paths 1.6% shorter and 2.9% less wire, and takes 3.2 times as long. VTR's Verilog
-suite, with memories and multipliers, and Titan23 are still to be run.
+and by VPR, which loads and times each one. Against VPR, `guide` needs 4.4% fewer tracks, gives
+critical paths 1.3% shorter and 5.5% less wire, and takes 0.28 times as long, since a map
+lookahead and incremental rerouting; it first took 3.2 times as long. VTR's Verilog suite,
+with memories and multipliers, and Titan23 are still to be run.
 
 ### M4: Geometry layer (done)
 

@@ -541,9 +541,11 @@ This is the comparison that M3's exit criterion asks for: `guide`'s router again
 the same placements and VPR's own device graphs, with VPR checking and timing every route of
 `guide`'s.
 
-Measured on 2026-11-08, on the commit that adds this section (the routes come from its
-parent, `1643bc4`, which has the same code), with rustc 1.97.1, on an AMD Ryzen Threadripper
-PRO 9995WX shared with other work.
+Measured on 2026-11-08 with rustc 1.97.1, on an AMD Ryzen Threadripper PRO 9995WX shared
+with other work. "Before" is the commit that first published this section, `e2d0bd5`. The
+rest is `21d5205`, the commit that finished the [lookahead and incremental
+rerouting](#closing-the-runtime-gap). VPR, the circuits and the placements are the same in
+both, and so are VPR's results, but for its times.
 
 ### How
 
@@ -570,17 +572,20 @@ PRO 9995WX shared with other work.
   own (`check_route`, including its reserved output pins) and then times it. Wirelength is
   VPR's count of tiles of wire, which agrees with `guide`'s own count in every case.
 - **Runtime** is the time inside the router, on one thread for both: VPR's `# Routing took`
-  line with `-j 1`, which leaves out building the graph and VPR's lookahead (shown
-  separately), and `guide`'s route time in `examples/vtr_route.rs`, which leaves out reading
-  the files but includes building the timing graph. "Threads" is `guide` with 16 threads and
-  batches of 32, which gives different routes from batches of 1, so it has its own delay.
-- **`guide`'s options** are `RrGraph::engine_options()`, timing-driven with
-  `DesignTiming::vpr_constraints(0)`, VPR's default without an SDC file.
+  line with `-j 1`, which leaves out building the graph and VPR's lookahead, and `guide`'s
+  route time in `examples/vtr_route.rs`, which leaves out reading the files and its own
+  lookahead but includes building the timing graph. Both lookaheads are shown separately.
+  "Threads" is `guide` with 16 threads and batches of 32, which gives different routes from
+  batches of 1, so it has its own delay.
+- **`guide`'s options** are `RrGraph::engine_options()` after `RrGraph::use_map_lookahead`
+  with its defaults, timing-driven with `DesignTiming::vpr_constraints(0)`, VPR's default
+  without an SDC file. Before, they were `engine_options()` on the graph's own bound.
 
 ```text
 scripts/vtr/build-vpr.sh DIR                     # about two minutes on many cores
 JOBS=8 scripts/vtr/compare.sh DIR WORK           # all 20 circuits, a few minutes on many cores
-python3 scripts/vtr/tables.py WORK               # the tables below
+python3 scripts/vtr/tables.py WORK [BEFORE]      # the tables below, BEFORE for a column
+                                                 # of an earlier run's
 ```
 
 ### Results
@@ -592,133 +597,207 @@ mean.
 
 Minimum channel width:
 
-| Circuit | CLBs | Grid, tiles a side | VPR | guide | guide / VPR | VPR accepts guide's route |
-| --- | --- | --- | --- | --- | --- | --- |
-| alu4 | 106 | 13 | 40 | 38 | 0.950 | yes |
-| apex2 | 126 | 14 | 54 | 54 | 1.000 | yes |
-| apex4 | 105 | 13 | 56 | 54 | 0.964 | yes |
-| bigkey | 92 | 16 | 34 | 34 | 1.000 | yes |
-| clma | 435 | 23 | 72 | 70 | 0.972 | yes |
-| des | 102 | 18 | 34 | 34 | 1.000 | yes |
-| diffeq | 102 | 13 | 30 | 30 | 1.000 | yes |
-| dsip | 93 | 16 | 34 | 36 | 1.059 | yes |
-| elliptic | 242 | 18 | 52 | 48 | 0.923 | yes |
-| ex1010 | 322 | 20 | 86 | 84 | 0.977 | yes |
-| ex5p | 98 | 12 | 44 | 44 | 1.000 | yes |
-| frisc | 251 | 18 | 58 | 56 | 0.966 | yes |
-| misex3 | 100 | 12 | 46 | 44 | 0.957 | yes |
-| pdc | 332 | 21 | 72 | 66 | 0.917 | yes |
-| s298 | 84 | 12 | 40 | 40 | 1.000 | yes |
-| s38417 | 397 | 22 | 34 | 32 | 0.941 | yes |
-| s38584.1 | 360 | 21 | 40 | 40 | 1.000 | yes |
-| seq | 112 | 13 | 54 | 52 | 0.963 | yes |
-| spla | 265 | 19 | 60 | 54 | 0.900 | yes |
-| tseng | 112 | 13 | 26 | 26 | 1.000 | yes |
-| Geomean |  |  |  |  | 0.974 |  |
+| Circuit | CLBs | Grid, tiles a side | VPR | guide before | before / VPR | guide | guide / VPR | VPR accepts guide's route |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| alu4 | 106 | 13 | 40 | 38 | 0.950 | 38 | 0.950 | yes |
+| apex2 | 126 | 14 | 54 | 54 | 1.000 | 52 | 0.963 | yes |
+| apex4 | 105 | 13 | 56 | 54 | 0.964 | 52 | 0.929 | yes |
+| bigkey | 92 | 16 | 34 | 34 | 1.000 | 34 | 1.000 | yes |
+| clma | 435 | 23 | 72 | 70 | 0.972 | 68 | 0.944 | yes |
+| des | 102 | 18 | 34 | 34 | 1.000 | 34 | 1.000 | yes |
+| diffeq | 102 | 13 | 30 | 30 | 1.000 | 30 | 1.000 | yes |
+| dsip | 93 | 16 | 34 | 36 | 1.059 | 34 | 1.000 | yes |
+| elliptic | 242 | 18 | 52 | 48 | 0.923 | 48 | 0.923 | yes |
+| ex1010 | 322 | 20 | 86 | 84 | 0.977 | 82 | 0.953 | yes |
+| ex5p | 98 | 12 | 44 | 44 | 1.000 | 44 | 1.000 | yes |
+| frisc | 251 | 18 | 58 | 56 | 0.966 | 54 | 0.931 | yes |
+| misex3 | 100 | 12 | 46 | 44 | 0.957 | 42 | 0.913 | yes |
+| pdc | 332 | 21 | 72 | 66 | 0.917 | 64 | 0.889 | yes |
+| s298 | 84 | 12 | 40 | 40 | 1.000 | 40 | 1.000 | yes |
+| s38417 | 397 | 22 | 34 | 32 | 0.941 | 32 | 0.941 | yes |
+| s38584.1 | 360 | 21 | 40 | 40 | 1.000 | 36 | 0.900 | yes |
+| seq | 112 | 13 | 54 | 52 | 0.963 | 52 | 0.963 | yes |
+| spla | 265 | 19 | 60 | 54 | 0.900 | 56 | 0.933 | yes |
+| tseng | 112 | 13 | 26 | 26 | 1.000 | 26 | 1.000 | yes |
+| Geomean |  |  |  |  | 0.974 |  | 0.956 |  |
 
 At the relaxed width, the critical-path delay, by VPR's analysis of each tool's routes, and
 by `guide`'s own analysis of its routes:
 
-| Circuit | W | VPR, ns | guide, ns | guide / VPR | guide's own STA, ns | own / VPR's STA | VPR accepts guide's route |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| alu4 | 52 | 5.318 | 4.780 | 0.899 | 4.775 | 0.999 | yes |
-| apex2 | 70 | 5.807 | 5.776 | 0.995 | 5.770 | 0.999 | yes |
-| apex4 | 72 | 5.386 | 5.443 | 1.010 | 5.438 | 0.999 | yes |
-| bigkey | 44 | 3.307 | 3.261 | 0.986 | 3.234 | 0.992 | yes |
-| clma | 94 | 8.695 | 8.687 | 0.999 | 8.610 | 0.991 | yes |
-| des | 44 | 4.469 | 4.460 | 0.998 | 4.456 | 0.999 | yes |
-| diffeq | 40 | 6.095 | 6.094 | 1.000 | 6.022 | 0.988 | yes |
-| dsip | 44 | 3.179 | 3.176 | 0.999 | 3.148 | 0.991 | yes |
-| elliptic | 68 | 7.581 | 7.516 | 0.991 | 7.442 | 0.990 | yes |
-| ex1010 | 112 | 6.897 | 6.787 | 0.984 | 6.780 | 0.999 | yes |
-| ex5p | 58 | 4.621 | 4.552 | 0.985 | 4.546 | 0.999 | yes |
-| frisc | 76 | 10.007 | 9.475 | 0.947 | 9.401 | 0.992 | yes |
-| misex3 | 60 | 4.821 | 4.756 | 0.987 | 4.751 | 0.999 | yes |
-| pdc | 94 | 7.060 | 6.985 | 0.989 | 6.976 | 0.999 | yes |
-| s298 | 52 | 7.263 | 7.197 | 0.991 | 7.126 | 0.990 | yes |
-| s38417 | 44 | 5.800 | 5.546 | 0.956 | 5.474 | 0.987 | yes |
-| s38584.1 | 52 | 5.056 | 5.026 | 0.994 | 4.979 | 0.991 | yes |
-| seq | 70 | 4.872 | 4.792 | 0.984 | 4.787 | 0.999 | yes |
-| spla | 78 | 6.529 | 6.472 | 0.991 | 6.464 | 0.999 | yes |
-| tseng | 34 | 5.713 | 5.684 | 0.995 | 5.613 | 0.987 | yes |
-| Geomean |  |  |  | 0.984 |  | 0.994 |  |
+| Circuit | W | VPR, ns | guide before, ns | before / VPR | guide, ns | guide / VPR | guide's own STA, ns | own / VPR's STA | VPR accepts guide's route |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| alu4 | 52 | 5.318 | 4.780 | 0.899 | 4.807 | 0.904 | 4.802 | 0.999 | yes |
+| apex2 | 70 | 5.807 | 5.776 | 0.995 | 5.777 | 0.995 | 5.772 | 0.999 | yes |
+| apex4 | 72 | 5.386 | 5.443 | 1.010 | 5.281 | 0.980 | 5.274 | 0.999 | yes |
+| bigkey | 44 | 3.307 | 3.261 | 0.986 | 3.264 | 0.987 | 3.237 | 0.992 | yes |
+| clma | 94 | 8.695 | 8.687 | 0.999 | 8.662 | 0.996 | 8.585 | 0.991 | yes |
+| des | 44 | 4.469 | 4.460 | 0.998 | 4.460 | 0.998 | 4.456 | 0.999 | yes |
+| diffeq | 40 | 6.095 | 6.094 | 1.000 | 6.199 | 1.017 | 6.128 | 0.989 | yes |
+| dsip | 44 | 3.179 | 3.176 | 0.999 | 3.176 | 0.999 | 3.148 | 0.991 | yes |
+| elliptic | 68 | 7.581 | 7.516 | 0.991 | 7.548 | 0.996 | 7.474 | 0.990 | yes |
+| ex1010 | 112 | 6.897 | 6.787 | 0.984 | 6.823 | 0.989 | 6.814 | 0.999 | yes |
+| ex5p | 58 | 4.621 | 4.552 | 0.985 | 4.556 | 0.986 | 4.550 | 0.999 | yes |
+| frisc | 76 | 10.007 | 9.475 | 0.947 | 9.812 | 0.980 | 9.737 | 0.992 | yes |
+| misex3 | 60 | 4.821 | 4.756 | 0.987 | 4.786 | 0.993 | 4.781 | 0.999 | yes |
+| pdc | 94 | 7.060 | 6.985 | 0.989 | 7.052 | 0.999 | 7.042 | 0.999 | yes |
+| s298 | 52 | 7.263 | 7.197 | 0.991 | 7.494 | 1.032 | 7.422 | 0.990 | yes |
+| s38417 | 44 | 5.800 | 5.546 | 0.956 | 5.512 | 0.950 | 5.440 | 0.987 | yes |
+| s38584.1 | 52 | 5.056 | 5.026 | 0.994 | 4.879 | 0.965 | 4.837 | 0.991 | yes |
+| seq | 70 | 4.872 | 4.792 | 0.984 | 4.823 | 0.990 | 4.818 | 0.999 | yes |
+| spla | 78 | 6.529 | 6.472 | 0.991 | 6.482 | 0.993 | 6.476 | 0.999 | yes |
+| tseng | 34 | 5.713 | 5.684 | 0.995 | 5.684 | 0.995 | 5.613 | 0.987 | yes |
+| Geomean |  |  |  | 0.984 |  | 0.987 |  | 0.994 |  |
 
 Wirelength at the relaxed width, in tiles of wire:
 
-| Circuit | VPR | guide | guide / VPR |
-| --- | --- | --- | --- |
-| alu4 | 7291 | 6896 | 0.946 |
-| apex2 | 12151 | 12003 | 0.988 |
-| apex4 | 10212 | 9940 | 0.973 |
-| bigkey | 6415 | 6281 | 0.979 |
-| clma | 44365 | 44821 | 1.010 |
-| des | 6744 | 6659 | 0.987 |
-| diffeq | 5218 | 4754 | 0.911 |
-| dsip | 7198 | 6878 | 0.956 |
-| elliptic | 16865 | 15985 | 0.948 |
-| ex1010 | 40817 | 42528 | 1.042 |
-| ex5p | 6964 | 6672 | 0.958 |
-| frisc | 21617 | 20176 | 0.933 |
-| misex3 | 6920 | 6949 | 1.004 |
-| pdc | 36688 | 37644 | 1.026 |
-| s298 | 5886 | 5453 | 0.926 |
-| s38417 | 18574 | 17796 | 0.958 |
-| s38584.1 | 19108 | 18261 | 0.956 |
-| seq | 10428 | 9970 | 0.956 |
-| spla | 25425 | 25369 | 0.998 |
-| tseng | 4210 | 4094 | 0.972 |
-| Geomean |  |  | 0.971 |
+| Circuit | VPR | guide before | before / VPR | guide | guide / VPR |
+| --- | --- | --- | --- | --- | --- |
+| alu4 | 7291 | 6896 | 0.946 | 6840 | 0.938 |
+| apex2 | 12151 | 12003 | 0.988 | 12015 | 0.989 |
+| apex4 | 10212 | 9940 | 0.973 | 9338 | 0.914 |
+| bigkey | 6415 | 6281 | 0.979 | 6328 | 0.986 |
+| clma | 44365 | 44821 | 1.010 | 42563 | 0.959 |
+| des | 6744 | 6659 | 0.987 | 6580 | 0.976 |
+| diffeq | 5218 | 4754 | 0.911 | 4749 | 0.910 |
+| dsip | 7198 | 6878 | 0.956 | 6918 | 0.961 |
+| elliptic | 16865 | 15985 | 0.948 | 15349 | 0.910 |
+| ex1010 | 40817 | 42528 | 1.042 | 38710 | 0.948 |
+| ex5p | 6964 | 6672 | 0.958 | 6771 | 0.972 |
+| frisc | 21617 | 20176 | 0.933 | 19599 | 0.907 |
+| misex3 | 6920 | 6949 | 1.004 | 6791 | 0.981 |
+| pdc | 36688 | 37644 | 1.026 | 34460 | 0.939 |
+| s298 | 5886 | 5453 | 0.926 | 5210 | 0.885 |
+| s38417 | 18574 | 17796 | 0.958 | 17595 | 0.947 |
+| s38584.1 | 19108 | 18261 | 0.956 | 18100 | 0.947 |
+| seq | 10428 | 9970 | 0.956 | 9654 | 0.926 |
+| spla | 25425 | 25369 | 0.998 | 23896 | 0.940 |
+| tseng | 4210 | 4094 | 0.972 | 4077 | 0.968 |
+| Geomean |  |  | 0.971 |  | 0.945 |
 
-Runtime at the relaxed width:
+Runtime at the relaxed width. Each ratio is to VPR's time in the same run, as VPR's times move
+from run to run:
 
-| Circuit | VPR, s | VPR's lookahead, s | VPR iterations | guide, 1 thread, s | guide iterations | / VPR | guide, threads, s | / VPR | Its delay, ns | VPR accepts it |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| alu4 | 0.17 | 0.01 | 24 | 0.51 | 11 | 3.02 | 0.60 | 3.51 | 5.011 | yes |
-| apex2 | 0.17 | 0.02 | 24 | 0.83 | 9 | 4.88 | 1.02 | 5.98 | 5.780 | yes |
-| apex4 | 0.18 | 0.02 | 27 | 0.70 | 11 | 3.88 | 0.68 | 3.80 | 5.278 | yes |
-| bigkey | 0.11 | 0.02 | 16 | 0.30 | 9 | 2.70 | 0.29 | 2.60 | 3.261 | yes |
-| clma | 0.83 | 0.08 | 23 | 4.94 | 11 | 5.95 | 5.60 | 6.74 | 8.656 | yes |
-| des | 0.07 | 0.02 | 14 | 0.17 | 8 | 2.41 | 0.16 | 2.30 | 4.460 | yes |
-| diffeq | 0.09 | 0.01 | 22 | 0.13 | 8 | 1.49 | 0.17 | 1.89 | 6.087 | yes |
-| dsip | 0.13 | 0.02 | 18 | 0.28 | 12 | 2.15 | 0.29 | 2.22 | 3.330 | yes |
-| elliptic | 0.39 | 0.03 | 24 | 0.88 | 10 | 2.25 | 1.05 | 2.69 | 7.554 | yes |
-| ex1010 | 0.78 | 0.08 | 23 | 9.00 | 11 | 11.53 | 9.36 | 12.00 | 6.788 | yes |
-| ex5p | 0.09 | 0.01 | 19 | 0.44 | 10 | 4.89 | 0.47 | 5.23 | 4.552 | yes |
-| frisc | 0.42 | 0.04 | 25 | 0.99 | 10 | 2.37 | 1.20 | 2.86 | 9.478 | yes |
-| misex3 | 0.12 | 0.01 | 20 | 0.44 | 9 | 3.65 | 0.46 | 3.83 | 4.707 | yes |
-| pdc | 0.62 | 0.06 | 22 | 5.45 | 10 | 8.78 | 6.47 | 10.44 | 6.983 | yes |
-| s298 | 0.09 | 0.01 | 21 | 0.28 | 10 | 3.14 | 0.30 | 3.39 | 7.344 | yes |
-| s38417 | 0.48 | 0.05 | 25 | 0.82 | 8 | 1.72 | 0.85 | 1.77 | 5.509 | yes |
-| s38584.1 | 0.43 | 0.04 | 22 | 0.53 | 11 | 1.22 | 0.54 | 1.26 | 5.028 | yes |
-| seq | 0.20 | 0.02 | 30 | 0.65 | 9 | 3.26 | 0.70 | 3.48 | 4.790 | yes |
-| spla | 0.49 | 0.04 | 24 | 3.29 | 10 | 6.71 | 4.22 | 8.61 | 6.479 | yes |
-| tseng | 0.07 | 0.01 | 17 | 0.11 | 9 | 1.51 | 0.14 | 2.03 | 5.684 | yes |
-| Geomean |  |  |  |  |  | 3.23 |  | 3.58 |  |  |
+| Circuit | VPR, s | VPR's lookahead, s | VPR iterations | guide before, s | before / VPR | guide, 1 thread, s | guide's lookahead, s | guide iterations | / VPR | guide, threads, s | / VPR | Its delay, ns | VPR accepts it |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| alu4 | 0.12 | 0.01 | 24 | 0.51 | 3.02 | 0.05 | 0.02 | 10 | 0.42 | 0.08 | 0.70 | 4.807 | yes |
+| apex2 | 0.20 | 0.02 | 24 | 0.83 | 4.88 | 0.06 | 0.03 | 10 | 0.32 | 0.10 | 0.52 | 5.777 | yes |
+| apex4 | 0.18 | 0.02 | 27 | 0.70 | 3.88 | 0.05 | 0.02 | 9 | 0.28 | 0.08 | 0.43 | 5.280 | yes |
+| bigkey | 0.10 | 0.02 | 16 | 0.30 | 2.70 | 0.03 | 0.03 | 10 | 0.32 | 0.05 | 0.54 | 3.265 | yes |
+| clma | 0.70 | 0.07 | 23 | 4.94 | 5.95 | 0.20 | 0.10 | 11 | 0.29 | 0.32 | 0.46 | 8.662 | yes |
+| des | 0.07 | 0.02 | 14 | 0.17 | 2.41 | 0.02 | 0.04 | 7 | 0.26 | 0.04 | 0.60 | 4.460 | yes |
+| diffeq | 0.09 | 0.01 | 22 | 0.13 | 1.49 | 0.01 | 0.02 | 7 | 0.17 | 0.03 | 0.38 | 6.200 | yes |
+| dsip | 0.11 | 0.02 | 18 | 0.28 | 2.15 | 0.03 | 0.03 | 8 | 0.26 | 0.05 | 0.44 | 3.170 | yes |
+| elliptic | 0.28 | 0.03 | 24 | 0.88 | 2.25 | 0.07 | 0.05 | 8 | 0.25 | 0.11 | 0.41 | 7.548 | yes |
+| ex1010 | 0.59 | 0.06 | 23 | 9.00 | 11.53 | 0.26 | 0.09 | 10 | 0.44 | 0.34 | 0.57 | 6.820 | yes |
+| ex5p | 0.10 | 0.01 | 19 | 0.44 | 4.89 | 0.04 | 0.02 | 11 | 0.40 | 0.07 | 0.67 | 4.549 | yes |
+| frisc | 0.32 | 0.04 | 25 | 0.99 | 2.37 | 0.08 | 0.06 | 10 | 0.25 | 0.13 | 0.41 | 9.597 | yes |
+| misex3 | 0.11 | 0.01 | 20 | 0.44 | 3.65 | 0.04 | 0.02 | 9 | 0.35 | 0.07 | 0.67 | 4.782 | yes |
+| pdc | 0.65 | 0.07 | 22 | 5.45 | 8.78 | 0.22 | 0.09 | 9 | 0.34 | 0.38 | 0.58 | 7.052 | yes |
+| s298 | 0.10 | 0.01 | 21 | 0.28 | 3.14 | 0.03 | 0.02 | 8 | 0.27 | 0.04 | 0.42 | 7.491 | yes |
+| s38417 | 0.40 | 0.04 | 25 | 0.82 | 1.72 | 0.06 | 0.06 | 8 | 0.14 | 0.12 | 0.29 | 5.512 | yes |
+| s38584.1 | 0.43 | 0.04 | 22 | 0.53 | 1.22 | 0.07 | 0.06 | 10 | 0.16 | 0.13 | 0.31 | 4.879 | yes |
+| seq | 0.18 | 0.02 | 30 | 0.65 | 3.26 | 0.06 | 0.03 | 10 | 0.34 | 0.10 | 0.57 | 4.862 | yes |
+| spla | 0.47 | 0.05 | 24 | 3.29 | 6.71 | 0.16 | 0.06 | 9 | 0.34 | 0.27 | 0.57 | 6.485 | yes |
+| tseng | 0.07 | 0.01 | 17 | 0.11 | 1.51 | 0.02 | 0.01 | 8 | 0.26 | 0.04 | 0.51 | 5.688 | yes |
+| Geomean |  |  |  |  | 3.23 |  |  |  | 0.28 |  | 0.49 |  |  |
 
 What this shows:
 
-- **Channel width: `guide` needs 2.6% fewer tracks**, as a geometric mean. It needs fewer on
-  11 circuits, by up to 10% (spla, 54 against 60), the same on 8, and more on one, dsip, 36
-  against 34.
-- **Delay: 1.6% shorter critical paths.** 19 of 20 are as fast or faster, alu4 by 10%, and
-  apex4 is 1% slower. Threaded, with batches of 32, the critical paths are 1.3% shorter than
-  VPR's.
-- **Wirelength: 2.9% less wire**, with 16 circuits better, by up to 8.9%, and 4 worse: ex1010
-  by 4.2%, pdc by 2.6%, clma by 1.0% and misex3 by 0.4%, the larger circuits among them.
-- **Runtime: `guide` is 3.2 times slower than VPR**, from 1.2 times on s38584.1 to 11.5 times
-  on ex1010, and the larger the circuit, the worse. VPR pushes about 40 entries on its heap
-  per connection on ex1010, and `guide` takes about 290 expansions. VPR's lookahead is a table
-  of real costs from a search of the whole device, weighted by 1.2, which makes the search go
-  nearly straight to its target but gives up exactness. `guide`'s bound is admissible, from a
-  cost per tile that only wires reach, so it searches far more widely. Nets of high fanout make
-  it worse: each sink's search starts from the whole tree, and ex1010 has a net of 689 sinks.
-  Most of the gap is here, and an estimate closer to the real cost is the obvious next step.
-  VPR also takes about twice as many iterations, at 14 to 30 against 8 to 12.
-- **Threads do not help here**: 16 threads with batches of 32 took 1.1 times as long as one
-  thread with batches of 1. Nets on these circuits are small and searches short, and batches
-  bring more iterations' worth of rerouting.
+- **Runtime: `guide` takes 0.28 times VPR's time, where it took 3.2 times**, from 0.14 times
+  on s38417 to 0.44 on ex1010, which took 11.5 times before. That is 0.08 times its own time
+  before, and 0.025 times the expansions: ex1010 went from 26.7 million to 225 000. With
+  each tool's lookahead counted in, `guide` takes 0.41 times VPR's time. Its lookahead is the
+  slower of the two, at about 1.5 times VPR's, from 0.01 s to 0.10 s.
+- **Channel width: `guide` needs 4.4% fewer tracks than VPR**, where it needed 2.6% fewer.
+  It needs fewer on 13 circuits, by up to 11% (pdc, 64 against 72), and as many on the other
+  7, so dsip no longer needs more. Against `guide` before, it needs fewer on 9 circuits and
+  more on one, spla, 56 against 54.
+- **Delay: 1.3% shorter critical paths than VPR**, where they were 1.6% shorter, so 0.3%
+  longer than before. 18 of 20 are as fast as VPR's or faster, diffeq is 1.7% slower and s298
+  3.2%, and apex4, which was 1% slower, is 2% faster. Single circuits move by up to 4% either
+  way between configurations, which is more than the means do.
+- **Wirelength: 5.5% less wire than VPR**, where it was 2.9% less. Every circuit uses less
+  than VPR's now, by up to 11.5% (s298), including the four that used more before.
+- **Threads still do not help**: 16 threads with batches of 32 took 1.7 times as long as one
+  thread with batches of 1. Searches are shorter than ever, and batches bring more
+  iterations' worth of rerouting.
 - **`guide`'s own timing analysis agrees with VPR's** to within 0.1% to 1.3%, always slightly
   optimistic: its delays are fixed per step, where VPR's Elmore delays depend on the tree.
+
+### Closing the runtime gap
+
+Before, VPR pushed about 40 entries on its heap per connection on ex1010, and `guide` took
+about 290 expansions. Three things closed the gap, and the table below has each of them on
+its own and together, over all 20 circuits as above.
+
+1. **A map lookahead**, `RrGraph::use_map_lookahead`, after VPR's `map` lookahead. For each
+   type of wire, by axis, direction and segment, a search of the whole graph starts from every
+   track of that type driven at a place on the device, once for the least sum of base costs
+   to each `SINK` and once for the least delay, and the least over the places goes in a table
+   by type and offset. Two places per axis, near opposite corners, are the fewest that see
+   every offset. The graph's estimator takes the larger of the table and the location bound
+   it had before. A minimum over places is not a minimum over all wires, so this is not
+   exactly a lower bound: on small irregular islands in the tests, about one pair in ten of a
+   wire and a `SINK` comes out above its distance. The lookahead also knows that an `IPIN`
+   reaches only its own `SINK` and that a `SINK` reaches nothing, which is exact, and comes
+   out as `Cost::MAX`. Searches hold those nodes back until nothing else is left, as [the
+   search's documentation](../src/search.rs) explains, which never changes a result. On
+   ex1010 that halved the pushes and took about a fifth of the time off.
+2. **Incremental rerouting**, `EngineOptions::incremental_reroute`, as VPR does it. Before, a
+   net that held one overused node was ripped up and routed whole, so ex1010's net of 689
+   sinks took 689 searches each time, and 87% of ex1010's searches came after the first
+   iteration. Now a net keeps its tree up to each overused node, and only the sinks cut off
+   are routed again. It also gave less wire and narrower channels, which routing whole nets
+   again does not seem to have been buying.
+3. **A weight of 1.1 on the bound**, `EngineOptions::bound_weight`, as VPR's `--astar_fac`,
+   whose default is 1.2.
+
+`RrGraph::engine_options` turns on the second, and the third once the first is in use. The
+engine's defaults are unchanged, and so is every result on grids and other graphs.
+
+| Run | Min W / VPR | Delay / VPR | Wire / VPR | Time / VPR | Expansions / before | Time / before |
+| --- | --- | --- | --- | --- | --- | --- |
+| Before | 0.974 | 0.984 | 0.971 | 3.23 | 1 | 1 |
+| Map lookahead | 0.974 | 0.988 | 0.971 | 0.52 | 0.057 | 0.16 |
+| Map, weight 1.1 | 0.971 | 0.988 | 0.972 | 0.47 | 0.047 | 0.14 |
+| Map, weight 1.2 | 0.983 | 0.988 | 0.966 | 0.47 | 0.045 | 0.14 |
+| Map, weight 1.4 | 0.977 | 0.991 | 0.972 | 0.47 | 0.044 | 0.15 |
+| Location bound, incremental | 0.952 | 0.989 | 0.943 | 1.91 | 0.539 | 0.61 |
+| Map, incremental | 0.961 | 0.987 | 0.946 | 0.29 | 0.030 | 0.12 |
+| **Map, incremental, weight 1.1** | **0.956** | **0.987** | **0.945** | **0.28** | **0.025** | **0.08** |
+| Map, incremental, weight 1.2 | 0.959 | 0.991 | 0.943 | 0.27 | 0.024 | 0.12 |
+
+The row in bold is the run of the tables above. The others ran three or four at a time, so
+their times are less reliable than their expansions, which do not depend on the machine.
+
+What did not help, or not enough to keep:
+
+- **Weights above 1.1.** 1.2, VPR's default, took about 5% fewer expansions than 1.1 for
+  critical paths 0.4% longer. Without incremental rerouting, 1.2 and 1.4 also needed wider
+  channels than 1.1, and 1.4 gave longer critical paths.
+- **More places to search from.** Three per axis rather than two, on ex1010, clma and tseng,
+  gave nearly the same expansions (ex1010 876 000 against 900 000, clma about the same) for
+  twice the time to build, and one, the middle of the device, gave 1.1 to 3.4 times the
+  expansions, as offsets beyond half the device have no entry there.
+- **Rerouting critical connections whole.** VPR also rips up connections that are critical,
+  with `--incremental_reroute_delay_ripup`. Cutting the branches to terminals of criticality
+  0.9 or more from what is kept made critical paths 0.1% shorter, and 0.7 or more 0.2%, for
+  3% and 36% more expansions: less than circuits move on their own, so it was left out.
+- **Not queueing what cannot reach the target, without changing anything else.** Leaving
+  out the pushes of the pins of other blocks on ex1010, 13.7 million of them down to 8.2,
+  saved nothing measurable: the heap was never the cost. Leaving out the tree's own pins and
+  sinks as sources of each search, two thirds of them, saved about a quarter of the time,
+  which is the part that holding them back in the search kept.
+- **Searching from the part of the tree near a sink only**, as VPR does for nets of high
+  fanout, was not built. Once nets are rerouted incrementally, starting each search from the
+  whole tree is about a fifth of ex1010's time, 50 ms of its 0.25 s, and most of the rest is
+  spent expanding nodes, at under a microsecond each. The engine knows nothing of where a node
+  is, so it would need a way for a space to say which nodes are near, which is a change to
+  `RoutingSpace`.
+- **Profiles.** perf hangs at the end of every recording on this machine and valgrind cannot
+  run the binaries, so the constant factors were found by timing parts of the router. One
+  thing showed up: `f64::floor` in the delay bound is a call into libm on x86-64 without
+  SSE4.1, and rounding down by `as` gives the same values.
 
 ### What it took
 
@@ -755,7 +834,12 @@ it only builds with some standard headers forced in.
 - One architecture. VPR's defaults were tuned for architectures like it, and so, now, is
   `engine_options`.
 - The machine was shared, and times of a few tenths of a second move by tens of percent between
-  runs. The ratios of the larger circuits are steadier.
+  runs. The ratios of the larger circuits are steadier. The times are now so short that the
+  lookahead, which VPR leaves out of its routing time and so do these tables, takes as long
+  as `guide`'s routing or longer on the smallest circuits.
+- The map lookahead was only measured on this one architecture, with one type of wire. A
+  device with several wire types or very irregular edges may see more of its entries above
+  the true cost.
 
 ## PCB clearance checks against KiCad
 

@@ -12,7 +12,7 @@ Inclusion means "worth evaluating"; benchmarks decide what stays.
 | Dijkstra, A\* | All domains | The default workhorse. Tight lower bounds matter more than anything else here. |
 | Line probe (Mikami-Tabuchi, Hightower) | Sparse PCB layouts | Finds few-bend routes quickly, without guaranteeing them optimal. |
 | Theta\* | Any-angle routing | Path shortening during search. A later option for PCB. |
-| Lookahead tables | FPGA | Precomputed per-wire-type costs give A\* a much tighter bound on real fabrics. Widely used in VPR and nextpnr-style routers. |
+| Lookahead tables | FPGA | Precomputed per-wire-type costs give A\* a much tighter bound on real fabrics. Widely used in VPR and nextpnr-style routers. Built as `fpga::MapLookahead`: 40 times fewer expansions on VTR's MCNC circuits, with incremental rerouting (see `docs/benchmarks.md`). |
 
 ## Multi-terminal nets
 

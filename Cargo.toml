@@ -47,3 +47,7 @@ harness = false
 name = "geom"
 harness = false
 required-features = ["pcb"]
+
+[[example]]
+name = "vtr_route"
+required-features = ["fpga"]

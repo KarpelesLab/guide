@@ -30,7 +30,9 @@
 //! The first iteration routes every net. After that, only nets that hold an overused
 //! resource at the moment their turn comes up are routed again, unless
 //! [`reroute_all`](EngineOptions::reroute_all) is set. A net whose conflict was settled by
-//! an earlier net that same iteration is left alone.
+//! an earlier net that same iteration is left alone. A net routed again is routed whole,
+//! unless [`incremental_reroute`](EngineOptions::incremental_reroute) has it keep what of its
+//! tree is not overused.
 //!
 //! Prices only ever raise a step's cost, so a space's lower bound stays admissible, and they
 //! take no step away, so whether a path exists never depends on them.
@@ -220,7 +222,12 @@
 //! ever raise a cost, so the prices add up to at least the cost bound, and the delays to at
 //! least the delay bound. Both weights are at least 0, so the blend of the sums is at least the
 //! blend of the bounds, and access costs at the end only add to it. The result is shrunk by a
-//! millionth of a millionth, as each blended step is rounded on its own.
+//! millionth of a millionth, as each blended step is rounded on its own. A cost bound of
+//! [`Cost::MAX`] stays that, whatever the criticality, as it says that there is no way there:
+//! a [search](crate::search#a-bound-of-the-maximum) then never queues the node if it can help
+//! it.
+//!
+//! [`bound_weight`](EngineOptions::bound_weight) multiplies whichever bound a search uses.
 //!
 //! The space's cost bound on its own, unscaled, would not do. At a criticality of 0.99 a step
 //! that costs 1 and takes no time counts as 0.01, and a bound of 1 for it would be a hundred
@@ -479,7 +486,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::cost::Cost;
 use crate::id::NetId;
-use crate::net::{FixedRoute, Net, Route, RouteSet, RouteStats, Terminal, UnroutedReason};
+use crate::net::{Edge, FixedRoute, Net, Route, RouteSet, RouteStats, Terminal, UnroutedReason};
 use crate::rng::Rng;
 use crate::search::{Search, SearchLimits, SearchOutcome, Source, Target};
 use crate::space::{DelaySpace, FastMap, FastSet, NodeSlots, RoutingSpace, Step};
@@ -585,6 +592,29 @@ pub struct EngineOptions<'c> {
     /// The criticality from which a connection counts as critical in those iterations, so that
     /// its net is routed again. The default is 0.9.
     pub timing_reroute_criticality: f64,
+    /// What every search multiplies its lower bound by, as in weighted A\*: see
+    /// [`Search::set_bound_weight`]. The default is 1, the bound as the space gives it, which
+    /// keeps each search's optimality.
+    ///
+    /// Above 1, searches go more directly at their targets for routes that may cost a little
+    /// more. VPR's `--astar_fac` is this, and its default is 1.2.
+    pub bound_weight: f64,
+    /// Whether a net routed again because it holds an overused resource keeps what of its
+    /// route is not overused, and only routes again the terminals that this cuts off, as VPR
+    /// does. The default is false, which routes the whole net again.
+    ///
+    /// The old route is cut at every step onto an overused resource, everything beyond such a
+    /// step goes with it, and so does any branch that no longer leads to a terminal. What is
+    /// left is what the net then grows from, as from a [fixed route](Engine::fix_routes). If
+    /// that finds no way, the whole net is routed again. The iterations that
+    /// [`timing_iterations`](EngineOptions::timing_iterations) adds,
+    /// [`reroute_all`](EngineOptions::reroute_all), nets with a fixed route, and spaces with
+    /// [non-configurable steps](self#non-configurable-steps) all route whole nets as before.
+    ///
+    /// A net of many terminals that one overused resource sends back for routing then costs
+    /// one search or a few, rather than one for each terminal. The part kept was found at
+    /// older prices, so this changes results, which is why it is off by default.
+    pub incremental_reroute: bool,
 }
 
 impl Default for EngineOptions<'_> {
@@ -603,6 +633,8 @@ impl Default for EngineOptions<'_> {
             batch_size: 1,
             timing_iterations: 0,
             timing_reroute_criticality: 0.9,
+            bound_weight: 1.0,
+            incremental_reroute: false,
         }
     }
 }
@@ -1197,6 +1229,15 @@ impl<S: RoutingSpace> ResourceTable<S> {
         state.occupancy.saturating_sub(allowed)
     }
 
+    /// Returns whether `resource` is held by more nets than it can take, not counting what
+    /// fixed routes hold beyond its capacity.
+    #[inline]
+    fn is_overused(&self, resource: S::Resource) -> bool {
+        self.slots
+            .get(resource)
+            .is_some_and(|slot| slot < self.states.len() && self.avoidable_overuse(slot) > 0)
+    }
+
     /// Records that a fixed route holds each of `slots`, or with `add` false that it no
     /// longer does.
     fn mark_fixed(&mut self, slots: &[usize], add: bool) {
@@ -1563,6 +1604,11 @@ impl<S: RoutingSpace> RoutingSpace for Blended<'_, '_, S> {
     #[inline]
     fn lower_bound(&self, net: NetId, from: S::Node, to: S::Node) -> Cost {
         let cost = self.priced.inner.lower_bound(net, from, to);
+        // A space says this when there is no way there, or none that costs less, and a blend
+        // would turn it into a large cost that the search could no longer tell apart.
+        if cost == Cost::MAX {
+            return Cost::MAX;
+        }
         let delay = (self.delay_bound)(self.priced.inner, net, from, to);
         let blended = self.congestion * cost + self.delay * Cost::from(delay);
         Cost::new(blended.get() * BLENDED_BOUND_SHRINK).unwrap_or(Cost::ZERO)
@@ -1862,6 +1908,10 @@ struct RouteContext<'a, S: RoutingSpace> {
     present: Cost,
     cancel: Option<&'a AtomicBool>,
     timing: Option<RouteTiming<'a, S>>,
+    bound_weight: f64,
+    /// Whether nets routed again keep what of their route is not overused, as
+    /// [`EngineOptions::incremental_reroute`] says.
+    incremental: bool,
 }
 
 /// Returns the most critical of the terminals still to connect, if any has a criticality
@@ -1894,6 +1944,7 @@ fn route_net<S: RoutingSpace>(
     let space = context.space;
     let timing = context.timing;
     let mut spent = 0u64;
+    worker.search.set_bound_weight(context.bound_weight);
     let Some(driver) = net.driver() else {
         return Attempt::NoPath;
     };
@@ -2095,15 +2146,42 @@ fn route_in_batch<S: RoutingSpace>(
     worker.replacing.extend(state.resources.iter().copied());
     let mut dead_roots = state.dead_roots.clone();
     let criticality = context.route.timing.map_or(&[][..], |t| t.of_net(index));
-    let attempt = route_net(
-        &context.route,
-        &context.nets[index],
-        criticality,
-        context.budget,
-        &mut dead_roots,
-        state.fixed.as_deref(),
-        worker,
-    );
+    let net = &context.nets[index];
+    let kept = if context.route.incremental {
+        let step_delays = context.route.timing.map(|timing| timing.step_delays);
+        kept_part(
+            context.route.space,
+            context.route.table,
+            step_delays,
+            net,
+            state,
+        )
+    } else {
+        None
+    };
+    let mut attempt = Attempt::NoPath;
+    if let Some(kept) = &kept {
+        attempt = route_net(
+            &context.route,
+            net,
+            criticality,
+            context.budget,
+            &mut dead_roots,
+            Some(kept),
+            worker,
+        );
+    }
+    if kept.is_none() || matches!(attempt, Attempt::NoPath) {
+        attempt = route_net(
+            &context.route,
+            net,
+            criticality,
+            context.budget.saturating_sub(worker.expanded),
+            &mut dead_roots,
+            state.fixed.as_deref(),
+            worker,
+        );
+    }
     worker.replacing.clear();
     let (searches, expanded) = (worker.searches, worker.expanded);
     worker.searches = 0;
@@ -2158,6 +2236,78 @@ impl<N, R> NetState<N, R> {
     fn is_fixed(&self) -> bool {
         self.fixed.as_ref().is_some_and(|fixed| fixed.complete)
     }
+}
+
+/// Returns what a net that is to be routed again because of overuse keeps of its route, for
+/// [`EngineOptions::incremental_reroute`]: everything up to the first step onto an overused
+/// resource along each branch, without the branches that then lead to no terminal. `None`
+/// means routing the whole net again, which is for a net with a fixed route or none yet, a
+/// root that is overused itself, or nothing worth keeping.
+fn kept_part<S: RoutingSpace>(
+    space: &S,
+    table: &ResourceTable<S>,
+    step_delays: Option<StepDelays<S>>,
+    net: &Net<S::Node>,
+    state: &NetState<S::Node, S::Resource>,
+) -> Option<FixedPart<S::Node, S::Resource>> {
+    if state.fixed.is_some() {
+        return None;
+    }
+    let route = state.route.as_ref()?;
+    let root = route.root()?;
+    let mut resources = Vec::new();
+    let overused = |resources: &[S::Resource]| {
+        resources
+            .iter()
+            .any(|&resource| table.is_overused(resource))
+    };
+    space.resources(net.id, root, root, &mut resources);
+    if overused(&resources) {
+        return None;
+    }
+
+    // Edges come after the edge into their start, as a route grows, so one pass forwards
+    // finds what is still connected, and one backwards what still leads to a terminal.
+    let edges = route.edges();
+    let mut connected: FastSet<S::Node> = FastSet::default();
+    connected.insert(root);
+    let mut keep = vec![false; edges.len()];
+    for (index, edge) in edges.iter().enumerate() {
+        if !connected.contains(&edge.from) {
+            continue;
+        }
+        resources.clear();
+        space.resources(net.id, edge.from, edge.to, &mut resources);
+        if !overused(&resources) {
+            connected.insert(edge.to);
+            keep[index] = true;
+        }
+    }
+    let mut useful: FastSet<S::Node> = FastSet::default();
+    for terminal in net.terminals.iter().skip(1) {
+        for point in terminal.access_points() {
+            if connected.contains(&point.node) {
+                useful.insert(point.node);
+            }
+        }
+    }
+    for (index, edge) in edges.iter().enumerate().rev() {
+        if keep[index] && useful.contains(&edge.to) {
+            useful.insert(edge.from);
+        } else {
+            keep[index] = false;
+        }
+    }
+    let kept: Vec<Edge<S::Node>> = edges
+        .iter()
+        .zip(&keep)
+        .filter(|&(_, &keep)| keep)
+        .map(|(edge, _)| *edge)
+        .collect();
+    if kept.is_empty() {
+        return None;
+    }
+    Engine::fixed_part(space, step_delays, net, Route::from_edges(root, kept)).ok()
 }
 
 /// A route given by the caller, and what the engine worked out from it once, at the start.
@@ -2686,7 +2836,19 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
         net: &Net<S::Node>,
         route: Route<S::Node>,
     ) -> Result<FixedPart<S::Node, S::Resource>, FixedRouteProblem> {
-        let space = self.space;
+        let step_delays = self.timing.as_ref().map(|timing| timing.step_delays);
+        Self::fixed_part(self.space, step_delays, net, route)
+    }
+
+    /// Works out what a route that a net is to grow from consumes and costs, and which of its
+    /// terminals it reaches: [`Engine::fix_routes`] does this for the caller's routes, and
+    /// [incremental rerouting](EngineOptions::incremental_reroute) for what it keeps of a net.
+    fn fixed_part(
+        space: &S,
+        step_delays: Option<StepDelays<S>>,
+        net: &Net<S::Node>,
+        route: Route<S::Node>,
+    ) -> Result<FixedPart<S::Node, S::Resource>, FixedRouteProblem> {
         let Some(root) = route.root() else {
             return Err(FixedRouteProblem::Empty);
         };
@@ -2706,7 +2868,6 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
             return Err(FixedRouteProblem::NodeNotInSpace);
         }
 
-        let step_delays = self.timing.as_ref().map(|timing| timing.step_delays);
         let mut cost = root_access.unwrap_or(Cost::ZERO);
         let mut resources = Vec::new();
         space.resources(net.id, root, root, &mut resources);
@@ -3073,6 +3234,8 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
                 present: self.present,
                 cancel: self.options.cancel,
                 timing: self.timing.as_ref().map(TimingState::route_timing),
+                bound_weight: self.options.bound_weight,
+                incremental: self.incremental(),
             },
             nets: self.nets,
             states: &self.states,
@@ -3181,6 +3344,15 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
     /// Whether the run goes on after its first legal result, to improve its timing.
     fn improves_timing(&self) -> bool {
         self.timing.is_some() && self.options.timing_iterations > 0
+    }
+
+    /// Whether nets routed again in this iteration keep what of their route is not overused,
+    /// as [`EngineOptions::incremental_reroute`] has it.
+    fn incremental(&self) -> bool {
+        self.options.incremental_reroute
+            && !self.options.reroute_all
+            && !(self.first_legal.is_some() && self.improves_timing())
+            && !self.space.has_non_configurable()
     }
 
     /// Steps until the engine stops, and returns the result.
@@ -3319,6 +3491,19 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
     /// Rips up a net and routes it again, or puts it back if interrupted.
     fn reroute(&mut self, index: usize) -> Result<(), Interrupt> {
         let net = &self.nets[index];
+        // Before the net lets go, so that it counts towards what is overused.
+        let kept = if self.incremental() {
+            let step_delays = self.timing.as_ref().map(|timing| timing.step_delays);
+            kept_part(
+                self.space,
+                &self.table,
+                step_delays,
+                net,
+                &self.states[index],
+            )
+        } else {
+            None
+        };
         let state = &mut self.states[index];
         self.table.release(&state.held);
 
@@ -3328,18 +3513,36 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
             present: self.present,
             cancel: self.options.cancel,
             timing: self.timing.as_ref().map(TimingState::route_timing),
+            bound_weight: self.options.bound_weight,
+            incremental: false,
         };
         let criticality = context.timing.map_or(&[][..], |t| t.of_net(index));
         let budget = self.options.max_expansions;
-        let attempt = route_net(
-            &context,
-            net,
-            criticality,
-            budget.saturating_sub(self.stats.nodes_expanded),
-            &mut state.dead_roots,
-            state.fixed.as_deref(),
-            &mut self.workers[0],
-        );
+        let worker = &mut self.workers[0];
+        let mut attempt = Attempt::NoPath;
+        if let Some(kept) = &kept {
+            attempt = route_net(
+                &context,
+                net,
+                criticality,
+                budget.saturating_sub(self.stats.nodes_expanded),
+                &mut state.dead_roots,
+                Some(kept),
+                worker,
+            );
+        }
+        if kept.is_none() || matches!(attempt, Attempt::NoPath) {
+            let spent = self.stats.nodes_expanded.saturating_add(worker.expanded);
+            attempt = route_net(
+                &context,
+                net,
+                criticality,
+                budget.saturating_sub(spent),
+                &mut state.dead_roots,
+                state.fixed.as_deref(),
+                worker,
+            );
+        }
         let worker = &mut self.workers[0];
         self.stats.searches += worker.searches;
         self.stats.nodes_expanded += worker.expanded;
@@ -3719,6 +3922,13 @@ mod tests {
 
     fn options() -> EngineOptions<'static> {
         EngineOptions::default()
+    }
+
+    fn incremental() -> EngineOptions<'static> {
+        EngineOptions {
+            incremental_reroute: true,
+            ..options()
+        }
     }
 
     /// The nodes of a net's route, as plain numbers, in the route's order.
@@ -5698,6 +5908,56 @@ mod tests {
         assert!(outcome.routes.stats.iterations >= 2);
     }
 
+    #[test]
+    fn incremental_rerouting_keeps_what_is_not_overused() {
+        let fabric = Fabric {
+            size: 16,
+            tracks: 5,
+        };
+        let (space, nets) = (fabric.build(), fabric.nets(80, 2));
+        let whole = route(&space, &nets, options()).unwrap();
+        let kept = route(&space, &nets, incremental()).unwrap();
+        assert_legal(&space, &nets, &kept);
+        assert!(whole.routes.stats.iterations >= 2);
+        // The first iteration is the same, and every later one has fewer terminals to connect.
+        assert!(kept.routes.stats.searches < whole.routes.stats.searches);
+
+        // A net of many terminals, which crosses a one-track channel that another net needs,
+        // only has to find its way again to the terminals beyond it.
+        let mut builder = GraphBuilder::new(9);
+        // 0 drives 1, 2 and 3 directly, and 4 through the shared node 5, or the longer way
+        // through 6 and 7. Net 1 goes from 8 to 4's neighbour 5 and has no other way.
+        for (from, to, cost) in [(0, 1, 1), (0, 2, 1), (0, 3, 1), (0, 5, 1), (5, 4, 1)] {
+            builder
+                .add_edge(NodeId(from), NodeId(to), Cost::from(cost))
+                .unwrap();
+        }
+        for (from, to, cost) in [(0, 6, 2), (6, 7, 2), (7, 4, 2), (8, 5, 1)] {
+            builder
+                .add_edge(NodeId(from), NodeId(to), Cost::from(cost))
+                .unwrap();
+        }
+        let graph = builder.build();
+        let nets = [net(0, &[0, 1, 2, 3, 4]), net(1, &[8, 5])];
+        let whole = route(&graph, &nets, options()).unwrap();
+        let kept = route(&graph, &nets, incremental()).unwrap();
+        assert!(whole.is_success() && kept.is_success());
+        assert_legal(&graph, &nets, &kept);
+        assert_eq!(nodes_of(&kept, 0), [0, 1, 2, 3, 6, 7, 4]);
+        // After the first iteration, net 0 searched for terminal 4 alone, not all four. Net 1
+        // has one terminal to connect either way.
+        let searches = |options| {
+            let mut engine = Engine::new(&graph, &nets, options).unwrap();
+            while engine.step().is_some() {}
+            let reports = engine.reports().iter();
+            reports.map(|report| report.searches).collect::<Vec<_>>()
+        };
+        // Both nets go again in the second iteration, and net 0 alone in the third.
+        assert_eq!(searches(options()), [5, 5, 4]);
+        assert_eq!(searches(incremental()), [5, 2, 1]);
+        assert_eq!(kept.total_cost, whole.total_cost);
+    }
+
     /// Far too few tracks, and the result has to say that it did not work.
     #[test]
     fn fabric_below_minimum_channel_width_reports_failure() {
@@ -5786,9 +6046,17 @@ mod tests {
         space: &S,
         nets: &[Net<S::Node>],
     ) -> Result<(), TestCaseError> {
+        check_problem_with(space, nets, options())
+    }
+
+    fn check_problem_with<S: RoutingSpace>(
+        space: &S,
+        nets: &[Net<S::Node>],
+        options: EngineOptions<'_>,
+    ) -> Result<(), TestCaseError> {
         let limited = EngineOptions {
             max_iterations: 12,
-            ..options()
+            ..options
         };
         let outcome = route(space, nets, limited).unwrap();
 
@@ -5833,6 +6101,16 @@ mod tests {
         #[test]
         fn graph_problems_get_honest_results((graph, nets) in any_graph_problem()) {
             check_problem(&graph, &nets)?;
+        }
+
+        #[test]
+        fn incremental_grid_problems_get_honest_results((grid, nets) in any_grid_problem()) {
+            check_problem_with(&grid, &nets, incremental())?;
+        }
+
+        #[test]
+        fn incremental_graph_problems_get_honest_results((graph, nets) in any_graph_problem()) {
+            check_problem_with(&graph, &nets, incremental())?;
         }
 
         #[test]

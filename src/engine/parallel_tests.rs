@@ -467,6 +467,28 @@ fn fabrics_are_the_same_on_any_number_of_threads() {
 }
 
 #[test]
+fn incremental_rerouting_is_the_same_on_any_number_of_threads() {
+    let fabric = small_fabric(12, 1);
+    let (graph, nets) = (fabric_graph(fabric), fabric.nets(50, 6, 3));
+    let incremental = EngineOptions {
+        incremental_reroute: true,
+        ..EngineOptions::default()
+    };
+    // A batch of one is still the sequential router.
+    let sequential = run_stepped(&graph, &nets, incremental);
+    assert!(sequential.1.len() > 1, "this should take some negotiation");
+    assert_eq!(run_through_batches(&graph, &nets, incremental), sequential);
+    for batch in [2, 16] {
+        let options = EngineOptions {
+            batch_size: batch,
+            ..incremental
+        };
+        let (outcome, _) = assert_same_for_all_threads(&graph, &nets, options);
+        assert!(outcome.is_success(), "at a batch size of {batch}");
+    }
+}
+
+#[test]
 fn graphs_with_dead_roots_and_equivalent_access_points_are_the_same() {
     // Directed, so that some roots reach the nearest terminal and not the next, and nets have
     // several ways in that compete. The access costs are odd so that their sums are telling.

@@ -14,9 +14,9 @@ use std::collections::{BinaryHeap, HashMap};
 
 use guide::engine::{EngineOptions, Outcome, route_timed, route_timed_parallel};
 use guide::fpga::{
-    Design, DesignTiming, LogicDelays, NetOptions, NodeKind, RouteHeader, RrGraph,
-    SequentialDelays, TimingOptions, build_timing, read_architecture, read_netlist, read_placement,
-    read_rr_graph, resolve_nets, write_route,
+    Design, DesignTiming, LogicDelays, LookaheadOptions, NetOptions, NodeKind, RouteHeader,
+    RrGraph, SequentialDelays, TimingOptions, build_timing, read_architecture, read_netlist,
+    read_placement, read_rr_graph, resolve_nets, write_route,
 };
 use guide::id::NodeId;
 use guide::net::Net;
@@ -438,6 +438,56 @@ fn mult_4x4_routes_timing_driven_from_vtr_files() {
     .unwrap();
     assert_eq!(threaded.routes, outcome.routes);
     assert_eq!(threaded.timing, outcome.timing);
+}
+
+#[test]
+fn mult_4x4_routes_with_the_map_lookahead_and_the_graphs_options() {
+    let flow = flow(8);
+    let constraints = Constraints::single_clock(0).unwrap();
+    let driven = || flow.timing.timing_driven(&flow.design, constraints.clone());
+    let nets = flow.design.nets();
+    let plain = route_timed(
+        &flow.device.timed_graph(),
+        nets,
+        flow.device.engine_options(),
+        driven(),
+    )
+    .unwrap();
+    assert!(plain.is_success());
+
+    let mut device = flow.device.clone();
+    device.use_map_lookahead(&LookaheadOptions::default());
+    let timed = device.timed_graph();
+    let options = device.engine_options();
+    let outcome = route_timed(&timed, nets, options, driven()).unwrap();
+    assert!(outcome.is_success(), "{:?}", outcome.stop);
+    let report = check(&timed, nets, &outcome.routes);
+    assert!(report.is_complete(), "{:?}", report.faults());
+    assert!(report.faults().is_empty());
+    assert!(
+        outcome.routes.stats.nodes_expanded < plain.routes.stats.nodes_expanded,
+        "{} against {}",
+        outcome.routes.stats.nodes_expanded,
+        plain.routes.stats.nodes_expanded
+    );
+    // The engine's delays are still the device's, step by step.
+    let delays: Vec<u32> = outcome
+        .timing
+        .as_ref()
+        .unwrap()
+        .connection_delays
+        .iter()
+        .map(|d| d.unwrap())
+        .collect();
+    assert_eq!(delays, tree_delays(&device, &outcome, &flow));
+
+    // The same on any number of threads, in batches too.
+    let mut batched = options;
+    batched.batch_size = 4;
+    let one = route_timed(&timed, nets, batched, driven()).unwrap();
+    let four = route_timed_parallel(&timed, nets, batched, driven(), 4).unwrap();
+    assert_eq!(one.routes, four.routes);
+    assert_eq!(one.timing, four.timing);
 }
 
 /// The smallest delay from any access point of `from` to any of `to`, ignoring every other

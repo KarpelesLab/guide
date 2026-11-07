@@ -16,6 +16,7 @@ use std::io::BufRead;
 use std::sync::Arc;
 
 use super::ImportError;
+use super::lookahead::{LookaheadOptions, Lookup, MapLookahead};
 use super::xml::{Event, Tag, XmlReader};
 use crate::cost::Cost;
 use crate::engine::EngineOptions;
@@ -389,30 +390,30 @@ pub struct RrStats {
 /// One node, in 20 bytes: a graph can have hundreds of millions of these.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct NodeInfo {
-    xlow: u16,
-    ylow: u16,
-    xhigh: u16,
-    yhigh: u16,
+    pub(super) xlow: u16,
+    pub(super) ylow: u16,
+    pub(super) xhigh: u16,
+    pub(super) yhigh: u16,
     /// The first `ptc` of the node, as VPR uses when it writes a route.
     ptc: u32,
     /// An index in the table of distinct timings, or `u32::MAX` for a node without any.
     rc: u32,
-    segment: u16,
-    kind: NodeKind,
+    pub(super) segment: u16,
+    pub(super) kind: NodeKind,
     /// A [`ChannelDirection`] in the low 2 bits, where 0 is none, and sides from bit 2 up.
-    packed: u8,
+    pub(super) packed: u8,
 }
 
 const SIDE_LEFT: u8 = 1 << 2;
 const SIDE_RIGHT: u8 = 1 << 3;
 const SIDE_TOP: u8 = 1 << 4;
 const SIDE_BOTTOM: u8 = 1 << 5;
-const DIRECTION_MASK: u8 = 0b11;
+pub(super) const DIRECTION_MASK: u8 = 0b11;
 
 impl NodeInfo {
     /// Returns the Manhattan distance between two boxes of tiles.
     #[inline]
-    fn gap(&self, other: &NodeInfo) -> u32 {
+    pub(super) fn gap(&self, other: &NodeInfo) -> u32 {
         let gap = |low_a: u16, high_a: u16, low_b: u16, high_b: u16| {
             u32::from(low_a.saturating_sub(high_b)).max(u32::from(low_b.saturating_sub(high_a)))
         };
@@ -470,11 +471,15 @@ impl NodeInfo {
 /// The result is also shrunk by a factor of a billionth, since a search sums its costs one
 /// step at a time and a distance computed in one go could otherwise round above that sum.
 /// That is enough for paths of millions of steps.
+///
+/// [`RrGraph::use_map_lookahead`] adds tables of real costs to this, which it then prefers
+/// where they have an answer: see [`MapLookahead`].
 #[derive(Clone)]
 pub struct LocationBound {
     nodes: Arc<[NodeInfo]>,
     tail_reach: Arc<[u16]>,
     cost_per_tile: f64,
+    map: Option<Arc<MapLookahead>>,
 }
 
 impl LocationBound {
@@ -501,7 +506,8 @@ impl fmt::Debug for LocationBound {
 
 impl LowerBound for LocationBound {
     #[inline]
-    fn estimate(&self, from: NodeId, to: NodeId) -> Cost {
+    fn estimate(&self, from_id: NodeId, to_id: NodeId) -> Cost {
+        let (from, to) = (from_id, to_id);
         // The graph only calls this with its own nodes, so these can't miss.
         let (Some(from), Some(target)) = (self.nodes.get(from.index()), self.nodes.get(to.index()))
         else {
@@ -510,7 +516,18 @@ impl LowerBound for LocationBound {
         let distance = from
             .gap(target)
             .saturating_sub(u32::from(self.tail_reach(to)));
-        Cost::new(f64::from(distance) * self.cost_per_tile * (1.0 - 1e-9)).unwrap_or(Cost::ZERO)
+        let Some(map) = &self.map else {
+            return Cost::new(f64::from(distance) * self.cost_per_tile * (1.0 - 1e-9))
+                .unwrap_or(Cost::ZERO);
+        };
+        let location = f64::from(distance) * self.cost_per_tile;
+        match map.lookup(from_id, to_id, from, target) {
+            Lookup::Unreachable => Cost::MAX,
+            Lookup::Table { cost, .. } => {
+                Cost::new(location.max(cost) * (1.0 - 1e-9)).unwrap_or(Cost::ZERO)
+            }
+            Lookup::Unknown => Cost::new(location * (1.0 - 1e-9)).unwrap_or(Cost::ZERO),
+        }
     }
 }
 
@@ -544,7 +561,8 @@ impl fmt::Debug for RrDelayBound {
 
 impl DelayBound for RrDelayBound {
     #[inline]
-    fn estimate(&self, from: NodeId, to: NodeId) -> u32 {
+    fn estimate(&self, from_id: NodeId, to_id: NodeId) -> u32 {
+        let (from, to) = (from_id, to_id);
         let nodes = &self.location.nodes;
         let (Some(from), Some(target)) = (nodes.get(from.index()), nodes.get(to.index())) else {
             return 0;
@@ -552,10 +570,21 @@ impl DelayBound for RrDelayBound {
         let distance = from
             .gap(target)
             .saturating_sub(u32::from(self.location.tail_reach(to)));
-        // Delays are whole picoseconds, so rounding down keeps the bound under their sum, and
-        // the margin keeps a product that should be whole from rounding up past it.
-        let estimate = (f64::from(distance) * self.picoseconds_per_tile * (1.0 - 1e-9)).floor();
-        estimate as u32
+        let Some(map) = &self.location.map else {
+            // Delays are whole picoseconds, so rounding down keeps the bound under their sum,
+            // and the margin keeps a product that should be whole from rounding up past it.
+            // `as` rounds towards zero, which is down for a value that is not negative, and
+            // saturates. `floor` would be a call into the C library on most targets.
+            return (f64::from(distance) * self.picoseconds_per_tile * (1.0 - 1e-9)) as u32;
+        };
+        let location = f64::from(distance) * self.picoseconds_per_tile;
+        let delay = match map.lookup(from_id, to_id, from, target) {
+            Lookup::Unreachable => return u32::MAX,
+            Lookup::Table { delay, .. } => location.max(f64::from(delay)),
+            Lookup::Unknown => location,
+        };
+        // Rounded down and saturated by `as`, as above.
+        (delay * (1.0 - 1e-9)) as u32
     }
 }
 
@@ -782,7 +811,10 @@ impl RrGraph {
 
     /// Returns options for routing on this graph: the engine's defaults, but for a
     /// [`history_factor`](EngineOptions::history_factor) of one tile of wire, the
-    /// [`delay_normalization`](RrGraph::delay_normalization).
+    /// [`delay_normalization`](RrGraph::delay_normalization),
+    /// [`incremental_reroute`](EngineOptions::incremental_reroute) on, and, once
+    /// [`use_map_lookahead`](RrGraph::use_map_lookahead) has been called, a
+    /// [`bound_weight`](EngineOptions::bound_weight) of 1.1.
     ///
     /// The factor is in the units of the space's costs, and the default of 1 suits steps that
     /// cost about 1. This graph's costs are in seconds, as VPR's are, with a tile of wire at
@@ -796,10 +828,21 @@ impl RrGraph {
     /// overuse, which is the same as adding its base cost each time. A tile, a quarter of the
     /// base cost of the length-4 wires in those circuits, did slightly better there than a
     /// whole wire.
+    ///
+    /// On the same circuits, with the map lookahead, keeping what is not overused of a net
+    /// routed again took 0.53 times the expansions of routing it whole, and 0.78 times the
+    /// time, with channels 1.4% narrower, 2.6% less wire and the same critical paths. A weight
+    /// of 1.1 on the bound then took 17% fewer expansions and 9% less time again, with
+    /// channels 0.5% narrower and the same delay and wire. A weight of 1.2 took 5% fewer
+    /// expansions than that, for critical paths 0.4% longer.
     pub fn engine_options(&self) -> EngineOptions<'static> {
         let mut options = EngineOptions::default();
         if let Some(factor) = Cost::new(self.delay_normalization) {
             options.history_factor = factor;
+        }
+        options.incremental_reroute = true;
+        if self.map_lookahead().is_some() {
+            options.bound_weight = 1.1;
         }
         options
     }
@@ -935,6 +978,47 @@ impl RrGraph {
         }
     }
 
+    /// Returns where a node's edges are in [`out_switches`](RrGraph::out_switches) order, as a
+    /// range over all of the graph's edges.
+    pub(crate) fn edge_range(&self, node: NodeId) -> core::ops::Range<usize> {
+        let start = self.edge_offsets.get(node.index()).copied().unwrap_or(0) as usize;
+        let end = self
+            .edge_offsets
+            .get(node.index() + 1)
+            .copied()
+            .unwrap_or(0) as usize;
+        start..end.max(start)
+    }
+
+    /// Replaces the estimator with one that also looks up tables of real costs and delays,
+    /// a [`MapLookahead`] built from searches of this graph, as VPR's default `map`
+    /// lookahead does.
+    ///
+    /// **The result is not exactly admissible**, as [`MapLookahead`] explains, so searches can
+    /// miss the cheapest path, by a little. In exchange they expand far fewer nodes. The
+    /// estimator of [`graph`](RrGraph::graph), [`bound`](RrGraph::bound) and the delay bound
+    /// of [`timed_graph`](RrGraph::timed_graph) all change, and nothing else does.
+    ///
+    /// Building takes two searches of the whole graph for each type of wire and each place
+    /// searched from, which [`LookaheadOptions`] has, and 4 bytes per node, 1 more per node and
+    /// 12 per type of wire and offset across the device. On VTR's MCNC circuits, `docs/
+    /// benchmarks.md` has what it did.
+    pub fn use_map_lookahead(&mut self, options: &LookaheadOptions) {
+        let map = MapLookahead::build(self, &self.nodes, options);
+        self.bound.map = Some(Arc::new(map));
+        // A placeholder, for the moment it takes to move the graph to its new estimator.
+        let empty = GraphBuilder::new(0)
+            .build()
+            .with_lower_bound(self.bound.clone());
+        let graph = core::mem::replace(&mut self.graph, empty);
+        self.graph = graph.with_lower_bound(self.bound.clone());
+    }
+
+    /// Returns the tables of [`use_map_lookahead`](RrGraph::use_map_lookahead), if it was used.
+    pub fn map_lookahead(&self) -> Option<&MapLookahead> {
+        self.bound.map.as_deref()
+    }
+
     /// Returns the switch of the edge between two nodes, if they're connected.
     ///
     /// If the file has several, this is the one to name in a route file: see the [parallel
@@ -1017,6 +1101,7 @@ impl RrGraph {
             + size_of::<u16>() * self.nodes.len()
             + size_of::<GridTile>() * self.grid.len()
             + pins
+            + self.map_lookahead().map_or(0, MapLookahead::heap_bytes)
     }
 }
 
@@ -2305,6 +2390,7 @@ fn finish(mut sections: Sections, end_line: u64) -> Result<RrGraph, ImportError>
         nodes: Arc::clone(&nodes),
         tail_reach: Arc::from(tail_reach),
         cost_per_tile,
+        map: None,
     };
     let graph = builder.build().with_lower_bound(bound.clone());
 

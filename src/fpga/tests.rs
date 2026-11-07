@@ -453,6 +453,12 @@ fn engine_options_put_history_in_the_units_of_the_graph() {
     assert_eq!(options.present_growth, defaults.present_growth);
     assert_eq!(options.max_present, defaults.max_present);
     assert_eq!(options.batch_size, defaults.batch_size);
+    // Nets keep what is not overused, and the bound is exact until there's a map.
+    assert!(options.incremental_reroute && !defaults.incremental_reroute);
+    assert_eq!(options.bound_weight, 1.0);
+    let mut device = device;
+    device.use_map_lookahead(&LookaheadOptions::default());
+    assert_eq!(device.engine_options().bound_weight, 1.1);
 }
 
 #[test]
@@ -1731,6 +1737,107 @@ fn bound_handles_wide_sinks_and_long_jumps() {
         Cost::ZERO
     );
     check_admissible(&device, 0..4);
+}
+
+/// Checks the map lookahead against true distances on `device`, from every node. Returns how
+/// many pairs of a wire and a `SINK` it can reach there are, and how many of those the map
+/// put above their distance.
+fn check_map_lookahead(device: &RrGraph) -> (u64, u64) {
+    let mut mapped = device.clone();
+    mapped.use_map_lookahead(&LookaheadOptions::default());
+    assert!(mapped.map_lookahead().is_some());
+    assert!(mapped.heap_bytes() > device.heap_bytes());
+    let (mut pairs, mut above) = (0, 0);
+    for from in 0..device.graph().num_nodes() {
+        let from = NodeId(from);
+        let found = distances(device.graph(), from);
+        for to in 0..device.graph().num_nodes() {
+            let to = NodeId(to);
+            let location = device.graph().lower_bound(NetId(0), from, to);
+            let map = mapped.graph().lower_bound(NetId(0), from, to);
+            match found[to.index()] {
+                // What the map says can't be reached can't.
+                None => {}
+                Some(distance) => {
+                    assert!(
+                        map < Cost::MAX,
+                        "{from:?} reaches {to:?} at {}",
+                        distance.get()
+                    );
+                    // It never knows less than the location bound.
+                    assert!(map >= location, "{from:?} to {to:?}");
+                    let wire = device.node_kind(from).is_some_and(NodeKind::is_wire);
+                    if wire && device.node_kind(to) == Some(NodeKind::Sink) {
+                        pairs += 1;
+                        above += u64::from(map > distance);
+                    }
+                }
+            }
+            if found[to.index()].is_none()
+                && matches!(
+                    device.node_kind(from),
+                    Some(NodeKind::Ipin | NodeKind::Sink)
+                )
+            {
+                // A pin, or a sink, that has no way there is known to have none.
+                assert_eq!(map, Cost::MAX, "{from:?} to {to:?}");
+            }
+        }
+    }
+    (pairs, above)
+}
+
+#[test]
+fn map_lookahead_knows_more_than_location_and_rarely_too_much() {
+    for (size, tracks, length, kind) in [(5, 4, 1, "mux"), (6, 6, 2, "mux"), (5, 4, 4, "pass_gate")]
+    {
+        let text = island_graph(size, tracks, length, kind, 200.0, 5e-14);
+        let device = read_rr_graph(text.as_bytes()).unwrap();
+        let (pairs, above) = check_map_lookahead(&device);
+        assert!(pairs > 100, "{pairs} pairs");
+        // Sampled tables are not a bound everywhere, but nearly. Edges look different.
+        assert!(
+            above * 5 <= pairs,
+            "{above} of {pairs} above for {size} {tracks} {length}"
+        );
+    }
+    let device = read_rr_graph(Z1000.as_bytes()).unwrap();
+    check_map_lookahead(&device);
+}
+
+#[test]
+fn map_lookahead_delays_bound_like_its_costs() {
+    let text = island_graph(5, 4, 2, "mux", 200.0, 5e-14);
+    let mut device = read_rr_graph(text.as_bytes()).unwrap();
+    let plain: Vec<u32> = {
+        let timed = device.timed_graph();
+        (0..device.graph().num_nodes())
+            .flat_map(|from| (0..device.graph().num_nodes()).map(move |to| (from, to)))
+            .map(|(from, to)| timed.delay_lower_bound(NetId(0), NodeId(from), NodeId(to)))
+            .collect()
+    };
+    device.use_map_lookahead(&LookaheadOptions {
+        samples_per_axis: 3,
+        ..LookaheadOptions::default()
+    });
+    let timed = device.timed_graph();
+    let count = device.graph().num_nodes();
+    let mut tighter = 0;
+    for from in 0..count {
+        for to in 0..count {
+            let map = timed.delay_lower_bound(NetId(0), NodeId(from), NodeId(to));
+            let before = plain[(from * count + to) as usize];
+            assert!(map >= before);
+            tighter += u32::from(map > before);
+        }
+    }
+    assert!(tighter > 0);
+    // From a node to itself, nothing.
+    assert_eq!(timed.delay_lower_bound(NetId(0), NodeId(7), NodeId(7)), 0);
+    assert_eq!(
+        device.graph().lower_bound(NetId(0), NodeId(7), NodeId(7)),
+        Cost::ZERO
+    );
 }
 
 proptest! {

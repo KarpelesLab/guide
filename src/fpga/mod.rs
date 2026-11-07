@@ -167,6 +167,7 @@ use std::io;
 
 mod arch;
 mod design;
+mod lookahead;
 mod netlist;
 mod place;
 mod route_file;
@@ -179,6 +180,7 @@ mod tests;
 
 pub use arch::{ArchPrimitive, Architecture, PrimitiveKind, read_architecture};
 pub use design::{Design, GlobalPort, NetInfo, NetOptions, NetPin, NetStatus, resolve_nets};
+pub use lookahead::{LookaheadOptions, MapLookahead};
 pub use netlist::{
     HopEnds, Interconnect, InternalPath, InternalPin, PackedBlock, PackedNet, PackedNetlist,
     PackedPin, PackedPrimitive, PortPin, read_netlist,

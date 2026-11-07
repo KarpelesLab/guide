@@ -5,9 +5,10 @@ it covers the engine, on synthetic instances that this repository generates. Tho
 useful for tuning, for catching regressions and for checking what the docs say. They are **not
 evidence about real designs**. The comparisons on real designs so far are
 [FPGA routing against VPR](#fpga-routing-against-vpr), on VTR's MCNC circuits, the
-[clearance check against KiCad's](#pcb-clearance-checks-against-kicad), on real boards, and
+[clearance check against KiCad's](#pcb-clearance-checks-against-kicad), on real boards,
 [those boards read from DSN](#pcb-dsn-designs-against-kicad-boards) against the same boards read
-from KiCad's files.
+from KiCad's files, and [PCB routing of the same boards](#pcb-routing-of-the-curated-boards),
+checked by KiCad.
 
 ## Running
 
@@ -531,7 +532,7 @@ done so far are below. There are no results for the others yet.
 | FPGA placement | VPR, nextpnr | VTR benchmarks, ISPD 2016/2017 contest sets | Not yet done |
 | PCB clearance checks | KiCad 10.0.3 | [Curated open-source KiCad boards](../testdata/kicad/README.md) | [Done](#pcb-clearance-checks-against-kicad) |
 | PCB DSN import, SES export | KiCad 10.0.3's reading of the same boards, and its session import | The same boards | [Done](#pcb-dsn-designs-against-kicad-boards) |
-| PCB routing | Freerouting | The same boards | Not yet done |
+| PCB routing | Freerouting | The same boards | Not yet done; [our own results](#pcb-routing-of-the-curated-boards), checked by KiCad, are below |
 | PCB placement | Hand-placed originals | The same boards | Not yet done |
 | ASIC global routing | Published contest results | ISPD 2007/2008 | Not yet done |
 
@@ -1118,3 +1119,100 @@ Freerouting.
   tested on small hand-written designs only.
 - KiCad's exporter refuses two footprints of one reference, so two of `nk3-nrf-mini`'s three
   mounting holes `REF**` were renamed for it, `REF**_2` and `REF**_3`, which changes no copper.
+
+## PCB routing of the curated boards
+
+`pcb::route` on the nine [curated boards](../testdata/kicad/README.md), each stripped of its
+tracks, arcs, vias and zone fills, so that every net with pads on two copper islands has to be
+routed again, ground and power included, which the originals mostly connect through zones.
+Copper graphics, pads, keepouts, the board's edge, text on copper and solder mask openings
+stay. Each net gets its class's track width and via size.
+
+### How
+
+```text
+GUIDE_ROUTE=1 cargo test --release --features kicad curated_boards_route -- --nocapture
+GUIDE_ROUTE=1 GUIDE_KICAD=1 cargo test --release --features kicad curated_boards_route -- --nocapture
+```
+
+The first routes the boards and checks each result with `drc::check`, which must find no
+violation involving a routed track or via, and `pcb::unconnected`, which must find every routed
+net connected. The second writes each routed board with `kicad::replace_routing` and runs
+`kicad-cli pcb drc` 10.0.3 on it, at error severity: it must find no violation involving a
+routed item, and on a board with every net routed, no missing connection. The three smallest
+boards route in every `cargo test` too. One thread, on an AMD Ryzen Threadripper PRO 9995WX,
+with the default options.
+
+### Results
+
+| Board | Nets | Connections | DRC violations | Vias: routed → after cleanup (original) | Track, mm: routed → after cleanup (original) | Seconds | KiCad |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `GB-BRK-LINK-A` | 6/6 | 8/8 | 0 | 0 → 0 (0) | 128 → 128 (115) | 0.00 | 0 violations, 0 unconnected |
+| `TS4231-BOB` | 8/8 | 13/13 | 0 | 2 → 1 (10) | 41 → 43 (39) | 0.02 | 0 violations, 0 unconnected |
+| `lisn` | 18/18 | 60/60 | 0 | 14 → 12 (0) | 312 → 315 (328) | 0.06 | 0 violations, 0 unconnected |
+| `isi-channel` | 7/7 | 29/29 | 0 | 2 → 0 (0) | 780 → 771 (1319) | 0.17 | 0 violations, 0 unconnected |
+| `placebo` | 23/23 | 50/50 | 0 | 19 → 9 (10) | 306 → 321 (286) | 0.55 | 0 violations, 0 unconnected |
+| `udb-s` | 8/8 | 33/33 | 0 | 15 → 6 (24) | 180 → 171 (172) | 5.18 | 0 violations, 0 unconnected |
+| `flea` | 24/24 | 79/79 | 0 | 56 → 52 (31) | 1602 → 1607 (1704) | 19.6 | 0 violations, 0 unconnected |
+| `GB-LIVE32` | 79/79 | 197/197 | 0 | 186 → 140 (140) | 2658 → 2720 (2315) | 92.8 | 0 violations, 0 unconnected |
+| `nk3-nrf-mini` | 28/30 | 56/83 | 0 | 49 → 45 (60) | 242 → 251 (349) | 66.8 | 0 violations, 27 unconnected |
+
+A connection is a terminal to join to its net's tree: a net of `n` islands of copper, pads that
+touch counted as one, needs `n - 1`. The original track length counts arcs as two chords, and
+leaves out what zones connect, so it is lower than it would be for the same connections.
+`isi-channel`'s original tracks are long because they are length-matched test channels, which
+this router does not attempt.
+
+Eight boards are complete, and KiCad finds nothing wrong with any of the nine. On
+`nk3-nrf-mini`, two nets of the nRF52 in its 0.5 mm-pitch aQFN73 are left: with 0.12 mm tracks
+and 0.11 mm clearances, nothing passes between its pads, and escaping the inner rows needs vias
+in pads placed in a careful order, which is M6's BGA escape routing. 27 of its connections are
+missing because one of the two nets left is ground, with many pads.
+
+Cleanup removed 78 of 343 vias over the nine boards, 23%, and made the track 1% longer: rerouting
+a net for fewer vias may lengthen it by up to 5 mm for each via saved, and pulling runs tight
+gives back less than that. Neither ever made a violation: they are checked as routing is, and
+the results above are after both.
+
+### What changes what
+
+Every option of the table below changes one default. Completion is the boards complete and the
+connections made on the two hard boards. Vias, length and seconds are totals over the eight
+boards other than `GB-BRK-LINK-A`, which every setting completes in a few milliseconds.
+
+| Options | Boards complete | `GB-LIVE32` | `nk3-nrf-mini` | Vias | Length, mm | Seconds |
+| --- | --- | --- | --- | --- | --- | --- |
+| Defaults | 8 of 9 | 197/197 | 56/83 | 265 | 6199 | 186 |
+| No rip-up | 4 of 9 | 136/197 | 35/83 | 167 | 4845 | 133 |
+| No second pass | 7 of 9 | 158/197 | 56/83 | 240 | 5879 | 132 |
+| No global routing | 7 of 9 | 158/197 | 55/83 | 224 | 5788 | 182 |
+| Corridor margin 0 | 7 of 9 | 191/197 | 40/83 | 298 | 6177 | 256 |
+| Corridor margin 2 | 7 of 9 | 158/197 | 40/83 | 224 | 5715 | 257 |
+| Layer bias 0.2 | 7 of 9 | 150/197 | 54/83 | 235 | 5717 | 277 |
+| No cleanup | 8 of 9 | 197/197 | 56/83 | 343 | 6120 | 167 |
+
+- **Rip-up** is what completes boards: without it, only the four easiest are complete.
+- **The second pass**, on a lattice of half the pitch for the nets that the first leaves, is
+  what completes `GB-LIVE32`, whose last net is its ground of 40 pads. It costs nothing on boards
+  that don't need it.
+- **Global routing** completes more than routing every net over the whole board, here
+  `GB-LIVE32`, but its corridors make nets detour around congestion that detailed routing
+  would have resolved, for a few percent more track on the boards both complete.
+- **Steering layers** by global routing, at a 20% premium for a track on a layer that the
+  global route didn't take there, loses nets on both hard boards, so it is off.
+- **Corridors** of 1 tile's margin beat 0 and 2 on both hard boards.
+
+Results on the two hard boards are chaotic, as for any router that routes nets one at a time:
+one changed option moves `nk3-nrf-mini` between 40 and 56 of its 83 connections. The choices
+above rest on several boards moving the same way, never on one.
+
+### What this does not show
+
+- No comparison with Freerouting yet, which M5's exit asks for.
+- Nine boards, all small: the largest has 79 nets. Larger boards would test global routing far
+  more than these do.
+- Tracks are octilinear and every via goes through the board. No differential pairs, length
+  matching or zones are routed.
+- Times are of one thread, and most of the time on the large boards goes into searches that find
+  no path, which a better lower bound or caching of step checks would cut.
+

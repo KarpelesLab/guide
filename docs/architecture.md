@@ -1,8 +1,9 @@
 # Architecture
 
 This records the intended design, and it changes as implementation teaches us things.
-The core model, search, multi-net engine, validator and timing analysis exist; see the
-[roadmap](../ROADMAP.md) for what doesn't yet. Code sketches are illustrative, not an API.
+The core model, search, multi-net engine, validator, timing analysis, geometry layer and
+PCB routing exist; see the [roadmap](../ROADMAP.md) for what doesn't yet. Code sketches are
+illustrative, not an API.
 
 ## Layers
 
@@ -101,7 +102,7 @@ serve both:
 | --- | --- | --- |
 | Node | Index into a prebuilt graph | Point on a layer, generated lazily |
 | Expansion | Read an adjacency list | Geometric query against the design rules |
-| Resource | The wire itself, naturally discrete | Not naturally discrete (see open questions) |
+| Resource | The wire itself, naturally discrete | Tile sides globally; in detail, conflicts found by exact clearance queries ([decision](#decisions)) |
 | Graph size | Up to hundreds of millions of nodes, so compact storage is essential | Effectively unbounded, so it can't be stored at all |
 
 ### Nets and routes
@@ -202,19 +203,58 @@ API: cargo treats each polyclip 0.0.x release as breaking, so exposing them woul
 `Point { x: i64, y: i64 }`, Y-up like polyclip and cadlab, with conversions behind the
 feature.
 
+**PCB routing negotiates over tiles globally, and resolves conflicts by rip-up in detail.**
+This settles open questions 1 and 4, for M5, as `src/pcb` does it:
+
+- *Global routing* is a `RoutingSpace` of square tiles on each layer, 16 lattice pitches on a
+  side, run by the unchanged negotiated-congestion engine. Its resources are discrete, as the
+  engine wants: the side between two tiles on a layer, whose capacity is how many tracks fit
+  along its free length, sampled against the fixed copper, and a tile's vias. Each net's
+  global route, grown by a tile, is its corridor.
+- *Detailed routing* is a second `RoutingSpace`, of points on layers generated as a search
+  reaches them and kept in `InternedSlots`, searched one net at a time with
+  `search::Search` (not the engine), inside the net's corridor. It has no resources at all:
+  every step is legal or not by exact clearance queries against a `ShapeIndex` of the fixed
+  copper and the routes committed so far, by the same rules as `drc::check`. So conflicts
+  between nets can't arise in a committed result. A net that finds no path is searched for
+  again with other nets' routes passable at a price, raised by a history of conflicts kept
+  per tile, and the nets it crosses are ripped up and routed again. That is the "resources
+  derived from conflicts, with history in a spatial structure" option, run outside the
+  engine.
+- So `RoutingSpace` needed no change, and the FPGA and grid spaces and their results are
+  untouched. What the engine would have needed, to negotiate the detailed level too, is a
+  conflict query in place of discrete resources, since "within a clearance of" has no
+  discrete identity. That stays open until a board shows that rip-up isn't enough.
+
+The measurements behind it, on the nine [curated boards](../testdata/kicad/README.md)
+([details](benchmarks.md#pcb-routing-of-the-curated-boards)):
+
+- *Rip-up is what completes boards.* Without it, 4 of 9 boards are complete; with it, 8.
+  `GB-LIVE32` goes from 136 to 197 of 197 connections, `udb-s` from 21 to 33 of 33, `flea`
+  from 57 to 79 of 79.
+- *Global routing helps completion, but not by restricting layers.* Steering detailed routing
+  onto the layers that global routing chose, by making other layers 20% dearer, lost nets on
+  both hard boards (`GB-LIVE32` 150 connections against 197, `nk3-nrf-mini` 54 against 56),
+  so that is off. Corridors alone completed `GB-LIVE32` where routing without them didn't
+  (158 of 197) and did slightly better on `nk3-nrf-mini` (56 against 55), in about the same
+  time, within 10% either way, but with 2% to 6% more track on three of the complete boards,
+  where global routing makes nets detour around congestion that detailed routing would have
+  resolved. Corridors with a margin of 0 or 2 tiles did worse on both hard boards than 1.
+- *A second, finer pass for what is left* completed `GB-LIVE32`: its 40-pad ground net, last
+  routed, fits on a lattice of half the pitch. It costs nothing on boards that don't need it.
+- *Results are chaotic on the hard boards*, as with any sequential router: a small change of
+  option moves `nk3-nrf-mini` between 23 and 28 of 30 nets. Conclusions above come from
+  several boards agreeing, not from one.
+
 **No `unsafe`, at least initially.** The crate forbids it. If profiling later proves
 it is needed, it gets isolated in a small audited module and the lint relaxed there.
 
 ## Open questions
 
-1. **What is a "resource" on a PCB?** Tracks conflict whenever they come within
-   clearance of each other, which is a continuous relation with no natural discrete
-   identity. Options: partition the board into cells that act as resources (natural
-   for global routing, coarse for detailed), derive resources from conflicts
-   dynamically (report "these nets conflict here", with congestion history kept in a
-   spatial structure), or negotiate only at the global level and resolve conflicts
-   with push-and-shove in detailed routing. We expect to prototype at M5, and
-   `resources`/`capacity` may need replacing with a conflict query.
+1. **What is a "resource" on a PCB?** Settled at M5, at least for now: tile sides and
+   tiles' vias in global routing, and nothing in detailed routing, where exact clearance
+   queries make conflicts impossible and rip-up with a history of conflicts by tile resolves
+   them. See [the decision](#decisions). Push-and-shove (M6) may change the detailed half.
 
 2. **Static or dynamic dispatch for spaces?** Generics give the FPGA inner loop full
    inlining, at a cost in compile time and API friction. A generic core with a
@@ -232,9 +272,10 @@ it is needed, it gets isolated in a small audited module and the lint relaxed th
    should move to pages for the largest graphs, as they take 16 bytes for every resource
    up to the highest one occupied.
 
-4. **How are global and detailed routing composed?** Possibly as two spaces at
-   different resolutions, where a global result restricts expansion in the detailed
-   space. If so, one engine handles both levels. This needs validation at M5.
+4. **How are global and detailed routing composed?** Settled at M5: as two spaces at
+   different resolutions, where the global result restricts expansion in the detailed space
+   to a corridor. The engine runs the global level, and the detailed level is searched net by
+   net with rip-up, as [the decision](#decisions) explains.
 
 5. **What does determinism cover across versions?** Same-version reproducibility is a
    requirement. Stability across versions would freeze every algorithmic improvement,

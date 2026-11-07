@@ -137,12 +137,25 @@ and 21 of ours, are explained, mostly by limits of KiCad's own check
   import into KiCad with every straight track and via exact, and KiCad's DRC unchanged
   ([results](docs/benchmarks.md#pcb-dsn-designs-against-kicad-boards)).
 - Multi-layer, grid-free routing over the geometry layer: through vias, keepouts,
-  fixed pre-routes, net classes.
-- Global routing followed by detailed routing.
-- Post-routing cleanup: via removal, track shortening.
+  fixed pre-routes, net classes. Done, in `pcb::route`, with octilinear tracks, through vias
+  and vias in pads, the board's edge and solder mask openings.
+- Global routing followed by detailed routing. Done: the engine routes tiles globally, and
+  each net is then routed in detail inside its corridor, with rip-up
+  ([design](docs/architecture.md#decisions)).
+- Post-routing cleanup: via removal, track shortening. Done: nets are rerouted with dearer
+  vias, and runs of tracks pulled tight.
+- Writing routes back into a KiCad board, to check them with KiCad's own DRC. Done, in
+  `kicad::replace_routing`.
 
 **Exit:** the curated boards are completed with zero DRC violations according to
 KiCad itself, with first results published against Freerouting.
+
+Eight of the nine curated boards, stripped of their tracks, vias and zone fills, are routed
+completely, ground and power included, and KiCad 10.0.3 finds nothing wrong with any of the
+nine: no violation, and no missing connection but on the ninth. That one, `nk3-nrf-mini`, leaves
+2 of its 30 nets around a 0.5 mm-pitch aQFN that wants BGA escape routing
+([results](docs/benchmarks.md#pcb-routing-of-the-curated-boards)). Left for the exit: that
+board, and the comparison with Freerouting.
 
 ### M6: PCB routing, advanced
 

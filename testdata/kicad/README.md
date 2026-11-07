@@ -64,3 +64,18 @@ GUIDE_KICAD=1 GUIDE_KICAD_UPDATE=1 cargo test --release --all-features curated_d
 
 [`docs/benchmarks.md`](../../docs/benchmarks.md#pcb-dsn-designs-against-kicad-boards) has the
 results.
+
+## Routing them
+
+`src/kicad/routing_tests.rs` takes each board's tracks, vias and zone fills out, routes its
+nets again with `pcb::route`, and checks the result with our DRC and for connectivity. With
+`GUIDE_KICAD=1` it also writes each routed board, by `kicad::replace_routing`, and runs
+`kicad-cli pcb drc` on it:
+
+```text
+GUIDE_ROUTE=1 cargo test --release --features kicad curated_boards_route -- --nocapture
+GUIDE_ROUTE=1 GUIDE_KICAD=1 cargo test --release --features kicad curated_boards_route -- --nocapture
+```
+
+[`docs/benchmarks.md`](../../docs/benchmarks.md#pcb-routing-of-the-curated-boards) has the
+results.

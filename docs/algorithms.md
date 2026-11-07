@@ -83,6 +83,11 @@ formulas to check reported delays, as the timing tests already do for fixed dela
 Via removal, corner smoothing, track pulling (rubber-banding), length tuning through
 meanders, and rerouting of critical connections.
 
+On PCBs, `pcb` does two of these after routing, each checked against the design rules as
+routing is: via removal, by routing each net with vias again at ten times the price of a via
+and keeping the result if it has fewer, and track pulling, by replacing each run of tracks
+between pads, vias and branches with the longest octilinear shortcuts that are legal.
+
 ## Placement
 
 | Algorithm | Use | Notes |

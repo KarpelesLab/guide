@@ -152,8 +152,10 @@ KiCad itself, with first results published against Freerouting.
 
 Eight of the nine curated boards, stripped of their tracks, vias and zone fills, are routed
 completely, ground and power included, and KiCad 10.0.3 finds nothing wrong with any of the
-nine: no violation, and no missing connection but on the ninth. That one, `nk3-nrf-mini`, leaves
-2 of its 30 nets around a 0.5 mm-pitch aQFN that wants BGA escape routing
+nine: no violation, and no missing connection but on the ninth. That one, `nk3-nrf-mini`, has 29
+of its 30 nets, with escape routing from its 0.5 mm-pitch aQFN. The last, `/LED_R`, can't be
+routed without a solder mask bridge that KiCad reports: its pad lies inside a mask opening drawn
+across another net's pad, where the original board's own via is reported too
 ([results](docs/benchmarks.md#pcb-routing-of-the-curated-boards)).
 
 The first results against Freerouting 2.5.0 are published, from the same stripped boards and
@@ -172,7 +174,10 @@ Each item is independently useful, and they can land in any order.
 - Push-and-shove detailed routing.
 - Differential pairs.
 - Length and skew matching.
-- BGA and fine-pitch escape routing.
+- BGA and fine-pitch escape routing. Started: pads that nothing passes between form
+  clusters, and those that can't get out on their own layers get a through via, placed on a
+  fine grid to leave room for the others, or where no via fits, their only way out, before
+  anything else is routed. Through vias only.
 - Blind, buried and micro vias; impedance-driven width per layer stack.
 - Copper zones and plane-aware routing.
 - Net topology constraints (daisy chain, star, T).

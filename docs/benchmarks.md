@@ -1148,15 +1148,15 @@ with the default options.
 
 | Board | Nets | Connections | DRC violations | Vias: routed → after cleanup (original) | Track, mm: routed → after cleanup (original) | Seconds | KiCad |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `GB-BRK-LINK-A` | 6/6 | 8/8 | 0 | 0 → 0 (0) | 128 → 128 (115) | 0.00 | 0 violations, 0 unconnected |
-| `TS4231-BOB` | 8/8 | 13/13 | 0 | 2 → 1 (10) | 41 → 43 (39) | 0.02 | 0 violations, 0 unconnected |
-| `lisn` | 18/18 | 60/60 | 0 | 14 → 12 (0) | 312 → 315 (328) | 0.06 | 0 violations, 0 unconnected |
-| `isi-channel` | 7/7 | 29/29 | 0 | 2 → 0 (0) | 780 → 771 (1319) | 0.17 | 0 violations, 0 unconnected |
-| `placebo` | 23/23 | 50/50 | 0 | 19 → 9 (10) | 306 → 321 (286) | 0.55 | 0 violations, 0 unconnected |
-| `udb-s` | 8/8 | 33/33 | 0 | 15 → 6 (24) | 180 → 171 (172) | 5.18 | 0 violations, 0 unconnected |
-| `flea` | 24/24 | 79/79 | 0 | 56 → 52 (31) | 1602 → 1607 (1704) | 19.6 | 0 violations, 0 unconnected |
-| `GB-LIVE32` | 79/79 | 197/197 | 0 | 186 → 140 (140) | 2658 → 2720 (2315) | 92.8 | 0 violations, 0 unconnected |
-| `nk3-nrf-mini` | 28/30 | 56/83 | 0 | 49 → 45 (60) | 242 → 251 (349) | 66.8 | 0 violations, 27 unconnected |
+| `GB-BRK-LINK-A` | 6/6 | 8/8 | 0 | 0 → 0 (0) | 128 → 128 (115) | 0.01 | 0 violations, 0 unconnected |
+| `TS4231-BOB` | 8/8 | 13/13 | 0 | 2 → 1 (10) | 41 → 43 (39) | 0.01 | 0 violations, 0 unconnected |
+| `lisn` | 18/18 | 60/60 | 0 | 15 → 10 (0) | 312 → 329 (328) | 0.08 | 0 violations, 0 unconnected |
+| `isi-channel` | 7/7 | 29/29 | 0 | 2 → 0 (0) | 780 → 771 (1319) | 0.21 | 0 violations, 0 unconnected |
+| `placebo` | 23/23 | 50/50 | 0 | 19 → 9 (10) | 306 → 321 (286) | 0.13 | 0 violations, 0 unconnected |
+| `udb-s` | 8/8 | 33/33 | 0 | 15 → 6 (24) | 180 → 171 (172) | 0.70 | 0 violations, 0 unconnected |
+| `flea` | 24/24 | 79/79 | 0 | 56 → 52 (31) | 1602 → 1607 (1704) | 5.43 | 0 violations, 0 unconnected |
+| `GB-LIVE32` | 79/79 | 197/197 | 0 | 186 → 142 (140) | 2654 → 2705 (2315) | 33.9 | 0 violations, 0 unconnected |
+| `nk3-nrf-mini` | 29/30 | 82/83 | 0 | 62 → 60 (60) | 311 → 307 (349) | 24.0 | 0 violations, 1 unconnected |
 
 A connection is a terminal to join to its net's tree: a net of `n` islands of copper, pads that
 touch counted as one, needs `n - 1`. The original track length counts arcs as two chords, and
@@ -1164,20 +1164,79 @@ leaves out what zones connect, so it is lower than it would be for the same conn
 `isi-channel`'s original tracks are long because they are length-matched test channels, which
 this router does not attempt.
 
-Eight boards are complete, and KiCad finds nothing wrong with any of the nine. On
-`nk3-nrf-mini`, two nets of the nRF52 in its 0.5 mm-pitch aQFN73 are left: with 0.12 mm tracks
-and 0.11 mm clearances, nothing passes between its pads, and escaping the inner rows needs vias
-in pads placed in a careful order, which is M6's BGA escape routing. 27 of its connections are
-missing because one of the two nets left is ground, with many pads.
+Eight boards are complete, and KiCad finds nothing wrong with any of the nine. `nk3-nrf-mini`
+has all its nets but one, ground included, around the nRF52 in its 0.5 mm-pitch aQFN73, where
+with 0.12 mm tracks and 0.11 mm clearances nothing passes between pads. Three things got it
+there from 28 nets and 56 connections:
 
-Cleanup removed 78 of 343 vias over the nine boards, 23%, and made the track 1% longer: rerouting
+- **Escape routing.** Pads that nothing passes between form clusters, and a pad of a cluster
+  that can't get out of it on its own layers gets a via first, placed on a grid of 7 µm so as to
+  leave room for the others; one whose only way out is long, and that no via fits by, gets that
+  way. On `nk3-nrf-mini`, the aQFN's inner pad of `Net-(C6-Pad2)` can only get out on `F.Cu`,
+  round a corner of the package, and no via fits by it, as a 5 V USB contact covers `B.Cu`
+  there; it gets that way before anything else is routed. The other inner pads there get out
+  directly, through the gaps in the outer row, and on `lisn` one pad shut in on all sides gets a
+  via in it.
+- **Pads with no room at their centre.** Text on copper, `1` beside a ground capacitor, is drawn
+  so close to the pad that the box the reader takes for it leaves no room for a track to end at
+  the pad's centre. A pad like that is now reached at the nearest point in it that has room.
+- **Vias in pads from below.** In the second pass, a route may go to the centre of a pad it has
+  yet to reach on a layer the pad isn't on, for a via in it. A ground pad that other nets'
+  tracks surround on `F.Cu` is reached so, from `In1.Cu`.
+
+The net left, `/LED_R`, can't be routed without a violation that KiCad reports. Its pad on the
+LED `D1` lies wholly inside an opening drawn on `F.Mask`, which also exposes a hole of a
+footprint and touches the pad of another net, so KiCad already reports it as a solder mask
+bridge with nothing routed. KiCad reports any copper of `/LED_R` in the opening too: a track
+leaving the pad in any direction, and a via in the pad, as written and checked by hand, and the
+original board's own via there, which KiCad's DRC of the original board reports as well.
+The router keeps every net out of an opening of several nets, so it leaves `/LED_R` unrouted.
+
+Cleanup removed 77 of 357 vias over the nine boards, 22%, and made the track 1% longer: rerouting
 a net for fewer vias may lengthen it by up to 5 mm for each via saved, and pulling runs tight
 gives back less than that. Neither ever made a violation: they are checked as routing is, and
 the results above are after both.
 
+Against the results before escape routing, at commit `8871703`: `nk3-nrf-mini` has one net and
+26 connections more, with 60 vias in place of 45 and 307 mm of track in place of 251, for the
+nets added; `lisn` has 10 vias in place of 12 and 329 mm in place of 315; `GB-LIVE32` has 142
+vias in place of 140 and 2705 mm in place of 2720. Every other board is unchanged.
+
+The router is 3 to 9 times as fast as it was then, with the same results on every board but
+those three. In seconds, and in billions of instructions, which a loaded machine changes less:
+
+| Board | Before | After |
+| --- | --- | --- |
+| `udb-s` | 5.8 s, 72 | 0.66 s, 7 |
+| `flea` | 21.3 s, 228 | 4.8 s, 59 |
+| `GB-LIVE32` | 98.1 s, 1114 | 34.3 s, 256 |
+| `nk3-nrf-mini` | 67.1 s, 879 | 23.8 s, 233 |
+
+- **Indexing arcs by their edges.** An arc of the board's edge was one entry of the index, with
+  a box over most of the board, so every step measured to each of its hundreds of edges.
+- **Resolving clearances once.** Each query resolved the net classes' clearances through the
+  rules again, which cost more than many a query. The world now keeps them by net and layer.
+- **Caching step checks.** The world's verdict on a step of one pitch is kept for both of its
+  ends while the world is unchanged: across the searches for a net's terminals, and across its
+  attempts in its corridor, over the board and with rip-up. So are its verdicts on vias, which a
+  search used to forget whenever the net placed one of its own.
+- **Giving up early.** Before a search over the whole board, a search of 50,000 nodes at most
+  from the terminals not yet reached finds out one that other nets shut in, far sooner than the
+  search to it, which has to go through everything outside first. And a net whose search runs
+  out of nodes in its corridor is no longer searched for over the board without rip-up, which
+  would run out too.
+
+Two more ideas didn't pay. A lower bound that adds a via's cost to reach another layer made
+searches take other paths among equals, and lost a net on each hard board; so did weighting the
+lower bound of rip-up's searches by 1.3. Routing nets in parallel, on disjoint corridors, would
+only speed up the first searches in corridors, which took about a third of the time on
+`nk3-nrf-mini` and a tenth on `GB-LIVE32` before the caching: the rest is rip-up, where each
+search depends on the one before, so it was not attempted.
+
 ### What changes what
 
-Every option of the table below changes one default. Completion is the boards complete and the
+Measured at commit `8871703`, before escape routing and the speedups above. Every option of
+the table below changes one default. Completion is the boards complete and the
 connections made on the two hard boards. Vias, length and seconds are totals over the eight
 boards other than `GB-BRK-LINK-A`, which every setting completes in a few milliseconds.
 
@@ -1213,8 +1272,8 @@ above rest on several boards moving the same way, never on one.
   more than these do.
 - Tracks are octilinear and every via goes through the board. No differential pairs, length
   matching or zones are routed.
-- Times are of one thread, and most of the time on the large boards goes into searches that find
-  no path, which a better lower bound or caching of step checks would cut.
+- Times are of one thread. Most of the time left on the large boards goes into rip-up's
+  searches, and into those that find no path.
 
 ## PCB routing against Freerouting
 

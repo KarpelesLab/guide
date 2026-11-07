@@ -45,7 +45,18 @@
 //!   `0.1`, say) adds its own relative error on top.
 //!
 //! An inadmissible bound voids these guarantees, but the search still terminates and
-//! returns a valid path.
+//! returns a valid path. So does a [weight](Search::set_bound_weight) above 1 on the bound,
+//! which is weighted A\*: with an admissible bound, the path found then costs at most that
+//! many times the cheapest.
+//!
+//! # A bound of the maximum
+//!
+//! A node whose heuristic is [`Cost::MAX`] can only leave the queue once every entry left has
+//! an `f` of [`Cost::MAX`], so its offers are held back until then, and made in their order,
+//! with the insertion order they would have had. Nothing a search finds changes, nor any
+//! statistic but [`SearchStats::pushes`], which only counts what was queued. A space can use
+//! this to say that a node has no way to a target, and a search that ends first never queues
+//! that node at all.
 //!
 //! [`Found::cost`] is the cost of [`Found::path`] whenever no sum involved rounds or
 //! saturates, and always with a zero lower bound. Otherwise the path's own cost can be
@@ -92,6 +103,10 @@ use crate::space::{NodeSlots, RoutingSpace, Step};
 
 /// Marks a node with no parent in its slot's `parent` field: the path starts there.
 const NO_PARENT: usize = usize::MAX;
+
+/// Marks a node in its slot's `parent` field whose heuristic is [`Cost::MAX`], and whose
+/// offers are held back, so that it has no cost or parent yet. See [`Search::deferred`].
+const DEFERRED: usize = usize::MAX - 1;
 
 /// Set in a [`HeapEntry`]'s `slot` when the entry is a target's finish rather than the node
 /// itself. Slots index arrays in memory, so they never get this high.
@@ -320,6 +335,12 @@ impl QuadHeap {
         self.entries[hole] = entry;
     }
 
+    /// Returns the entry that would leave the queue next.
+    #[inline]
+    fn peek(&self) -> Option<&HeapEntry> {
+        self.entries.first()
+    }
+
     #[inline]
     fn pop(&mut self) -> Option<HeapEntry> {
         let last = self.entries.pop()?;
@@ -386,6 +407,21 @@ pub struct Search<S: RoutingSpace> {
     /// The path of the most recent search.
     path: Vec<S::Node>,
     stats: SearchStats,
+    /// What the heuristic is multiplied by: see [`Search::set_bound_weight`].
+    bound_weight: f64,
+    /// Offers of nodes whose heuristic is [`Cost::MAX`], with the sequence number each would
+    /// have been queued with, in the order made.
+    ///
+    /// Such a node's entries have an `f` of [`Cost::MAX`], and leave the queue after every
+    /// entry with a lower `f`, so queueing them can wait until the queue has nothing lower.
+    /// Then they are offered again in order, and queued with the sequence numbers they would
+    /// have had. Every entry leaves the queue in the same order as without this, so nothing
+    /// a search finds changes. But a search that ends first, as nearly all do, never queues
+    /// them. A space can give [`Cost::MAX`] to say that there is no way to a target, as
+    /// `fpga::MapLookahead` does for the pins of other blocks, and those cost very little.
+    deferred: Vec<(usize, Cost, usize, u64)>,
+    /// Whether the offers held back have been made, after which none are held back.
+    flushed: bool,
 }
 
 impl<S: RoutingSpace> fmt::Debug for Search<S> {
@@ -412,7 +448,27 @@ impl<S: RoutingSpace> Search<S> {
             steps: Vec::new(),
             path: Vec::new(),
             stats: SearchStats::default(),
+            bound_weight: 1.0,
+            deferred: Vec::new(),
+            flushed: false,
         }
+    }
+
+    /// Multiplies the heuristic by `weight` in the searches that follow, which is weighted
+    /// A\*. The default is 1, the plain bound.
+    ///
+    /// Above 1, a search goes more directly at its target and expands fewer nodes, but the
+    /// heuristic overestimates by up to that factor, so the optimality guarantees of the
+    /// [module documentation](self) no longer hold: the path found costs at most `weight` times
+    /// the cheapest, given an admissible bound. VPR's router does the same with its
+    /// `--astar_fac`, by default 1.2. A weight that is not finite or below 0 is taken as 1, and
+    /// at 0 the search is Dijkstra's algorithm.
+    pub fn set_bound_weight(&mut self, weight: f64) {
+        self.bound_weight = if weight.is_finite() && weight >= 0.0 {
+            weight
+        } else {
+            1.0
+        };
     }
 
     /// Returns the counters for the most recent search.
@@ -588,7 +644,18 @@ impl<S: RoutingSpace> Search<S> {
             self.offer(space, net, source.node, source.cost, NO_PARENT);
         }
 
-        while let Some(entry) = self.heap.pop() {
+        loop {
+            if !self.deferred.is_empty()
+                && self
+                    .heap
+                    .peek()
+                    .is_none_or(|entry| entry.f == Cost::MAX.key())
+            {
+                self.flush_deferred();
+            }
+            let Some(entry) = self.heap.pop() else {
+                break;
+            };
             if entry.slot & FINISH_BIT != 0 {
                 let slot = entry.slot & !FINISH_BIT;
                 // Read afresh, in case the node got cheaper by so little that its finish
@@ -650,6 +717,8 @@ impl<S: RoutingSpace> Search<S> {
         self.path.clear();
         self.next_sequence = 0;
         self.stats = SearchStats::default();
+        self.deferred.clear();
+        self.flushed = false;
 
         if self.generation == u32::MAX {
             // After 4 billion searches an old stamp could match again, so they all go.
@@ -686,7 +755,7 @@ impl<S: RoutingSpace> Search<S> {
             // parents acyclic. A child's `g` is never below its parent's, because adding
             // a cost never lowers a total, so closing a cycle would need a strict decrease
             // that cannot exist.
-            if g >= state.g {
+            if state.parent != DEFERRED && g >= state.g {
                 return;
             }
         } else {
@@ -694,16 +763,56 @@ impl<S: RoutingSpace> Search<S> {
             state.h = if state.target == self.generation {
                 // Already the true remaining cost, and needs no call into the space.
                 Cost::ZERO
-            } else {
+            } else if self.bound_weight == 1.0 {
                 min_lower_bound(space, net, node, &self.targets)
+            } else {
+                let bound = min_lower_bound(space, net, node, &self.targets);
+                Cost::new(bound.get() * self.bound_weight).unwrap_or(Cost::MAX)
             };
             self.nodes[slot] = node;
+            // Set either way, as an old search may have left the mark.
+            state.parent = if state.h == Cost::MAX && !self.flushed {
+                DEFERRED
+            } else {
+                NO_PARENT
+            };
+        }
+        if state.parent == DEFERRED {
+            // Only before the flush, which offers every node held back.
+            self.deferred.push((slot, g, parent, self.next_sequence));
+            self.next_sequence += 1;
+            return;
         }
         state.g = g;
         state.parent = parent;
 
         let f = g + state.h;
         self.push_entry(f, g, slot);
+    }
+
+    /// Makes the offers held back, in the order they were made, with the sequence numbers
+    /// they were given then.
+    fn flush_deferred(&mut self) {
+        self.flushed = true;
+        let deferred = mem::take(&mut self.deferred);
+        for &(slot, g, parent, sequence) in &deferred {
+            let state = &mut self.states[slot];
+            if state.parent != DEFERRED && g >= state.g {
+                continue;
+            }
+            state.g = g;
+            state.parent = parent;
+            let f = g + state.h;
+            self.heap.push(HeapEntry {
+                f: f.key(),
+                inverted_g: !g.key(),
+                sequence,
+                slot,
+            });
+            self.stats.pushes += 1;
+        }
+        self.deferred = deferred;
+        self.deferred.clear();
     }
 
     /// Queues an entry for `slot`, which may have the [`FINISH_BIT`] set.
@@ -1112,6 +1221,52 @@ mod tests {
         // A saturating bound must not stop a source from being explored.
         let space = TestGraph::new(2, &[(0, 1, huge)]).with_bound(|_, _| huge);
         assert_eq!(route(&space, &[0], &[1]).unwrap().1, f64::MAX);
+    }
+
+    #[test]
+    fn a_node_whose_bound_is_the_maximum_is_still_searched_when_nothing_else_is_left() {
+        // The only way to 3 is through 1, whose bound says there is none. 2 is a dead end.
+        let space = TestGraph::with_integer_edges(4, &[(0, 1, 1), (0, 2, 1), (1, 3, 1)])
+            .with_bound(|from, _| if from == 1 { Cost::MAX } else { Cost::ZERO });
+        let mut search = Search::new(&space);
+        let found = search
+            .find_path(&space, NET, sources(&[0]), targets(&[3]))
+            .unwrap();
+        assert_eq!(found.path, targets(&[0, 1, 3]));
+        assert_eq!(found.cost, Cost::from(2));
+        assert_eq!(search.stats().expanded, 3);
+
+        // Where the target comes first, a node held back is never queued at all.
+        let space = TestGraph::with_integer_edges(3, &[(0, 1, 1), (0, 2, 1)])
+            .with_bound(|from, _| if from == 1 { Cost::MAX } else { Cost::ZERO });
+        let found = search
+            .find_path(&space, NET, sources(&[0]), targets(&[2]))
+            .unwrap();
+        assert_eq!(found.path, targets(&[0, 2]));
+        assert_eq!(search.stats().pushes, 2);
+    }
+
+    #[test]
+    fn a_weighted_bound_goes_straight_for_the_target() {
+        // 4 is a dead end that looks close, and 1 is the way, a little further along.
+        let space = TestGraph::with_integer_edges(5, &[(0, 4, 0), (0, 1, 2), (1, 3, 2)])
+            .with_bounds_to(3, &[(1, 2), (4, 3)]);
+        let mut search = Search::new(&space);
+        let route = |search: &mut Search<TestGraph>| {
+            let found = search.find_path(&space, NET, sources(&[0]), targets(&[3]));
+            (found.map(|found| found.cost), search.stats().expanded)
+        };
+        assert_eq!(route(&mut search), (Some(Cost::from(4)), 3));
+        // At 3, 1 comes first, and 4 is never expanded.
+        search.set_bound_weight(3.0);
+        assert_eq!(route(&mut search), (Some(Cost::from(4)), 2));
+        // Anything else is the plain bound, and 0 is Dijkstra's algorithm.
+        for weight in [f64::NAN, -1.0, f64::INFINITY] {
+            search.set_bound_weight(weight);
+            assert_eq!(search.bound_weight, 1.0);
+        }
+        search.set_bound_weight(0.0);
+        assert_eq!(route(&mut search), (Some(Cost::from(4)), 3));
     }
 
     #[test]
@@ -2141,6 +2296,57 @@ mod tests {
                 let fewer = (needed as f64 * fraction) as u64;
                 prop_assert_eq!(run(&mut search, fewer), Err(SearchEnd::LimitReached));
                 prop_assert_eq!(search.stats().expanded, fewer);
+            }
+        }
+
+        #[test]
+        fn a_bound_of_the_maximum_changes_nothing_but_pushes(
+            case in case(),
+            maximal in prop::collection::vec(any::<bool>(), 144),
+            weight in prop::sample::select(vec![1.0, 1.5]),
+        ) {
+            // Offers of nodes whose bound is the maximum are held back, which must not change
+            // the order anything leaves the queue in. Against a bound one step below it, which
+            // sorts the same but is never held back, on the same reused searches, with bounds
+            // of the maximum both where there is no way and, inadmissibly, where there is.
+            let plain = TestGraph::with_integer_edges(case.nodes, &case.edges);
+            let distances: Vec<_> = (0..case.nodes as u32)
+                .map(|from| bellman_ford(&plain, [(from, Cost::ZERO)]))
+                .collect();
+            let below = Cost::new(f64::MAX.next_down()).unwrap();
+            let (distances, maximal, fractions, nodes) =
+                (&distances, &maximal, &case.fractions, case.nodes);
+            let bound = |top: Cost| {
+                move |from: usize, to: usize| match distances[from][to] {
+                    _ if maximal[from * 12 + to] => top,
+                    None => top,
+                    Some(distance) => {
+                        let fraction = u32::from(fractions[from * nodes + to]);
+                        Cost::from((distance.get() as u32) * fraction / 255)
+                    }
+                }
+            };
+            let held = TestGraph::with_integer_edges(case.nodes, &case.edges)
+                .with_bound(bound(Cost::MAX));
+            let queued = TestGraph::with_integer_edges(case.nodes, &case.edges)
+                .with_bound(bound(below));
+            let starts = integer_starts(&case);
+            let mut on_held = Search::new(&held);
+            let mut on_queued = Search::new(&queued);
+            on_held.set_bound_weight(weight);
+            on_queued.set_bound_weight(weight);
+            for _ in 0..2 {
+                let a = on_held
+                    .find_path(&held, NET, cost_sources(&starts), targets(&case.targets))
+                    .map(|found| (found.path.to_vec(), found.cost));
+                let b = on_queued
+                    .find_path(&queued, NET, cost_sources(&starts), targets(&case.targets))
+                    .map(|found| (found.path.to_vec(), found.cost));
+                prop_assert_eq!(a, b);
+                let (a, b) = (on_held.stats(), on_queued.stats());
+                prop_assert_eq!(a.expanded, b.expanded);
+                prop_assert_eq!(a.stale_pops, b.stale_pops);
+                prop_assert!(a.pushes <= b.pushes);
             }
         }
 

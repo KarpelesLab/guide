@@ -94,11 +94,17 @@ fn crossing_nets_take_a_via_on_two_layers() {
         ],
         3,
     );
+    let mut d = d;
+    // Too tight for a track to go round the end of a pad.
+    d.outline = outline(Rect::new(
+        Point::new(-600_000, -600_000),
+        Point::new(10_600_000, 10_600_000),
+    ));
     let routed = route_checked(&d, &Options::default());
     assert!(routed.unrouted.is_empty());
     assert_eq!(routed.stats.routed, 2);
     assert!(!routed.vias.is_empty());
-    // Straight across, for the net that doesn't move: 10 mm less nothing.
+    // Not far from straight across, for both.
     assert!(routed.stats.after_cleanup.1 < 23.0 * MM as f64);
 }
 

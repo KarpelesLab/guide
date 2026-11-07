@@ -51,10 +51,14 @@ fn fewer_vias(
     };
     let mut expanded = 0;
     let mut found = None;
-    for corridor in [job.corridor.as_ref(), None] {
-        if corridor.is_none() && job.corridor.is_some() && found.is_some() {
-            break;
-        }
+    // In the corridor first, if there is one, and then anywhere.
+    let attempts = [job.corridor.as_ref(), None];
+    let attempts = if job.corridor.is_some() {
+        &attempts[..]
+    } else {
+        &attempts[1..]
+    };
+    for &corridor in attempts {
         match detail::route_net(world, &job.ctx, p, corridor, None) {
             Ok(t) => {
                 expanded += t.expanded;
@@ -66,9 +70,11 @@ fn fewer_vias(
     }
     if let Some(t) = found {
         let new = NetCopper::from_tree(&job.ctx, &t);
-        // A via is worth a few millimetres of track, at most.
-        let limit = c.length() + 1e6 * options.via_cost * VIA_COST_FACTOR / 2.0;
-        if new.vias.len() < c.vias.len() && new.length() <= limit {
+        // Each via saved may cost up to half its price in the search in track, in
+        // millimetres, as the costs are.
+        let saved = c.vias.len().saturating_sub(new.vias.len());
+        let limit = c.length() + saved as f64 * 1e6 * options.via_cost * VIA_COST_FACTOR / 2.0;
+        if saved > 0 && new.length() <= limit {
             *c = new;
         }
     }

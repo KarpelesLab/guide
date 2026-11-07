@@ -26,6 +26,9 @@ pub(crate) struct Job {
 const RIP_PENALTY: f64 = 10.0;
 const HISTORY_STEP: f64 = 0.5;
 
+/// How much finer the lattice of the second pass is.
+const FINE: i64 = 2;
+
 /// How many pitches from a pad routes may move onto its lattice.
 const LATTICE_REACH: i64 = 8;
 
@@ -323,72 +326,94 @@ pub(crate) fn run(design: &Design, options: &Options) -> Result<Routed, RouteErr
         .map(|(i, j)| (j.ctx.net, i))
         .collect();
     let mut outside = vec![false; jobs.len()];
-    while let Some(j) = queue.pop_front() {
-        let job = &jobs[j];
-        let mut tree = None;
-        if let Some(corridor) = &job.corridor {
-            let rip = RipUp {
-                penalty: None,
-                history: &history,
-            };
-            match detail::route_net(&world, &job.ctx, params, Some(corridor), Some(rip)) {
-                Ok(t) => {
-                    stats.expanded += t.expanded;
-                    tree = Some(t);
-                }
-                Err((_, e)) => stats.expanded += e,
+    // A second pass, on a finer lattice, for the nets the first leaves unrouted, with every
+    // net that can be ripped up again.
+    for pass in 0..2 {
+        let params = if pass == 0 {
+            params
+        } else {
+            let left: Vec<usize> = (0..jobs.len()).filter(|&j| copper[j].is_none()).collect();
+            if left.is_empty() || !options.fine_pass {
+                break;
             }
-        }
-        if tree.is_none() {
-            let rip = RipUp {
-                penalty: None,
-                history: &history,
-            };
-            match detail::route_net(&world, &job.ctx, params, None, Some(rip)) {
-                Ok(t) => {
-                    stats.expanded += t.expanded;
-                    outside[j] = job.corridor.is_some();
-                    tree = Some(t);
-                }
-                Err((_, e)) => stats.expanded += e,
+            stats.fine_pass = left.len();
+            queue.extend(left);
+            for (j, job) in jobs.iter().enumerate() {
+                ripped[j] = 0;
+                world.set_locked(job.ctx.net, false);
             }
-        }
-        if tree.is_none() && options.rip_ups > 0 {
-            let rip = RipUp {
-                penalty: Some(RIP_PENALTY),
-                history: &history,
-            };
-            match detail::route_net(&world, &job.ctx, params, None, Some(rip)) {
-                Ok(t) => {
-                    stats.expanded += t.expanded;
-                    let (victims, at) = detail::victims(&world, &job.ctx, &t);
-                    for p in at {
-                        if let Some(tile) = history.grid.tile_of(p) {
-                            history.cost[tile] += HISTORY_STEP;
-                        }
+            Params {
+                pitch: (pitch / FINE).max(1000),
+                ..params
+            }
+        };
+        while let Some(j) = queue.pop_front() {
+            let job = &jobs[j];
+            let mut tree = None;
+            if let Some(corridor) = &job.corridor {
+                let rip = RipUp {
+                    penalty: None,
+                    history: &history,
+                };
+                match detail::route_net(&world, &job.ctx, params, Some(corridor), Some(rip)) {
+                    Ok(t) => {
+                        stats.expanded += t.expanded;
+                        tree = Some(t);
                     }
-                    for v in victims {
-                        let Some(&k) = by_net.get(&v) else { continue };
-                        if let Some(mut c) = copper[k].take() {
-                            c.unplace(&mut world);
-                            ripped[k] += 1;
-                            stats.rip_ups += 1;
-                            if ripped[k] >= options.rip_ups {
-                                world.set_locked(v, true);
+                    Err((_, e)) => stats.expanded += e,
+                }
+            }
+            if tree.is_none() {
+                let rip = RipUp {
+                    penalty: None,
+                    history: &history,
+                };
+                match detail::route_net(&world, &job.ctx, params, None, Some(rip)) {
+                    Ok(t) => {
+                        stats.expanded += t.expanded;
+                        outside[j] = job.corridor.is_some();
+                        tree = Some(t);
+                    }
+                    Err((_, e)) => stats.expanded += e,
+                }
+            }
+            if tree.is_none() && options.rip_ups > 0 {
+                let rip = RipUp {
+                    penalty: Some(RIP_PENALTY),
+                    history: &history,
+                };
+                match detail::route_net(&world, &job.ctx, params, None, Some(rip)) {
+                    Ok(t) => {
+                        stats.expanded += t.expanded;
+                        let (victims, at) = detail::victims(&world, &job.ctx, &t);
+                        for p in at {
+                            if let Some(tile) = history.grid.tile_of(p) {
+                                history.cost[tile] += HISTORY_STEP;
                             }
-                            queue.push_back(k);
                         }
+                        for v in victims {
+                            let Some(&k) = by_net.get(&v) else { continue };
+                            if let Some(mut c) = copper[k].take() {
+                                c.unplace(&mut world);
+                                ripped[k] += 1;
+                                stats.rip_ups += 1;
+                                if ripped[k] >= options.rip_ups {
+                                    world.set_locked(v, true);
+                                }
+                                queue.push_back(k);
+                            }
+                        }
+                        outside[j] = job.corridor.is_some();
+                        tree = Some(t);
                     }
-                    outside[j] = job.corridor.is_some();
-                    tree = Some(t);
+                    Err((_, e)) => stats.expanded += e,
                 }
-                Err((_, e)) => stats.expanded += e,
             }
-        }
-        if let Some(t) = tree {
-            let mut c = NetCopper::from_tree(&job.ctx, &t);
-            c.place(&mut world, &job.ctx);
-            copper[j] = Some(c);
+            if let Some(t) = tree {
+                let mut c = NetCopper::from_tree(&job.ctx, &t);
+                c.place(&mut world, &job.ctx);
+                copper[j] = Some(c);
+            }
         }
     }
     // A net ripped up and then not routed again is unrouted too.

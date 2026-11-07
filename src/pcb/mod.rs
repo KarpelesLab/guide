@@ -20,12 +20,13 @@
 //!    go a lattice pitch in any of the eight octilinear directions, a through via can
 //!    change layers, and near a pad of the net a track can go straight to its centre.
 //!    Every step is checked exactly against the fixed copper and the routes committed so
-//!    far, by the same rules as the check, and the board's edge. So whatever is routed is
-//!    legal by construction, and the check can only confirm it.
+//!    far, by the same rules as the check, the board's edge and the solder mask's openings.
+//!    So whatever is routed is legal by construction, and the check can only confirm it.
 //! 3. **Rip-up.** A net that finds no path, in its corridor or then anywhere, searches
 //!    again with other nets' routes passable at a price that grows with the history of
 //!    conflicts where it crosses them. The nets it crosses are ripped up, it takes its
-//!    path, and they route again.
+//!    path, and they route again. A net ripped up too often stays where it is. Nets left
+//!    unrouted at the end get a second pass, on a lattice of half the pitch.
 //! 4. **Cleanup**: nets with vias are rerouted with dearer vias, kept only if they lose
 //!    vias; then each run of tracks between pads, vias and branches is pulled tight, by
 //!    replacing runs with straight or 45° shortcuts where those are legal.
@@ -169,7 +170,8 @@ pub struct Options {
     /// How many tiles a corridor reaches beyond its net's global route. The default is 1.
     pub corridor_margin: u32,
     /// The extra cost of a track on a layer that global routing did not choose for its
-    /// tile, as a fraction of its length. The default is 0.2.
+    /// tile, as a fraction of its length. The default is 0, as any more lost nets on the
+    /// curated boards: see `docs/benchmarks.md`.
     pub layer_bias: f64,
     /// What a via costs, in millimetres of track. The default is 1.
     pub via_cost: f64,
@@ -178,6 +180,9 @@ pub struct Options {
     pub rip_ups: u32,
     /// How many nodes one net's search may expand. The default is 2 million.
     pub max_expansions: u64,
+    /// Whether nets left unrouted get a second pass, on a lattice of half the pitch, in
+    /// which any net may be ripped up again. The default is true.
+    pub fine_pass: bool,
     /// Whether to clean up after routing. The default is true.
     pub cleanup: bool,
 }
@@ -189,10 +194,11 @@ impl Default for Options {
             tile: None,
             global: true,
             corridor_margin: 1,
-            layer_bias: 0.2,
+            layer_bias: 0.0,
             via_cost: 1.0,
             rip_ups: 4,
             max_expansions: 2_000_000,
+            fine_pass: true,
             cleanup: true,
         }
     }
@@ -214,6 +220,8 @@ pub struct Stats {
     pub outside_corridor: usize,
     /// How many times a net was ripped up.
     pub rip_ups: usize,
+    /// How many nets the first pass left unrouted, for the second.
+    pub fine_pass: usize,
     /// Nodes expanded by detailed searches, cleanup included.
     pub expanded: u64,
     /// Resources that global routing left overused.

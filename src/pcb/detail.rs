@@ -202,6 +202,9 @@ pub(crate) struct Params {
     pub(crate) layer_bias: f64,
     pub(crate) bounds: Rect,
     pub(crate) max_expansions: u64,
+    /// Whether a route may go to the centre of a pad it has yet to reach on a layer the pad
+    /// isn't on, for a via in the pad.
+    pub(crate) under_pads: bool,
 }
 
 /// The space one net is searched in.
@@ -218,6 +221,8 @@ pub(crate) struct DetailSpace<'a> {
     /// The net's own vias so far, which others of its vias keep the hole-to-hole
     /// clearance from: the world doesn't have them until the net is committed.
     keep_off: Vec<Point>,
+    /// By terminal, whether the net's tree has reached it yet.
+    reached: Vec<bool>,
 }
 
 impl<'a> DetailSpace<'a> {
@@ -238,6 +243,7 @@ impl<'a> DetailSpace<'a> {
             vias: RefCell::new(FastMap::default()),
             near: RefCell::new(Vec::new()),
             keep_off: Vec::new(),
+            reached: vec![false; ctx.terminals],
         }
     }
 
@@ -379,7 +385,11 @@ impl RoutingSpace for DetailSpace<'_> {
             drop(near);
             for i in found {
                 let pad = &self.ctx.pads[i];
-                if pad.center == p || !pad.layers.contains(LayerId(from.l)) {
+                // On a layer the pad isn't on, a route can still go to its centre for a via
+                // in the pad.
+                let under =
+                    self.params.under_pads && self.ctx.via.is_some() && !self.reached[pad.terminal];
+                if pad.center == p || !(pad.layers.contains(LayerId(from.l)) || under) {
                     continue;
                 }
                 let b = pad.bbox.expand(pitch);
@@ -471,6 +481,7 @@ pub(crate) fn route_net(
     let mut connected = vec![false; ctx.terminals];
     let mut sources: Vec<DNode> = ctx.terminal_nodes(0);
     connected[0] = true;
+    space.reached[0] = true;
     let mut on_tree: FastMap<DNode, ()> = FastMap::default();
     for &s in &sources {
         on_tree.insert(s, ());
@@ -546,6 +557,7 @@ pub(crate) fn route_net(
         for &n in &path {
             if let Some(t) = terminal_of(n) {
                 connected[t] = true;
+                space.reached[t] = true;
             }
             if on_tree.insert(n, ()).is_none() {
                 sources.push(n);

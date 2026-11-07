@@ -213,7 +213,8 @@ fn kicad_check(text: &str, project: &str, name: &str) -> (Vec<String>, usize) {
 /// `GUIDE_ROUTE=1`, and is meant for a release build. With `GUIDE_KICAD=1` as well, it writes
 /// each routed board and checks that `kicad-cli pcb drc` finds no violation of a routed
 /// item, and a missing connection only where a net could not be routed. `GUIDE_BOARDS`, a
-/// list of board names separated by commas, routes only those.
+/// list of board names separated by commas, routes only those, and `GUIDE_WRITE`, a
+/// directory, writes each routed board there.
 #[test]
 fn curated_boards_route() {
     if std::env::var_os("GUIDE_ROUTE").is_none() {
@@ -234,6 +235,11 @@ fn curated_boards_route() {
         }
         let (row, text, routed, pro) = route_board(dir, name);
         print!("{}", row.markdown());
+        if let Some(out) = std::env::var_os("GUIDE_WRITE") {
+            let base = std::path::Path::new(&out).join(name);
+            std::fs::write(base.with_extension("kicad_pcb"), &text).unwrap();
+            std::fs::write(base.with_extension("kicad_pro"), &pro).unwrap();
+        }
         if kicad {
             let (found, unconnected) = kicad_check(&text, &pro, name);
             print!(

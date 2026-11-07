@@ -378,3 +378,60 @@ fn hole_to_hole_holds_between_a_nets_own_vias() {
         "{found:?}"
     );
 }
+
+#[test]
+fn pads_trapped_in_an_area_array_escape_through_vias() {
+    // A ball grid of 5 by 5 at a pitch of 1 mm, with balls of 0.45 mm: no track of 0.2 mm
+    // with 0.2 mm on either side passes between them. The 8 balls round the centre each
+    // connect to a pad outside it; the others are of nets with nothing else.
+    let ball = |x: i64, y: i64, net: u32| Pad {
+        shape: Shape::circle(Point::new(x, y), 450_000).unwrap(),
+        ..smd(x, y, net)
+    };
+    let mut pads = Vec::new();
+    let mut net = 1;
+    let mut lone = 9;
+    for i in 0..5 {
+        for j in 0..5 {
+            let (x, y) = (i * MM, j * MM);
+            let ring = (1..=3).contains(&i) && (1..=3).contains(&j) && (i, j) != (2, 2);
+            if ring {
+                pads.push(ball(x, y, net));
+                pads.push(smd(10 * MM, i64::from(net) * 1_500_000 - 4 * MM, net));
+                net += 1;
+            } else {
+                lone += 1;
+                pads.push(ball(x, y, lone));
+            }
+        }
+    }
+    let d = design(2, pads, lone as usize + 1);
+    let routed = route_checked(&d, &Options::default());
+    assert!(routed.unrouted.is_empty(), "{:?}", routed.unrouted);
+    // Each of the 8 needs a via to get out.
+    for n in 1..9 {
+        assert!(
+            routed.vias.iter().any(|v| v.net == Some(NetId(n))),
+            "net {n}"
+        );
+    }
+}
+
+#[test]
+fn a_pad_whose_centre_is_blocked_is_reached_where_it_has_room() {
+    let mut d = design(1, vec![smd(0, 0, 1), smd(5 * MM, 0, 1)], 2);
+    // Copper of no net, as text can be, over the left edge of the first pad, too near its
+    // centre for a track to end there.
+    let text = Shape::rect(Rect::new(
+        Point::new(-2 * MM, -2 * MM),
+        Point::new(-250_000, 2 * MM),
+    ))
+    .unwrap();
+    d.obstacles.push((text.clone(), LayerId(0)));
+    let routed = route_checked(&d, &Options::default());
+    assert!(routed.unrouted.is_empty());
+    for t in &routed.tracks {
+        let shape = Shape::track(t.start, t.end, t.width).unwrap();
+        assert!(!shape.violates(&text, 200_000).unwrap());
+    }
+}

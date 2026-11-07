@@ -5,9 +5,10 @@ use std::collections::{BTreeMap, VecDeque};
 
 use super::cleanup;
 use super::detail::{self, Corridor, History, NetCtx, Params, RipUp, TermPad};
+use super::escape;
 use super::geometry::NetCopper;
 use super::global::{self, GlobalSpace, Probe, TerminalPads};
-use super::world::World;
+use super::world::{Verdict, World};
 use super::{Design, Options, RouteError, Routed, Stats};
 use crate::geom::drc::{Track, Via};
 use crate::geom::{LayerId, LayerSet, Point, Rect, Shape};
@@ -49,6 +50,41 @@ fn pad_center(shape: &Shape) -> Option<Point> {
         .flat_map(|i| (1..8).map(move |j| (i, j)))
         .map(|(i, j)| Point::new(b.min().x + w * i / 8, b.min().y + h * j / 8))
         .find(|&p| inside(p))
+}
+
+/// Where routes of `net` end at a pad: its centre, or if fixed copper leaves no room for a
+/// track's end there, as with text drawn up to the pad, the point of a grid in the pad
+/// nearest the centre that has room, so that routes can still reach it.
+fn access_point(
+    world: &World<'_>,
+    net: NetId,
+    shape: &Shape,
+    center: Point,
+    layers: LayerSet,
+    widths: &[i64],
+) -> Point {
+    let room = |p: Point| {
+        layers.iter().any(|l| {
+            Shape::circle(p, widths[usize::from(l.0)])
+                .is_ok_and(|end| world.track(net, l, &end, None) != Verdict::Blocked)
+        })
+    };
+    if room(center) {
+        return center;
+    }
+    let b = shape.bbox();
+    let (w, h) = (b.max().x - b.min().x, b.max().y - b.min().y);
+    let inside = |p: Point| Shape::circle(p, 2).is_ok_and(|c| shape.touches(&c));
+    let far = |p: Point| {
+        let (dx, dy) = ((p.x - center.x) as i128, (p.y - center.y) as i128);
+        dx * dx + dy * dy
+    };
+    (1..8)
+        .flat_map(|i| (1..8).map(move |j| (i, j)))
+        .map(|(i, j)| Point::new(b.min().x + w * i / 8, b.min().y + h * j / 8))
+        .filter(|&p| inside(p) && room(p))
+        .min_by_key(|&p| (far(p), p))
+        .unwrap_or(center)
 }
 
 /// A terminal: its pads, by position in the board's, and the ends of fixed tracks and the
@@ -127,7 +163,7 @@ fn terminals(design: &Design, net: NetId) -> Vec<Group> {
 }
 
 /// The jobs, in no particular order yet.
-fn jobs(design: &Design, pitch: i64) -> Vec<Job> {
+fn jobs(design: &Design, world: &World<'_>, pitch: i64) -> Vec<Job> {
     let rules = &design.rules;
     let layers = rules.layer_count();
     let mut out = Vec::new();
@@ -140,6 +176,12 @@ fn jobs(design: &Design, pitch: i64) -> Vec<Job> {
         if groups.len() < 2 {
             continue;
         }
+        let widths: Vec<i64> = (0..layers)
+            .map(|l| {
+                spec.track_width
+                    .max(rules.track_width(Some(net), LayerId(l as u8)))
+            })
+            .collect();
         let mut pads = Vec::new();
         let mut t = 0;
         for (group, ends) in &groups {
@@ -149,9 +191,11 @@ fn jobs(design: &Design, pitch: i64) -> Vec<Job> {
                 if let Some(center) = pad_center(&pad.shape)
                     && pad.layers.0 & rules.layers().0 != 0
                 {
+                    let on = LayerSet(pad.layers.0 & rules.layers().0);
+                    let center = access_point(world, net, &pad.shape, center, on, &widths);
                     pads.push(TermPad {
                         center,
-                        layers: LayerSet(pad.layers.0 & rules.layers().0),
+                        layers: on,
                         bbox: pad.shape.bbox(),
                         terminal: t,
                     });
@@ -172,12 +216,6 @@ fn jobs(design: &Design, pitch: i64) -> Vec<Job> {
         if t < 2 {
             continue;
         }
-        let widths = (0..layers)
-            .map(|l| {
-                spec.track_width
-                    .max(rules.track_width(Some(net), LayerId(l as u8)))
-            })
-            .collect();
         let via = spec
             .via
             .filter(|_| layers > 1)
@@ -211,15 +249,17 @@ fn most_common(values: impl Iterator<Item = i64>) -> Option<i64> {
 
 pub(crate) fn run(design: &Design, options: &Options) -> Result<Routed, RouteError> {
     let rules = &design.rules;
-    let mut world = World::new(
-        &design.board,
-        rules,
-        &design.outline,
-        design.edge_clearance,
-        &design.masks,
-        &design.obstacles,
-    )
-    .map_err(RouteError::Geometry)?;
+    let world_of = |design: &Design| {
+        World::new(
+            &design.board,
+            rules,
+            &design.outline,
+            design.edge_clearance,
+            &design.masks,
+            &design.obstacles,
+        )
+        .map_err(RouteError::Geometry)
+    };
 
     // The lattice: half the tightest pitch of tracks routed.
     let routed_nets: Vec<usize> = (0..design.nets.len())
@@ -238,7 +278,25 @@ pub(crate) fn run(design: &Design, options: &Options) -> Result<Routed, RouteErr
             .min()
             .map_or(100_000, |p| (p / 2).max(1000))
     });
-    let mut jobs = jobs(design, pitch);
+    // Escapes from fine-pitch footprints, which become fixed copper of their nets.
+    let escapes = {
+        let mut world = world_of(design)?;
+        escape::plan(design, &mut world, pitch)
+    };
+    let with_escapes;
+    let design = if escapes.is_empty() {
+        design
+    } else {
+        let mut d = design.clone();
+        for e in &escapes {
+            d.board.tracks.extend(e.tracks.iter().cloned());
+            d.board.vias.extend(e.via.clone());
+        }
+        with_escapes = d;
+        &with_escapes
+    };
+    let mut world = world_of(design)?;
+    let mut jobs = jobs(design, &world, pitch);
     jobs.sort_by_key(|j| (j.span, j.ctx.net));
 
     let pad_bounds = design
@@ -314,6 +372,7 @@ pub(crate) fn run(design: &Design, options: &Options) -> Result<Routed, RouteErr
         layer_bias: options.layer_bias,
         bounds,
         max_expansions: options.max_expansions,
+        under_pads: false,
     };
 
     // Detailed routing, with rip-up.
@@ -344,6 +403,7 @@ pub(crate) fn run(design: &Design, options: &Options) -> Result<Routed, RouteErr
             }
             Params {
                 pitch: (pitch / FINE).max(1000),
+                under_pads: true,
                 ..params
             }
         };
@@ -426,11 +486,27 @@ pub(crate) fn run(design: &Design, options: &Options) -> Result<Routed, RouteErr
         .filter(|&j| outside[j] && copper[j].is_some())
         .count();
 
+    // The escapes of nets routed are part of their routes.
+    let escaped: Vec<&escape::Escape> = escapes
+        .iter()
+        .filter(|e| by_net.get(&e.net).is_some_and(|&j| copper[j].is_some()))
+        .collect();
+    let escape_length: f64 = escaped
+        .iter()
+        .flat_map(|e| &e.tracks)
+        .map(|t| {
+            let (dx, dy) = ((t.end.x - t.start.x) as f64, (t.end.y - t.start.y) as f64);
+            (dx * dx + dy * dy).sqrt()
+        })
+        .sum();
     let measure = |copper: &[Option<NetCopper>]| -> (usize, f64) {
-        copper
-            .iter()
-            .flatten()
-            .fold((0, 0.0), |(v, l), c| (v + c.vias.len(), l + c.length()))
+        copper.iter().flatten().fold(
+            (
+                escaped.iter().filter(|e| e.via.is_some()).count(),
+                escape_length,
+            ),
+            |(v, l), c| (v + c.vias.len(), l + c.length()),
+        )
     };
     stats.before_cleanup = measure(&copper);
     if options.cleanup {
@@ -443,8 +519,8 @@ pub(crate) fn run(design: &Design, options: &Options) -> Result<Routed, RouteErr
         .map(|j| jobs[j].ctx.terminals - 1)
         .sum();
 
-    let mut tracks = Vec::new();
-    let mut vias = Vec::new();
+    let mut tracks: Vec<Track> = escaped.iter().flat_map(|e| e.tracks.clone()).collect();
+    let mut vias: Vec<Via> = escaped.iter().filter_map(|e| e.via.clone()).collect();
     let top = LayerId(0);
     let bottom = LayerId((rules.layer_count() - 1) as u8);
     for (job, c) in jobs.iter().zip(&copper) {

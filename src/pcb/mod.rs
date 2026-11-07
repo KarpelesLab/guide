@@ -10,6 +10,13 @@
 //!
 //! # How it routes
 //!
+//! 0. **Escapes.** Pads closer together than a track and its clearances, such as a BGA's or
+//!    an aQFN's, form clusters. A pad of a cluster that a track of its net can't get out
+//!    of on its own layers is given a through via first, in the pad or beside it, placed on
+//!    a fine grid so as to leave room for the others; one whose only way out is long, and
+//!    that no via fits by, is given that way. Both become fixed copper of their nets, which
+//!    the rest completes. A pad whose centre has no room for a track's end, as where text
+//!    is drawn up to it, is reached at the point nearest its centre that has.
 //! 1. **Global routing.** The board is cut into square tiles on each layer, and the
 //!    negotiated-congestion [engine](crate::engine) routes every net over them. A resource
 //!    is the side between two tiles on a layer, with as many tracks as fit along its free
@@ -26,7 +33,8 @@
 //!    again with other nets' routes passable at a price that grows with the history of
 //!    conflicts where it crosses them. The nets it crosses are ripped up, it takes its
 //!    path, and they route again. A net ripped up too often stays where it is. Nets left
-//!    unrouted at the end get a second pass, on a lattice of half the pitch.
+//!    unrouted at the end get a second pass, on a lattice of half the pitch, in which a
+//!    route may also go to a pad's centre on a layer the pad isn't on, for a via in it.
 //! 4. **Cleanup**: nets with vias are rerouted with dearer vias, kept only if they lose
 //!    vias; then each run of tracks between pads, vias and branches is pulled tight, by
 //!    replacing runs with straight or 45° shortcuts where those are legal.
@@ -42,6 +50,7 @@
 
 mod cleanup;
 mod detail;
+mod escape;
 mod geometry;
 mod global;
 mod router;

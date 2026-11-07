@@ -7,13 +7,18 @@ use super::json::{self, Json};
 use super::units::mm_to_nm;
 
 /// A net class: its name, its clearance and the gap within its differential pairs if it
-/// sets them, and its priority, lower first, where KiCad 9 and later give one.
+/// sets them, and its priority, lower first, where KiCad 9 and later give one. The track
+/// width and via sizes are what new routes of the class get, not limits, so they are only
+/// for routing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ClassDef {
     pub(crate) name: String,
     pub(crate) clearance: Option<i64>,
     pub(crate) pair_gap: Option<i64>,
     pub(crate) priority: Option<i64>,
+    pub(crate) track_width: Option<i64>,
+    pub(crate) via_diameter: Option<i64>,
+    pub(crate) via_drill: Option<i64>,
 }
 
 /// The rules, as KiCad states them.
@@ -23,6 +28,8 @@ pub(crate) struct ProjectRules {
     pub(crate) hole_clearance: i64,
     pub(crate) hole_to_hole: i64,
     pub(crate) min_track_width: i64,
+    /// The clearance between copper and the board's edge.
+    pub(crate) edge_clearance: i64,
     /// The classes, `Default` among them, in file order.
     pub(crate) classes: Vec<ClassDef>,
     /// Nets assigned to classes by name, in file order.
@@ -40,11 +47,15 @@ pub(crate) fn defaults() -> ProjectRules {
         hole_clearance: 0,
         hole_to_hole: 250_000,
         min_track_width: 0,
+        edge_clearance: 0,
         classes: vec![ClassDef {
             name: "Default".into(),
             clearance: Some(200_000),
             pair_gap: Some(250_000),
             priority: None,
+            track_width: Some(200_000),
+            via_diameter: Some(600_000),
+            via_drill: Some(300_000),
         }],
         assignments: Vec::new(),
         patterns: Vec::new(),
@@ -66,6 +77,7 @@ pub(crate) fn parse(text: &str) -> Result<ProjectRules, KicadError> {
     rules.hole_clearance = get("min_hole_clearance").unwrap_or(rules.hole_clearance);
     rules.hole_to_hole = get("min_hole_to_hole").unwrap_or(rules.hole_to_hole);
     rules.min_track_width = get("min_track_width").unwrap_or(rules.min_track_width);
+    rules.edge_clearance = get("min_copper_edge_clearance").unwrap_or(rules.edge_clearance);
     if let Some(severities) = root.at(&["board", "design_settings", "rule_severities"]) {
         for (check, severity) in severities.as_object() {
             if severity.as_str() == Some("ignore") {
@@ -90,6 +102,9 @@ pub(crate) fn parse(text: &str) -> Result<ProjectRules, KicadError> {
                     .get("priority")
                     .and_then(Json::as_number)
                     .and_then(|p| p.parse().ok()),
+                track_width: length(class.get("track_width")),
+                via_diameter: length(class.get("via_diameter")),
+                via_drill: length(class.get("via_drill")),
             });
             // KiCad 6 lists a class's nets in the class.
             for net in class.get("nets").map_or(&[][..], Json::as_array) {
@@ -244,6 +259,39 @@ impl ProjectRules {
             Some(c) => self.classes[c].pair_gap,
             None => self.classes.iter().find(|c| c.name == "Default")?.pair_gap,
         }
+    }
+
+    /// The class whose track width and via sizes new routes of a net take, `Default`
+    /// included, by the same choice as [`class_of`](ProjectRules::class_of) but among the
+    /// classes that set a track width.
+    pub(crate) fn routing_class(&self, net: &str) -> Option<usize> {
+        let default = self.classes.iter().position(|c| c.name == "Default");
+        let mut matched: Vec<usize> = Vec::new();
+        for (name, classes) in &self.assignments {
+            if name == net {
+                matched.extend(
+                    classes
+                        .iter()
+                        .filter_map(|c| self.classes.iter().position(|d| &d.name == c)),
+                );
+            }
+        }
+        for (pattern, class) in &self.patterns {
+            if matches(pattern, net) {
+                matched.extend(self.classes.iter().position(|d| &d.name == class));
+            }
+        }
+        let prioritised = self.classes.iter().any(|c| c.priority.is_some());
+        let chosen = if prioritised {
+            matched
+                .iter()
+                .copied()
+                .filter(|&c| self.classes[c].track_width.is_some())
+                .min_by_key(|&c| (self.classes[c].priority.unwrap_or(i64::MAX), c))
+        } else {
+            matched.first().copied()
+        };
+        chosen.or(default)
     }
 
     /// The `Default` class's clearance.

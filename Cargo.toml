@@ -18,9 +18,11 @@ all-features = true
 [features]
 # FPGA routing problems: importing device graphs and designs from VTR.
 fpga = []
-# PCB-like domains: shapes, exact clearances, a spatial index, design rules and a DRC.
+# PCB-like domains: shapes, exact clearances, a spatial index, design rules, a DRC, and
+# PCB routing.
 pcb = ["dep:polyclip"]
-# Reading KiCad boards and their rules into the geometry layer, for clearance checks.
+# Reading KiCad boards and their rules into the geometry layer, for clearance checks and
+# routing.
 kicad = ["pcb"]
 # Reading Specctra DSN designs into the geometry layer, and writing SES sessions.
 dsn = ["pcb"]

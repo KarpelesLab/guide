@@ -15,6 +15,9 @@
 //!   own clearances or their footprint's;
 //! - copper graphics, on the board and in footprints;
 //! - zones' fills, as saved: `kicad-cli pcb drc` doesn't refill them either, unless asked;
+//! - rule areas that keep tracks, vias or pads out, as [keepouts](drc::Keepout);
+//! - for routing, in [`KicadBoard::routing`], the board's edge, the copper-to-edge
+//!   clearance, and the track width and via size of each net's class;
 //! - the rules: net classes, their patterns and assignments, differential pairs' gaps, the
 //!   minimum clearance, the hole clearance and the hole-to-hole clearance, from the
 //!   project, or from the board itself for KiCad 5 files and boards without a project.
@@ -113,6 +116,45 @@ pub struct KicadBoard {
     /// that the project turns off; copper given another net by KiCad's connectivity; and
     /// anything malformed, which is skipped.
     pub warnings: Vec<(String, usize)>,
+    /// What routing the board needs beyond the checks: its edge, and the track width and
+    /// via of each net.
+    pub routing: Routing,
+}
+
+/// What a router needs from a KiCad board beyond what [`drc::check`] looks at.
+///
+/// The widths and vias of the net classes are what KiCad gives new routes, not limits,
+/// which is why they are not in the [`Rules`]: KiCad's DRC only checks the minimum width.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Routing {
+    /// The board's edge, from `Edge.Cuts`, as lines of their own width, or of one
+    /// nanometre if they have none. Copper keeps
+    /// [`edge_clearance`](Routing::edge_clearance) from them.
+    pub outline: Vec<crate::geom::Shape>,
+    /// The clearance between copper and the board's edge, KiCad's
+    /// `min_copper_edge_clearance`.
+    pub edge_clearance: i64,
+    /// By [`NetId`](crate::id::NetId), what new routes of the net take, from its class.
+    pub nets: Vec<NetRouting>,
+    /// The openings in the solder mask over the outer layers: pads', with their mask
+    /// expansion, and graphics on `F.Mask` and `B.Mask`, which take the net of the pads in
+    /// them if those have one. KiCad reports an opening with copper of two nets in it.
+    pub masks: Vec<crate::pcb::MaskOpening>,
+    /// Boxes around text on copper, which the reader doesn't take as copper, a little
+    /// larger than the text, with their layers.
+    pub text: Vec<(crate::geom::Shape, crate::geom::LayerId)>,
+}
+
+/// What new routes of one net take, from its net class: see [`Routing`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NetRouting {
+    /// The track width, at least the board's minimum.
+    pub track_width: i64,
+    /// The diameter of a via's copper.
+    pub via_diameter: i64,
+    /// The diameter of a via's hole.
+    pub via_drill: i64,
 }
 
 /// Where an item of a [`KicadBoard`] came from.

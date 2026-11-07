@@ -2,16 +2,17 @@
 
 use std::collections::BTreeMap;
 
-use super::project::{self, ProjectRules};
+use super::project::{self, ClassDef, ProjectRules};
 use super::sexpr::{self, Sexp};
 use super::units::{
     degrees_to_millidegrees, mm_to_nm, ratio_to_millionths, rotate, times_ratio, to_point,
 };
-use super::{KicadBoard, KicadError, Source};
+use super::{KicadBoard, KicadError, NetRouting, Routing, Source};
 use crate::geom::drc::{self, Pad, Track, Via, Zone};
 use crate::geom::{
     LayerId, LayerSet, NetClass, Overrides, Point, RuleSpec, Rules, Shape, ShapeIndex,
 };
+use crate::pcb::MaskOpening;
 
 /// The tolerance for arcs in graphics and custom pads, which are approximated as they are
 /// read: 10 nm, far inside KiCad's slack of 500 nm. Arc tracks are approximated by
@@ -86,8 +87,10 @@ pub fn read(pcb: &str, project: Option<&str>) -> Result<KicadBoard, KicadError> 
             _ => {}
         }
     }
-    let rules = r.rules(&rules)?;
+    let project = rules;
+    let rules = r.rules(&project)?;
     r.propagate();
+    r.mask_nets();
     let Reader {
         board,
         names,
@@ -96,8 +99,14 @@ pub fn read(pcb: &str, project: Option<&str>) -> Result<KicadBoard, KicadError> 
         pads,
         zones,
         warnings,
+        outline,
+        masks,
+        text,
         ..
     } = r;
+    let mut routing = routing(&project, &names, outline);
+    routing.masks = masks;
+    routing.text = text;
     Ok(KicadBoard {
         board,
         rules,
@@ -107,7 +116,91 @@ pub fn read(pcb: &str, project: Option<&str>) -> Result<KicadBoard, KicadError> 
         pads,
         zones,
         warnings: warnings.into_iter().collect(),
+        routing,
     })
+}
+
+/// A box that holds a text on copper, with its stroke, turned as the text is. KiCad's
+/// stroke font is narrower than its size, so the box is wider than the text.
+fn text_box(node: &Sexp<'_>, place: Place) -> Option<Shape> {
+    // `(gr_text "text" ...)`, or `(fp_text kind "text" ...)`.
+    let text = if node.is("fp_text") {
+        node.arg(1)?
+    } else {
+        node.arg(0)?
+    };
+    let at = node.child("at");
+    let pos = at.and_then(args_pair)?;
+    let angle = at
+        .and_then(|a| a.arg(2))
+        .and_then(degrees_to_millidegrees)
+        .unwrap_or(0);
+    let effects = node.child("effects");
+    let font = effects.and_then(|e| e.child("font"));
+    let size = font
+        .and_then(|f| pair(f, "size"))
+        .unwrap_or((1_000_000, 1_000_000));
+    let thickness = font
+        .and_then(|f| length(f, "thickness"))
+        .unwrap_or(size.1 / 8);
+    let lines: Vec<&str> = text.split("\\n").collect();
+    let longest = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as i64;
+    let w = longest * size.1 + thickness;
+    let h = lines.len() as i64 * size.0 * 3 / 2 + thickness;
+    let justify = effects.and_then(|e| e.child("justify"));
+    let has =
+        |what: &str| justify.is_some_and(|j| j.args().iter().any(|a| a.as_atom() == Some(what)));
+    let (x0, x1) = match (has("left"), has("right"), has("mirror")) {
+        (_, _, true) => (-w, w),
+        (true, _, _) => (0, w),
+        (_, true, _) => (-w, 0),
+        _ => (-w / 2, w - w / 2),
+    };
+    let (y0, y1) = match (has("top"), has("bottom")) {
+        (true, _) => (0, h),
+        (_, true) => (-h, 0),
+        _ => (-h / 2, h - h / 2),
+    };
+    let base = place.apply(pos);
+    let corners: Vec<Point> = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+        .into_iter()
+        .map(|c| to_point(add(base, rotate(c, angle))))
+        .collect();
+    Shape::polygon(&corners, &[]).ok()
+}
+
+/// What new routes of each net take, from the classes, and the board's edge.
+fn routing(project: &ProjectRules, names: &[String], outline: Vec<Shape>) -> Routing {
+    let defaults = project::defaults().classes.remove(0);
+    let default = project
+        .classes
+        .iter()
+        .find(|c| c.name == "Default")
+        .unwrap_or(&defaults);
+    let mut nets = Vec::with_capacity(names.len());
+    for name in names {
+        let class = project
+            .routing_class(name)
+            .map_or(default, |c| &project.classes[c]);
+        let pick = |f: fn(&ClassDef) -> Option<i64>| {
+            f(class)
+                .or_else(|| f(default))
+                .or_else(|| f(&defaults))
+                .unwrap_or(0)
+        };
+        nets.push(NetRouting {
+            track_width: pick(|c| c.track_width).max(project.min_track_width).max(1),
+            via_diameter: pick(|c| c.via_diameter),
+            via_drill: pick(|c| c.via_drill),
+        });
+    }
+    Routing {
+        outline,
+        edge_clearance: project.edge_clearance,
+        nets,
+        masks: Vec::new(),
+        text: Vec::new(),
+    }
 }
 
 /// Where a footprint puts what it holds.
@@ -133,6 +226,8 @@ struct Footprint {
     place: Place,
     reference: String,
     clearance: Option<i64>,
+    /// Its pads' solder mask expansion, if it sets one.
+    mask_margin: Option<i64>,
 }
 
 /// Whether KiCad's connectivity may give an item another net: tracks, vias and graphics
@@ -160,6 +255,14 @@ struct Reader {
     track_kinds: Vec<Kind>,
     zone_kinds: Vec<Kind>,
     warnings: BTreeMap<String, usize>,
+    /// The board's edge, from `Edge.Cuts`.
+    outline: Vec<Shape>,
+    /// Openings in the solder mask, from pads and graphics on the mask layers.
+    masks: Vec<MaskOpening>,
+    /// Boxes holding text on copper, which isn't read as copper.
+    text: Vec<(Shape, LayerId)>,
+    /// The board's solder mask expansion of pads.
+    mask_margin: i64,
 }
 
 /// The text of the UUID of an item: `uuid` from KiCad 7 on, `tstamp` before.
@@ -268,6 +371,13 @@ impl Reader {
             track_kinds: Vec::new(),
             zone_kinds: Vec::new(),
             warnings: BTreeMap::new(),
+            outline: Vec::new(),
+            masks: Vec::new(),
+            text: Vec::new(),
+            mask_margin: root
+                .child("setup")
+                .and_then(|s| length(s, "pad_to_mask_clearance"))
+                .unwrap_or(0),
         };
         // Copper with no net is of the net with no name, so that it is never checked
         // against itself, as in KiCad.
@@ -473,6 +583,7 @@ impl Reader {
             clearance: own_clearance(
                 length(node, "clearance").or_else(|| length(node, "local_clearance")),
             ),
+            mask_margin: length(node, "solder_mask_margin"),
         };
         for item in node.args() {
             match item.name() {
@@ -572,8 +683,20 @@ impl Reader {
             }
             return;
         }
+        let sides = self.mask_sides(node.child("layers"));
+        let margin = length(node, "solder_mask_margin")
+            .or(fp.mask_margin)
+            .unwrap_or(self.mask_margin);
         let mut hole = hole;
         for shape in shapes {
+            for &layer in &sides {
+                self.masks.push(MaskOpening {
+                    shape: shape.clone(),
+                    layer,
+                    margin,
+                    net,
+                });
+            }
             self.board.pads.push(Pad {
                 shape,
                 layers,
@@ -735,8 +858,14 @@ impl Reader {
         to: &dyn Fn(Vec2) -> Point,
         what: &str,
     ) -> Option<Vec<Shape>> {
+        let edge = what == "board edge";
         let width = stroke_width(node).unwrap_or(0);
-        let fill = filled(node);
+        // The board's edge is a line, whatever its width and fill.
+        let (width, fill) = if edge {
+            (width.max(1), false)
+        } else {
+            (width, filled(node))
+        };
         let kind = node.name().unwrap_or("");
         let kind = kind
             .strip_prefix("gr_")
@@ -823,9 +952,18 @@ impl Reader {
         let Some(layer) = node.child("layer").and_then(|l| l.arg(0)) else {
             return;
         };
+        if layer == "Edge.Cuts" {
+            return self.edge(node, fp);
+        }
+        if let Some(side) = self.mask_side(layer) {
+            return self.mask_graphic(node, fp, side);
+        }
         let Some(l) = self.layer(layer) else { return };
         let kind = node.name().unwrap_or("");
         if kind.ends_with("text") || kind.ends_with("text_box") || kind.ends_with("textbox") {
+            if let Some(b) = text_box(node, fp.map_or(Place::BOARD, |f| f.place)) {
+                self.text.push((b, l));
+            }
             return self.warn("text on copper, skipped");
         }
         let place = fp.map_or(Place::BOARD, |f| f.place);
@@ -857,10 +995,146 @@ impl Reader {
         }
     }
 
+    /// The outer copper layer under a solder mask layer.
+    fn mask_side(&self, layer: &str) -> Option<LayerId> {
+        let last = self.copper.len().checked_sub(1)?;
+        match layer {
+            "F.Mask" => Some(LayerId(0)),
+            "B.Mask" => Some(LayerId(last as u8)),
+            _ => None,
+        }
+    }
+
+    /// The outer copper layers whose mask a pad's `(layers ...)` opens.
+    fn mask_sides(&self, node: Option<&Sexp<'_>>) -> Vec<LayerId> {
+        let Some(last) = self.copper.len().checked_sub(1) else {
+            return Vec::new();
+        };
+        let (mut top, mut bottom) = (false, false);
+        for name in node
+            .map_or(&[][..], Sexp::args)
+            .iter()
+            .filter_map(Sexp::as_atom)
+        {
+            match name {
+                "F.Mask" => top = true,
+                "B.Mask" => bottom = true,
+                "*.Mask" | "F&B.Mask" => (top, bottom) = (true, true),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        if top {
+            out.push(LayerId(0));
+        }
+        if bottom && last > 0 {
+            out.push(LayerId(last as u8));
+        }
+        out
+    }
+
+    /// A graphic on a solder mask layer: an opening in the mask.
+    fn mask_graphic(&mut self, node: &Sexp<'_>, fp: Option<&Footprint>, layer: LayerId) {
+        let kind = node.name().unwrap_or("");
+        if kind.ends_with("text") || kind.ends_with("text_box") || kind.ends_with("textbox") {
+            return;
+        }
+        let place = fp.map_or(Place::BOARD, |f| f.place);
+        if let Some(shapes) = self.graphic_shapes(node, &|v| to_point(place.apply(v)), "mask") {
+            for shape in shapes {
+                self.masks.push(MaskOpening {
+                    shape,
+                    layer,
+                    margin: 0,
+                    net: None,
+                });
+            }
+        }
+    }
+
+    /// Gives each opening from a graphic the net of the pads in it, if they have one net.
+    /// An opening with pads of several nets bridges them already, and KiCad reports any
+    /// other copper in it too, so it keeps the net `None`, which every net keeps out of.
+    fn mask_nets(&mut self) {
+        let pads = ShapeIndex::bulk_load(self.board.pads.iter().map(|p| p.shape.clone()));
+        let mut near = Vec::new();
+        for m in self.masks.iter_mut() {
+            if m.net.is_some() || m.margin != 0 || pads.within(&m.shape, 1, &mut near).is_err() {
+                continue;
+            }
+            let mut nets: Vec<Option<NetId>> = near
+                .iter()
+                .map(|id| &self.board.pads[id.slot() as usize])
+                .filter(|p| p.layers.contains(m.layer))
+                .map(|p| p.net)
+                .collect();
+            nets.sort_unstable();
+            nets.dedup();
+            if let [net] = nets[..] {
+                m.net = net;
+            }
+        }
+    }
+
+    /// A graphic on `Edge.Cuts`, of the board or of a footprint: part of the board's edge.
+    fn edge(&mut self, node: &Sexp<'_>, fp: Option<&Footprint>) {
+        let kind = node.name().unwrap_or("");
+        if kind.ends_with("text") || kind.ends_with("text_box") || kind.ends_with("textbox") {
+            return;
+        }
+        let place = fp.map_or(Place::BOARD, |f| f.place);
+        match self.graphic_shapes(node, &|v| to_point(place.apply(v)), "board edge") {
+            Some(shapes) => self.outline.extend(shapes),
+            None => self.warn("malformed board edge, skipped"),
+        }
+    }
+
+    /// A rule area, as a keepout if it keeps tracks, vias or pads out.
+    fn keepout(&mut self, node: &Sexp<'_>, rules: &Sexp<'_>) {
+        let not_allowed =
+            |what: &str| rules.child(what).and_then(|c| c.arg(0)) == Some("not_allowed");
+        let (tracks, vias, pads) = (
+            not_allowed("tracks"),
+            not_allowed("vias"),
+            not_allowed("pads"),
+        );
+        if !(tracks || vias || pads) {
+            return;
+        }
+        // `(layers ...)`, or `(layer ...)` for a rule area on one layer.
+        let layers = LayerSet(
+            self.layer_set(node.child("layers")).0 | self.layer_set(node.child("layer")).0,
+        );
+        for polygon in node.children("polygon") {
+            let Some((ring, arcs)) = points(polygon) else {
+                self.warn("malformed rule area, skipped");
+                continue;
+            };
+            if arcs > 0 {
+                self.warn("zone outline with arcs: taken as straight between their points");
+            }
+            // A footprint's rule areas are saved in board coordinates, as its zones are.
+            let ring: Vec<Point> = ring.into_iter().map(to_point).collect();
+            let Ok(pieces) = Shape::region(&[&ring]) else {
+                self.warn("rule area that could not be built, skipped");
+                continue;
+            };
+            for shape in pieces {
+                self.board.keepouts.push(drc::Keepout {
+                    shape,
+                    layers,
+                    tracks,
+                    vias,
+                    pads,
+                });
+            }
+        }
+    }
+
     /// A zone's fill, which is copper unless the zone is a rule area.
     fn zone(&mut self, node: &Sexp<'_>, fp: Option<&Footprint>) {
-        if node.child("keepout").is_some() {
-            return;
+        if let Some(rules) = node.child("keepout") {
+            return self.keepout(node, rules);
         }
         let net = self.net(node);
         let name = &self.names[net.index()];
@@ -925,6 +1199,9 @@ impl Reader {
             if let Some(v) = length(setup, "trace_min") {
                 rules.min_track_width = v;
             }
+            if let Some(v) = length(setup, "edge_clearance") {
+                rules.edge_clearance = v;
+            }
         }
         let classes: Vec<&Sexp<'_>> = root.children("net_class").collect();
         if !classes.is_empty() {
@@ -936,6 +1213,9 @@ impl Reader {
                     clearance: length(class, "clearance"),
                     pair_gap: length(class, "diff_pair_gap"),
                     priority: None,
+                    track_width: length(class, "trace_width"),
+                    via_diameter: length(class, "via_dia"),
+                    via_drill: length(class, "via_drill"),
                 });
                 for net in class.children("add_net").filter_map(|n| n.arg(0)) {
                     rules

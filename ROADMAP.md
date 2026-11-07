@@ -161,11 +161,13 @@ across another net's pad, where the original board's own via is reported too
 The first results against Freerouting 2.5.0 are published, from the same stripped boards and
 checked by the same KiCad DRC ([results](docs/benchmarks.md#pcb-routing-against-freerouting)).
 Freerouting completes seven of the nine, leaves one connection on `flea`, and makes 44 of
-`nk3-nrf-mini`'s 83 connections to `guide`'s 56. KiCad finds violations in its results on six
+`nk3-nrf-mini`'s 83 connections, to the 56 `guide` made then and the 82 it makes now. KiCad finds violations in its results on six
 boards, nearly all of rules that the DSN it is given doesn't carry. On the seven boards both
 complete, `guide`'s track is 6% shorter, and its vias about as many, 168 to 172, though more on
-three boards; on one thread it is faster on seven boards, and slower on `flea` and
-`nk3-nrf-mini`. Left for the exit: `nk3-nrf-mini`.
+three boards. On one thread it was faster on seven boards, and slower on `flea` and
+`nk3-nrf-mini`, before speedups that cut those two to a quarter and a third. Left for the exit:
+`nk3-nrf-mini`'s `/LED_R`, which the board itself makes impossible without a violation, so M5 is
+done but for a fault in that board's design.
 
 ### M6: PCB routing, advanced
 

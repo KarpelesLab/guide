@@ -1285,6 +1285,11 @@ Measured on 2026-11-08 with rustc 1.97.1, on commit `8871703` with the harness a
 Ryzen Threadripper PRO 9995WX shared with other work. Freerouting is 2.5.0's jar on Adoptium's
 JRE 25.0.5.
 
+`guide`'s numbers here are from before escape routing and the speedups that followed it, which
+[the section above](#pcb-routing-of-the-curated-boards) has: since then it makes 82 of
+`nk3-nrf-mini`'s 83 connections, against Freerouting's 44, and its times on the four slowest
+boards are a third to a ninth of these. This comparison has not been run again since.
+
 ### How
 
 ```text

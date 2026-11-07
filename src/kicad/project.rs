@@ -30,6 +30,11 @@ pub(crate) struct ProjectRules {
     pub(crate) min_track_width: i64,
     /// The clearance between copper and the board's edge.
     pub(crate) edge_clearance: i64,
+    /// The smallest through hole, via diameter and via annular ring, which new vias keep
+    /// to whatever their class says.
+    pub(crate) min_hole: i64,
+    pub(crate) min_via_diameter: i64,
+    pub(crate) min_via_annular: i64,
     /// The classes, `Default` among them, in file order.
     pub(crate) classes: Vec<ClassDef>,
     /// Nets assigned to classes by name, in file order.
@@ -48,6 +53,9 @@ pub(crate) fn defaults() -> ProjectRules {
         hole_to_hole: 250_000,
         min_track_width: 0,
         edge_clearance: 0,
+        min_hole: 0,
+        min_via_diameter: 0,
+        min_via_annular: 0,
         classes: vec![ClassDef {
             name: "Default".into(),
             clearance: Some(200_000),
@@ -78,6 +86,9 @@ pub(crate) fn parse(text: &str) -> Result<ProjectRules, KicadError> {
     rules.hole_to_hole = get("min_hole_to_hole").unwrap_or(rules.hole_to_hole);
     rules.min_track_width = get("min_track_width").unwrap_or(rules.min_track_width);
     rules.edge_clearance = get("min_copper_edge_clearance").unwrap_or(rules.edge_clearance);
+    rules.min_hole = get("min_through_hole_diameter").unwrap_or(rules.min_hole);
+    rules.min_via_diameter = get("min_via_diameter").unwrap_or(rules.min_via_diameter);
+    rules.min_via_annular = get("min_via_annular_width").unwrap_or(rules.min_via_annular);
     if let Some(severities) = root.at(&["board", "design_settings", "rule_severities"]) {
         for (check, severity) in severities.as_object() {
             if severity.as_str() == Some("ignore") {

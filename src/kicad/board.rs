@@ -188,10 +188,26 @@ fn routing(project: &ProjectRules, names: &[String], outline: Vec<Shape>) -> Rou
                 .or_else(|| f(&defaults))
                 .unwrap_or(0)
         };
+        // The class's via, made as large as the board's minimums ask: KiCad checks those
+        // whatever the class says.
+        let drill = pick(|c| c.via_drill);
+        let drill = if drill > 0 {
+            drill.max(project.min_hole)
+        } else {
+            drill
+        };
+        let diameter = pick(|c| c.via_diameter);
+        let diameter = if diameter > 0 && drill > 0 {
+            diameter
+                .max(project.min_via_diameter)
+                .max(drill + 2 * project.min_via_annular)
+        } else {
+            diameter
+        };
         nets.push(NetRouting {
             track_width: pick(|c| c.track_width).max(project.min_track_width).max(1),
-            via_diameter: pick(|c| c.via_diameter),
-            via_drill: pick(|c| c.via_drill),
+            via_diameter: diameter,
+            via_drill: drill,
         });
     }
     Routing {

@@ -245,6 +245,33 @@ fn own_clearances_and_classes() {
 }
 
 #[test]
+fn new_vias_keep_to_the_boards_minimums() {
+    let text = board(&["A", "B"], "");
+    // The default class's via has a 0.25 mm hole and a 0.05 mm ring, under the board's
+    // minimums of a 0.3 mm hole, a 0.6 mm via and a 0.15 mm ring; the other class's via
+    // is within them, and stays as it is.
+    let project = |ring: &str| {
+        format!(
+            r#"{{"board": {{"design_settings": {{"rules": {{"min_through_hole_diameter": 0.3,
+                "min_via_diameter": 0.6, "min_via_annular_width": {ring}}}}}}},
+            "net_settings": {{"classes": [{{"name": "Default", "via_diameter": 0.35, "via_drill": 0.25}},
+                                          {{"name": "Big", "via_diameter": 0.8, "via_drill": 0.4}}],
+                              "netclass_patterns": [{{"netclass": "Big", "pattern": "B"}}]}}}}"#
+        )
+    };
+    let read = read(&text, Some(&project("0.15"))).unwrap();
+    let via = |n: usize| {
+        let r = read.routing.nets[n];
+        (r.via_diameter, r.via_drill)
+    };
+    assert_eq!(via(1), (600_000, 300_000));
+    assert_eq!(via(2), (800_000, 400_000));
+    // With rings of 0.2 mm, the 0.3 mm hole needs 0.7 mm of copper.
+    let read = super::read(&text, Some(&project("0.2"))).unwrap();
+    assert_eq!(read.routing.nets[1].via_diameter, 700_000);
+}
+
+#[test]
 fn zone_fills_are_unfractured() {
     // A square of 10 with a square hole of 4, joined to the outline by a cut along y = 3,
     // as KiCad saves fills, in KiCad's coordinates. The hole runs the other way round.

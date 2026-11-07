@@ -4,8 +4,10 @@ This is the start of the benchmark report that the [roadmap](../ROADMAP.md) asks
 it covers the engine, on synthetic instances that this repository generates. Those are
 useful for tuning, for catching regressions and for checking what the docs say. They are **not
 evidence about real designs**. The comparisons on real designs so far are
-[FPGA routing against VPR](#fpga-routing-against-vpr), on VTR's MCNC circuits, and the
-[clearance check against KiCad's](#pcb-clearance-checks-against-kicad), on real boards.
+[FPGA routing against VPR](#fpga-routing-against-vpr), on VTR's MCNC circuits, the
+[clearance check against KiCad's](#pcb-clearance-checks-against-kicad), on real boards, and
+[those boards read from DSN](#pcb-dsn-designs-against-kicad-boards) against the same boards read
+from KiCad's files.
 
 ## Running
 
@@ -519,8 +521,8 @@ path and can pay for it. On these instances, 10 iterations at 0.9 is a reasonabl
 
 ## FPGA and PCB comparisons
 
-Of the comparisons of results in the [roadmap](../ROADMAP.md#measuring-best), the first two
-done are below. There are no results for the others yet.
+Of the comparisons of results in the [roadmap](../ROADMAP.md#measuring-best), the ones
+done so far are below. There are no results for the others yet.
 
 | Domain | Compared against | Benchmarks | Status |
 | --- | --- | --- | --- |
@@ -528,6 +530,7 @@ done are below. There are no results for the others yet.
 | FPGA routing | VPR, nextpnr | VTR's Verilog suite, Titan23 | Not yet done |
 | FPGA placement | VPR, nextpnr | VTR benchmarks, ISPD 2016/2017 contest sets | Not yet done |
 | PCB clearance checks | KiCad 10.0.3 | [Curated open-source KiCad boards](../testdata/kicad/README.md) | [Done](#pcb-clearance-checks-against-kicad) |
+| PCB DSN import, SES export | KiCad 10.0.3's reading of the same boards, and its session import | The same boards | [Done](#pcb-dsn-designs-against-kicad-boards) |
 | PCB routing | Freerouting | The same boards | Not yet done |
 | PCB placement | Hand-placed originals | The same boards | Not yet done |
 | ASIC global routing | Published contest results | ISPD 2007/2008 | Not yet done |
@@ -889,3 +892,145 @@ were found:
   padstacks with other shapes on other layers, text, Bézier curves, nor pads and vias without
   copper where nothing connects to them; `kicad::read` warns of each.
 - Copper edge clearance, solder mask and silkscreen checks are KiCad's, and not compared.
+
+## PCB: DSN designs against KiCad boards
+
+`dsn::read` reads the Specctra designs that KiCad's Freerouting workflow exports, into the same
+`drc::Board` and `Rules` as `kicad::read`. This compares the two readings of each
+[curated board](../testdata/kicad/README.md): its `.kicad_pcb` and project, and the `.dsn` that
+KiCad 10.0.3's own exporter (`pcbnew.ExportSpecctraDSN`) wrote from it, under the same scenarios
+as above, finding by finding.
+
+### How
+
+Each DSN item is matched to the KiCad item it came from: tracks by their layer and ends, vias by
+their position, pads by their component, number and the box of their copper, all within 3 µm.
+Every DSN track, via and pad finds its KiCad item, and every KiCad track, via and pad with copper
+is in the DSN. Both readings are then checked with KiCad's slack and an arc tolerance of 10 nm,
+the DSN's rules raised as the project's are, and their findings compared by the UUIDs of the
+KiCad items. A short and a clearance violation are one kind here, as which a pair is can turn on
+rounding. Each difference must be explained by something a DSN file doesn't carry, or by
+rounding whose size is checked: the two readings' gaps for the pair must straddle what decides,
+the clearance less KiCad's slack, and be within 1.5 µm of each other (6.5 µm for a rounded pad,
+which KiCad writes as a polygon), or within an arc's sagitta of each other for an arc.
+
+```text
+cargo test --release --all-features curated_dsn
+```
+
+### Results
+
+| Board | Rules | KiCad reading | DSN reading | Both | KiCad reading only | DSN reading only |
+| --- | --- | --- | --- | --- | --- | --- |
+| GB-BRK-LINK-A | own | 0 | 0 | 0 | - | - |
+| GB-BRK-LINK-A | +0.1 mm | 3 | 3 | 3 | - | - |
+| GB-BRK-LINK-A | +0.3 mm | 19 | 9 | 9 | 10 zone fills | - |
+| GB-BRK-LINK-A | +0.5 mm | 30 | 20 | 20 | 10 zone fills | - |
+| GB-LIVE32 | own | 0 | 0 | 0 | - | - |
+| GB-LIVE32 | +0.05 mm | 339 | 339 | 339 | - | - |
+| TS4231-BOB | own | 0 | 0 | 0 | - | - |
+| TS4231-BOB | +0.1 mm | 12 | 12 | 12 | - | - |
+| TS4231-BOB | +0.3 mm | 78 | 78 | 78 | - | - |
+| TS4231-BOB | +0.5 mm | 141 | 118 | 118 | 23 zone fills | - |
+| lisn | own | 0 | 3 | 0 | - | 3 rounding |
+| lisn | +0.1 mm | 43 | 47 | 43 | - | 4 rounding |
+| lisn | +0.3 mm | 261 | 147 | 147 | 114 zone fills | - |
+| lisn | +0.5 mm | 362 | 221 | 217 | 145 zone fills | 4 rounding |
+| placebo | own | 2 | 9 | 2 | - | 4 arcs, 3 rounding |
+| placebo | +0.1 mm | 123 | 81 | 77 | 46 zone fills | 2 arcs, 2 rounding |
+| placebo | +0.2 mm | 274 | 209 | 208 | 9 arcs, 57 zone fills | 1 arc |
+| flea | own | 199 | 323 | 177 | 22 holes | 56 arcs, 54 custom pads, 10 holes as keepouts, 26 rounding |
+| flea | +0.05 mm | 477 | 534 | 453 | 2 arcs, 22 holes | 16 arcs, 55 custom pads, 10 holes as keepouts |
+| nk3-nrf-mini | own | 5 | 45 | 0 | 5 holes | 37 custom pads, 6 holes as keepouts, 1 pad's own clearance, 1 rounding |
+| nk3-nrf-mini | +0.05 mm | 420 | 327 | 280 | 5 holes, 135 zone fills | 40 custom pads, 6 holes as keepouts, 1 pad's own clearance |
+| udb-s | own | 4 | 93 | 4 | - | 4 arcs, 3 rounding, 82 routing widths |
+| udb-s | +0.1 mm | 281 | 251 | 68 | 213 zone fills | 1 arc, 100 pairs' gaps, 82 routing widths |
+| udb-s | +0.3 mm | 392 | 390 | 158 | 1 arc, 233 zone fills | 1 arc, 149 pairs' gaps, 82 routing widths |
+| isi-channel | own | 0 | 0 | 0 | - | - |
+| isi-channel | +0.5 mm | 4 | 0 | 0 | 4 zone fills | - |
+
+In all, the KiCad reading makes 3469 findings, as in the comparison with KiCad above, and the
+DSN reading 3259, of which 2413 are the same. All 1902 differences are explained, and none is
+unexplained. Of the 1056 on the KiCad reading only, 990 are zone fills, 54 holes and 12 arcs. Of
+the 846 on the DSN reading only, 249 are pairs' gaps, 246 routing widths, 186 custom pads, 85
+arcs, 46 rounding, 32 holes as keepouts and 2 pads' own clearances.
+
+### The differences
+
+All but rounding are things a design doesn't carry, as `dsn`'s documentation lists them:
+
+- **Zone fills** (KiCad only). A design has planes, which are outlines to pour, and not the
+  fills; KiCad exports teardrops as planes too. They are read, and not checked as copper.
+- **Holes** (KiCad only), and **holes as keepouts** (DSN only). Pins have no drills in a design,
+  so there are no hole clearances or hole-to-hole checks. KiCad exports non-plated holes as
+  keepouts, grown by the board's hole clearance, which tracks and vias then enter.
+- **Arcs.** KiCad exports an arc track as one straight wire from end to end. Each of these is a
+  pair whose two gaps differ by no more than the arc's sagitta, and the rounding.
+- **Custom pads** (DSN only). KiCad exports a custom pad as the convex hull of its shape, which
+  covers what the pad doesn't: on `nk3-nrf-mini`, the curved touch pad, and on `flea`, the pads
+  of `U1` next to its pads of no number.
+- **Pairs' gaps** (DSN only). The two nets of a differential pair may come as close as their
+  class's gap, which a design doesn't say, so the class's clearance applies between them.
+- **Pads' own clearances** (DSN only). A design has no clearance of a pad's own.
+- **Routing widths** (DSN only). A design's widths are what to route at, and become the rules'
+  widths, where the KiCad reading has KiCad's minimum width. `udb-s` has 82 tracks narrower than
+  their class's width.
+- **Rounding.** KiCad writes coordinates to six significant digits in micrometres: 0.1 µm below
+  100 mm, and 1 µm beyond. Each of these is a pair at the very edge of the clearance, whose two
+  gaps are within 1.5 µm of each other, or 6.5 µm for a rounded pad.
+
+### Sessions into KiCad
+
+The other direction: `dsn::write_session` writes a session from each curated board's own tracks
+and vias, as `kicad::read` reads them, and KiCad's own `pcbnew.ImportSpecctraSES` imports it into
+the board, replacing its tracks and vias.
+
+```text
+GUIDE_KICAD=1 cargo test --release --all-features curated_sessions
+```
+
+On all nine boards, every straight track and every via comes back exactly, to the nanometre,
+with its width, layers, drill and net. A session has no arcs that KiCad reads (`qarc` is
+refused), so the 934 arcs of four boards come back as polylines within 100 nm of them, 29 777
+tracks in all. KiCad's DRC then finds the same as before:
+
+- on the five boards with no arcs, as many violations of each kind, and as many unconnected
+  items;
+- on every board, the same pairs of items, where an arc and the tracks it became are one item,
+  with the same smallest gaps to within 0.3 µm. An arc too close to something is now several
+  tracks too close to it, so there are more violations. On `flea` that takes KiCad's clearance
+  violations past its limit of 499, from 177 to 503, so its clearances and hole clearances can't
+  be compared there. Solder mask bridges are left out of this, as KiCad reports one pair of
+  the items a mask opening bridges, whichever its threads reach first, and that changes from
+  run to run on the same board.
+
+The same test with `curated_dsn_files` checks that KiCad's exporter still writes the DSN files in
+`testdata/kicad`, and `GUIDE_KICAD_UPDATE=1` writes them again.
+
+### Freerouting
+
+For the comparison with Freerouting that M5's exit asks for, Freerouting 2.5.0 routes these
+designs headless. It isn't installed: its jar needs Java 25, and its native `freerouting-cli`
+build for Linux crashes as it starts routing (a GraalVM serialisation error), so it runs from
+the jar on a JRE unpacked anywhere, such as Adoptium's:
+
+```text
+jre/bin/java -Djava.awt.headless=true -jar freerouting-2.5.0.jar \
+    -de board.dsn -do board.ses --router.autorouter.max_passes=20 -mt 4 --gui.enabled=false
+```
+
+On `TS4231-BOB` it keeps the existing wiring, routes the two nets left, and writes a session in
+the same form as `write_session`'s, which KiCad imports. It reports one clearance violation that
+neither KiCad nor either reading here finds, between a via of `GND` and pad 2 of `R1`, which it
+calls fixed and leaves alone; that is for the comparison to look into. Nothing here depends on
+Freerouting.
+
+### What this does not show
+
+- Both readings are ours. That the DSN reading agrees with the KiCad reading, and the KiCad
+  reading with KiCad's DRC, says the DSN reader is right about what KiCad exports; it says
+  nothing about designs from other tools, which can use what KiCad's exporter doesn't: other
+  units, `qarc` wires, padstacks with other shapes on other layers, layer rules. Those are
+  tested on small hand-written designs only.
+- KiCad's exporter refuses two footprints of one reference, so two of `nk3-nrf-mini`'s three
+  mounting holes `REF**` were renamed for it, `REF**_2` and `REF**_3`, which changes no copper.

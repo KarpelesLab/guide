@@ -129,7 +129,12 @@ and 21 of ours, are explained, mostly by limits of KiCad's own check
 ### M5: PCB routing MVP
 
 - Specctra DSN import and SES export, giving KiCad interoperability through its
-  existing Freerouting workflow.
+  existing Freerouting workflow. Done, behind the `dsn` feature: `dsn::read` gives the same
+  board and rules as `kicad::read`, and on the nine curated boards, as KiCad exports them, finds
+  what the `.kicad_pcb` does but for differences that are each explained by what DSN doesn't
+  carry, such as zone fills and holes, or by KiCad's rounding. Sessions from `write_session`
+  import into KiCad with every straight track and via exact, and KiCad's DRC unchanged
+  ([results](docs/benchmarks.md#pcb-dsn-designs-against-kicad-boards)).
 - Multi-layer, grid-free routing over the geometry layer: through vias, keepouts,
   fixed pre-routes, net classes.
 - Global routing followed by detailed routing.

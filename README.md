@@ -71,7 +71,8 @@ cargo test --all-features
 ```
 
 With `kicad-cli` 10.0.3 installed, `GUIDE_KICAD=1 cargo test --release --all-features` also
-compares the PCB clearance check with KiCad's own, live.
+compares the PCB clearance check with KiCad's own, live, and imports sessions written here into
+KiCad, through its `pcbnew` module for Python.
 
 Commits follow [Conventional Commits](https://www.conventionalcommits.org/).
 [release-plz](https://release-plz.dev/) derives versions and the changelog from

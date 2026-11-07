@@ -48,7 +48,8 @@ to stress the `RoutingSpace` abstraction
 interface and is how KiCad talks to Freerouting. Direct KiCad files follow, and
 IPC-2581 or ODB++ on demand. Reading KiCad boards for clearance checks exists already, behind
 the `kicad` feature: the copper, the nets, and the rules from the project, as KiCad's own DRC
-sees them.
+sees them. So do reading DSN designs and writing SES sessions, behind the `dsn` feature, into
+and from the same model, which KiCad's session import takes back.
 
 ## FPGA
 

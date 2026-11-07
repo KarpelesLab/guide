@@ -1848,6 +1848,36 @@ fn drc_hole_clearance() {
 }
 
 #[test]
+fn drc_reports_a_track_over_a_hole_with_no_hole_clearance() {
+    let rules = Rules::new(RuleSpec::new(&["F.Cu", "B.Cu"], 100, 100)).unwrap();
+    let mut board = Board::default();
+    board.pads = vec![Pad {
+        shape: circle(0, 0, 1000),
+        layers: LayerSet::EMPTY,
+        hole: Some(circle(0, 0, 1000)),
+        net: None,
+        clearance: None,
+    }];
+    // Touching the hole is allowed, and crossing it is not.
+    board.tracks = vec![t((-2000, 600), (2000, 600), 200, 0, Some(1))];
+    assert!(drc::check(&board, &rules).unwrap().is_empty());
+    board.tracks[0] = t((-2000, 599), (2000, 599), 200, 0, Some(1));
+    let found = drc::check(&board, &rules).unwrap();
+    assert!(
+        matches!(
+            found[..],
+            [Violation::HoleClearance {
+                hole: Item::Pad(0),
+                item: Item::Track(0),
+                required: 0,
+                ..
+            }]
+        ),
+        "{found:?}"
+    );
+}
+
+#[test]
 fn regions_unfracture_outlines() {
     // Two squares meeting at a corner, saved as one ring that visits it twice.
     let ring: Vec<Point> = [

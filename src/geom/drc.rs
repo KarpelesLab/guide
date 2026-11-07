@@ -214,7 +214,8 @@ pub enum Violation {
         /// The gap between the holes.
         gap: Gap,
     },
-    /// Copper is closer to a hole than the hole clearance, and is not of the hole's net.
+    /// Copper is closer to a hole than the hole clearance, and is not of the hole's net, or
+    /// with no hole clearance, a track or a via overlaps the hole, as KiCad reports too.
     /// A hole with no net, such as a mounting hole's, is of no net at all. A pad's hole is
     /// not reported against copper that its pad is already reported against, by a
     /// [short](Violation::Short) or a [clearance](Violation::Clearance), as KiCad does.
@@ -704,10 +705,8 @@ fn hole_clearances(
         .iter()
         .filter_map(|h| h.own)
         .chain(copper.iter().filter_map(|c| c.own))
-        .fold(rules.spec().hole_clearance, i64::max);
-    if reach <= slack {
-        return Ok(());
-    }
+        .fold(rules.spec().hole_clearance, i64::max)
+        .max(0);
     let mut near = Vec::new();
     for hole in holes {
         // By item, the first finding, from the top layer down.
@@ -729,12 +728,18 @@ fn hole_clearances(
                 }
                 let required = hole_clearance_between(rules, hole.own, c.own);
                 let limit = required - slack;
-                if limit > 0
-                    && hole
-                        .shape
+                // With no clearance left to keep, a track or a via still may not cover the
+                // hole. KiCad reports that, and not a zone's fill over a hole.
+                let violated = if limit > 0 {
+                    hole.shape
                         .violates(&c.shape, limit)
                         .map_err(geometry_error(hole.item))?
-                {
+                } else {
+                    matches!(c.item, Item::Track(_) | Item::Via(_))
+                        && hole.shape.touches(&c.shape)
+                        && hole.shape.distance(&c.shape).is_overlap()
+                };
+                if violated {
                     found.insert(
                         c.item,
                         Violation::HoleClearance {

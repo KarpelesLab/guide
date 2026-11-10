@@ -9,8 +9,10 @@ evidence about real designs**. The comparisons on real designs so far are
 [clearance check against KiCad's](#pcb-clearance-checks-against-kicad), on real boards,
 [those boards read from DSN](#pcb-dsn-designs-against-kicad-boards) against the same boards read
 from KiCad's files, [PCB routing of the same boards](#pcb-routing-of-the-curated-boards),
-checked by KiCad, and [their zones' fills](#pcb-zones-and-planes) against KiCad's. [Placement](#placement-on-synthetic-problems) is measured on synthetic problems
-whose optimum is known.
+checked by KiCad, and [their zones' fills](#pcb-zones-and-planes) against KiCad's, and
+[the same boards placed again](#pcb-placement-of-the-curated-boards) from nothing.
+[Placement](#placement-on-synthetic-problems) is also measured on synthetic problems whose
+optimum is known.
 
 ## Running
 
@@ -543,7 +545,7 @@ done so far are below. There are no results for the others yet.
 | PCB clearance checks | KiCad 10.0.3 | [Curated open-source KiCad boards](../testdata/kicad/README.md) | [Done](#pcb-clearance-checks-against-kicad) |
 | PCB DSN import, SES export | KiCad 10.0.3's reading of the same boards, and its session import | The same boards | [Done](#pcb-dsn-designs-against-kicad-boards) |
 | PCB routing | Freerouting 2.5.0, both checked by KiCad 10.0.3 | The same boards | [First results](#pcb-routing-against-freerouting) |
-| PCB placement | Hand-placed originals | The same boards | Not yet done |
+| PCB placement | Hand-placed originals, both routed by `guide` and checked by KiCad 10.0.3 | The same boards | [Done](#pcb-placement-of-the-curated-boards) |
 | ASIC global routing | Published contest results | ISPD 2007/2008 | Not yet done |
 
 ## FPGA routing against VPR
@@ -2956,3 +2958,137 @@ families unless a family is named.
   measures what it does to routability.
 - Free-space problems are squares of one size. Mixed sizes, which PCBs have, are only tested for
   legality, and rows as tall as the tallest unit waste room when sizes differ much.
+
+## PCB placement of the curated boards
+
+This is the PCB half of M8's exit: the eleven [curated boards](../testdata/kicad/README.md), each
+with the placement of its movable footprints discarded, placed again by
+`pcb::place::place_components`, written back by `kicad::replace_placement`, and routed by
+`pcb::route` with its zones, as [the routing through zones](#routing-through-zones) does; against
+the same router on the board as its designer placed it. Measured on 2026-11-11 with rustc 1.97.1,
+on commit `56adcf4`, one thread, on the AMD Ryzen Threadripper PRO 9995WX, shared with other
+work, with the default options.
+
+### How
+
+```text
+GUIDE_PLACE=1 GUIDE_KICAD=1 cargo test --release --features kicad curated_boards_place -- --nocapture
+```
+
+[`placement_tests.rs`](../src/kicad/placement_tests.rs) reads each board, builds its design
+with `kicad::placement_design`, which decides what stays fixed, and places the rest from
+nothing: no position or rotation of a movable footprint is used, only its side, and parts may
+change sides where theirs is full. It checks that no two outlines overlap, writes the board,
+reads it back, and checks that every footprint and pad is where the placer put it. Then it
+takes the routing and zones' fills out, as the routing test does, routes the board, and checks
+it:
+
+- **our DRC**, `drc::check`, must find no violation involving a routed track or via or a pad of
+  a footprint that moved, other than those the board has before routing, such as a footprint's
+  own pads under its own opening in the mask;
+- **KiCad's DRC**, `kicad-cli pcb drc` 10.0.3 at error severity, must find no violation
+  involving a routed item, a footprint that moved or one of its pads, that it doesn't also find
+  on the board as placed by hand and routed alike, or that is between items of one footprint.
+  Courtyards that overlap, `courtyards_overlap`, are errors on every board, silkscreen that
+  overlaps on `placebo` and `udb-s`, and thermal reliefs short of spokes, `starved_thermal`, on
+  six;
+- **completion**, by the router's count of connections, and KiCad's of missing ones.
+
+What stays fixed, by `kicad::fixed_because`: locked footprints, those with no pads, those
+nobody assembles (`board_only`, or out of both the bill of materials and the position files:
+test and touch pads, card edges), those that draw the board's edge, mounting holes, connectors,
+fiducials, switches and batteries by reference or library, and footprints whose courtyard
+reaches the board's edge. That leaves nothing to place on `GB-BRK-LINK-A` and `isi-channel`,
+which are connectors and holes, and on `flea`, a keyboard, only its microcontroller module and
+power switch, as its keys are switches.
+
+### Results
+
+| Board | Movable (to the other side) | Placing, s | Wirelength, mm: by hand → placed | Connections: by hand, placed | Vias | Track, mm | Routing, s | Our DRC | KiCad |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `GB-BRK-LINK-A` | 0/6 (0) | 0.00 | 98 → 98 | 8/8, 8/8 | 0 → 0 | 93 → 93 | 0.1 → 0.1 | 0 | 0 violations, 0 unconnected |
+| `TS4231-BOB` | 5/6 (3) | 0.01 | 35 → 61 | 13/13, 13/13 | 0 → 11 | 31 → 71 | 0.1 → 0.7 | 0 | 0 violations, 0 unconnected |
+| `lisn` | 28/36 (0) | 0.03 | 125 → 157 | 60/60, 60/60 | 7 → 14 | 144 → 253 | 0.5 → 0.7 | 0 | 0 violations, 0 unconnected |
+| `isi-channel` | 0/17 (0) | 0.00 | 481 → 481 | 29/29, 29/29 | 0 → 0 | 453 → 453 | 0.1 → 0.1 | 0 | 0 violations, 0 unconnected |
+| `placebo` | 10/18 (0) | 0.37 | 265 → 252 | 50/50, 50/50 | 9 → 17 | 292 → 257 | 0.4 → 0.6 | 0 | 0 violations, 0 unconnected |
+| `udb-s` | 6/11 (3) | 0.05 | 103 → 102 | 33/33, 33/33 | 11 → 13 | 149 → 162 | 1.4 → 1.7 | 0 | 0 violations, 0 unconnected |
+| `flea` | 2/19 (0) | 0.13 | 1376 → 1307 | 79/79, 79/79 | 52 → 47 | 1607 → 1521 | 5.6 → 1.5 | 0 | 0 violations, 0 unconnected |
+| `GB-LIVE32` | 44/61 (0) | 0.02 | 2010 → 1900 | 197/197, 197/197 | 165 → 243 | 2283 → 2155 | 27.4 → 77.1 | 0 | 0 violations, 0 unconnected |
+| `nk3-nrf-mini` | 21/35 (14) | 0.12 | 153 → 157 | 82/83, 83/83 | 55 → 63 | 249 → 305 | 22.2 → 283.4 | 0 | 0 violations, 0 unconnected |
+| `lpddr4-testbed` | 62/68 (0) | 0.04 | 517 → 523 | 344/344, 344/344 | 220 → 219 | 670 → 684 | 100.9 → 116.7 | 0 | 0 violations, 0 unconnected |
+| `ddr5-testbed` | 59/65 (0) | 0.03 | 789 → 761 | 255/255, 255/255 | 170 → 177 | 876 → 932 | 152.2 → 150.6 | 0 | 0 violations, 0 unconnected |
+
+Wirelength is the half-perimeter of the nets that count, those that no zone connects, of the
+parts where they were and where they are. Connections, vias and track are the router's, after
+cleanup, as in [the routing through zones](#routing-through-zones), whose numbers for the boards
+as placed by hand these are, run again. KiCad's column is what it finds that counts, as above.
+
+### What the results say
+
+- **Every board routes to completion**, and KiCad finds nothing wrong with what moved or was
+  routed on any of them, courtyards and silkscreen included, and no connection missing. That
+  includes `nk3-nrf-mini`, which as placed by hand leaves `/LED_R` unrouted, its LED inside an
+  opening drawn in the mask that also exposes another net: placement keeps parts out of such
+  openings, so the LED goes elsewhere, and all 83 connections are made. This is the exit M8 asks
+  for.
+- **Wirelength** comes out below the hand placement's on five boards of the nine with anything
+  to place, from 1% (`udb-s`) to 5% (`GB-LIVE32`), and above on four: 1% on `lpddr4-testbed`,
+  3% on `nk3-nrf-mini`, 26% on `lisn` and 74% on `TS4231-BOB`.
+- **Routing it** takes more vias on seven of those nine boards, most on `GB-LIVE32`, 243 against
+  165, whose 44 parts are spread with room between them where the designer packed them, and
+  more track on six, most on `lisn`, 253 mm against 144, whose zones the designer drew around
+  where each part was: placement only knows their boxes. Track is shorter on `placebo`, `flea`
+  and `GB-LIVE32`. The DRAM boards, where the BGA and the edge connector stay and only their
+  passives move, come within 2% and 6% of the hand placement's track, with as many vias give or
+  take seven.
+- **Sides.** `TS4231-BOB`, `udb-s` and `nk3-nrf-mini` have parts moved to the back, as their
+  fronts would be more than 60% full with spacing: on `TS4231-BOB`, a board of 12 by 13 mm, that
+  costs 11 vias where the designer's single-sided placement needs none; on `nk3-nrf-mini`, nothing
+  fits on the front without it.
+- **Time.** Placing takes at most 0.4 s; `placebo` tries less spacing and other fills before one
+  fits. Routing the placed boards takes longer on most, three times as long on `GB-LIVE32` and
+  13 times on `nk3-nrf-mini`, where rip-up works harder; shorter on `flea` and `ddr5-testbed`.
+
+### What it took
+
+Each of these was found by a board failing, by our DRC or KiCad's, or routing short:
+
+- **Zones are where the designer drew them.** `lisn` is mostly copper pours on `F.Cu`, a net
+  each, drawn round where each part was. Leaving out the wirelength of zones' nets, as planes,
+  scattered parts away from their pours: 59 of 60 connections, `GND` unrouted, and 481 mm of
+  track. Drawing each pin of a zone's net into the box of its zones, unless they cover most of
+  the board, gave 60 of 60.
+- **Pads past the courtyard.** `udb-s`'s connector draws its courtyard round its body only, and
+  parts went on its pads: shorts. The room a footprint takes is now its courtyard and its pads.
+- **Clearances.** `lisn`'s net class keeps 0.4 mm, more than two courtyards' margins: outlines
+  grow by at least half the largest clearance, and fixed parts and keepouts as much.
+- **Thermal spokes.** Pads of zones' nets packed against the edge or each other got one spoke,
+  which KiCad reports on six boards: parts keep twice the spacing from the edge, so that the zone
+  fills between, and 0.25 mm a side from each other, where 0.15 mm wasn't enough.
+- **Silkscreen.** `placebo` and `udb-s` make overlapping silkscreen an error: there, outlines
+  include the footprint's silkscreen, the fixed parts' and the board's are kept out of, and a
+  moved footprint's text that would overlap goes beside it, or is hidden where nothing fits: two
+  on `placebo`, one on `udb-s`.
+- **Fixed parts without courtyards**, such as `placebo`'s cutout and `flea`'s keys, are kept
+  out of by their pads, not their whole silkscreen, which on `placebo` left no room.
+- **The back.** `nk3-nrf-mini` has no room on its front for its parts with spacing, nor without
+  it for the legalizer, which needs some slack in a region cut up by its fixed parts: moving the
+  smallest passives to the back, and trying fills a tenth either side of 60% before less
+  spacing, fits it, with no spacing left. Its footprints are written flipped as KiCad flips
+  them, which a test checks against the reader, pad by pad.
+- **Openings in the mask** drawn on the board: on `nk3-nrf-mini`, a resistor went into the
+  one that already bridges `/LED_R`. Kept out of, the board went from 70 of 83 connections to
+  83.
+
+### What this does not show
+
+- Small boards: at most 62 parts to place. Global placement is analytic, which scales, but the
+  passes and the rasterized free space have not been tried on a large board.
+- The hand placements are better boards: shorter or as short, with fewer vias, on most of
+  these. Placement knows nothing of signal integrity, assembly or mechanics beyond what stays
+  fixed, and decoupling capacitors are found by their nets' names and tied to power pins in
+  order, not to the pins that need them most.
+- Sides are chosen by how full a side is, not by what is better electrically or for assembly,
+  and parts turn by quarter turns only: free rotation is not done.
+- Thermal grouping is a term the caller fills from what it knows of heat; no board here says.
+- No other placer is compared: KiCad has none built in, and Freerouting doesn't place.

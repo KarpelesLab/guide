@@ -304,7 +304,7 @@ default effort is 25% to 80% above, and 0% to 33% with ten times the moves. Left
 unanchored grid packed exactly full that comes out sheared (21% above on two seeds of three). The
 FPGA hookup, building a problem from a VTR netlist and architecture, came with M8.
 
-### M8: Domain placement
+### M8: Domain placement (done)
 
 - **FPGA:** packing-aware site legalization, fixed I/O, carry chains and other
   macros, clock regions, timing-driven optimization. Done but for clock regions, in
@@ -317,7 +317,18 @@ FPGA hookup, building a problem from a VTR netlist and architecture, came with M
   starts cold; and `fpga::write_placement` for VPR. VTR's architectures have no clock regions,
   so nothing models them yet.
 - **PCB:** fixed connectors and mounting holes, courtyards, both board sides, 90°
-  or free rotation, decoupling capacitors kept near their pins, thermal grouping.
+  or free rotation, decoupling capacitors kept near their pins, thermal grouping. Done but for
+  free rotation, in `pcb::place::place_components`, with `kicad::placement_design` and
+  `kicad::replace_placement`: footprints from a KiCad board with their courtyards, or their
+  pads' and silkscreen's box, and their pins at their real offsets; fixed if locked, not
+  assembled, mounting holes, connectors, fiducials, switches, or on the board's edge; the edge,
+  fixed parts and keepouts rasterized into a free-space `place` problem, and the two sides
+  placed in passes, parts through the board taking both, surface-mount parts moving to the
+  other side when theirs is too full; half-perimeter wirelength on pins, pins of zones' nets
+  drawn into their zones, decoupling capacitors tied to their supply's power pins, optional
+  thermal groups, and a RUDY routability term, by analytic placement then annealing; written
+  back into the board's text, flipped footprints as KiCad flips them. Parts turn by quarter
+  turns only.
 
 **Exit:** FPGA placement competitive with VPR after routing; PCB placement that
 routes to completion on the curated boards with the original placement discarded.
@@ -328,7 +339,15 @@ of `guide`'s, and routed by VPR's router they give critical paths 0.2% and 2.0% 
 VPR's own placements, with 4.5% and 2.7% less wire, in 1.6 and 0.6 times VPR's placement time;
 `guide`'s router finds the same. Channel width is the same on average, but the largest Verilog
 circuits need 2% to 11% wider channels on `guide`'s placements, as nothing in the cost looks at
-congestion yet. The PCB half is not started.
+congestion yet.
+
+The PCB half is met ([results](docs/benchmarks.md#pcb-placement-of-the-curated-boards)): on all
+eleven curated boards, with the placement of every movable footprint discarded, `guide` places
+them again in under half a second, and `pcb::route` routes every board to completion, with its
+zones; KiCad 10.0.3 finds no violation of anything that moved or was routed, courtyards and
+silkscreen included, and no connection missing. That includes `nk3-nrf-mini`, which as placed
+by hand leaves a net unrouted. The hand placements route with fewer vias on seven boards of the
+nine that have anything to move, and shorter track on six.
 
 ### M9: Co-optimization
 

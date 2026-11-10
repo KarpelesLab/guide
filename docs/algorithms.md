@@ -184,6 +184,54 @@ against VPR in [`docs/benchmarks.md`](benchmarks.md#fpga-placement-against-vpr).
   starts too, from a placement that puts blocks near their neighbours' centroid at
   `std_dev / 64`. Annealing from a random placement, hot, as VPR did before, is the other method.
 
+### PCB placement
+
+PCB placement (roadmap M8) is in `src/pcb/place.rs`, on top of `src/place`, with KiCad's side in
+`src/kicad/place.rs`, and measured on the curated boards in
+[`docs/benchmarks.md`](benchmarks.md#pcb-placement-of-the-curated-boards).
+
+- **Problem.** `kicad::placement_design` makes a `pcb::place::PlacementDesign` of a board: a
+  component for each footprint, whose room is its courtyard's box (`F.CrtYd` or `B.CrtYd`),
+  grown to its pads where they reach past it, or failing a courtyard, the box of its pads, copper
+  and silkscreen grown by a quarter of a millimetre; its pins are its pads with nets, at their
+  real offsets. Footprints that go through the board take room on both sides. What stays fixed
+  is decided by `kicad::fixed_because`: locked, without pads, not assembled (`board_only`, or
+  left out of both the bill of materials and the position files: test and touch pads, card
+  edges), drawing the board's edge, a mounting hole, connector, fiducial, switch or battery by
+  its reference or library, or with a courtyard that reaches the board's edge. On boards whose
+  project makes silkscreen overlaps errors, silkscreen takes room too.
+- **Free region.** The board is rasterized on 100 µm cells: blocked outside the edge (by
+  crossings of each row with the edge's lines), within the edge clearance and twice the spacing
+  of it, and under fixed parts, keepouts, copper graphics and text on copper, grown by the
+  spacing. A fixed area array, a BGA, also blocks the other side under it, for its fan-out vias.
+  Blocked cells merge into rectangles, which are fixed items of a `place::PlacementProblem` in
+  free space, so the generic placers need nothing new.
+- **Sides.** `src/place` knows one plane, so the board is placed in passes: parts through the
+  board first, against both sides, with the rest movable but taking no room; then the front,
+  the back's parts still taking no room, so that they sit where their nets want; then the back,
+  legalized from there, the front fixed; then the front again, the back fixed. Where a side's
+  parts would take more than 60% of its free room, surface-mount parts, those of two pins and
+  the smallest first, go to the other side while it has room, and `kicad::replace_placement`
+  flips them as KiCad does.
+- **Cost.** Half-perimeter wirelength on pin positions, with nets of more than 12 pins at a
+  quarter weight. A pin of a net that a copper zone connects is drawn into the box of its
+  zones, as three-pin nets with the box's corners fixed, unless the zones cover most of the
+  board, rather than to the net's other pins. A capacitor between a supply and a ground, by
+  their names, gets a net to a power pin on the same supply of an IC, the supply's capacitors
+  spread over its power pins in order, which costs four times as much beyond 2 mm. Thermal
+  groups, given by the caller, are nets of their own. After the first placement, a RUDY map of
+  the signal nets against half of what the layers carry at the board's track pitch prices nets
+  through congested bins, as `place::CongestionCost`, in annealing at a low temperature.
+- **Room for routing.** Outlines grow by 0.25 mm a side, 0.35 mm more for parts of 8 pins or
+  more, never less than half the largest clearance. If that leaves no room, the spacing goes down
+  by quarters, to none.
+- **Writing back.** `kicad::replace_placement` edits the board's text where footprints moved:
+  the footprint's `(at)`, its pads', texts' and fields' angles, which a board file holds with
+  the footprint's own included, its zones' points, which it holds on the board, and for a flip,
+  every point mirrored, layers swapped, chamfers and texts' justification mirrored. Routing goes,
+  as it was for the old placement. On boards where silkscreen overlaps are errors, a moved
+  footprint's text that would overlap silkscreen or pads goes beside its outline, or is hidden.
+
 ## Support structures
 
 | Structure | Use |

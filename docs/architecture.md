@@ -127,6 +127,12 @@ iterations, and the interface is `CongestionEstimate`, an overflow for a rectang
 RUDY map or a router's own demand can answer. Placement costs are `u64` sums over nets of a
 `CostTerm`, cached per net so that a move prices only the nets it touches.
 
+Domains build problems for these placers rather than placers of their own: `fpga` from a
+packed netlist and a device, and `pcb::place` from a board's components, with the board's
+edge, fixed parts and keepouts rasterized into fixed items of a free-space problem, and its two
+sides placed in passes, each side's parts real in turn and the other's fixed or taking no room.
+`src/place` needed nothing new for either.
+
 ## Decisions
 
 Each of these can be revisited, but changing one should be a conscious act.

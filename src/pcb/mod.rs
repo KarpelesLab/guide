@@ -7,7 +7,8 @@
 //! [`drc`](crate::geom::drc) model, so that [`drc::check`](crate::geom::drc::check) runs on
 //! the result as on any board. With the `kicad` feature, [`Design::from_kicad`] takes a
 //! board that [`kicad::read`](crate::kicad::read) has read. [`fill_zones`] fills a design's
-//! copper zones on their own, as KiCad's zone filler does.
+//! copper zones on their own, as KiCad's zone filler does. [`place`] places a board's
+//! components before it is routed.
 //!
 //! # How it routes
 //!

@@ -5,12 +5,17 @@
 
 SOLVERS is a directory holding the solvers, built from source by build-reference.sh:
 CBSH2-RTC/build/cbs (optimal), EECBS/build/eecbs (bounded-suboptimal, w = 1.2), and
-lacam3/build/main (anytime, on one thread). Lines go to OUT/ref-MAP.tsv:
+lacam3/build/main (anytime, on one thread, and as "lacam3-mt" with its default threads, only
+when ONLY asks for it). Lines go to OUT/ref-MAP.tsv:
 
-    solver  scenario  agents  solved  sum-of-costs  milliseconds  [first-sum-of-costs  first-ms]
+    solver  scenario  agents  solved  sum-of-costs  milliseconds  [first-ms]
 
-The last two are LaCAM3's first solution, before it refines it. The environment variables
-SCENS, JOBS and LIMIT are as for guide.sh.
+For LaCAM3, the milliseconds are those to its first solution, which it refines until its time
+is up, and the sum of costs is that of its last. It reports two costs: `soc`, the sum of costs
+as everyone else has it, and `sum_of_loss`, which leaves out waits on the goal in the middle of
+a plan too and is what LaCAM3 minimizes. This takes `soc`. The environment variables SCENS,
+JOBS and LIMIT are as for guide.sh, and ONLY, a comma-separated list of solvers, runs only
+those, into OUT/ref-MAP-ONLY.tsv, which tables.py reads after OUT/ref-MAP.tsv.
 """
 
 import concurrent.futures
@@ -49,11 +54,12 @@ def run_cbs(binary, extra, name, mapfile, scen, count, limit):
         return [name, count, int(solved), cost if solved else "-", round(runtime * 1000)]
 
 
-def run_lacam(binary, mapfile, scen, count, limit):
+def run_lacam(binary, name, mapfile, scen, count, limit):
     with tempfile.TemporaryDirectory() as tmp:
         out = os.path.join(tmp, "out.txt")
-        cmd = [binary, "-m", mapfile, "-i", scen, "-N", str(count), "-t", str(limit), "-o", out,
-               "--no-multi-thread"]
+        cmd = [binary, "-m", mapfile, "-i", scen, "-N", str(count), "-t", str(limit), "-o", out]
+        if name == "lacam3":
+            cmd.append("--no-multi-thread")
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                        timeout=limit * 3 + 60, check=False)
         values = {}
@@ -63,11 +69,10 @@ def run_lacam(binary, mapfile, scen, count, limit):
                     key, _, value = line.strip().partition("=")
                     values[key] = value
         except OSError:
-            return ["lacam3", count, 0, "-", "-", "-", "-"]
+            return [name, count, 0, "-", "-"]
         if values.get("solved") != "1":
-            return ["lacam3", count, 0, "-", "-", "-", "-"]
-        return ["lacam3", count, 1, int(values["sum_of_loss"]), int(values["comp_time"]),
-                int(values["cost_initial_solution"]), int(values["comp_time_initial_solution"])]
+            return [name, count, 0, "-", "-"]
+        return [name, count, 1, int(values["soc"]), int(values["comp_time_initial_solution"])]
 
 
 def main():
@@ -76,6 +81,8 @@ def main():
     scens = int(os.environ.get("SCENS", "25"))
     jobs = int(os.environ.get("JOBS", "8"))
     limit = int(os.environ.get("LIMIT", "60"))
+    only = [name for name in os.environ.get("ONLY", "").split(",") if name]
+    suffix = "-" + "-".join(only) if only else ""
     os.makedirs(out, exist_ok=True)
     cbs = os.path.join(solvers, "CBSH2-RTC/build/cbs")
     eecbs = os.path.join(solvers, "EECBS/build/eecbs")
@@ -88,13 +95,20 @@ def main():
                 scen = os.path.join(data, "scen", "scen-random", f"{name}-random-{index}.scen")
                 for count in COUNTS.get(name, [10, 20, 50, 100]):
                     tag = os.path.basename(scen)
-                    tasks.append((tag, pool.submit(run_cbs, cbs, [], "cbsh2-rtc", mapfile, scen,
-                                                   count, limit)))
-                    tasks.append((tag, pool.submit(run_cbs, eecbs, ["--suboptimality=1.2"],
-                                                   "eecbs-1.2", mapfile, scen, count, limit)))
-                    tasks.append((tag, pool.submit(run_lacam, lacam, mapfile, scen, count,
-                                                   limit)))
-            with open(os.path.join(out, f"ref-{name}.tsv"), "w", encoding="utf-8") as f:
+                    if not only or "cbsh2-rtc" in only:
+                        tasks.append((tag, pool.submit(run_cbs, cbs, [], "cbsh2-rtc", mapfile,
+                                                       scen, count, limit)))
+                    if not only or "eecbs-1.2" in only:
+                        tasks.append((tag, pool.submit(run_cbs, eecbs, ["--suboptimality=1.2"],
+                                                       "eecbs-1.2", mapfile, scen, count, limit)))
+                    if not only or "lacam3" in only:
+                        tasks.append((tag, pool.submit(run_lacam, lacam, "lacam3", mapfile, scen,
+                                                       count, limit)))
+                    if "lacam3-mt" in only:
+                        tasks.append((tag, pool.submit(run_lacam, lacam, "lacam3-mt", mapfile,
+                                                       scen, count, limit)))
+            path = os.path.join(out, f"ref-{name}{suffix}.tsv")
+            with open(path, "w", encoding="utf-8") as f:
                 for tag, task in tasks:
                     row = task.result()
                     print("\t".join(str(v) for v in [row[0], tag] + row[1:]), file=f, flush=True)

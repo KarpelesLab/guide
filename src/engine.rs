@@ -131,6 +131,39 @@
 //! [`Engine::overused`] shows these conflicts as soon as the routes are fixed, before any
 //! iteration.
 //!
+//! # Engineering changes
+//!
+//! After a small change to a problem, such as nets added or removed, terminals added, removed or
+//! moved, or resources blocked or given less capacity, the routes found before are still nearly
+//! all good. [`Engine::seed_routes`] starts each net from the route it had, so that only what
+//! changed, or now conflicts, is routed again, and the rest stays as it was. [`crate::eco`] has
+//! [`reroute`](crate::eco::reroute), which does this from a [`RouteSet`], and
+//! [`route_change`](crate::eco::route_change) to measure how much moved.
+//!
+//! - **A seed is checked against the problem as it is now.** Edges that are no longer steps of
+//!   the space, with everything beyond them, and branches that lead to no terminal are cut off.
+//!   A seed whose root is no longer an access point of the driver is dropped. What is left
+//!   holds its resources from before the first iteration. [`SeedReport`] says what became of
+//!   each.
+//! - **A seed that still reaches every terminal is the net's route**, and the net is routed
+//!   again only if it holds an overused resource, as after any iteration. One that does not,
+//!   for a terminal added or moved, is grown from in the net's first turn, as a [partial
+//!   pre-route](#fixed-and-pre-routed-nets) is, and given up if that finds no way.
+//! - **Nothing is frozen.** Seeds are a starting point and negotiate like any route. Routes
+//!   that must not move are for [`Engine::fix_routes`], which can be used with seeds.
+//! - **History** can be carried over too: [`Engine::history`] at the end of one run, and
+//!   [`Engine::seed_history`] before the next, so that what was fought over is dear from the
+//!   start.
+//!
+//! With the default options, a net that changed routes in the first iteration at a present
+//! factor of 0.5, so it may well take resources that unchanged nets hold, and push them off.
+//! [`eco::stable_options`](crate::eco::stable_options) sets the first present factor to 10 and
+//! turns [incremental rerouting](EngineOptions::incremental_reroute) on, which on the generated
+//! problems of `docs/benchmarks.md` kept 94% to 99.9% of the routes as they were, where routing
+//! from scratch kept 60% to 97%, for the same cost to half a percent, in 0.1% to 4.3% of the
+//! expansions. Carrying history over did not help there. Seeds change nothing about
+//! determinism: the result is the same on any number of threads.
+//!
 //! # Budgets and cancellation
 //!
 //! A run ends at [`max_iterations`](EngineOptions::max_iterations), at
@@ -851,6 +884,9 @@ pub enum EngineError {
         /// What is wrong with it.
         problem: FixedRouteProblem,
     },
+    /// Seeds were given after the first iteration: see [`Engine::seed_routes`] and
+    /// [`Engine::seed_history`].
+    AlreadyStarted,
 }
 
 /// What is wrong with a [`FixedRoute`] given to [`Engine::fix_routes`].
@@ -932,6 +968,9 @@ impl fmt::Display for EngineError {
             ),
             EngineError::InvalidFixedRoute { net, problem } => {
                 write!(f, "the fixed route of net {}: {problem}", net.0)
+            }
+            EngineError::AlreadyStarted => {
+                f.write_str("seeds have to be given before the first iteration")
             }
         }
     }
@@ -2255,19 +2294,22 @@ fn route_in_batch<S: RoutingSpace>(
     } else {
         None
     };
+    // A net routed again keeps what it can of its route, and one routed for the first time
+    // grows from its seed.
+    let start = kept.as_ref().or(state.seed.as_deref());
     let mut attempt = Attempt::NoPath;
-    if let Some(kept) = &kept {
+    if let Some(start) = start {
         attempt = route_net(
             &context.route,
             net,
             criticality,
             context.budget,
             &mut dead_roots,
-            Some(kept),
+            Some(start),
             worker,
         );
     }
-    if kept.is_none() || matches!(attempt, Attempt::NoPath) {
+    if start.is_none() || matches!(attempt, Attempt::NoPath) {
         attempt = route_net(
             &context.route,
             net,
@@ -2327,6 +2369,9 @@ struct NetState<N, R> {
     no_path: bool,
     /// The part of the route that the caller fixed, if any.
     fixed: Option<Box<FixedPart<N, R>>>,
+    /// What is left of a [seed](Engine::seed_routes) that does not reach every terminal, which
+    /// the net grows from when it is first routed, and holds until then.
+    seed: Option<Box<FixedPart<N, R>>>,
 }
 
 impl<N, R> NetState<N, R> {
@@ -2784,6 +2829,7 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
                 dead_roots: Vec::new(),
                 no_path: has_terminal_outside(space, net),
                 fixed: None,
+                seed: None,
             })
             .collect();
         Ok(Engine {
@@ -2899,6 +2945,10 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
             if state.no_path {
                 continue;
             }
+            // A net seeded before it was fixed gives up its seed.
+            self.table.release(&state.held);
+            state.seed = None;
+            state.route = None;
             let slots: Vec<usize> = part
                 .resources
                 .iter()
@@ -3297,6 +3347,7 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
         self.table.release(&state.held);
         state.held.clear();
         state.dead_roots = routed.dead_roots;
+        state.seed = None;
         match routed.attempt {
             Attempt::Routed {
                 route,
@@ -3669,6 +3720,9 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
         };
         let state = &mut self.states[index];
         self.table.release(&state.held);
+        // A net routed for the first time grows from its seed, if it has one.
+        let seed = state.seed.take();
+        let start = kept.as_ref().or(seed.as_deref());
 
         let context = RouteContext {
             space: self.space,
@@ -3683,18 +3737,18 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
         let budget = self.options.max_expansions;
         let worker = &mut self.workers[0];
         let mut attempt = Attempt::NoPath;
-        if let Some(kept) = &kept {
+        if let Some(start) = start {
             attempt = route_net(
                 &context,
                 net,
                 criticality,
                 budget.saturating_sub(self.stats.nodes_expanded),
                 &mut state.dead_roots,
-                Some(kept),
+                Some(start),
                 worker,
             );
         }
-        if kept.is_none() || matches!(attempt, Attempt::NoPath) {
+        if start.is_none() || matches!(attempt, Attempt::NoPath) {
             let spent = self.stats.nodes_expanded.saturating_add(worker.expanded);
             attempt = route_net(
                 &context,
@@ -3745,6 +3799,7 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
             }
             Attempt::Interrupted(interrupt) => {
                 self.table.acquire(&state.held);
+                state.seed = seed;
                 Err(interrupt)
             }
         }
@@ -4159,6 +4214,10 @@ fn has_terminal_outside<S: RoutingSpace>(space: &S, net: &Net<S::Node>) -> bool 
     })
 }
 
+mod seed;
+
+pub use seed::{SeedReport, Seeded};
+
 #[cfg(test)]
 mod parallel_tests;
 
@@ -4170,6 +4229,9 @@ mod fixed_tests;
 
 #[cfg(test)]
 mod tied_tests;
+
+#[cfg(test)]
+mod seed_tests;
 
 #[cfg(test)]
 mod tests {

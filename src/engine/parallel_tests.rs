@@ -42,7 +42,7 @@ fn dense_grid(size: u32, layers: u32, seed: u64) -> (Grid, Vec<Net<NodeId>>) {
 }
 
 /// Many nets of two to four terminals on unshared cells, each within `reach` of its first.
-fn local_grid(
+pub(super) fn local_grid(
     size: u32,
     layers: u32,
     count: u32,

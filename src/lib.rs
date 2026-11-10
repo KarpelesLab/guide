@@ -8,7 +8,8 @@
 //! [roadmap] for the plan and the [architecture notes] for the intended design.
 //!
 //! [`place`] places items on sites or in free space, by simulated annealing or analytic
-//! placement, and needs no feature.
+//! placement, and needs no feature. [`eco`] routes and places again after a small change to a
+//! problem, keeping what did not change.
 //!
 //! The `fpga` feature adds support for FPGA routing problems, and the `pcb` feature adds
 //! the geometry layer, `geom`, and PCB routing over it, `pcb`. The `kicad` feature, which
@@ -21,6 +22,7 @@
 pub mod cost;
 #[cfg(feature = "dsn")]
 pub mod dsn;
+pub mod eco;
 pub mod engine;
 #[cfg(feature = "fpga")]
 pub mod fpga;

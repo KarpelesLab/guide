@@ -200,8 +200,8 @@ pub use netlist::{
 };
 pub use place::{PlacedBlock, Placement, read_placement, write_placement};
 pub use placer::{
-    PlaceDelayModel, PlaceMethod, PlaceProblem, PlaceResult, PlacerOptions, ProblemOptions,
-    build_place_problem, estimate_slack, place_design,
+    ChannelDemand, PlaceDelayModel, PlaceMethod, PlaceProblem, PlaceResult, PlacerOptions,
+    ProblemOptions, build_place_problem, estimate_slack, place_design,
 };
 pub use route_file::{RouteFileError, RouteHeader, RouteSummary, write_route};
 pub use rr_graph::{

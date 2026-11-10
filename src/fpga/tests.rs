@@ -2822,3 +2822,88 @@ fn timing_driven_placements_route() {
     let report = crate::validate::check(device.graph(), design.nets(), routes);
     assert!(report.is_complete() && report.faults().is_empty());
 }
+
+#[test]
+fn channel_demand_spreads_each_nets_wire_over_its_box() {
+    let device = read_rr_graph(mesh_graph(4, 2).as_bytes()).unwrap();
+    let netlist = line_netlist(10);
+    let problem = build_place_problem(
+        &device,
+        &netlist,
+        &Architecture::default(),
+        &ProblemOptions::default(),
+    )
+    .unwrap();
+    // The mesh has two horizontal tracks on each logic block's tile, and nothing else.
+    assert_eq!(problem.channel_tracks(1, 1), Some([2, 0]));
+    assert_eq!(problem.channel_tracks(4, 4), Some([2, 0]));
+    assert_eq!(problem.channel_tracks(0, 3), Some([0, 0]));
+    assert_eq!(problem.channel_tracks(6, 0), None);
+
+    let delays = PlaceDelayModel::from_rr_graph(&device);
+    let placed = place_design(&problem, &delays, None, &PlacerOptions::default()).unwrap();
+    let demand = problem.channel_demand(&placed.placement);
+    // Each net of two pins needs a track over each column of its box, all on logic blocks'
+    // tiles, which have horizontal tracks; vertical channels have none, so count nothing.
+    let places = problem.problem();
+    let wanted: u64 = (0..places.net_count() as u32)
+        .map(|net| {
+            places
+                .net_box(&placed.placement, NetId(net))
+                .unwrap()
+                .width()
+                + 1
+        })
+        .sum();
+    let mut horizontal = 0.0;
+    for y in 0..6 {
+        for x in 0..6 {
+            let [ux, uy] = demand.utilization(x, y).unwrap();
+            assert_eq!(uy, 0.0);
+            horizontal += ux * f64::from(problem.channel_tracks(x, y).unwrap()[0]);
+        }
+    }
+    assert!(
+        (horizontal - wanted as f64).abs() < 1e-9,
+        "{horizontal} against {wanted}"
+    );
+    assert_eq!(demand.utilization(6, 0), None);
+    assert!(demand.peak() > 0.0);
+    assert!(demand.peak() >= demand.quantile(0.9));
+    assert!(demand.quantile(0.9) >= demand.quantile(0.1));
+    assert_eq!(demand.quantile(1.0), demand.peak());
+    let total = demand.overflow(0.0);
+    assert!((total * 2.0 - horizontal).abs() < 1e-9, "{total}");
+    assert_eq!(demand.overflow(demand.peak()), 0.0);
+}
+
+#[test]
+fn congestion_aware_placements_are_legal_and_repeatable() {
+    let device = read_rr_graph(mesh_graph(5, 1).as_bytes()).unwrap();
+    let netlist = line_netlist(20);
+    let problem = build_place_problem(
+        &device,
+        &netlist,
+        &Architecture::default(),
+        &ProblemOptions::default(),
+    )
+    .unwrap();
+    let delays = PlaceDelayModel::from_rr_graph(&device);
+    let options = PlacerOptions {
+        congestion_factor: 2.0,
+        congestion_threshold: 0.2,
+        max_inflation: 2.0,
+        ..PlacerOptions::default()
+    };
+    let placed = place_design(&problem, &delays, None, &options).unwrap();
+    assert!(crate::place::check(problem.problem(), &placed.placement).is_empty());
+    assert_eq!(
+        place_design(&problem, &delays, None, &options).unwrap(),
+        placed
+    );
+    for method in [PlaceMethod::Anneal, PlaceMethod::Analytic] {
+        let options = PlacerOptions { method, ..options };
+        let placed = place_design(&problem, &delays, None, &options).unwrap();
+        assert!(crate::place::check(problem.problem(), &placed.placement).is_empty());
+    }
+}

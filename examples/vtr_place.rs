@@ -28,6 +28,9 @@
 //! | `--tradeoff F` | `PlacerOptions::timing_tradeoff` | 0.5 |
 //! | `--detailed-temperature F` | `PlacerOptions::detailed_temperature` | 0.05 |
 //! | `--detailed-range N` | `PlacerOptions::detailed_range` | 8 |
+//! | `--congestion-factor F` | `PlacerOptions::congestion_factor` | Its default |
+//! | `--congestion-threshold F` | `PlacerOptions::congestion_threshold` | Its default |
+//! | `--max-inflation F` | `PlacerOptions::max_inflation` | Its default |
 //! | `--no-timing` | Place for wirelength alone | Timing-driven |
 //!
 //! It prints one line of `key=value` pairs, which the scripts parse, and exits with status 0 if
@@ -39,7 +42,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use guide::fpga::{
-    PlaceDelayModel, PlaceMethod, PlacerOptions, ProblemOptions, TimingOptions,
+    ChannelDemand, PlaceDelayModel, PlaceMethod, PlacerOptions, ProblemOptions, TimingOptions,
     build_place_problem, build_timing, constant_nets, estimate_slack, place_design,
     read_architecture, read_netlist, read_placement, read_rr_graph, write_placement,
 };
@@ -114,6 +117,9 @@ fn parse_args() -> Result<Args, String> {
             "--tradeoff" => args.options.timing_tradeoff = factor(&value)?,
             "--detailed-temperature" => args.options.detailed_temperature = factor(&value)?,
             "--detailed-range" => args.options.detailed_range = number(&value)? as u32,
+            "--congestion-factor" => args.options.congestion_factor = factor(&value)?,
+            "--congestion-threshold" => args.options.congestion_threshold = factor(&value)?,
+            "--max-inflation" => args.options.max_inflation = factor(&value)?,
             _ => return Err(format!("unknown option {flag}")),
         }
     }
@@ -133,6 +139,17 @@ fn open(path: &str) -> Result<BufReader<File>, String> {
     File::open(path)
         .map(|file| BufReader::with_capacity(1 << 20, file))
         .map_err(|error| format!("{path}: {error}"))
+}
+
+/// The expected use of the channels, as key-value pairs with a prefix.
+fn channel_text(prefix: &str, demand: &ChannelDemand) -> String {
+    format!(
+        " {prefix}chan_peak={:.3} {prefix}chan_q99={:.3} {prefix}chan_q90={:.3} {prefix}chan_q50={:.3}",
+        demand.peak(),
+        demand.quantile(0.99),
+        demand.quantile(0.9),
+        demand.quantile(0.5),
+    )
 }
 
 fn slack_text(slack: Option<i64>) -> String {
@@ -199,10 +216,11 @@ fn run(args: &Args) -> Result<bool, String> {
             .map_err(|e| format!("{path}: {e}"))?;
         let other_slack = estimate_slack(&problem, &delays, &mut timing, &constraints, &other);
         evaluated = format!(
-            " other_bb_estimate={:.0} other_worst_slack_ps={} other_legal={}",
+            " other_bb_estimate={:.0} other_worst_slack_ps={} other_legal={}{}",
             problem.bb_estimate(&other),
             slack_text(other_slack),
-            check(problem.problem(), &other).is_empty()
+            check(problem.problem(), &other).is_empty(),
+            channel_text("other_", &problem.channel_demand(&other)),
         );
     }
 
@@ -223,7 +241,7 @@ fn run(args: &Args) -> Result<bool, String> {
         "legal={legal} violations={} blocks={} nets={} chains={chains} chained_blocks={chained} \
          bb_estimate={:.0} start_bb_estimate={:.0} worst_slack_ps={} temperatures={} moves={} \
          read_s={read_seconds:.3} delay_model_s={delay_model_seconds:.3} \
-         place_s={place_seconds:.3} written={written}{evaluated}",
+         place_s={place_seconds:.3} written={written}{}{evaluated}",
         violations.len(),
         netlist.blocks().len(),
         problem.problem().net_count(),
@@ -232,6 +250,7 @@ fn run(args: &Args) -> Result<bool, String> {
         slack_text(slack),
         result.temperatures,
         result.moves,
+        channel_text("", &problem.channel_demand(&result.placement)),
     );
     Ok(legal)
 }

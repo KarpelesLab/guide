@@ -21,8 +21,8 @@ use super::rr_graph::{NodeKind, PinClassKind, RrGraph};
 use super::timing::DesignTiming;
 use crate::id::{NetId, NodeId};
 use crate::place::{
-    AnalyticOptions, AnnealOptions, Annealer, CostTerm, Item, ItemId, Layout, NetView, Pin,
-    PlaceError, PlacementProblem, Point, Site, SiteId, Wirelength, legalize, place_analytic,
+    AnalyticOptions, AnnealOptions, Annealer, CostTerm, Inflation, Item, ItemId, Layout, NetView,
+    Pin, PlaceError, PlacementProblem, Point, Site, SiteId, Wirelength, legalize, place_analytic,
 };
 use crate::rng::Rng;
 use crate::space::{RoutingSpace, Step};
@@ -66,6 +66,9 @@ pub struct PlaceProblem {
     crossing: Vec<f64>,
     /// How many carry chains became macros, and how many blocks they hold.
     chains: (usize, usize),
+    /// By tile, column by column within each row, the tracks of the horizontal and the
+    /// vertical channel next to it.
+    tracks: Vec<[u32; 2]>,
 }
 
 impl PlaceProblem {
@@ -209,6 +212,195 @@ impl PlaceProblem {
     /// The width plus the height of a box, counting tiles, so a net within one tile spans 2.
     fn span(bounds: crate::place::Rect) -> u64 {
         bounds.width() + bounds.height() + 2
+    }
+
+    /// The tracks of the device's channels at a tile, horizontal and vertical: the `CHANX`
+    /// nodes of the graph that pass over the tile in the channel above it, and the `CHANY`
+    /// nodes in the channel to its right.
+    pub fn channel_tracks(&self, x: u32, y: u32) -> Option<[u32; 2]> {
+        (x < self.grid.0 && y < self.grid.1).then(|| self.tracks[(y * self.grid.0 + x) as usize])
+    }
+
+    /// How much of the channels a placement is expected to use, tile by tile.
+    ///
+    /// This is RUDY (Spindler and Johannes, 2007) with VPR's measure of a net's wire: each
+    /// net needs [`crossing_count`] times the columns of its bounding box of horizontal wire,
+    /// and as many times its rows of vertical wire, which [`bb_estimate`] adds up, spread
+    /// evenly over the tiles of the box. Each tile's demand is then divided by the tracks of
+    /// its channels, [`channel_tracks`](PlaceProblem::channel_tracks).
+    ///
+    /// [`bb_estimate`]: PlaceProblem::bb_estimate
+    pub fn channel_demand(&self, placement: &crate::place::Placement) -> ChannelDemand {
+        let (width, height) = (self.grid.0 as usize, self.grid.1 as usize);
+        // Demand is added to the corners of each box, and summed up afterwards.
+        let stride = width + 1;
+        let mut corners = vec![[0.0f64; 2]; stride * (height + 1)];
+        for net in 0..self.problem.net_count() {
+            let net = NetId(net as u32);
+            let Some(bounds) = self.problem.net_box(placement, net) else {
+                continue;
+            };
+            let Some((x0, x1, y0, y1)) = clip(bounds, self.grid) else {
+                continue;
+            };
+            let columns = (x1 - x0 + 1) as f64;
+            let rows = (y1 - y0 + 1) as f64;
+            let crossing = self.crossing[net.index()];
+            // `columns` of horizontal wire over `columns * rows` tiles, and so on.
+            let add = [crossing / rows, crossing / columns];
+            for (x, y, sign) in [
+                (x0, y0, 1.0),
+                (x1 + 1, y0, -1.0),
+                (x0, y1 + 1, -1.0),
+                (x1 + 1, y1 + 1, 1.0),
+            ] {
+                let corner = &mut corners[y * stride + x];
+                corner[0] += sign * add[0];
+                corner[1] += sign * add[1];
+            }
+        }
+        let mut utilization = vec![[0.0f64; 2]; width * height];
+        let mut row = vec![[0.0f64; 2]; width];
+        for y in 0..height {
+            let mut running = [0.0f64; 2];
+            for x in 0..width {
+                let corner = corners[y * stride + x];
+                for d in 0..2 {
+                    running[d] += corner[d];
+                    row[x][d] += running[d];
+                    let tracks = self.tracks[y * width + x][d];
+                    utilization[y * width + x][d] = if tracks > 0 {
+                        row[x][d].max(0.0) / f64::from(tracks)
+                    } else {
+                        0.0
+                    };
+                }
+            }
+        }
+        ChannelDemand {
+            width: self.grid.0,
+            height: self.grid.1,
+            utilization,
+            has_tracks: self.tracks.iter().map(|t| [t[0] > 0, t[1] > 0]).collect(),
+        }
+    }
+}
+
+/// A box in tiles, clipped to the grid, as first and last column and row, or `None` if it is
+/// off the grid.
+fn clip(
+    bounds: crate::place::Rect,
+    (width, height): (u32, u32),
+) -> Option<(usize, usize, usize, usize)> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let cx = |v: i64| v.clamp(0, i64::from(width) - 1) as usize;
+    let cy = |v: i64| v.clamp(0, i64::from(height) - 1) as usize;
+    Some((
+        cx(bounds.min.x),
+        cx(bounds.max.x),
+        cy(bounds.min.y),
+        cy(bounds.max.y),
+    ))
+}
+
+/// How much of each channel a placement is expected to use: demand over tracks, by tile,
+/// horizontal and vertical. Made by [`PlaceProblem::channel_demand`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChannelDemand {
+    width: u32,
+    height: u32,
+    utilization: Vec<[f64; 2]>,
+    has_tracks: Vec<[bool; 2]>,
+}
+
+impl ChannelDemand {
+    /// The expected use of the horizontal and the vertical channel at a tile, as a fraction
+    /// of their tracks. A channel with no tracks is at 0.
+    pub fn utilization(&self, x: u32, y: u32) -> Option<[f64; 2]> {
+        (x < self.width && y < self.height).then(|| self.utilization[(y * self.width + x) as usize])
+    }
+
+    /// Every channel's use, of those with tracks, in no particular order.
+    fn channels(&self) -> impl Iterator<Item = f64> + '_ {
+        self.utilization
+            .iter()
+            .zip(&self.has_tracks)
+            .flat_map(|(u, t)| [(u[0], t[0]), (u[1], t[1])])
+            .filter(|&(_, t)| t)
+            .map(|(u, _)| u)
+    }
+
+    /// The use of the busiest channel.
+    pub fn peak(&self) -> f64 {
+        self.channels().fold(0.0, f64::max)
+    }
+
+    /// The use that this fraction of channels, from 0 to 1, are at or below.
+    pub fn quantile(&self, fraction: f64) -> f64 {
+        let mut all: Vec<f64> = self.channels().collect();
+        if all.is_empty() {
+            return 0.0;
+        }
+        all.sort_by(f64::total_cmp);
+        let k = (fraction.clamp(0.0, 1.0) * (all.len() - 1) as f64).round() as usize;
+        all[k]
+    }
+
+    /// The sum over channels of how far their use is above `threshold`.
+    pub fn overflow(&self, threshold: f64) -> f64 {
+        self.channels().map(|u| (u - threshold).max(0.0)).sum()
+    }
+
+    /// Sums over boxes of how far each channel is above `threshold`.
+    fn excess(&self, threshold: f64) -> Excess {
+        let (width, height) = (self.width as usize, self.height as usize);
+        let stride = width + 1;
+        let mut sums = vec![[0.0f64; 2]; stride * (height + 1)];
+        for y in 0..height {
+            let mut running = [0.0f64; 2];
+            for x in 0..width {
+                let u = self.utilization[y * width + x];
+                for d in 0..2 {
+                    running[d] += (u[d] - threshold).max(0.0);
+                    sums[(y + 1) * stride + x + 1][d] = sums[y * stride + x + 1][d] + running[d];
+                }
+            }
+        }
+        Excess {
+            grid: (self.width, self.height),
+            sums,
+        }
+    }
+}
+
+/// A summed-area table of how far channels are over a threshold, to find the average over a
+/// box in constant time.
+struct Excess {
+    grid: (u32, u32),
+    sums: Vec<[f64; 2]>,
+}
+
+impl Excess {
+    /// The average excess of the horizontal and the vertical channels over a box.
+    fn mean(&self, bounds: crate::place::Rect) -> [f64; 2] {
+        let Some((x0, x1, y0, y1)) = clip(bounds, self.grid) else {
+            return [0.0; 2];
+        };
+        let stride = self.grid.0 as usize + 1;
+        let at = |x: usize, y: usize| self.sums[y * stride + x];
+        let (a, b, c, d) = (
+            at(x1 + 1, y1 + 1),
+            at(x0, y1 + 1),
+            at(x1 + 1, y0),
+            at(x0, y0),
+        );
+        let tiles = ((x1 - x0 + 1) * (y1 - y0 + 1)) as f64;
+        [
+            ((a[0] - b[0] - c[0] + d[0]) / tiles).max(0.0),
+            ((a[1] - b[1] - c[1] + d[1]) / tiles).max(0.0),
+        ]
     }
 }
 
@@ -489,6 +681,25 @@ pub fn build_place_problem(
         problem.add_macro(&members);
     }
 
+    // Channels: each wire is a track of the channel of every tile it passes.
+    let mut tracks = vec![[0u32; 2]; (width * height) as usize];
+    for node in 0..device.graph().num_nodes() {
+        let node = NodeId(node);
+        let direction = match device.node_kind(node) {
+            Some(NodeKind::ChanX) => 0,
+            Some(NodeKind::ChanY) => 1,
+            _ => continue,
+        };
+        let Some(at) = device.node_location(node) else {
+            continue;
+        };
+        for y in u32::from(at.ylow)..=u32::from(at.yhigh).min(height.saturating_sub(1)) {
+            for x in u32::from(at.xlow)..=u32::from(at.xhigh).min(width.saturating_sub(1)) {
+                tracks[(y * width + x) as usize][direction] += 1;
+            }
+        }
+    }
+
     Ok(PlaceProblem {
         problem,
         grid: (width, height),
@@ -497,6 +708,7 @@ pub fn build_place_problem(
         pin_start,
         crossing,
         chains,
+        tracks,
     })
 }
 
@@ -708,6 +920,19 @@ pub struct PlacerOptions {
     /// For [`PlaceMethod::Analytic`], the first range limit of annealing, in steps of the
     /// columns and rows that have sites of a block's type. The default is 8.
     pub detailed_range: u32,
+    /// How much congestion counts against wirelength: each net costs this much more, times its
+    /// wire, for each unit by which the channels of its bounding box are expected to be used
+    /// above [`congestion_threshold`](PlacerOptions::congestion_threshold), on average, by
+    /// [`PlaceProblem::channel_demand`] of the placement at the start of each temperature.
+    /// 0 leaves congestion out.
+    pub congestion_factor: f64,
+    /// The use of a channel, as a fraction of its tracks, above which it counts as congested.
+    pub congestion_threshold: f64,
+    /// For [`PlaceMethod::Analytic`], the most room a block can take while it is spread, as a
+    /// multiple of its own, where its channels are expected to be used above
+    /// [`congestion_threshold`](PlacerOptions::congestion_threshold): see [`Inflation`]. 1
+    /// leaves blocks their own room.
+    pub max_inflation: f64,
 }
 
 impl Default for PlacerOptions {
@@ -720,6 +945,9 @@ impl Default for PlacerOptions {
             criticality_exponents: (1, 8),
             detailed_temperature: 0.05,
             detailed_range: 8,
+            congestion_factor: 0.0,
+            congestion_threshold: 0.5,
+            max_inflation: 1.0,
         }
     }
 }
@@ -762,6 +990,8 @@ struct VprCost<'p> {
     timing_weight: f64,
     /// By pin, among all nets' pins, the criticality of its connection, or nothing.
     criticality: Vec<f64>,
+    /// How far channels are over the threshold of congestion, and how much that weighs.
+    congestion: Option<(Excess, f64)>,
 }
 
 impl CostTerm for VprCost<'_> {
@@ -780,6 +1010,14 @@ impl CostTerm for VprCost<'_> {
                 cost += self.timing_weight * timing;
             }
         }
+        if let Some((excess, weight)) = &self.congestion {
+            let [x, y] = excess.mean(net.bounds);
+            if x > 0.0 || y > 0.0 {
+                let columns = (net.bounds.width() + 1) as f64;
+                let rows = (net.bounds.height() + 1) as f64;
+                cost += weight * self.problem.crossing[index] * (columns * x + rows * y);
+            }
+        }
         cost.round() as u64
     }
 }
@@ -791,6 +1029,8 @@ struct Weigher<'p, 't> {
     delays: &'p PlaceDelayModel,
     timing: Option<TimingState<'t>>,
     tradeoff: f64,
+    /// The congestion factor and threshold, if congestion counts.
+    congestion: Option<(f64, f64)>,
 }
 
 struct TimingState<'t> {
@@ -834,6 +1074,7 @@ impl<'p, 't> Weigher<'p, 't> {
             } else {
                 0.0
             },
+            congestion: None,
         }
     }
 
@@ -859,8 +1100,19 @@ impl<'p, 't> Weigher<'p, 't> {
         state.analysis.worst_slack()
     }
 
-    /// The cost for a placement, weighed for it, with criticalities to this exponent.
+    /// The cost for a placement, weighed for it, with criticalities to this exponent, and
+    /// congestion as it is in this placement.
     fn cost(&mut self, placement: &crate::place::Placement, exponent: u32) -> VprCost<'p> {
+        let mut cost = self.timing_cost(placement, exponent);
+        if let Some((factor, threshold)) = self.congestion {
+            let excess = self.problem.channel_demand(placement).excess(threshold);
+            cost.congestion = Some((excess, factor * cost.bb_weight));
+        }
+        cost
+    }
+
+    /// The cost without congestion.
+    fn timing_cost(&mut self, placement: &crate::place::Placement, exponent: u32) -> VprCost<'p> {
         let problem = self.problem;
         let bb_total = problem.bb_estimate(placement).max(f64::MIN_POSITIVE);
         let mut cost = VprCost {
@@ -869,6 +1121,7 @@ impl<'p, 't> Weigher<'p, 't> {
             bb_weight: COST_SCALE / bb_total,
             timing_weight: 0.0,
             criticality: Vec::new(),
+            congestion: None,
         };
         if self.tradeoff <= 0.0 || self.timing.is_none() {
             return cost;
@@ -902,6 +1155,37 @@ impl<'p, 't> Weigher<'p, 't> {
         }
         cost.criticality = criticality;
         cost
+    }
+}
+
+/// Blocks take more room in global placement where their channels are congested: as much more
+/// as their busiest channel is used above the threshold, relatively, up to a most.
+#[derive(Debug)]
+struct ChannelInflation<'p> {
+    problem: &'p PlaceProblem,
+    threshold: f64,
+    max: f64,
+}
+
+impl Inflation for ChannelInflation<'_> {
+    fn inflate(
+        &self,
+        _problem: &PlacementProblem,
+        placement: &crate::place::Placement,
+        factors: &mut [f64],
+    ) {
+        let demand = self.problem.channel_demand(placement);
+        let (width, height) = self.problem.grid;
+        for (item, factor) in factors.iter_mut().enumerate() {
+            let at = placement.origin(ItemId(item as u32));
+            let x = at.x.clamp(0, i64::from(width) - 1) as u32;
+            let y = at.y.clamp(0, i64::from(height) - 1) as u32;
+            let [ux, uy] = demand.utilization(x, y).unwrap_or_default();
+            let busiest = ux.max(uy);
+            if busiest > self.threshold && self.threshold > 0.0 {
+                *factor = (busiest / self.threshold).min(self.max);
+            }
+        }
     }
 }
 
@@ -969,9 +1253,15 @@ pub fn place_design(
             legalize(places, &targets, &vec![0; targets.len()])?
         }
         PlaceMethod::Analytic => {
+            let inflation = ChannelInflation {
+                problem,
+                threshold: options.congestion_threshold,
+                max: options.max_inflation,
+            };
             let analytic = AnalyticOptions {
                 seed: options.seed,
                 detailed: None,
+                inflation: (options.max_inflation > 1.0).then_some(&inflation as &dyn Inflation),
                 ..AnalyticOptions::default()
             };
             anneal_options.initial_temperature_factor = options.detailed_temperature;
@@ -982,6 +1272,9 @@ pub fn place_design(
     let start_bb_estimate = problem.bb_estimate(&start);
 
     let mut weigher = Weigher::new(problem, delays, timing, options.timing_tradeoff);
+    if options.congestion_factor > 0.0 {
+        weigher.congestion = Some((options.congestion_factor, options.congestion_threshold));
+    }
     let (first, last) = options.criticality_exponents;
     let cost = weigher.cost(&start, first);
     let mut annealer = Annealer::new(places, cost, start, anneal_options)?;

@@ -16,11 +16,14 @@
 //! implies `pcb`, reads KiCad boards into them, for clearance checks and routing, and the `dsn`
 //! feature, which implies `pcb` too, reads Specctra DSN designs and writes SES sessions. The
 //! `mapf` feature adds multi-agent path finding, `mapf`, routed by the same
-//! engine through a time-expanded space.
+//! engine through a time-expanded space, and the `asic` feature ASIC global routing, `asic`, on
+//! the ISPD contests' designs.
 //!
 //! [roadmap]: https://github.com/KarpelesLab/guide/blob/master/ROADMAP.md
 //! [architecture notes]: https://github.com/KarpelesLab/guide/blob/master/docs/architecture.md
 
+#[cfg(feature = "asic")]
+pub mod asic;
 pub mod cost;
 #[cfg(feature = "dsn")]
 pub mod dsn;

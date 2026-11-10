@@ -29,6 +29,8 @@ dsn = ["pcb"]
 # Multi-agent path finding over time-expanded grids and graphs, and reading the MovingAI
 # benchmarks for it.
 mapf = []
+# ASIC global routing: the ISPD 2007 and 2008 contests' designs, routes and scoring.
+asic = []
 
 [lints.rust]
 unsafe_code = "forbid"
@@ -78,6 +80,10 @@ required-features = ["fpga"]
 [[example]]
 name = "mapf_bench"
 required-features = ["mapf"]
+
+[[example]]
+name = "ispd_route"
+required-features = ["asic"]
 
 # Routing and placement tests run whole boards and circuits, and take minutes unoptimised.
 [profile.test]

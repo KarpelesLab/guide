@@ -17,7 +17,8 @@ contended resources*:
 > **Status: pre-alpha.** The API is not stable yet and changes between 0.0.x releases.
 > Routing and placement work for FPGAs and PCBs, measured against VPR, KiCad and
 > Freerouting in [docs/benchmarks.md](docs/benchmarks.md), and the same engine solves
-> multi-agent path finding, measured against CBSH2-RTC, EECBS and LaCAM3. See the
+> multi-agent path finding, measured against CBSH2-RTC, EECBS and LaCAM3, and ASIC global
+> routing, against the ISPD contests' published results. See the
 > [roadmap](ROADMAP.md) for what is done and what is next.
 
 ## Features
@@ -31,6 +32,7 @@ All optional, so the default build has no dependencies:
 | `kicad` | Reading KiCad boards and rules, and writing routes, fills and placements back (implies `pcb`) |
 | `dsn` | Specctra DSN import and SES export (implies `pcb`) |
 | `mapf` | Multi-agent path finding on graphs and grids, and the MovingAI benchmarks |
+| `asic` | ASIC global routing: the ISPD 2007 and 2008 contests' designs and route files, and their scoring |
 
 ## Why one engine?
 

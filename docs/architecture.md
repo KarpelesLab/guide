@@ -259,6 +259,30 @@ where it fits, and kept only if it connects what its two routes did, so no other
 at all, and a pair that doesn't fit stays as two nets. Meanders come after that, for the same
 reason ([results](benchmarks.md#pcb-differential-pairs-and-lengths)).
 
+**Zones are filled, not routed, and a net reaches its fill like a terminal.** `pcb::fill_zones`
+fills a zone as KiCad's `ZONE_FILLER` does, on polyclip: the outline less what other nets need
+around them, thermal reliefs to its own pads, parts too narrow taken away, islands removed. Its
+fills are within 1% of KiCad 10's own on the curated boards, by the area only one of the two
+covers ([results](benchmarks.md#pcb-zones-and-planes)). The router never sees fills as
+copper: they are what is left after routing, filled again at the end around everything. What
+it does see is where its nets' fills will be:
+
+- Before routing, zones are filled around the fixed copper. The pads that a net's largest fill
+  joins, on inner layers if it has fills there, are one terminal, which also holds places in
+  that fill, near each of the net's other pads, where a via or a track's end fits. Routing the
+  net is then routing stubs to its fill, by the same search and rip-up as any net, rather than
+  tracks across the board. Placing the stubs first, as fixed copper, cost `nk3-nrf-mini`
+  three nets, around its aQFN, which routing them as a net that others can rip up didn't.
+- Inner-layer fills are planes, which other nets' tracks pay twice their length to cross,
+  so as not to cut them in pieces.
+- After routing, zones are filled again, and a net that its routes and fills leave in pieces
+  has each piece joined to the largest by a stub, from any of its pads, tracks or vias, or
+  by tracks, and is filled again, three times at most. Islands are kept until the very end,
+  as a plane that no via reaches yet is still a plane to reach.
+
+Fills are not obstacles to other nets' routing, as a zone of a lower priority isn't to one of
+a higher in KiCad: the cost of a plane, and the repair after, take their place.
+
 **No `unsafe`, at least initially.** The crate forbids it. If profiling later proves
 it is needed, it gets isolated in a small audited module and the lint relaxed there.
 

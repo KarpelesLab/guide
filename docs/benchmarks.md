@@ -8,8 +8,8 @@ evidence about real designs**. The comparisons on real designs so far are
 [its Verilog benchmarks](#vtrs-verilog-benchmarks), the
 [clearance check against KiCad's](#pcb-clearance-checks-against-kicad), on real boards,
 [those boards read from DSN](#pcb-dsn-designs-against-kicad-boards) against the same boards read
-from KiCad's files, and [PCB routing of the same boards](#pcb-routing-of-the-curated-boards),
-checked by KiCad. [Placement](#placement-on-synthetic-problems) is measured on synthetic problems
+from KiCad's files, [PCB routing of the same boards](#pcb-routing-of-the-curated-boards),
+checked by KiCad, and [their zones' fills](#pcb-zones-and-planes) against KiCad's. [Placement](#placement-on-synthetic-problems) is measured on synthetic problems
 whose optimum is known.
 
 ## Running
@@ -1390,7 +1390,9 @@ routers](#pcb-routing-against-freerouting) is below too. Nothing here depends on
 `pcb::route` on the nine [curated boards](../testdata/kicad/README.md), each stripped of its
 tracks, arcs, vias and zone fills, so that every net with pads on two copper islands has to be
 routed again, ground and power included, which the originals mostly connect through zones.
-Copper graphics, pads, keepouts, the board's edge, text on copper and solder mask openings
+These are the results of the router as it was before zones, which it still gives with
+`Options::planes` off; [below](#pcb-zones-and-planes), the same boards keep their zones'
+outlines, and their nets connect through them. Copper graphics, pads, keepouts, the board's edge, text on copper and solder mask openings
 stay. Each net gets its class's track width and via size.
 
 ### How
@@ -1538,8 +1540,9 @@ above rest on several boards moving the same way, never on one.
 
 - Nine boards, all small: the largest has 79 nets. Larger boards would test global routing far
   more than these do.
-- Tracks are octilinear and every via goes through the board. No zones are routed, and these
-  results have no lengths to meet: [those below](#pcb-differential-pairs-and-lengths) do.
+- Tracks are octilinear and every via goes through the board. No zones are routed here, and
+  these results have no lengths to meet: [those below](#pcb-differential-pairs-and-lengths) and
+  [those through zones](#pcb-zones-and-planes) do.
 - Times are of one thread. Most of the time left on the large boards goes into rip-up's
   searches, and into those that find no path.
 
@@ -1611,6 +1614,13 @@ rules here are this test's. Completion, our DRC and KiCad's are as without pairs
 all four boards, and so are the times, to within the machine's noise: 0.21, 0.89, 33.4 and
 20.7 s.
 
+These tables are of the router before [zones](#pcb-zones-and-planes). With the boards' zones
+kept and their nets routed through them, the default since, all nine constraints are still met,
+with KiCad's DRC as clean: `udb-s`'s pair is coupled for 52% of its 28.08 mm, with 4 vias,
+`GB-LIVE32`'s is unchanged, `nk3-nrf-mini`'s two nets come out at 16.56 mm with 5 vias and
+0.6 mm of meander, and `isi-channel`'s channels are the same lengths, with no ground track
+around them.
+
 ### What the results say
 
 - **Coupling.** The two USB pairs that can get out side by side run so for about half their
@@ -1645,6 +1655,123 @@ all four boards, and so are the times, to within the machine's noise: 0.21, 0.89
   and nothing here models them.
 - Meanders are trombones of square corners, on one side of a track at a time; there are no
   sawtooth or rounded meanders, and none on arcs.
+
+## PCB zones and planes
+
+Copper zones filled by `pcb::fill_zones` against KiCad's own fills, and the curated boards
+routed with their zones' nets connected through them, against the same router with zones
+ignored and against the hand routing, which used zones too. Measured on 2026-11-10 on the same
+machine, one thread.
+
+### How
+
+```text
+cargo test --release --features kicad curated_fills -- --nocapture             # our DRC, against saved fills
+GUIDE_KICAD=1 cargo test --release --features kicad curated_fills -- --nocapture  # against KiCad 10's
+GUIDE_ROUTE=1 GUIDE_KICAD=1 cargo test --release --features kicad curated_boards_route -- --nocapture
+GUIDE_ROUTE=1 GUIDE_PLANES=0 cargo test --release --features kicad curated_boards_route -- --nocapture
+```
+
+[`zone_tests.rs`](../src/kicad/zone_tests.rs) keeps each board's tracks and vias, takes its
+zones' fills out, fills them again, and checks the result with `drc::check`, which must find
+nothing involving a fill. With `GUIDE_KICAD=1`, `kicad-cli pcb drc --refill-zones --save-board`
+10.0.3 refills the same board, and its fills are compared with ours zone by zone and layer by
+layer: the area of each, and the area that only one of the two covers. The board is also
+written with our fills by `kicad::replace_routing_and_fills`, and checked by KiCad's DRC without
+refilling. Teardrops, which KiCad keeps as zones, stay as they are.
+
+Routing is [as above](#pcb-routing-of-the-curated-boards), on the boards stripped of tracks,
+vias and fills, with the zones' outlines kept. The routed board is written with our fills, and
+KiCad's DRC checks it twice: as written, and with `--refill-zones`, its own fills in place of
+ours. Both must find no violation involving a routed item, and no missing connection on a
+board with every net routed.
+
+### Fills against KiCad's
+
+| Board | Zones | KiCad's, mm² | Ours, mm² | Only one of the two, mm² | KiCad's DRC of our fills | Unconnected: KiCad's fills, ours |
+| --- | --- | --- | --- | --- | --- | --- |
+| `GB-BRK-LINK-A` | 1 | 948.1 | 948.4 | 0.26 (0.03%) | clean | 0, 0 |
+| `TS4231-BOB` | 2 | 208.9 | 209.8 | 2.07 (0.99%) | clean | 0, 0 |
+| `lisn` | 10 | 3756.2 | 3757.8 | 8.54 (0.23%) | clean | 0, 0 |
+| `isi-channel` | 1 | 14750.4 | 14750.5 | 0.15 (0.00%) | clean | 0, 0 |
+| `placebo` | 1 | 407.6 | 410.0 | 2.42 (0.59%) | clean | 0, 0 |
+| `udb-s` | 1 | 734.8 | 736.7 | 1.94 (0.26%) | clean | 3, 3 |
+| `GB-LIVE32` | 8 | 5186.9 | 5188.7 | 1.83 (0.04%) | clean | 0, 0 |
+| `nk3-nrf-mini` | 4 | 218.9 | 218.7 | 0.67 (0.31%) | clean | 0, 0 |
+
+`flea` has no zone. Our DRC finds nothing involving our fills on any board, and KiCad's no
+error involving a zone. `udb-s`'s 3 unconnected items are the board's own, with KiCad's fills
+too. What differs is mostly thermal spokes, where ours and KiCad's are laid out a little
+differently on rotated and custom pads, and text, which we keep clear of as a box around it.
+Getting there took what KiCad 10 does and doesn't:
+
+- the board's edge is kept clear of by the edge clearance from its line, whatever the line's
+  width, and holes by the hole clearance, not the zone's clearance, as the fills saved in the
+  files, from KiCad 7, were: against those, ours differ by up to 9%;
+- of two overlapping zones of one priority, the one with the greater UUID fills first;
+- a spoke is kept only if its end is in the fill or in another spoke, and reaches past the
+  pad's own size, not its box's, by the gap and half the minimum width.
+
+### Routing through zones
+
+| Board | Nets | Connections | DRC violations | Vias: routed → after cleanup (as tracks) (original) | Track, mm: routed → after cleanup (as tracks) (original) | Seconds (as tracks) | KiCad, our fills and refilled |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `GB-BRK-LINK-A` | 6/6 | 8/8 | 0 | 0 → 0 (0) (0) | 93 → 93 (128) (115) | 0.06 (0.01) | 0 violations, 0 unconnected |
+| `TS4231-BOB` | 8/8 | 13/13 | 0 | 1 → 0 (1) (10) | 29 → 31 (43) (39) | 0.11 (0.01) | 0 violations, 0 unconnected |
+| `lisn` | 18/18 | 60/60 | 0 | 9 → 7 (10) (0) | 141 → 144 (329) (328) | 0.45 (0.08) | 0 violations, 0 unconnected |
+| `isi-channel` | 7/7 | 29/29 | 0 | 2 → 0 (0) (0) | 461 → 453 (771) (1319) | 0.14 (0.21) | 0 violations, 0 unconnected |
+| `placebo` | 23/23 | 50/50 | 0 | 21 → 9 (9) (10) | 250 → 292 (321) (286) | 0.39 (0.13) | 0 violations, 0 unconnected |
+| `udb-s` | 8/8 | 33/33 | 0 | 15 → 11 (12) (24) | 143 → 149 (187) (172) | 1.35 (0.95) | 0 violations, 0 unconnected |
+| `flea` | 24/24 | 79/79 | 0 | 56 → 52 (52) (31) | 1602 → 1607 (1607) (1704) | 4.92 (5.43) | 0 violations, 0 unconnected |
+| `GB-LIVE32` | 79/79 | 197/197 | 0 | 255 → 165 (142) (140) | 2222 → 2283 (2705) (2315) | 24.4 (33.9) | 0 violations, 0 unconnected |
+| `nk3-nrf-mini` | 29/30 | 82/83 | 0 | 63 → 55 (60) (60) | 231 → 249 (307) (349) | 19.4 (24.0) | 0 violations, 1 unconnected |
+
+*As tracks* is the router with `Options::planes` off, which routes zones' nets as any others
+and fills the zones after: its tracks and vias are exactly [the results
+above](#pcb-routing-of-the-curated-boards), before zones, and its times are those recorded
+there. Connections count what the zones join as made. The original's track is now comparable,
+as it too leaves to zones what they join.
+
+- **Completion** is as before: eight boards complete, and `nk3-nrf-mini` all but `/LED_R`. KiCad
+  finds nothing wrong with any of them, with our fills or its own.
+- **Track** is shorter on every board with zones, 3694 mm in all against 4791 as tracks and 4923
+  by hand: ground and power are stubs to their planes. `isi-channel`'s ground goes to its plane
+  on `In1.Cu`, and its track is now its three channels' 453 mm, before meanders.
+- **Vias** are 23 more on `GB-LIVE32`, 165 against 142 as tracks and 140 by hand, as every
+  ground and supply pad on the surface has a via of its own to its plane, which tracks between
+  pads would share. On the other boards they are as many or fewer.
+- **Time** is less on the two hard boards, where ground was the hardest net: 24 s against 34
+  on `GB-LIVE32`, 19 against 24 on `nk3-nrf-mini`. Filling zones twice or more costs up to half
+  a second on the small boards.
+
+### What the cost of a plane does
+
+The extra cost of another net's track inside a plane, as a fraction of its length,
+`Options::plane_cost`:
+
+| Plane cost | Boards complete | `GB-LIVE32` vias, mm, s | `nk3-nrf-mini` |
+| --- | --- | --- | --- |
+| 0 | 7 of 9 | 172, 2245, 8.5 | 78/83, `/3V3` in pieces |
+| 1, the default | 8 of 9 | 165, 2283, 24.4 | 82/83 |
+| 3 | 7 of 9 | 200, 2376, 43.3 | 80/83, `/SCL` unrouted |
+
+With no cost, signals cut `nk3-nrf-mini`'s `/3V3` plane on `In2.Cu` in pieces that stubs can't
+join again; with too much, they crowd the outer layers, and lose a signal there. The other
+seven boards are the same at all three.
+
+Placing the stubs first, as fixed copper before anything else is routed, rather than as a net's
+routes to its plane that rip-up can move, completed `GB-LIVE32` in 14 s, but cost `nk3-nrf-mini`
+three signals around its aQFN, 79 connections of 83.
+
+### What this does not show
+
+- Fills are compared on eight boards' zones, mostly simple: rectangles and a few polygons, no
+  hatched fills, no zone with a fillet or chamfer of its corners, which KiCad applies to
+  `TS4231-BOB`'s outlines and we don't.
+- The planes are whole: no board here splits a layer between several nets' planes, beyond
+  `GB-LIVE32`'s `In2.Cu`, so stubs rarely have to choose.
+- Zones' fills are written for KiCad, which then checks them, but not for fabrication:
+  nothing here is a Gerber.
 
 ## PCB routing against Freerouting
 

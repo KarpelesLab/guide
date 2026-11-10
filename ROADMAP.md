@@ -204,7 +204,20 @@ Each item is independently useful, and they can land in any order.
   fine grid to leave room for the others, or where no via fits, their only way out, before
   anything else is routed. Through vias only.
 - Blind, buried and micro vias; impedance-driven width per layer stack.
-- Copper zones and plane-aware routing.
+- Copper zones and plane-aware routing. Done: `pcb::fill_zones` fills zones as KiCad does,
+  with clearances, thermal reliefs, minimum widths, priorities and island removal, within 1% of
+  KiCad 10's own fills on the curated boards, and KiCad's DRC finds nothing wrong with them.
+  `pcb::route` keeps zones' outlines, and connects their nets to them: a net's pads that its
+  fill reaches are one terminal with places in the fill near its other pads, so that it is
+  routed as stubs, track and via, to the fill; inner-layer fills are planes that other nets
+  pay to cross; and after routing, zones are filled again, and a net left in pieces is joined
+  up again by stubs or tracks. All nine curated boards route as completely as before, the
+  ground and power nets through their zones, with KiCad's DRC clean, of guide's fills and of
+  KiCad's own refill; `GB-LIVE32` in 24 s rather than 34, with 2283 mm of track, against 2705
+  and 2315 by hand, and 165 vias against 142 and 140
+  ([results](docs/benchmarks.md#pcb-zones-and-planes)). Not yet: hatched fills, zones' own
+  thermal spoke counts and fillets, and planes split between nets on one layer, which are
+  filled as any zones.
 - Net topology constraints (daisy chain, star, T).
 - Direct KiCad board-file reading for routing, and writing routes back. Reading for
   clearance checks came with M4.

@@ -635,6 +635,12 @@ impl Reader {
                 pb_type: name.clone(),
                 kind,
             });
+        }
+        // The made-up primitive has the same name whatever it came from, as with `lut5` and
+        // `lut6` in one architecture, so it is also kept under its parent's name, which is
+        // how `LogicDelays::primitive_name` tells them apart.
+        names.extend(child.map(|child| format!("{}.{child}", pb_type.name)));
+        for name in &names {
             if let Some(model) = &model {
                 self.arch.delays.set_model(name, model.clone());
             }
@@ -680,18 +686,30 @@ impl Reader {
                 }
             }
             Some("memory") => {
-                let data_pins = pb_type
+                // As `ProcessMemoryClass` names them: `direct{n}` for a data port, which
+                // goes to every slice at once, and `direct{n}_{slice}` for each slice of
+                // any other port, with `n` counting every one of them.
+                let is_data = |port: &PbPort| {
+                    port.class
+                        .as_deref()
+                        .is_some_and(|class| class.starts_with("data"))
+                };
+                let slices = pb_type
                     .ports
                     .iter()
-                    .find(|port| {
-                        port.class
-                            .as_deref()
-                            .is_some_and(|class| class.starts_with("data"))
-                    })
+                    .find(|port| is_data(port))
                     .map_or(1, |port| port.pins);
-                let count = (pb_type.ports.len() as u32).saturating_mul(data_pins);
-                for index in 0..count {
-                    self.add_interconnect(&pb_type.name, &format!("direct:{index}"));
+                let mut index = 0u64;
+                for port in &pb_type.ports {
+                    if is_data(port) {
+                        self.add_interconnect(&pb_type.name, &format!("direct{index}"));
+                        index += 1;
+                    } else {
+                        for slice in 0..slices {
+                            self.add_interconnect(&pb_type.name, &format!("direct{index}_{slice}"));
+                            index += 1;
+                        }
+                    }
                 }
             }
             _ => {}
@@ -815,7 +833,12 @@ impl Reader {
 /// interconnect `complete:name` carries the LUT's delays, and a mode with a primitive called
 /// `lut` that has them (or `lut_child` if the `pb_type` is itself `lut`), joined by
 /// interconnect `direct:name`. A `.net` file names those, so they are read the same way. The
-/// same goes for `class="memory"`, whose primitive is `memory_slice`.
+/// same goes for `class="memory"`, whose primitive is `memory_slice`, with interconnect
+/// `direct{n}` and `direct{n}_{slice}`. As every `class="lut"` makes a `lut` and every
+/// `class="memory"` a `memory_slice`, the delays and model of each are also kept under the name
+/// of the `pb_type` they came from, as in `lut5.lut`, which
+/// [`LogicDelays::primitive_name`](super::LogicDelays::primitive_name) finds. Under the plain
+/// name, the last such `pb_type` in the file wins.
 ///
 /// # Differences from VPR
 ///
@@ -1108,6 +1131,95 @@ mod tests {
         );
         assert_eq!(delays.interconnect("blk", "m"), Some(0));
         assert_eq!(delays.model("ignored"), None);
+    }
+
+    /// Two LUT sizes and two memories, each a `class`, as in `k6_frac_N10_mem32K` architectures.
+    const CLASSES: &str = r#"<architecture>
+      <models>
+        <model name="single_port_ram">
+          <input_ports>
+            <port name="addr" clock="clk"/><port name="data" clock="clk"/>
+            <port name="clk" is_clock="1"/>
+          </input_ports>
+          <output_ports><port name="out" clock="clk"/></output_ports>
+        </model>
+        <model name="dual_port_ram">
+          <input_ports>
+            <port name="addr1" clock="clk"/><port name="data1" clock="clk"/>
+            <port name="clk" is_clock="1"/>
+          </input_ports>
+          <output_ports><port name="out1" clock="clk"/></output_ports>
+        </model>
+      </models>
+      <complexblocklist>
+        <pb_type name="blk">
+          <mode name="five">
+            <pb_type name="lut5" blif_model=".names" class="lut">
+              <input name="in" num_pins="5" port_class="lut_in"/>
+              <output name="out" num_pins="1" port_class="lut_out"/>
+              <delay_constant max="235e-12" in_port="lut5.in" out_port="lut5.out"/>
+            </pb_type>
+          </mode>
+          <mode name="six">
+            <pb_type name="lut6" blif_model=".names" class="lut">
+              <input name="in" num_pins="6" port_class="lut_in"/>
+              <output name="out" num_pins="1" port_class="lut_out"/>
+              <delay_constant max="261e-12" in_port="lut6.in" out_port="lut6.out"/>
+            </pb_type>
+          </mode>
+          <mode name="sp">
+            <pb_type name="sp" blif_model=".subckt single_port_ram" class="memory">
+              <input name="addr" num_pins="2" port_class="address"/>
+              <input name="data" num_pins="2" port_class="data_in"/>
+              <output name="out" num_pins="2" port_class="data_out"/>
+              <clock name="clk" num_pins="1" port_class="clock"/>
+              <T_setup value="509e-12" port="sp.data" clock="clk"/>
+            </pb_type>
+          </mode>
+          <mode name="dp">
+            <pb_type name="dp" blif_model=".subckt dual_port_ram" class="memory">
+              <input name="addr1" num_pins="2" port_class="address1"/>
+              <input name="data1" num_pins="2" port_class="data_in1"/>
+              <output name="out1" num_pins="2" port_class="data_out1"/>
+              <clock name="clk" num_pins="1" port_class="clock"/>
+              <T_setup value="400e-12" port="dp.data1" clock="clk"/>
+            </pb_type>
+          </mode>
+        </pb_type>
+      </complexblocklist>
+    </architecture>"#;
+
+    #[test]
+    fn primitives_made_up_for_classes_keep_their_parents_delays() {
+        let arch = read_architecture(CLASSES.as_bytes()).unwrap();
+        let delays = arch.delays();
+        // Under the plain name, the last in the file wins.
+        assert_eq!(delays.combinational("lut", "in", "out"), Some(261));
+        assert_eq!(delays.combinational("lut5.lut", "in", "out"), Some(235));
+        assert_eq!(delays.combinational("lut6.lut", "in", "out"), Some(261));
+        assert_eq!(delays.primitive_name(Some("lut5"), "lut"), "lut5.lut");
+
+        let name = delays.primitive_name(Some("sp"), "memory_slice");
+        let model = delays.model(&name).unwrap();
+        assert!(model.is_clocked("data") && !model.is_clocked("data1"));
+        assert_eq!(delays.sequential(&name).unwrap().setup, 509);
+        let name = delays.primitive_name(Some("dp"), "memory_slice");
+        assert!(delays.model(&name).unwrap().is_clocked("data1"));
+        assert_eq!(delays.sequential(&name).unwrap().setup, 400);
+
+        // VPR's names for a memory's interconnect: one for each data port, and one for each
+        // slice of every other port, numbered on through both.
+        for name in [
+            "direct0_0",
+            "direct1_1",
+            "direct2",
+            "direct3",
+            "direct4_0",
+            "direct5_1",
+        ] {
+            assert_eq!(delays.interconnect("sp", name), Some(0), "{name}");
+        }
+        assert_eq!(delays.interconnect("sp", "direct0_1"), None);
     }
 
     #[test]

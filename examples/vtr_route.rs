@@ -33,6 +33,7 @@
 //! | `--lookahead-samples N` | `LookaheadOptions::samples_per_axis` | The default, 2 |
 //! | `--astar F` | `EngineOptions::bound_weight` | From `RrGraph::engine_options` |
 //! | `--incremental on/off` | `EngineOptions::incremental_reroute` | From `RrGraph::engine_options` |
+//! | `--report-timing` | Print the delays that fell back on defaults, and the critical path with each pin's arrival, to standard error | Off |
 //!
 //! It prints one line of `key=value` pairs, which the scripts parse, and exits with status 0 if
 //! the routes are legal, 1 if they are not, and 2 on bad input.
@@ -45,10 +46,12 @@ use std::time::Instant;
 use guide::cost::Cost;
 use guide::engine::{Outcome, route_parallel, route_timed_parallel};
 use guide::fpga::{
-    LookaheadOptions, NetOptions, NodeKind, RouteHeader, RrGraph, TimingOptions, build_timing,
-    read_architecture, read_netlist, read_placement, read_rr_graph, resolve_nets, write_route,
+    DesignTiming, InternalPin, LookaheadOptions, NetOptions, NodeKind, PackedNetlist, RouteHeader,
+    RrGraph, TimingOptions, build_timing, constant_nets, read_architecture, read_netlist,
+    read_placement, read_rr_graph, resolve_nets, write_route,
 };
 use guide::id::NodeId;
+use guide::timing::{Constraints, TimingAnalysis};
 use guide::validate::check;
 
 /// What the command line asks for.
@@ -73,6 +76,7 @@ struct Args {
     lookahead_samples: Option<u32>,
     astar: Option<f64>,
     incremental: Option<bool>,
+    report_timing: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -96,11 +100,16 @@ fn parse_args() -> Result<Args, String> {
         lookahead_samples: None,
         astar: None,
         incremental: None,
+        report_timing: false,
     };
     let mut given = std::env::args().skip(1);
     while let Some(flag) = given.next() {
         if flag == "--no-timing" {
             args.timing = false;
+            continue;
+        }
+        if flag == "--report-timing" {
+            args.report_timing = true;
             continue;
         }
         let value = given
@@ -188,6 +197,46 @@ fn wirelength(device: &RrGraph, outcome: &Outcome<NodeId, NodeId>) -> u64 {
     total
 }
 
+/// Prints what `--report-timing` asks for.
+fn report_timing(timing: &DesignTiming, netlist: &PackedNetlist, constraints: &Constraints) {
+    for fallback in &timing.report().fallbacks {
+        eprintln!("fallback: {fallback:?}");
+    }
+    let mut analysis = TimingAnalysis::new(timing.graph());
+    analysis.run(timing.graph(), constraints);
+    let Some(path) = analysis.critical_path() else {
+        eprintln!("no critical path");
+        return;
+    };
+    eprintln!(
+        "critical path: slack {} ps, arrival {} ps",
+        path.slack(),
+        path.arrival()
+    );
+    for &point in path.points() {
+        let name = match timing.pin(point) {
+            Some(InternalPin::Block(pin)) => format!(
+                "block {} {}[{}]",
+                netlist.blocks()[pin.block as usize].name,
+                netlist.ports()[pin.port as usize],
+                pin.bit
+            ),
+            Some(InternalPin::Primitive { primitive, pin }) => {
+                let primitive = &netlist.primitives()[primitive as usize];
+                format!(
+                    "{} ({}) {}[{}]",
+                    primitive.name,
+                    primitive.pb_type,
+                    netlist.ports()[pin.port as usize],
+                    pin.bit
+                )
+            }
+            None => "?".to_owned(),
+        };
+        eprintln!("  {:>8} {name}", analysis.arrival(point).unwrap_or(0));
+    }
+}
+
 fn run(args: &Args) -> Result<bool, String> {
     let started = Instant::now();
     let arch = read_architecture(open(&args.arch)?).map_err(|e| format!("{}: {e}", args.arch))?;
@@ -196,7 +245,10 @@ fn run(args: &Args) -> Result<bool, String> {
     let netlist = read_netlist(open(&args.net)?).map_err(|e| format!("{}: {e}", args.net))?;
     let placement =
         read_placement(open(&args.place)?).map_err(|e| format!("{}: {e}", args.place))?;
-    let design = resolve_nets(&device, &netlist, &placement, &NetOptions::default())
+    let mut net_options = NetOptions::default();
+    net_options.constant_nets = constant_nets(&netlist);
+    let constants = net_options.constant_nets.len();
+    let design = resolve_nets(&device, &netlist, &placement, &net_options)
         .map_err(|e| format!("resolving nets: {e}"))?;
     let read_seconds = started.elapsed().as_secs_f64();
 
@@ -245,8 +297,17 @@ fn run(args: &Args) -> Result<bool, String> {
         let constraints = timing
             .vpr_constraints(0)
             .map_err(|e| format!("constraints: {e}"))?;
-        let driven = timing.timing_driven(&design, constraints);
-        route_timed_parallel(&timed, design.nets(), options, driven, args.threads)
+        let driven = timing.timing_driven(&design, constraints.clone());
+        let connections = driven.connections.clone();
+        let outcome = route_timed_parallel(&timed, design.nets(), options, driven, args.threads);
+        if args.report_timing
+            && let Ok(outcome) = &outcome
+            && let Some(result) = &outcome.timing
+        {
+            timing.set_connection_delays(&connections, &result.connection_delays);
+            report_timing(&timing, &netlist, &constraints);
+        }
+        outcome
     } else {
         route_parallel(device.graph(), design.nets(), options, args.threads)
     }
@@ -259,6 +320,10 @@ fn run(args: &Args) -> Result<bool, String> {
         .timing
         .as_ref()
         .and_then(|timing| timing.metrics.critical_path_delay);
+    let slack = outcome
+        .timing
+        .as_ref()
+        .and_then(|timing| timing.metrics.worst_slack);
 
     let mut written = false;
     if legal && let Some(path) = &args.out {
@@ -276,7 +341,7 @@ fn run(args: &Args) -> Result<bool, String> {
 
     println!(
         "legal={legal} validator_faults={} overused={} iterations={} best_iteration={} \
-         stop={:?} nets={} wirelength={} critical_path_ps={} total_cost={:.6e} \
+         stop={:?} nets={} constant_nets={constants} wirelength={} critical_path_ps={} worst_slack_ps={} total_cost={:.6e} \
          expansions={} read_s={read_seconds:.3} lookahead_s={lookahead_seconds:.3} \
          route_s={route_seconds:.3} threads={} \
          batch={} written={written}",
@@ -288,6 +353,7 @@ fn run(args: &Args) -> Result<bool, String> {
         design.nets().len(),
         wirelength(&device, &outcome),
         critical.map_or_else(|| "none".to_owned(), |ps| ps.to_string()),
+        slack.map_or_else(|| "none".to_owned(), |ps| ps.to_string()),
         outcome.total_cost.get(),
         outcome.routes.stats.nodes_expanded,
         args.threads,

@@ -193,7 +193,7 @@ pub use rr_graph::{
 };
 pub use timing::{
     ClockDomain, ClockSelection, DesignTiming, Fallback, LogicDelays, PrimitiveModel,
-    SequentialDelays, TimingOptions, TimingReport, build_timing,
+    SequentialDelays, TimingOptions, TimingReport, build_timing, constant_nets,
 };
 
 /// Why a file could not be imported.

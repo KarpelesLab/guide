@@ -322,6 +322,39 @@ impl LogicDelays {
     pub fn model(&self, pb_type: &str) -> Option<&PrimitiveModel> {
         self.models.get(pb_type)
     }
+
+    /// Returns the name that a primitive's delays and model are under: `parent.pb_type` if a
+    /// model or delays were set under that name, and `pb_type` otherwise.
+    ///
+    /// `parent` is the type of the block that holds the primitive, from
+    /// [`PackedNetlist::primitive_parent`]. VPR makes a primitive of the same type, such as
+    /// `lut` or `memory_slice`, for every `pb_type` of a `class`, so `lut4`, `lut5` and `lut6`
+    /// each hold a `lut` with delays of their own. [`read_architecture`](super::read_architecture)
+    /// keeps those under `lut4.lut` and so on, as well as under `lut`.
+    ///
+    /// ```
+    /// use guide::fpga::LogicDelays;
+    ///
+    /// let mut delays = LogicDelays::new();
+    /// delays.set_combinational("lut", 261);
+    /// delays.set_combinational("lut5.lut", 235);
+    /// assert_eq!(delays.primitive_name(Some("lut5"), "lut"), "lut5.lut");
+    /// assert_eq!(delays.primitive_name(Some("lut6"), "lut"), "lut");
+    /// assert_eq!(delays.primitive_name(None, "lut"), "lut");
+    /// ```
+    pub fn primitive_name(&self, parent: Option<&str>, pb_type: &str) -> String {
+        if let Some(parent) = parent {
+            let qualified = format!("{parent}.{pb_type}");
+            if self.models.contains_key(&qualified)
+                || self.combinational.contains_key(&qualified)
+                || self.sequential.contains_key(&qualified)
+                || self.hold.contains_key(&qualified)
+            {
+                return qualified;
+            }
+        }
+        pb_type.to_owned()
+    }
 }
 
 /// Which clocks' registers to time.
@@ -902,10 +935,11 @@ pub fn build_timing(
     let add_paths = |builder: &mut TimingGraphBuilder,
                      fallbacks: &mut BTreeSet<Fallback>,
                      primitive: &PackedPrimitive,
+                     type_name: &str,
                      inputs: &[PointId],
                      outputs: &[PointId]|
      -> Result<(), TimingError> {
-        let model = delays.model(&primitive.pb_type);
+        let model = delays.model(type_name);
         for (&input, &from) in primitive.inputs.iter().zip(inputs) {
             for (&output, &to) in primitive.outputs.iter().zip(outputs) {
                 let (input_port, output_port) = (port_name(input), port_name(output));
@@ -914,13 +948,13 @@ pub fn build_timing(
                 }
                 let delay = delays
                     .combinational_pins(
-                        &primitive.pb_type,
+                        type_name,
                         (input_port, input.bit),
                         (output_port, output.bit),
                     )
                     .unwrap_or_else(|| {
                         fallbacks.insert(Fallback::Combinational {
-                            pb_type: primitive.pb_type.clone(),
+                            pb_type: type_name.to_owned(),
                             input: input_port.to_owned(),
                             output: output_port.to_owned(),
                         });
@@ -931,10 +965,10 @@ pub fn build_timing(
         }
         Ok(())
     };
-    let sequential_delays = |fallbacks: &mut BTreeSet<Fallback>, primitive: &PackedPrimitive| {
-        delays.sequential(&primitive.pb_type).unwrap_or_else(|| {
+    let sequential_delays = |fallbacks: &mut BTreeSet<Fallback>, type_name: &str| {
+        delays.sequential(type_name).unwrap_or_else(|| {
             fallbacks.insert(Fallback::Sequential {
-                pb_type: primitive.pb_type.clone(),
+                pb_type: type_name.to_owned(),
             });
             delays.default_sequential
         })
@@ -967,8 +1001,10 @@ pub fn build_timing(
         };
         let clock = clock_of[index as usize].as_deref();
         let domain = clock_id(clock);
-        let sequential = delays.sequential(&primitive.pb_type);
-        let model = delays.model(&primitive.pb_type);
+        let type_name = delays.primitive_name(netlist.primitive_parent(index), &primitive.pb_type);
+        let type_name = type_name.as_str();
+        let sequential = delays.sequential(type_name);
+        let model = delays.model(type_name);
         let role = if input_pads.contains(primitive.name.as_str()) {
             Role::InputPad
         } else if output_pads.contains(primitive.name.as_str()) {
@@ -1022,11 +1058,18 @@ pub fn build_timing(
                 // Only a model says which paths go through a register, and which of its ports
                 // are clocked. Without one, all are clocked and none go through.
                 if let Some(model) = model {
-                    add_paths(&mut builder, &mut fallbacks, primitive, &inputs, &outputs)?;
+                    add_paths(
+                        &mut builder,
+                        &mut fallbacks,
+                        primitive,
+                        type_name,
+                        &inputs,
+                        &outputs,
+                    )?;
                     if !timed {
                         continue;
                     }
-                    let sequential = sequential_delays(&mut fallbacks, primitive);
+                    let sequential = sequential_delays(&mut fallbacks, type_name);
                     for (&pin, &point) in primitive.inputs.iter().zip(&inputs) {
                         if model.is_clocked(port_name(pin)) {
                             builder.set_capture_on(point, domain, sequential.setup)?;
@@ -1042,7 +1085,7 @@ pub fn build_timing(
                 if !timed {
                     continue;
                 }
-                let sequential = sequential_delays(&mut fallbacks, primitive);
+                let sequential = sequential_delays(&mut fallbacks, type_name);
                 for &point in &inputs {
                     builder.set_capture_on(point, domain, sequential.setup)?;
                 }
@@ -1053,7 +1096,14 @@ pub fn build_timing(
             Role::Constant => report.constant_generators += 1,
             Role::Combinational => {
                 report.combinational += 1;
-                add_paths(&mut builder, &mut fallbacks, primitive, &inputs, &outputs)?;
+                add_paths(
+                    &mut builder,
+                    &mut fallbacks,
+                    primitive,
+                    type_name,
+                    &inputs,
+                    &outputs,
+                )?;
             }
         }
     }
@@ -1101,6 +1151,145 @@ pub fn build_timing(
         report,
         clock_ids,
     })
+}
+
+/// Finds the nets that carry a constant, which VPR doesn't route.
+///
+/// VPR treats these as global by default (`--constant_net_method global`), so they are not
+/// routed, and a route file lists them as global nets. Pass them as
+/// [`NetOptions::constant_nets`](super::NetOptions::constant_nets) to do the same.
+///
+/// This follows VPR's default inference, `--const_gen_inference comb_seq`: a primitive other
+/// than a pad generates a constant if every input it has connected carries one, or if none is
+/// connected, as for a LUT that ABC made a constant of, and this goes on until nothing more is
+/// found. That takes in registers, as VPR does, whose clock doesn't count as an input. A net is
+/// constant if a constant generator drives it, through its block. VPR goes by each output port,
+/// and for a combinational one only by the inputs that the model connects to it, where this
+/// goes by the primitive as a whole. That differs only for a hard block with an output that
+/// depends on some of its inputs and not others.
+///
+/// The nets are in ascending order.
+///
+/// # Examples
+///
+/// ```
+/// use guide::fpga::{constant_nets, read_netlist};
+/// use guide::id::NetId;
+///
+/// // A LUT with no inputs drives `vcc` to an output pad.
+/// let text = r#"<block name="top.net" instance="FPGA_packed_netlist[0]">
+///   <inputs></inputs><outputs>out:b</outputs><clocks></clocks>
+///   <block name="vcc" instance="clb[0]" mode="default">
+///     <inputs><port name="I">open</port></inputs>
+///     <outputs><port name="O">lut[0].out[0]-&gt;out</port></outputs>
+///     <block name="vcc" instance="lut[0]">
+///       <inputs><port name="in">open</port></inputs>
+///       <outputs><port name="out">vcc</port></outputs>
+///     </block>
+///   </block>
+///   <block name="out:b" instance="io[1]" mode="outpad">
+///     <inputs><port name="outpad">vcc</port></inputs>
+///   </block>
+/// </block>"#;
+/// let netlist = read_netlist(text.as_bytes())?;
+/// assert_eq!(constant_nets(&netlist), [NetId(0)]);
+/// # Ok::<(), guide::fpga::ImportError>(())
+/// ```
+pub fn constant_nets(netlist: &PackedNetlist) -> Vec<NetId> {
+    let pads: BTreeSet<&str> = netlist
+        .primary_inputs()
+        .iter()
+        .chain(netlist.primary_outputs())
+        .map(String::as_str)
+        .collect();
+    let primitives = netlist.primitives();
+    let candidate: Vec<bool> = primitives
+        .iter()
+        .map(|primitive| !pads.contains(primitive.name.as_str()))
+        .collect();
+
+    /// What feeds an input of a primitive.
+    #[derive(Clone, Copy)]
+    enum Feed {
+        Net(u32),
+        Primitive(u32),
+        Unknown,
+    }
+    let mut pin_nets: HashMap<PackedPin, u32> = HashMap::new();
+    for (index, net) in netlist.nets().iter().enumerate() {
+        for &pin in &net.sinks {
+            pin_nets.insert(pin, index as u32);
+        }
+    }
+    let mut feeds: Vec<Vec<Feed>> = vec![Vec::new(); primitives.len()];
+    let mut block_outputs: HashMap<PackedPin, u32> = HashMap::new();
+    for path in netlist.internal_paths() {
+        if path.clock {
+            continue;
+        }
+        match (path.from, path.to) {
+            (from, InternalPin::Primitive { primitive, .. }) => {
+                let feed = match from {
+                    InternalPin::Block(pin) => pin_nets
+                        .get(&pin)
+                        .map_or(Feed::Unknown, |&net| Feed::Net(net)),
+                    InternalPin::Primitive { primitive, .. } => Feed::Primitive(primitive),
+                };
+                if let Some(slot) = feeds.get_mut(primitive as usize) {
+                    slot.push(feed);
+                }
+            }
+            (InternalPin::Primitive { primitive, .. }, InternalPin::Block(pin)) => {
+                block_outputs.insert(pin, primitive);
+            }
+            (InternalPin::Block(_), InternalPin::Block(_)) => {}
+        }
+    }
+    let drivers: Vec<Option<u32>> = netlist
+        .nets()
+        .iter()
+        .map(|net| net.driver.and_then(|pin| block_outputs.get(&pin).copied()))
+        .collect();
+
+    let mut constant_primitive = vec![false; primitives.len()];
+    let mut constant_net = vec![false; netlist.nets().len()];
+    loop {
+        let mut changed = false;
+        for (index, primitive) in primitives.iter().enumerate() {
+            if constant_primitive[index] || !candidate[index] {
+                continue;
+            }
+            // An input without a path can't be followed, so it isn't taken as constant.
+            let feeds = &feeds[index];
+            let constant = feeds.len() == primitive.inputs.len()
+                && feeds.iter().all(|feed| match *feed {
+                    Feed::Net(net) => constant_net[net as usize],
+                    Feed::Primitive(other) => constant_primitive[other as usize],
+                    Feed::Unknown => false,
+                });
+            if constant {
+                constant_primitive[index] = true;
+                changed = true;
+            }
+        }
+        for (net, driver) in drivers.iter().enumerate() {
+            if !constant_net[net]
+                && driver.is_some_and(|driver| constant_primitive[driver as usize])
+            {
+                constant_net[net] = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    constant_net
+        .iter()
+        .enumerate()
+        .filter(|&(_, &constant)| constant)
+        .map(|(net, _)| NetId(net as u32))
+        .collect()
 }
 
 #[cfg(test)]

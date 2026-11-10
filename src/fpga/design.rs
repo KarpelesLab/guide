@@ -54,6 +54,11 @@ pub struct NetOptions {
     /// These are ports with `is_non_clock_global` in the architecture file, which neither
     /// the netlist nor the graph can reveal.
     pub global_ports: Vec<GlobalPort>,
+    /// Nets that carry a constant, which are global as VPR's default
+    /// `--constant_net_method global` makes them: reported and skipped like other global
+    /// nets, and routed only with [`route_global_nets`](NetOptions::route_global_nets).
+    /// [`constant_nets`](super::constant_nets) finds them. Their order doesn't matter.
+    pub constant_nets: Vec<NetId>,
 }
 
 /// What becomes of a net.
@@ -62,9 +67,9 @@ pub struct NetOptions {
 pub enum NetStatus {
     /// It needs routing, and is in [`Design::nets`].
     Routable,
-    /// It's global: it reaches a clock port or one of [`NetOptions::global_ports`]. It isn't
-    /// in [`Design::nets`], and VPR would not route it either. A net with any global pin is
-    /// global as a whole, as it is in VPR.
+    /// It's global: it reaches a clock port or one of [`NetOptions::global_ports`], or is
+    /// one of [`NetOptions::constant_nets`]. It isn't in [`Design::nets`], and VPR would not
+    /// route it either. A net with any global pin is global as a whole, as it is in VPR.
     Global,
     /// It has a driver but no sinks outside of its block. It's in [`Design::nets`], with
     /// one terminal and nothing to route.
@@ -254,6 +259,8 @@ pub fn resolve_nets(
         .iter()
         .map(|global| (global.pb_type.as_str(), global.port.as_str()))
         .collect();
+    let mut constants = options.constant_nets.clone();
+    constants.sort_unstable();
 
     // Locations of the blocks, as far as they have one. Whether it's needed depends on
     // whether a block has any pins connected to a net.
@@ -351,8 +358,29 @@ pub fn resolve_nets(
                 block: String::new(),
             });
         };
-        let points: Vec<AccessPoint<NodeId>> = device
-            .find_nodes(kind, place.root_x, place.root_y, pin.class)
+        // VPR 9 puts a class's node of a block over several tiles on the tile of the class's
+        // pins, so every tile of the block is looked at, from the root.
+        let (width, height) = device
+            .block_types()
+            .get(usize::from(pin.tile_type))
+            .map_or((1, 1), |tile| (tile.width.max(1), tile.height.max(1)));
+        let mut nodes = Vec::new();
+        for dx in 0..width {
+            for dy in 0..height {
+                for node in device.find_nodes(
+                    kind,
+                    place.root_x.saturating_add(dx),
+                    place.root_y.saturating_add(dy),
+                    pin.class,
+                ) {
+                    if !nodes.contains(&node) {
+                        nodes.push(node);
+                    }
+                }
+            }
+        }
+        nodes.sort_unstable();
+        let points: Vec<AccessPoint<NodeId>> = nodes
             .into_iter()
             .filter(|&node| {
                 device.node_location(node).is_some_and(|location| {
@@ -382,6 +410,7 @@ pub fn resolve_nets(
     for (index, net) in netlist.nets().iter().enumerate() {
         let id = NetId(index as u32);
         let global = net.on_clock_port
+            || constants.binary_search(&id).is_ok()
             || (!globals.is_empty()
                 && net.sinks.iter().any(|pin| {
                     let block = netlist.blocks().get(pin.block as usize);

@@ -176,6 +176,9 @@ pub struct PackedNetlist {
     primary_outputs: Vec<String>,
     clock_nets: Vec<String>,
     primitives: Vec<PackedPrimitive>,
+    /// The type of the block holding each primitive, or nothing for a placed block that is
+    /// itself a primitive.
+    primitive_parents: Vec<String>,
     paths: Vec<InternalPath>,
     interconnects: Vec<Interconnect>,
     hops: Vec<u32>,
@@ -246,6 +249,19 @@ impl PackedNetlist {
     /// within each block.
     pub fn primitives(&self) -> &[PackedPrimitive] {
         &self.primitives
+    }
+
+    /// Returns the type of the block that directly holds a primitive, as in `lut5` for a `lut`
+    /// that VPR made of a `pb_type` of `class="lut"`. `None` for a placed block that is itself a
+    /// primitive, or a primitive that doesn't exist.
+    ///
+    /// Primitives that VPR makes up for a `class` all have the same type whatever they came
+    /// from, so this is what tells them apart: see [`LogicDelays::primitive_name`](super::LogicDelays::primitive_name).
+    pub fn primitive_parent(&self, primitive: u32) -> Option<&str> {
+        self.primitive_parents
+            .get(primitive as usize)
+            .map(String::as_str)
+            .filter(|parent| !parent.is_empty())
     }
 
     /// Returns the connections inside the placed blocks, block by block.
@@ -749,7 +765,11 @@ fn trace_internals(
     }
 
     // The primitives, in file order.
-    for flat in &mut blocks {
+    for index in 0..blocks.len() {
+        let parent_type = blocks[index]
+            .parent
+            .map(|parent| blocks[parent].frame.pb_type().to_owned());
+        let flat = &mut blocks[index];
         if !flat.frame.is_leaf {
             continue;
         }
@@ -779,6 +799,9 @@ fn trace_internals(
         };
         flat.primitive = Some(netlist.primitives.len() as u32);
         netlist.primitives.push(primitive);
+        netlist
+            .primitive_parents
+            .push(parent_type.unwrap_or_default());
     }
 
     // Walks back from a pin to its source, collecting the interconnect on the way, from the

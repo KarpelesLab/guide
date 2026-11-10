@@ -1035,6 +1035,143 @@ fn non_clock_globals_are_as_the_caller_names_them() {
     assert_eq!(design.nets().len(), 0);
 }
 
+/// A pad and a `ram` two tiles tall, whose classes' nodes are each on the tile of their pin,
+/// as VPR 9 builds them, and not on the block's root tile.
+fn tall_ram_device() -> RrGraph {
+    let text = "<rr_graph>\
+        <switches><switch id=\"0\" name=\"s\"><timing Tdel=\"1e-10\"/></switch></switches>\
+        <segments><segment id=\"0\" name=\"L1\"/></segments>\
+        <block_types>\
+        <block_type id=\"0\" name=\"pad\" width=\"1\" height=\"1\">\
+        <pin_class type=\"OUTPUT\"><pin ptc=\"0\">pad.inpad[0]</pin></pin_class>\
+        <pin_class type=\"INPUT\"><pin ptc=\"1\">pad.outpad[0]</pin></pin_class>\
+        </block_type>\
+        <block_type id=\"1\" name=\"ram\" width=\"1\" height=\"2\">\
+        <pin_class type=\"INPUT\"><pin ptc=\"0\">ram.a[0]</pin></pin_class>\
+        <pin_class type=\"INPUT\"><pin ptc=\"1\">ram.a[1]</pin></pin_class>\
+        </block_type>\
+        </block_types>\
+        <grid>\
+        <grid_loc x=\"0\" y=\"0\" block_type_id=\"0\" width_offset=\"0\" height_offset=\"0\"/>\
+        <grid_loc x=\"1\" y=\"0\" block_type_id=\"1\" width_offset=\"0\" height_offset=\"0\"/>\
+        <grid_loc x=\"0\" y=\"1\" block_type_id=\"0\" width_offset=\"0\" height_offset=\"0\"/>\
+        <grid_loc x=\"1\" y=\"1\" block_type_id=\"1\" width_offset=\"0\" height_offset=\"1\"/>\
+        </grid>\
+        <rr_nodes>\
+        <node id=\"0\" type=\"SOURCE\" capacity=\"1\"><loc xlow=\"0\" ylow=\"0\" xhigh=\"0\" yhigh=\"0\" ptc=\"0\"/></node>\
+        <node id=\"1\" type=\"SINK\" capacity=\"1\"><loc xlow=\"1\" ylow=\"0\" xhigh=\"1\" yhigh=\"0\" ptc=\"0\"/></node>\
+        <node id=\"2\" type=\"SINK\" capacity=\"1\"><loc xlow=\"1\" ylow=\"1\" xhigh=\"1\" yhigh=\"1\" ptc=\"1\"/></node>\
+        </rr_nodes>\
+        <rr_edges/>\
+        </rr_graph>";
+    read_rr_graph(text.as_bytes()).unwrap()
+}
+
+#[test]
+fn pins_of_blocks_over_several_tiles_find_class_nodes_on_any_of_them() {
+    let device = tall_ram_device();
+    let netlist = "<block name=\"t\" instance=\"FPGA_packed_netlist[0]\">\
+        <block name=\"in\" instance=\"pad[0]\"><outputs><port name=\"inpad\">in</port></outputs></block>\
+        <block name=\"r\" instance=\"ram[0]\" mode=\"m\"><inputs><port name=\"a\">in in</port></inputs></block>\
+        </block>";
+    let netlist = read_netlist(netlist.as_bytes()).unwrap();
+    // The ram is placed at its root, the tile without the second class's node.
+    let placement = read_placement("in 0 0 0\nr 1 0 0\n".as_bytes()).unwrap();
+    let design = resolve_nets(&device, &netlist, &placement, &NetOptions::default()).unwrap();
+    let sinks: Vec<Vec<u32>> = design.nets()[0].terminals[1..]
+        .iter()
+        .map(|terminal| {
+            terminal
+                .access_points()
+                .iter()
+                .map(|point| point.node.0)
+                .collect()
+        })
+        .collect();
+    assert_eq!(sinks, [vec![1], vec![2]]);
+}
+
+#[test]
+fn constant_nets_are_global_and_found_through_logic_and_registers() {
+    // `vcc` comes from a LUT without inputs, `k` from a LUT fed only by `vcc`, and `q` from a
+    // register that takes `k`, so all three are constant. `x` mixes `k` with an input.
+    let text = "<block name=\"t\" instance=\"FPGA_packed_netlist[0]\">\
+        <inputs>in clk</inputs><outputs>out:x out:q</outputs><clocks>clk</clocks>\
+        <block name=\"in\" instance=\"pad[0]\" mode=\"m\"><outputs><port name=\"inpad\">inpad[0].inpad[0]-&gt;o</port></outputs>\
+        <block name=\"in\" instance=\"inpad[0]\"><outputs><port name=\"inpad\">in</port></outputs></block></block>\
+        <block name=\"vcc\" instance=\"clb[0]\" mode=\"m\">\
+        <inputs><port name=\"I\">open</port></inputs>\
+        <outputs><port name=\"O\">lut[0].out[0]-&gt;o</port></outputs>\
+        <block name=\"vcc\" instance=\"lut[0]\"><inputs><port name=\"in\">open</port></inputs>\
+        <outputs><port name=\"out\">vcc</port></outputs></block></block>\
+        <block name=\"k\" instance=\"clb[1]\" mode=\"m\">\
+        <inputs><port name=\"I\">vcc in</port></inputs>\
+        <outputs><port name=\"O\">lut[0].out[0]-&gt;o lut[1].out[0]-&gt;o ff[0].Q[0]-&gt;o</port></outputs>\
+        <clocks><port name=\"clk\">clk</port></clocks>\
+        <block name=\"k\" instance=\"lut[0]\"><inputs><port name=\"in\">clb.I[0]-&gt;x</port></inputs>\
+        <outputs><port name=\"out\">k</port></outputs></block>\
+        <block name=\"x\" instance=\"lut[1]\"><inputs><port name=\"in\">lut[0].out[0]-&gt;x clb.I[1]-&gt;x</port></inputs>\
+        <outputs><port name=\"out\">x</port></outputs></block>\
+        <block name=\"q\" instance=\"ff[0]\"><inputs><port name=\"D\">lut[0].out[0]-&gt;x</port></inputs>\
+        <outputs><port name=\"Q\">q</port></outputs><clocks><port name=\"clk\">clb.clk[0]-&gt;c</port></clocks></block>\
+        </block>\
+        <block name=\"out:x\" instance=\"pad[1]\" mode=\"m\"><inputs><port name=\"outpad\">x</port></inputs></block>\
+        <block name=\"out:q\" instance=\"pad[2]\" mode=\"m\"><inputs><port name=\"outpad\">q k</port></inputs></block>\
+        <block name=\"clk\" instance=\"pad[3]\" mode=\"m\"><outputs><port name=\"inpad\">inpad[0].inpad[0]-&gt;o</port></outputs>\
+        <block name=\"clk\" instance=\"inpad[0]\"><outputs><port name=\"inpad\">clk</port></outputs></block></block>\
+        </block>";
+    let netlist = read_netlist(text.as_bytes()).unwrap();
+    let names = |nets: &[NetId]| -> Vec<&str> {
+        nets.iter()
+            .map(|net| netlist.nets()[net.0 as usize].name.as_str())
+            .collect()
+    };
+    let constants = constant_nets(&netlist);
+    let mut found = names(&constants);
+    found.sort_unstable();
+    assert_eq!(found, ["k", "q", "vcc"]);
+    assert!(constants.windows(2).all(|pair| pair[0] < pair[1]));
+
+    // What holds each primitive, which tells apart those that VPR makes up for a class.
+    let parents: Vec<(&str, Option<&str>)> = netlist
+        .primitives()
+        .iter()
+        .enumerate()
+        .map(|(index, primitive)| {
+            (
+                primitive.name.as_str(),
+                netlist.primitive_parent(index as u32),
+            )
+        })
+        .collect();
+    assert_eq!(
+        parents,
+        [
+            ("in", Some("pad")),
+            ("vcc", Some("clb")),
+            ("k", Some("clb")),
+            ("x", Some("clb")),
+            ("q", Some("clb")),
+            ("clk", Some("pad")),
+        ]
+    );
+    assert_eq!(netlist.primitive_parent(6), None);
+
+    // As global nets, they aren't routed.
+    let mut options = NetOptions::default();
+    let device = dsp_device();
+    let netlist = read_netlist(DSP_NET.as_bytes()).unwrap();
+    let placement = read_placement(DSP_PLACE.as_bytes()).unwrap();
+    options.constant_nets = vec![NetId(1)];
+    let design = resolve_nets(&device, &netlist, &placement, &options).unwrap();
+    let names: Vec<&str> = design
+        .global_nets()
+        .map(|(_, info)| info.name.as_str())
+        .collect();
+    assert_eq!(names, ["out"]);
+    assert_eq!(design.nets().len(), 1);
+}
+
 #[test]
 fn import_failures_say_what_failed() {
     let device = dsp_device();

@@ -79,6 +79,18 @@ pub(crate) struct World<'r> {
     /// By net and then layer, [`Rules::clearance`], for the nets of the board's items,
     /// which costs more to resolve than many a query.
     clearances: Vec<i64>,
+    /// Where zones of nets are planes, which other nets' tracks pay more to cross.
+    planes: Option<Planes>,
+}
+
+/// Where the planes of nets are, by tile of a grid and layer, and what crossing another
+/// net's costs: tracks there cost `1 + cost` times their length.
+#[derive(Clone, Debug)]
+pub(crate) struct Planes {
+    pub(crate) grid: super::detail::Corridor,
+    /// By layer and then tile, the net's index plus one, or zero for none.
+    pub(crate) nets: Vec<u32>,
+    pub(crate) cost: f64,
 }
 
 impl<'r> World<'r> {
@@ -115,6 +127,7 @@ impl<'r> World<'r> {
             scratch: RefCell::new(Vec::new()),
             locked: Vec::new(),
             clearances: Vec::new(),
+            planes: None,
         };
         let nets = board
             .pads
@@ -219,6 +232,27 @@ impl<'r> World<'r> {
         net.and_then(|net| self.clearances.get(net.index() * n + usize::from(layer.0)))
             .copied()
             .unwrap_or_else(|| self.rules.clearance(net, layer))
+    }
+
+    /// Sets where the planes are.
+    pub(crate) fn set_planes(&mut self, planes: Planes) {
+        self.planes = Some(planes);
+    }
+
+    /// What a track of `net` on `layer` ending at `at` costs for its length: more inside
+    /// another net's plane.
+    pub(crate) fn plane_factor(&self, net: NetId, layer: u8, at: Point) -> f64 {
+        let Some(p) = &self.planes else {
+            return 1.0;
+        };
+        let Some(tile) = p.grid.tile_of(at) else {
+            return 1.0;
+        };
+        let cells = p.grid.cols * p.grid.rows;
+        match p.nets.get(usize::from(layer) * cells + tile) {
+            Some(&n) if n != 0 && n != net.0 + 1 => 1.0 + p.cost,
+            _ => 1.0,
+        }
     }
 
     /// Makes a net's routes block like fixed copper, or not.

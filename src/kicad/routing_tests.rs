@@ -8,7 +8,7 @@
 use std::time::Instant;
 
 use super::json::{self, Json};
-use super::{KicadBoard, replace_routing};
+use super::{KicadBoard, replace_routing_and_fills};
 use crate::geom::drc::{self, Item, Violation};
 use crate::pcb::{self, Design, Options, Routed};
 
@@ -24,7 +24,7 @@ const BOARDS: [(&str, &str); 9] = [
     ("nitrokey", "nk3-nrf-mini"),
 ];
 
-/// The UUIDs that [`replace_routing`] gives new items start with this.
+/// The UUIDs that [`replace_routing_and_fills`] gives new items start with this.
 const OURS: &str = "67756964-";
 
 fn load(dir: &str, board: &str) -> (String, String) {
@@ -37,8 +37,8 @@ fn load(dir: &str, board: &str) -> (String, String) {
     (pcb, pro)
 }
 
-/// The board with no routing: no tracks, vias or zone fills, but copper graphics kept, as
-/// [`replace_routing`] keeps them.
+/// The board with no routing: no tracks, vias or zone fills, but copper graphics and zones'
+/// outlines kept, as [`replace_routing_and_fills`] keeps them.
 fn stripped(read: &KicadBoard) -> Design {
     let mut design = Design::from_kicad(read);
     design.board.tracks.clear();
@@ -103,6 +103,22 @@ impl Row {
     }
 }
 
+/// The options to route with: the defaults, but for `GUIDE_PLANES=0`, which routes nets
+/// with zones as any others, and `GUIDE_PLANE_COST`, for measuring them.
+fn options() -> Options {
+    let mut options = Options::default();
+    if std::env::var("GUIDE_PLANES").is_ok_and(|v| v == "0") {
+        options.planes = false;
+    }
+    if let Some(cost) = std::env::var("GUIDE_PLANE_COST")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        options.plane_cost = cost;
+    }
+    options
+}
+
 /// Routes a board, checks it, and returns what it did with the routed board's text.
 fn route_board(dir: &str, name: &'static str) -> (Row, String, Routed, String) {
     let (row, text, routed, pro, _, _) = route_board_with(dir, name, |_, _| ());
@@ -121,7 +137,7 @@ fn route_board_with(
     let mut design = stripped(&read);
     change(&read, &mut design);
     let start = Instant::now();
-    let routed = pcb::route(&design, &Options::default()).unwrap();
+    let routed = pcb::route(&design, &options()).unwrap();
     let seconds = start.elapsed().as_secs_f64();
     let board = routed.board(&design);
     let ours = |item: Item| matches!(item, Item::Track(_) | Item::Via(_));
@@ -170,7 +186,7 @@ fn route_board_with(
         ),
         seconds,
     };
-    let text = replace_routing(&pcb, &routed.tracks, &routed.vias, &read.nets, &read.rules);
+    let text = replace_routing_and_fills(&pcb, &routed.tracks, &routed.vias, &routed.fills, &read);
     (row, text, routed, pro, design, read)
 }
 
@@ -184,16 +200,22 @@ fn small_curated_boards_route_completely() {
 }
 
 /// What KiCad found on a board: violations that involve routed items, by type, and how
-/// many connections are missing.
-fn kicad_check(text: &str, project: &str, name: &str) -> (Vec<String>, usize) {
+/// many connections are missing. With `refill`, KiCad fills the zones again itself first,
+/// in place of the fills written.
+fn kicad_check(text: &str, project: &str, name: &str, refill: bool) -> (Vec<String>, usize) {
     let dir = std::env::temp_dir().join(format!("guide-routed-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let board = dir.join(format!("{name}.kicad_pcb"));
     let report = dir.join(format!("{name}.json"));
     std::fs::write(&board, text).unwrap();
     std::fs::write(board.with_extension("kicad_pro"), project).unwrap();
-    let run = std::process::Command::new("kicad-cli")
-        .args(["pcb", "drc", "--format", "json", "--severity-error", "-o"])
+    let mut cmd = std::process::Command::new("kicad-cli");
+    cmd.args(["pcb", "drc", "--format", "json", "--severity-error"]);
+    if refill {
+        cmd.arg("--refill-zones");
+    }
+    let run = cmd
+        .arg("-o")
         .arg(&report)
         .arg(&board)
         .output()
@@ -253,16 +275,19 @@ fn curated_boards_route() {
             std::fs::write(base.with_extension("kicad_pro"), &pro).unwrap();
         }
         if kicad {
-            let (found, unconnected) = kicad_check(&text, &pro, name);
-            print!(
-                " KiCad: {} violations, {unconnected} unconnected",
-                found.len()
-            );
-            if !found.is_empty() {
-                failures.push(format!("{name}: {found:?}"));
-            }
-            if routed.unrouted.is_empty() && unconnected > 0 {
-                failures.push(format!("{name}: {unconnected} unconnected"));
+            for refill in [false, true] {
+                let (found, unconnected) = kicad_check(&text, &pro, name, refill);
+                let what = if refill { "refilled by KiCad" } else { "KiCad" };
+                print!(
+                    " {what}: {} violations, {unconnected} unconnected",
+                    found.len()
+                );
+                if !found.is_empty() {
+                    failures.push(format!("{name}, {what}: {found:?}"));
+                }
+                if routed.unrouted.is_empty() && unconnected > 0 {
+                    failures.push(format!("{name}, {what}: {unconnected} unconnected"));
+                }
             }
         }
         println!();
@@ -445,7 +470,7 @@ fn curated_pairs() {
             std::fs::write(base.with_extension("kicad_pro"), &pro).unwrap();
         }
         if kicad {
-            let (found, unconnected) = kicad_check(&text, &pro, name);
+            let (found, unconnected) = kicad_check(&text, &pro, name, false);
             println!(
                 "{name}: KiCad: {} violations, {unconnected} unconnected",
                 found.len()

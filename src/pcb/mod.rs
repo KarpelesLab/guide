@@ -3,10 +3,11 @@
 //! feature.
 //!
 //! [`route`] takes a [`Design`], the fixed items of a board with its rules and the nets
-//! to route, and returns tracks and vias of the same [`drc`](crate::geom::drc) model, so
-//! that [`drc::check`](crate::geom::drc::check) runs on the result as on any board. With
-//! the `kicad` feature, [`Design::from_kicad`] takes a board that
-//! [`kicad::read`](crate::kicad::read) has read.
+//! to route, and returns tracks, vias and zones' fills of the same
+//! [`drc`](crate::geom::drc) model, so that [`drc::check`](crate::geom::drc::check) runs on
+//! the result as on any board. With the `kicad` feature, [`Design::from_kicad`] takes a
+//! board that [`kicad::read`](crate::kicad::read) has read. [`fill_zones`] fills a design's
+//! copper zones on their own, as KiCad's zone filler does.
 //!
 //! # How it routes
 //!
@@ -17,6 +18,13 @@
 //!    that no via fits by, is given that way. Both become fixed copper of their nets, which
 //!    the rest completes. A pad whose centre has no room for a track's end, as where text
 //!    is drawn up to it, is reached at the point nearest its centre that has.
+//!
+//!    **Planes.** The [zones](Design::zones) are filled around the fixed copper, and each
+//!    net with zones takes the pads that its largest fill joins, its fills on inner layers
+//!    if it has any, as one terminal, which also holds places in that fill near each of the
+//!    net's other pads where a via fits. So routing it is a stub from each other pad to the
+//!    fill, a track and a via, rather than tracks across the board. Other nets' tracks pay
+//!    more for their length inside another net's plane, [`Options::plane_cost`].
 //! 1. **Global routing.** The board is cut into square tiles on each layer, and the
 //!    negotiated-congestion [engine](crate::engine) routes every net over them. A resource
 //!    is the side between two tiles on a layer, with as many tracks as fit along its free
@@ -48,6 +56,11 @@
 //!    meanders on their straight tracks, in free space, each checked exactly as routing
 //!    is, and pairs side by side get meanders of both tracks together, which keep their
 //!    gap.
+//! 7. **Zones** are filled again around everything routed, before meanders, and once more
+//!    after them if any were added. Before meanders, a net with zones that its
+//!    copper and fills leave in pieces, as routes of other nets cut its fills, has each
+//!    piece joined to its largest by a stub, from any of the piece's pads, tracks or vias,
+//!    or failing that by tracks, and the zones are filled again, a few times at most.
 //!
 //! `docs/architecture.md` has why it is built this way, with the measurements, and
 //! `docs/benchmarks.md` has results on real boards.
@@ -65,6 +78,7 @@ mod geometry;
 mod global;
 mod measure;
 mod pairs;
+mod planes;
 mod router;
 mod tune;
 mod verify;
@@ -175,7 +189,8 @@ pub struct Design {
     pub pairs: Vec<DiffPair>,
     /// Lengths to route nets to, which meanders make up after routing.
     pub lengths: Vec<LengthConstraint>,
-    /// Copper zones, which [`fill_zones`] fills.
+    /// Copper zones, which are filled after routing, and which their nets connect to
+    /// rather than routing tracks between all their pads: see [`Options::planes`].
     pub zones: Zones,
 }
 
@@ -286,6 +301,14 @@ pub struct Options {
     pub tune_lengths: bool,
     /// How far a meander may reach out from the track it is added to. The default is 3 mm.
     pub max_amplitude: i64,
+    /// Whether nets with [zones](Design::zones) connect to them, rather than routing tracks
+    /// between all their pads. The default is true. Without, zones are still filled after
+    /// routing, around everything routed.
+    pub planes: bool,
+    /// What a track costs for its length inside another net's plane, a zone on an inner
+    /// layer, over its length anywhere else, as a fraction of its length. The default is 1,
+    /// twice the cost, so that routes cut planes in pieces only where they must.
+    pub plane_cost: f64,
 }
 
 impl Default for Options {
@@ -304,6 +327,8 @@ impl Default for Options {
             couple_pairs: true,
             tune_lengths: true,
             max_amplitude: 3_000_000,
+            planes: true,
+            plane_cost: 1.0,
         }
     }
 }
@@ -341,6 +366,10 @@ pub struct Stats {
     pub lengths: (usize, usize),
     /// The track that meanders added, in nanometres.
     pub meanders: f64,
+    /// Stubs added to connect nets to their zones, before routing and after.
+    pub stubs: usize,
+    /// Nets whose copper and zones are still in pieces, after the last attempt to join them.
+    pub planes_broken: usize,
 }
 
 /// The result of [`route`].
@@ -350,19 +379,26 @@ pub struct Routed {
     pub tracks: Vec<Track>,
     /// The through vias added.
     pub vias: Vec<Via>,
-    /// The nets that could not be routed, in order. Nothing of theirs is in the result.
+    /// The zones' fills, around everything else.
+    pub fills: Vec<Fill>,
+    /// The nets that could not be routed, in order. Nothing of theirs is in the result, but
+    /// for a net with zones, which keeps what joins it to them, though they leave it in
+    /// pieces.
     pub unrouted: Vec<NetId>,
     /// Measurements.
     pub stats: Stats,
 }
 
 impl Routed {
-    /// The design's board with these tracks and vias added, ready for
+    /// The design's board with these tracks, vias and fills added, ready for
     /// [`drc::check`](crate::geom::drc::check).
     pub fn board(&self, design: &Design) -> Board {
         let mut board = design.board.clone();
         board.tracks.extend(self.tracks.iter().cloned());
         board.vias.extend(self.vias.iter().cloned());
+        board
+            .zones
+            .extend(self.fills.iter().map(|f| f.to_zone(design)));
         board
     }
 }
@@ -439,3 +475,5 @@ pub fn route(design: &Design, options: &Options) -> Result<Routed, RouteError> {
 mod pair_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod zone_tests;

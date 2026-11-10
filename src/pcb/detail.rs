@@ -362,6 +362,7 @@ impl<'a> DetailSpace<'a> {
             self.layer_factor(to, from.l)
         };
         let Some(factor) = factor else { return };
+        let factor = factor * self.world.plane_factor(self.ctx.net, from.l, to);
         let verdict = match dir.and_then(|d| self.cache.get(from, d)) {
             Some(v) => v,
             None => {

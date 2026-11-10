@@ -545,7 +545,8 @@ pub struct EngineOptions<'c> {
     /// What the present factor is multiplied by after each iteration from the second. The
     /// default is 1.8, as in reticle, where VPR uses 1.3. On dense grids, 1.3 took 1.2 to 1.4
     /// times the expansions and solved fewer problems within the same number of iterations,
-    /// but on multi-terminal grids it solved more, 71 against 67.
+    /// but on multi-terminal grids it solved more, 71 against 67. On VPR's graphs,
+    /// `fpga::RrGraph::engine_options` uses 1.5, chosen on VTR's benchmarks.
     pub present_growth: Cost,
     /// The most the present factor can be. The default is 1000, as in VPR.
     ///

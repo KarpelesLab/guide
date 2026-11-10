@@ -850,18 +850,19 @@ impl RrGraph {
     /// overuse, which is the same as adding its base cost each time, a whole length-4 wire on
     /// the architectures measured. Two tiles and a growth of 1.5, against one tile and the
     /// engine's 1.8, were chosen on both VTR suites together, with the map lookahead and the
-    /// rest of these options: channels 2% narrower on MCNC and 5% on VTR's Verilog
-    /// circuits, critical paths 0.3% and 0.6% shorter, the same wire, and about 5% more
+    /// rest of these options: channels 2% narrower on MCNC and 6% on VTR's Verilog
+    /// circuits, critical paths 0.3% and 0.5% shorter, the same wire, and 5% to 6% more
     /// expansions at a relaxed width. More history narrows channels further but costs wire
-    /// and delay, and VPR's growth of 1.3 costs more time for no narrower channels once
-    /// history is two tiles.
+    /// and delay, and VPR's growth of 1.3 costs more time for channels no narrower over both
+    /// suites once history is two tiles.
     ///
     /// Giving up early cuts the time spent on widths that cannot be routed, which is most of
-    /// the time of a search for the narrowest channel, to about half, and changed no width
-    /// found on either suite. Allowed to give up on fewer than VPR's 100 overused nodes, it
-    /// gave up on runs that would have succeeded.
+    /// the time of a search for the narrowest channel: a search took 0.57 times the
+    /// expansions, and found the same width on all 39 circuits compared, all but the two
+    /// largest. Allowed to give up on fewer than VPR's 100 overused nodes, it gave up on runs
+    /// that would have succeeded.
     ///
-    /// On the same circuits, with the map lookahead, keeping what is not overused of a net
+    /// On the MCNC circuits, with the map lookahead, keeping what is not overused of a net
     /// routed again took 0.53 times the expansions of routing it whole, and 0.78 times the
     /// time, with channels 1.4% narrower, 2.6% less wire and the same critical paths. A weight
     /// of 1.1 on the bound then took 17% fewer expansions and 9% less time again, with

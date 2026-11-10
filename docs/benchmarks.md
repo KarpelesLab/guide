@@ -552,11 +552,14 @@ This is the comparison that M3's exit criterion asks for: `guide`'s router again
 the same placements and VPR's own device graphs, with VPR checking and timing every route of
 `guide`'s.
 
-Measured on 2026-11-08 with rustc 1.97.1, on an AMD Ryzen Threadripper PRO 9995WX shared
-with other work. "Before" is the commit that first published this section, `e2d0bd5`. The
-rest is `21d5205`, the commit that finished the [lookahead and incremental
-rerouting](#closing-the-runtime-gap). VPR, the circuits and the placements are the same in
-both, and so are VPR's results, but for its times.
+Measured on 2026-11-10 with rustc 1.97.1, on an AMD Ryzen Threadripper PRO 9995WX shared
+with other work. "Before" is `14c1022`, with the [lookahead and incremental
+rerouting](#closing-the-runtime-gap) and constant nets left unrouted as VPR leaves them. The
+rest is `7346331`, whose `RrGraph::engine_options` were [tuned on both
+suites](#tuning-the-negotiation-on-both-suites). VPR, the circuits and the placements are the
+same in both, and so are VPR's results, but for its times. The first results of this section,
+from `e2d0bd5`, took 3.2 times VPR's time: [closing the runtime gap](#closing-the-runtime-gap)
+has how that went.
 
 ### How
 
@@ -573,8 +576,9 @@ both, and so are VPR's results, but for its times.
   routers start from it.
 - **Minimum channel width.** VPR finds its own by its binary search. `guide` finds its own
   with the same rules: even widths only, as the wires are unidirectional, at most 50
-  iterations at each, as VPR allows, and a binary search between a width that fails and one
-  that routes, starting from VPR's. Each width's graph is the one VPR writes for it with
+  iterations at each, as VPR allows, giving up early as VPR's routing failure predictor
+  does (`EngineOptions::give_up_factor`), and a binary search between a width that fails and
+  one that routes, starting from VPR's. Each width's graph is the one VPR writes for it with
   `--write_rr_graph`.
 - **Delay, wirelength and runtime** are at 1.3 times VPR's minimum width, rounded to an even
   number as VTR's flow does (`relax_w` in its scripts), on the graph that VPR wrote while
@@ -590,7 +594,8 @@ both, and so are VPR's results, but for its times.
   batches of 1, so it has its own delay.
 - **`guide`'s options** are `RrGraph::engine_options()` after `RrGraph::use_map_lookahead`
   with its defaults, timing-driven with `DesignTiming::vpr_constraints(0)`, VPR's default
-  without an SDC file. Before, they were `engine_options()` on the graph's own bound.
+  without an SDC file. Before, they had a present factor growth of 1.8, a history of one
+  tile of wire, and did not give up early.
 
 ```text
 scripts/vtr/build-vpr.sh DIR                     # about two minutes on many cores
@@ -610,141 +615,139 @@ Minimum channel width:
 
 | Circuit | CLBs | Grid, tiles a side | VPR | guide before | before / VPR | guide | guide / VPR | VPR accepts guide's route |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| alu4 | 106 | 13 | 40 | 38 | 0.950 | 38 | 0.950 | yes |
-| apex2 | 126 | 14 | 54 | 54 | 1.000 | 52 | 0.963 | yes |
+| alu4 | 106 | 13 | 40 | 38 | 0.950 | 36 | 0.900 | yes |
+| apex2 | 126 | 14 | 54 | 52 | 0.963 | 52 | 0.963 | yes |
 | apex4 | 105 | 13 | 56 | 54 | 0.964 | 52 | 0.929 | yes |
 | bigkey | 92 | 16 | 34 | 34 | 1.000 | 34 | 1.000 | yes |
-| clma | 435 | 23 | 72 | 70 | 0.972 | 68 | 0.944 | yes |
+| clma | 435 | 23 | 72 | 66 | 0.917 | 68 | 0.944 | yes |
 | des | 102 | 18 | 34 | 34 | 1.000 | 34 | 1.000 | yes |
-| diffeq | 102 | 13 | 30 | 30 | 1.000 | 30 | 1.000 | yes |
-| dsip | 93 | 16 | 34 | 36 | 1.059 | 34 | 1.000 | yes |
-| elliptic | 242 | 18 | 52 | 48 | 0.923 | 48 | 0.923 | yes |
-| ex1010 | 322 | 20 | 86 | 84 | 0.977 | 82 | 0.953 | yes |
+| diffeq | 102 | 13 | 30 | 30 | 1.000 | 28 | 0.933 | yes |
+| dsip | 93 | 16 | 34 | 34 | 1.000 | 36 | 1.059 | yes |
+| elliptic | 242 | 18 | 52 | 48 | 0.923 | 46 | 0.885 | yes |
+| ex1010 | 322 | 20 | 86 | 82 | 0.953 | 76 | 0.884 | yes |
 | ex5p | 98 | 12 | 44 | 44 | 1.000 | 44 | 1.000 | yes |
-| frisc | 251 | 18 | 58 | 56 | 0.966 | 54 | 0.931 | yes |
-| misex3 | 100 | 12 | 46 | 44 | 0.957 | 42 | 0.913 | yes |
-| pdc | 332 | 21 | 72 | 66 | 0.917 | 64 | 0.889 | yes |
-| s298 | 84 | 12 | 40 | 40 | 1.000 | 40 | 1.000 | yes |
+| frisc | 251 | 18 | 58 | 54 | 0.931 | 54 | 0.931 | yes |
+| misex3 | 100 | 12 | 46 | 42 | 0.913 | 42 | 0.913 | yes |
+| pdc | 332 | 21 | 72 | 64 | 0.889 | 64 | 0.889 | yes |
+| s298 | 84 | 12 | 40 | 40 | 1.000 | 34 | 0.850 | yes |
 | s38417 | 397 | 22 | 34 | 32 | 0.941 | 32 | 0.941 | yes |
-| s38584.1 | 360 | 21 | 40 | 40 | 1.000 | 36 | 0.900 | yes |
-| seq | 112 | 13 | 54 | 52 | 0.963 | 52 | 0.963 | yes |
-| spla | 265 | 19 | 60 | 54 | 0.900 | 56 | 0.933 | yes |
+| s38584.1 | 360 | 21 | 40 | 38 | 0.950 | 36 | 0.900 | yes |
+| seq | 112 | 13 | 54 | 52 | 0.963 | 54 | 1.000 | yes |
+| spla | 265 | 19 | 60 | 56 | 0.933 | 54 | 0.900 | yes |
 | tseng | 112 | 13 | 26 | 26 | 1.000 | 26 | 1.000 | yes |
-| Geomean |  |  |  |  | 0.974 |  | 0.956 |  |
+| Geomean |  |  |  |  | 0.959 |  | 0.940 |  |
 
 At the relaxed width, the critical-path delay, by VPR's analysis of each tool's routes, and
 by `guide`'s own analysis of its routes:
 
 | Circuit | W | VPR, ns | guide before, ns | before / VPR | guide, ns | guide / VPR | guide's own STA, ns | own / VPR's STA | VPR accepts guide's route |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| alu4 | 52 | 5.318 | 4.780 | 0.899 | 4.807 | 0.904 | 4.802 | 0.999 | yes |
-| apex2 | 70 | 5.807 | 5.776 | 0.995 | 5.777 | 0.995 | 5.772 | 0.999 | yes |
-| apex4 | 72 | 5.386 | 5.443 | 1.010 | 5.281 | 0.980 | 5.274 | 0.999 | yes |
-| bigkey | 44 | 3.307 | 3.261 | 0.986 | 3.264 | 0.987 | 3.237 | 0.992 | yes |
-| clma | 94 | 8.695 | 8.687 | 0.999 | 8.662 | 0.996 | 8.585 | 0.991 | yes |
-| des | 44 | 4.469 | 4.460 | 0.998 | 4.460 | 0.998 | 4.456 | 0.999 | yes |
-| diffeq | 40 | 6.095 | 6.094 | 1.000 | 6.199 | 1.017 | 6.128 | 0.989 | yes |
-| dsip | 44 | 3.179 | 3.176 | 0.999 | 3.176 | 0.999 | 3.148 | 0.991 | yes |
-| elliptic | 68 | 7.581 | 7.516 | 0.991 | 7.548 | 0.996 | 7.474 | 0.990 | yes |
-| ex1010 | 112 | 6.897 | 6.787 | 0.984 | 6.823 | 0.989 | 6.814 | 0.999 | yes |
-| ex5p | 58 | 4.621 | 4.552 | 0.985 | 4.556 | 0.986 | 4.550 | 0.999 | yes |
-| frisc | 76 | 10.007 | 9.475 | 0.947 | 9.812 | 0.980 | 9.737 | 0.992 | yes |
-| misex3 | 60 | 4.821 | 4.756 | 0.987 | 4.786 | 0.993 | 4.781 | 0.999 | yes |
-| pdc | 94 | 7.060 | 6.985 | 0.989 | 7.052 | 0.999 | 7.042 | 0.999 | yes |
-| s298 | 52 | 7.263 | 7.197 | 0.991 | 7.494 | 1.032 | 7.422 | 0.990 | yes |
-| s38417 | 44 | 5.800 | 5.546 | 0.956 | 5.512 | 0.950 | 5.440 | 0.987 | yes |
-| s38584.1 | 52 | 5.056 | 5.026 | 0.994 | 4.879 | 0.965 | 4.837 | 0.991 | yes |
-| seq | 70 | 4.872 | 4.792 | 0.984 | 4.823 | 0.990 | 4.818 | 0.999 | yes |
-| spla | 78 | 6.529 | 6.472 | 0.991 | 6.482 | 0.993 | 6.476 | 0.999 | yes |
-| tseng | 34 | 5.713 | 5.684 | 0.995 | 5.684 | 0.995 | 5.613 | 0.987 | yes |
-| Geomean |  |  |  | 0.984 |  | 0.987 |  | 0.994 |  |
+| alu4 | 52 | 5.318 | 4.807 | 0.904 | 4.846 | 0.911 | 4.842 | 0.999 | yes |
+| apex2 | 70 | 5.807 | 5.777 | 0.995 | 5.777 | 0.995 | 5.772 | 0.999 | yes |
+| apex4 | 72 | 5.386 | 5.281 | 0.980 | 5.278 | 0.980 | 5.272 | 0.999 | yes |
+| bigkey | 44 | 3.307 | 3.264 | 0.987 | 3.265 | 0.987 | 3.304 | 1.012 | yes |
+| clma | 94 | 8.695 | 8.662 | 0.996 | 8.665 | 0.997 | 8.654 | 0.999 | yes |
+| des | 44 | 4.469 | 4.460 | 0.998 | 4.464 | 0.999 | 4.459 | 0.999 | yes |
+| diffeq | 40 | 6.095 | 6.199 | 1.017 | 6.103 | 1.001 | 6.098 | 0.999 | yes |
+| dsip | 44 | 3.179 | 3.176 | 0.999 | 3.176 | 0.999 | 3.214 | 1.012 | yes |
+| elliptic | 68 | 7.581 | 7.548 | 0.996 | 7.546 | 0.995 | 7.538 | 0.999 | yes |
+| ex1010 | 112 | 6.897 | 6.823 | 0.989 | 6.821 | 0.989 | 6.813 | 0.999 | yes |
+| ex5p | 58 | 4.621 | 4.556 | 0.986 | 4.549 | 0.984 | 4.544 | 0.999 | yes |
+| frisc | 76 | 10.007 | 9.812 | 0.980 | 9.592 | 0.959 | 9.585 | 0.999 | yes |
+| misex3 | 60 | 4.821 | 4.786 | 0.993 | 4.784 | 0.992 | 4.779 | 0.999 | yes |
+| pdc | 94 | 7.060 | 7.052 | 0.999 | 7.052 | 0.999 | 7.042 | 0.999 | yes |
+| s298 | 52 | 7.263 | 7.494 | 1.032 | 7.352 | 1.012 | 7.345 | 0.999 | yes |
+| s38417 | 44 | 5.800 | 5.512 | 0.950 | 5.512 | 0.950 | 5.506 | 0.999 | yes |
+| s38584.1 | 52 | 5.056 | 4.879 | 0.965 | 4.880 | 0.965 | 4.841 | 0.992 | yes |
+| seq | 70 | 4.872 | 4.823 | 0.990 | 4.794 | 0.984 | 4.789 | 0.999 | yes |
+| spla | 78 | 6.529 | 6.482 | 0.993 | 6.517 | 0.998 | 6.508 | 0.999 | yes |
+| tseng | 34 | 5.713 | 5.684 | 0.995 | 5.684 | 0.995 | 5.679 | 0.999 | yes |
+| Geomean |  |  |  | 0.987 |  | 0.984 |  | 1.000 |  |
 
 Wirelength at the relaxed width, in tiles of wire:
 
 | Circuit | VPR | guide before | before / VPR | guide | guide / VPR |
 | --- | --- | --- | --- | --- | --- |
-| alu4 | 7291 | 6896 | 0.946 | 6840 | 0.938 |
-| apex2 | 12151 | 12003 | 0.988 | 12015 | 0.989 |
-| apex4 | 10212 | 9940 | 0.973 | 9338 | 0.914 |
-| bigkey | 6415 | 6281 | 0.979 | 6328 | 0.986 |
-| clma | 44365 | 44821 | 1.010 | 42563 | 0.959 |
-| des | 6744 | 6659 | 0.987 | 6580 | 0.976 |
-| diffeq | 5218 | 4754 | 0.911 | 4749 | 0.910 |
-| dsip | 7198 | 6878 | 0.956 | 6918 | 0.961 |
-| elliptic | 16865 | 15985 | 0.948 | 15349 | 0.910 |
-| ex1010 | 40817 | 42528 | 1.042 | 38710 | 0.948 |
-| ex5p | 6964 | 6672 | 0.958 | 6771 | 0.972 |
-| frisc | 21617 | 20176 | 0.933 | 19599 | 0.907 |
-| misex3 | 6920 | 6949 | 1.004 | 6791 | 0.981 |
-| pdc | 36688 | 37644 | 1.026 | 34460 | 0.939 |
-| s298 | 5886 | 5453 | 0.926 | 5210 | 0.885 |
-| s38417 | 18574 | 17796 | 0.958 | 17595 | 0.947 |
-| s38584.1 | 19108 | 18261 | 0.956 | 18100 | 0.947 |
-| seq | 10428 | 9970 | 0.956 | 9654 | 0.926 |
-| spla | 25425 | 25369 | 0.998 | 23896 | 0.940 |
-| tseng | 4210 | 4094 | 0.972 | 4077 | 0.968 |
-| Geomean |  |  | 0.971 |  | 0.945 |
+| alu4 | 7291 | 6840 | 0.938 | 6951 | 0.953 |
+| apex2 | 12151 | 12015 | 0.989 | 11739 | 0.966 |
+| apex4 | 10212 | 9338 | 0.914 | 9352 | 0.916 |
+| bigkey | 6415 | 6328 | 0.986 | 6263 | 0.976 |
+| clma | 44365 | 42623 | 0.961 | 42652 | 0.961 |
+| des | 6744 | 6580 | 0.976 | 6619 | 0.981 |
+| diffeq | 5218 | 4749 | 0.910 | 4809 | 0.922 |
+| dsip | 7198 | 6918 | 0.961 | 6917 | 0.961 |
+| elliptic | 16865 | 15349 | 0.910 | 15326 | 0.909 |
+| ex1010 | 40817 | 38710 | 0.948 | 38845 | 0.952 |
+| ex5p | 6964 | 6771 | 0.972 | 6671 | 0.958 |
+| frisc | 21617 | 19599 | 0.907 | 19669 | 0.910 |
+| misex3 | 6920 | 6791 | 0.981 | 6861 | 0.991 |
+| pdc | 36688 | 34460 | 0.939 | 34864 | 0.950 |
+| s298 | 5886 | 5210 | 0.885 | 5232 | 0.889 |
+| s38417 | 18574 | 17595 | 0.947 | 17667 | 0.951 |
+| s38584.1 | 19108 | 18080 | 0.946 | 18154 | 0.950 |
+| seq | 10428 | 9654 | 0.926 | 9903 | 0.950 |
+| spla | 25425 | 23896 | 0.940 | 24047 | 0.946 |
+| tseng | 4210 | 4077 | 0.968 | 4050 | 0.962 |
+| Geomean |  |  | 0.945 |  | 0.947 |
 
 Runtime at the relaxed width. Each ratio is to VPR's time in the same run, as VPR's times move
 from run to run:
 
 | Circuit | VPR, s | VPR's lookahead, s | VPR iterations | guide before, s | before / VPR | guide, 1 thread, s | guide's lookahead, s | guide iterations | / VPR | guide, threads, s | / VPR | Its delay, ns | VPR accepts it |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| alu4 | 0.12 | 0.01 | 24 | 0.51 | 3.02 | 0.05 | 0.02 | 10 | 0.42 | 0.08 | 0.70 | 4.807 | yes |
-| apex2 | 0.20 | 0.02 | 24 | 0.83 | 4.88 | 0.06 | 0.03 | 10 | 0.32 | 0.10 | 0.52 | 5.777 | yes |
-| apex4 | 0.18 | 0.02 | 27 | 0.70 | 3.88 | 0.05 | 0.02 | 9 | 0.28 | 0.08 | 0.43 | 5.280 | yes |
-| bigkey | 0.10 | 0.02 | 16 | 0.30 | 2.70 | 0.03 | 0.03 | 10 | 0.32 | 0.05 | 0.54 | 3.265 | yes |
-| clma | 0.70 | 0.07 | 23 | 4.94 | 5.95 | 0.20 | 0.10 | 11 | 0.29 | 0.32 | 0.46 | 8.662 | yes |
-| des | 0.07 | 0.02 | 14 | 0.17 | 2.41 | 0.02 | 0.04 | 7 | 0.26 | 0.04 | 0.60 | 4.460 | yes |
-| diffeq | 0.09 | 0.01 | 22 | 0.13 | 1.49 | 0.01 | 0.02 | 7 | 0.17 | 0.03 | 0.38 | 6.200 | yes |
-| dsip | 0.11 | 0.02 | 18 | 0.28 | 2.15 | 0.03 | 0.03 | 8 | 0.26 | 0.05 | 0.44 | 3.170 | yes |
-| elliptic | 0.28 | 0.03 | 24 | 0.88 | 2.25 | 0.07 | 0.05 | 8 | 0.25 | 0.11 | 0.41 | 7.548 | yes |
-| ex1010 | 0.59 | 0.06 | 23 | 9.00 | 11.53 | 0.26 | 0.09 | 10 | 0.44 | 0.34 | 0.57 | 6.820 | yes |
-| ex5p | 0.10 | 0.01 | 19 | 0.44 | 4.89 | 0.04 | 0.02 | 11 | 0.40 | 0.07 | 0.67 | 4.549 | yes |
-| frisc | 0.32 | 0.04 | 25 | 0.99 | 2.37 | 0.08 | 0.06 | 10 | 0.25 | 0.13 | 0.41 | 9.597 | yes |
-| misex3 | 0.11 | 0.01 | 20 | 0.44 | 3.65 | 0.04 | 0.02 | 9 | 0.35 | 0.07 | 0.67 | 4.782 | yes |
-| pdc | 0.65 | 0.07 | 22 | 5.45 | 8.78 | 0.22 | 0.09 | 9 | 0.34 | 0.38 | 0.58 | 7.052 | yes |
-| s298 | 0.10 | 0.01 | 21 | 0.28 | 3.14 | 0.03 | 0.02 | 8 | 0.27 | 0.04 | 0.42 | 7.491 | yes |
-| s38417 | 0.40 | 0.04 | 25 | 0.82 | 1.72 | 0.06 | 0.06 | 8 | 0.14 | 0.12 | 0.29 | 5.512 | yes |
-| s38584.1 | 0.43 | 0.04 | 22 | 0.53 | 1.22 | 0.07 | 0.06 | 10 | 0.16 | 0.13 | 0.31 | 4.879 | yes |
-| seq | 0.18 | 0.02 | 30 | 0.65 | 3.26 | 0.06 | 0.03 | 10 | 0.34 | 0.10 | 0.57 | 4.862 | yes |
-| spla | 0.47 | 0.05 | 24 | 3.29 | 6.71 | 0.16 | 0.06 | 9 | 0.34 | 0.27 | 0.57 | 6.485 | yes |
-| tseng | 0.07 | 0.01 | 17 | 0.11 | 1.51 | 0.02 | 0.01 | 8 | 0.26 | 0.04 | 0.51 | 5.688 | yes |
-| Geomean |  |  |  |  | 3.23 |  |  |  | 0.28 |  | 0.49 |  |  |
+| alu4 | 0.13 | 0.01 | 24 | 0.10 | 0.37 | 0.05 | 0.02 | 11 | 0.39 | 0.10 | 0.73 | 4.846 | yes |
+| apex2 | 0.21 | 0.02 | 24 | 0.07 | 0.33 | 0.07 | 0.03 | 10 | 0.33 | 0.12 | 0.55 | 5.782 | yes |
+| apex4 | 0.18 | 0.02 | 27 | 0.06 | 0.26 | 0.06 | 0.02 | 11 | 0.33 | 0.09 | 0.48 | 5.282 | yes |
+| bigkey | 0.10 | 0.02 | 16 | 0.04 | 0.33 | 0.03 | 0.03 | 9 | 0.28 | 0.04 | 0.44 | 3.265 | yes |
+| clma | 0.93 | 0.10 | 23 | 0.21 | 0.21 | 0.30 | 0.12 | 13 | 0.32 | 0.34 | 0.37 | 8.661 | yes |
+| des | 0.08 | 0.02 | 14 | 0.02 | 0.26 | 0.02 | 0.04 | 7 | 0.21 | 0.04 | 0.55 | 4.464 | yes |
+| diffeq | 0.09 | 0.01 | 22 | 0.04 | 0.18 | 0.02 | 0.02 | 9 | 0.19 | 0.04 | 0.41 | 6.200 | yes |
+| dsip | 0.13 | 0.02 | 18 | 0.04 | 0.26 | 0.03 | 0.03 | 9 | 0.23 | 0.05 | 0.35 | 3.176 | yes |
+| elliptic | 0.26 | 0.03 | 24 | 0.07 | 0.23 | 0.08 | 0.05 | 11 | 0.30 | 0.13 | 0.48 | 7.554 | yes |
+| ex1010 | 0.80 | 0.08 | 23 | 0.27 | 0.54 | 0.34 | 0.10 | 11 | 0.43 | 0.45 | 0.57 | 6.819 | yes |
+| ex5p | 0.10 | 0.01 | 19 | 0.09 | 0.41 | 0.04 | 0.02 | 11 | 0.38 | 0.07 | 0.67 | 4.569 | yes |
+| frisc | 0.48 | 0.04 | 25 | 0.07 | 0.17 | 0.08 | 0.05 | 9 | 0.16 | 0.14 | 0.30 | 9.595 | yes |
+| misex3 | 0.11 | 0.01 | 20 | 0.07 | 0.30 | 0.05 | 0.02 | 12 | 0.42 | 0.09 | 0.81 | 4.783 | yes |
+| pdc | 0.72 | 0.06 | 22 | 0.21 | 0.27 | 0.28 | 0.10 | 12 | 0.38 | 0.42 | 0.59 | 7.052 | yes |
+| s298 | 0.10 | 0.01 | 21 | 0.06 | 0.38 | 0.03 | 0.02 | 10 | 0.28 | 0.05 | 0.52 | 7.505 | yes |
+| s38417 | 0.32 | 0.04 | 25 | 0.06 | 0.18 | 0.07 | 0.06 | 9 | 0.23 | 0.14 | 0.45 | 5.512 | yes |
+| s38584.1 | 0.34 | 0.04 | 22 | 0.09 | 0.26 | 0.09 | 0.06 | 11 | 0.26 | 0.14 | 0.41 | 4.873 | yes |
+| seq | 0.17 | 0.02 | 30 | 0.07 | 0.25 | 0.06 | 0.02 | 12 | 0.36 | 0.10 | 0.61 | 4.795 | yes |
+| spla | 0.60 | 0.06 | 24 | 0.17 | 0.31 | 0.22 | 0.07 | 11 | 0.37 | 0.34 | 0.56 | 6.492 | yes |
+| tseng | 0.07 | 0.01 | 17 | 0.02 | 0.24 | 0.02 | 0.01 | 8 | 0.24 | 0.04 | 0.50 | 5.685 | yes |
+| Geomean |  |  |  |  | 0.28 |  |  |  | 0.30 |  | 0.50 |  |  |
 
 What this shows:
 
-- **Runtime: `guide` takes 0.28 times VPR's time, where it took 3.2 times**, from 0.14 times
-  on s38417 to 0.44 on ex1010, which took 11.5 times before. That is 0.08 times its own time
-  before, and 0.025 times the expansions: ex1010 went from 26.7 million to 225 000. With
-  each tool's lookahead counted in, `guide` takes 0.41 times VPR's time. Its lookahead is the
-  slower of the two, at about 1.5 times VPR's, from 0.01 s to 0.10 s.
-- **Channel width: `guide` needs 4.4% fewer tracks than VPR**, where it needed 2.6% fewer.
-  It needs fewer on 13 circuits, by up to 11% (pdc, 64 against 72), and as many on the other
-  7, so dsip no longer needs more. Against `guide` before, it needs fewer on 9 circuits and
-  more on one, spla, 56 against 54.
-- **Delay: 1.3% shorter critical paths than VPR**, where they were 1.6% shorter, so 0.3%
-  longer than before. 18 of 20 are as fast as VPR's or faster, diffeq is 1.7% slower and s298
-  3.2%, and apex4, which was 1% slower, is 2% faster. Single circuits move by up to 4% either
-  way between configurations, which is more than the means do.
-- **Wirelength: 5.5% less wire than VPR**, where it was 2.9% less. Every circuit uses less
-  than VPR's now, by up to 11.5% (s298), including the four that used more before.
+- **Channel width: `guide` needs 6.0% fewer tracks than VPR**, where it needed 4.1% fewer
+  before. It needs fewer on 14 circuits, by up to 15% (s298, 34 against 40), as many on 5, and
+  more on one, dsip, 36 against 34. Against before, it needs fewer on 8 circuits, ex1010 76
+  against 82 and s298 34 against 40, and more on 3: clma, dsip and seq, by one step of two
+  tracks each.
+- **Delay: 1.6% shorter critical paths than VPR**, where they were 1.3% shorter. 18 of 20 are
+  as fast as VPR's or faster, diffeq is 0.1% slower and s298 1.2%, where they were 1.7% and
+  3.2% slower before. Single circuits move by up to 4% either way between configurations,
+  which is more than the means do.
+- **Wirelength: 5.3% less wire than VPR**, where it was 5.5% less, which is within what
+  circuits move by between runs of different options. Every circuit uses less than VPR's.
+- **Runtime: `guide` takes 0.30 times VPR's time**, where it took 0.28, from 0.16 times on
+  frisc to 0.43 on ex1010. It takes 10.2 iterations at the relaxed width where it took 9.0,
+  against VPR's 21.7, and 5% more expansions. With each tool's lookahead counted in, it
+  takes 0.42 times VPR's time, where it took 0.40.
 - **Threads still do not help**: 16 threads with batches of 32 took 1.7 times as long as one
-  thread with batches of 1. Searches are shorter than ever, and batches bring more
-  iterations' worth of rerouting.
-- **`guide`'s own timing analysis agrees with VPR's** to within 0.1% to 1.3%, always slightly
-  optimistic: its delays are fixed per step, where VPR's Elmore delays depend on the tree.
+  thread with batches of 1. Searches are short, and batches bring more iterations' worth of
+  rerouting.
+- **`guide`'s own timing analysis agrees with VPR's**, by the worst slack as VPR counts it,
+  to within 0.1% on 17 circuits, 0.8% under it on s38584.1, and 1.2% over it, pessimistic,
+  on bigkey and dsip.
 
-**Since then**, for [the Verilog benchmarks](#vtrs-verilog-benchmarks), `guide` leaves constant
-nets unrouted as VPR does (`fpga::constant_nets`), which it routed before. Three of these
-circuits have any: apex4 one, clma 15 and s38584.1 two. Rerun at `2bc0139`, apex4's minimum
-width went from 52 to 54, clma's from 68 to 66 and s38584.1's from 36 to 38, and the geomean
-from 0.956 to 0.959 of VPR's. Their relaxed routes kept their delays, and clma's wire went from
-42563 to 42623 tiles and s38584.1's from 18100 to 18080. Every other number above is
-unchanged but for times. The comparison of timing analyses above is of the latest arrival,
-which leaves out the setup time at the end of the path. With the worst slack instead, as VPR
-counts it, `guide`'s analysis comes to within 0.1% of VPR's on 17 circuits, 0.9% under it on
-s38584.1, and 1.2% over it, pessimistic, on bigkey and dsip.
+Before, between `21d5205`, which finished [the lookahead and incremental
+rerouting](#closing-the-runtime-gap), and `14c1022`, `guide` started leaving constant nets
+unrouted as VPR does (`fpga::constant_nets`), for [the Verilog
+benchmarks](#vtrs-verilog-benchmarks). Three of these circuits have any: apex4 one, clma 15
+and s38584.1 two. That took apex4's minimum width from 52 to 54, clma's from 68 to 66 and
+s38584.1's from 36 to 38, and the geomean from 0.956 to 0.959 of VPR's, with every other
+number the same but for times.
 
 ### Closing the runtime gap
 
@@ -789,7 +792,8 @@ engine's defaults are unchanged, and so is every result on grids and other graph
 | **Map, incremental, weight 1.1** | **0.956** | **0.987** | **0.945** | **0.28** | **0.025** | **0.08** |
 | Map, incremental, weight 1.2 | 0.959 | 0.991 | 0.943 | 0.27 | 0.024 | 0.12 |
 
-The row in bold is the run of the tables above. The others ran three or four at a time, so
+The row in bold is the run that these tables had at `21d5205`, before constant nets and [the
+tuning](#tuning-the-negotiation-on-both-suites). The others ran three or four at a time, so
 their times are less reliable than their expansions, which do not depend on the machine.
 
 What did not help, or not enough to keep:
@@ -870,9 +874,11 @@ of VTR's `vtr_reg_qor_chain` test. They are larger than the MCNC circuits, up to
 7600 clusters, 32 multipliers and 167 memories on a 103 by 103 grid, and have multipliers,
 memories and carry chains.
 
-Measured on 2026-11-10 with rustc 1.97.1, on the same shared machine, at `2bc0139`, the commit
-that made these routes acceptable to VPR, as [what it took](#what-the-verilog-benchmarks-took)
-says. Titan23 was not run: see [what this does not show](#what-the-verilog-benchmarks-do-not-show).
+Measured on 2026-11-10 with rustc 1.97.1, on the same shared machine. "Before" is
+`2bc0139`, the commit that made these routes acceptable to VPR, as [what it
+took](#what-the-verilog-benchmarks-took) says, and the rest is `7346331`, whose
+`RrGraph::engine_options` were [tuned on both suites](#tuning-the-negotiation-on-both-suites).
+Titan23 was not run: see [what this does not show](#what-the-verilog-benchmarks-do-not-show).
 
 #### How
 
@@ -909,156 +915,256 @@ VPR's, so below 1 is better for `guide`, and the last row is their geometric mea
 
 Minimum channel width, with the hard blocks each circuit uses:
 
-| Circuit | CLBs | Multipliers | Memories | Grid, tiles a side | VPR | guide | guide / VPR | VPR accepts guide's route |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| LU32PEEng | 7600 | 32 | 167 | 103 | 124 | 122 | 0.984 | yes |
-| LU8PEEng | 2232 | 8 | 44 | 57 | 92 | 88 | 0.957 | yes |
-| arm_core | 1023 | 0 | 24 | 39 | 104 | 102 | 0.981 | yes |
-| bgm | 2786 | 11 | 0 | 63 | 70 | 70 | 1.000 | yes |
-| blob_merge | 619 | 0 | 0 | 31 | 58 | 62 | 1.069 | yes |
-| boundtop | 97 | 0 | 0 | 14 | 42 | 42 | 1.000 | yes |
-| ch_intrinsics | 68 | 0 | 1 | 12 | 42 | 42 | 1.000 | yes |
-| diffeq1 | 32 | 5 | 0 | 16 | 60 | 60 | 1.000 | yes |
-| diffeq2 | 21 | 7 | 0 | 18 | 46 | 50 | 1.087 | yes |
-| mcml | 7302 | 27 | 159 | 101 | 124 | 126 | 1.016 | yes |
-| mkDelayWorker32B | 473 | 0 | 45 | 50 | 38 | 40 | 1.053 | yes |
-| mkPktMerge | 31 | 0 | 15 | 28 | 46 | 46 | 1.000 | yes |
-| mkSMAdapter4B | 189 | 0 | 5 | 20 | 50 | 50 | 1.000 | yes |
-| or1200 | 258 | 1 | 2 | 27 | 92 | 92 | 1.000 | yes |
-| raygentop | 123 | 8 | 0 | 19 | 58 | 56 | 0.966 | yes |
-| sha | 155 | 0 | 0 | 17 | 68 | 72 | 1.059 | yes |
-| spree | 64 | 1 | 3 | 14 | 62 | 62 | 1.000 | yes |
-| stereovision0 | 725 | 0 | 0 | 34 | 48 | 50 | 1.042 | yes |
-| stereovision1 | 770 | 40 | 0 | 40 | 80 | 82 | 1.025 | yes |
-| stereovision2 | 1977 | 324 | 0 | 104 | 68 | 72 | 1.059 | yes |
-| stereovision3 | 14 | 0 | 0 | 7 | 30 | 30 | 1.000 | yes |
-| Geomean |  |  |  |  |  |  | 1.014 |  |
+| Circuit | CLBs | Multipliers | Memories | Grid, tiles a side | VPR | guide before | before / VPR | guide | guide / VPR | VPR accepts guide's route |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| LU32PEEng | 7600 | 32 | 167 | 103 | 124 | 122 | 0.984 | 116 | 0.935 | yes |
+| LU8PEEng | 2232 | 8 | 44 | 57 | 92 | 88 | 0.957 | 84 | 0.913 | yes |
+| arm_core | 1023 | 0 | 24 | 39 | 104 | 102 | 0.981 | 100 | 0.962 | yes |
+| bgm | 2786 | 11 | 0 | 63 | 70 | 70 | 1.000 | 70 | 1.000 | yes |
+| blob_merge | 619 | 0 | 0 | 31 | 58 | 62 | 1.069 | 60 | 1.034 | yes |
+| boundtop | 97 | 0 | 0 | 14 | 42 | 42 | 1.000 | 42 | 1.000 | yes |
+| ch_intrinsics | 68 | 0 | 1 | 12 | 42 | 42 | 1.000 | 42 | 1.000 | yes |
+| diffeq1 | 32 | 5 | 0 | 16 | 60 | 60 | 1.000 | 54 | 0.900 | yes |
+| diffeq2 | 21 | 7 | 0 | 18 | 46 | 50 | 1.087 | 42 | 0.913 | yes |
+| mcml | 7302 | 27 | 159 | 101 | 124 | 126 | 1.016 | 112 | 0.903 | yes |
+| mkDelayWorker32B | 473 | 0 | 45 | 50 | 38 | 40 | 1.053 | 40 | 1.053 | yes |
+| mkPktMerge | 31 | 0 | 15 | 28 | 46 | 46 | 1.000 | 46 | 1.000 | yes |
+| mkSMAdapter4B | 189 | 0 | 5 | 20 | 50 | 50 | 1.000 | 50 | 1.000 | yes |
+| or1200 | 258 | 1 | 2 | 27 | 92 | 92 | 1.000 | 76 | 0.826 | yes |
+| raygentop | 123 | 8 | 0 | 19 | 58 | 56 | 0.966 | 54 | 0.931 | yes |
+| sha | 155 | 0 | 0 | 17 | 68 | 72 | 1.059 | 56 | 0.824 | yes |
+| spree | 64 | 1 | 3 | 14 | 62 | 62 | 1.000 | 62 | 1.000 | yes |
+| stereovision0 | 725 | 0 | 0 | 34 | 48 | 50 | 1.042 | 48 | 1.000 | yes |
+| stereovision1 | 770 | 40 | 0 | 40 | 80 | 82 | 1.025 | 78 | 0.975 | yes |
+| stereovision2 | 1977 | 324 | 0 | 104 | 68 | 72 | 1.059 | 60 | 0.882 | yes |
+| stereovision3 | 14 | 0 | 0 | 7 | 30 | 30 | 1.000 | 30 | 1.000 | yes |
+| Geomean |  |  |  |  |  |  | 1.014 |  | 0.953 |  |
 
 At the relaxed width, the critical-path delay, by VPR's analysis of each tool's routes, and
 by `guide`'s own analysis of its routes:
 
-| Circuit | W | VPR, ns | guide, ns | guide / VPR | guide's own STA, ns | own / VPR's STA | VPR accepts guide's route |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| LU32PEEng | 162 | 76.286 | 76.128 | 0.998 | 76.065 | 0.999 | yes |
-| LU8PEEng | 120 | 76.110 | 75.649 | 0.994 | 75.594 | 0.999 | yes |
-| arm_core | 136 | 18.622 | 18.602 | 0.999 | 18.595 | 1.000 | yes |
-| bgm | 92 | 20.456 | 20.471 | 1.001 | 20.456 | 0.999 | yes |
-| blob_merge | 76 | 15.232 | 15.162 | 0.995 | 15.153 | 0.999 | yes |
-| boundtop | 54 | 3.555 | 3.552 | 0.999 | 3.549 | 0.999 | yes |
-| ch_intrinsics | 54 | 2.496 | 2.520 | 1.010 | 2.519 | 1.000 | yes |
-| diffeq1 | 78 | 17.082 | 17.617 | 1.031 | 17.653 | 1.002 | yes |
-| diffeq2 | 60 | 12.977 | 13.323 | 1.027 | 13.319 | 1.000 | yes |
-| mcml | 162 | 46.357 | 46.452 | 1.002 | 46.425 | 0.999 | yes |
-| mkDelayWorker32B | 50 | 8.430 | 8.463 | 1.004 | 8.417 | 0.995 | yes |
-| mkPktMerge | 60 | 4.263 | 4.268 | 1.001 | 4.268 | 1.000 | yes |
-| mkSMAdapter4B | 64 | 4.822 | 4.802 | 0.996 | 4.797 | 0.999 | yes |
-| or1200 | 120 | 8.645 | 8.634 | 0.999 | 8.631 | 1.000 | yes |
-| raygentop | 76 | 4.743 | 4.860 | 1.025 | 4.857 | 0.999 | yes |
-| sha | 88 | 10.035 | 10.161 | 1.013 | 10.156 | 0.999 | yes |
-| spree | 80 | 11.281 | 11.277 | 1.000 | 11.270 | 0.999 | yes |
-| stereovision0 | 62 | 3.606 | 3.602 | 0.999 | 3.600 | 0.999 | yes |
-| stereovision1 | 104 | 5.580 | 5.443 | 0.976 | 5.440 | 0.999 | yes |
-| stereovision2 | 88 | 15.825 | 15.782 | 0.997 | 15.776 | 1.000 | yes |
-| stereovision3 | 40 | 2.658 | 2.658 | 1.000 | 2.656 | 0.999 | yes |
-| Geomean |  |  |  | 1.003 |  | 0.999 |  |
+| Circuit | W | VPR, ns | guide before, ns | before / VPR | guide, ns | guide / VPR | guide's own STA, ns | own / VPR's STA | VPR accepts guide's route |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| LU32PEEng | 162 | 76.286 | 76.128 | 0.998 | 76.099 | 0.998 | 76.040 | 0.999 | yes |
+| LU8PEEng | 120 | 76.110 | 75.649 | 0.994 | 75.675 | 0.994 | 75.622 | 0.999 | yes |
+| arm_core | 136 | 18.622 | 18.602 | 0.999 | 18.598 | 0.999 | 18.592 | 1.000 | yes |
+| bgm | 92 | 20.456 | 20.471 | 1.001 | 20.464 | 1.000 | 20.450 | 0.999 | yes |
+| blob_merge | 76 | 15.232 | 15.162 | 0.995 | 15.161 | 0.995 | 15.153 | 0.999 | yes |
+| boundtop | 54 | 3.555 | 3.552 | 0.999 | 3.553 | 0.999 | 3.550 | 0.999 | yes |
+| ch_intrinsics | 54 | 2.496 | 2.520 | 1.010 | 2.452 | 0.983 | 2.451 | 0.999 | yes |
+| diffeq1 | 78 | 17.082 | 17.617 | 1.031 | 17.090 | 1.000 | 17.084 | 1.000 | yes |
+| diffeq2 | 60 | 12.977 | 13.323 | 1.027 | 13.006 | 1.002 | 13.003 | 1.000 | yes |
+| mcml | 162 | 46.357 | 46.452 | 1.002 | 46.367 | 1.000 | 46.343 | 0.999 | yes |
+| mkDelayWorker32B | 50 | 8.430 | 8.463 | 1.004 | 8.460 | 1.004 | 8.414 | 0.995 | yes |
+| mkPktMerge | 60 | 4.263 | 4.268 | 1.001 | 4.292 | 1.007 | 4.290 | 1.000 | yes |
+| mkSMAdapter4B | 64 | 4.822 | 4.802 | 0.996 | 4.806 | 0.997 | 4.801 | 0.999 | yes |
+| or1200 | 120 | 8.645 | 8.634 | 0.999 | 8.630 | 0.998 | 8.627 | 1.000 | yes |
+| raygentop | 76 | 4.743 | 4.860 | 1.025 | 4.740 | 0.999 | 4.737 | 0.999 | yes |
+| sha | 88 | 10.035 | 10.161 | 1.013 | 10.032 | 1.000 | 10.026 | 0.999 | yes |
+| spree | 80 | 11.281 | 11.277 | 1.000 | 11.280 | 1.000 | 11.273 | 0.999 | yes |
+| stereovision0 | 62 | 3.606 | 3.602 | 0.999 | 3.601 | 0.999 | 3.599 | 0.999 | yes |
+| stereovision1 | 104 | 5.580 | 5.443 | 0.976 | 5.451 | 0.977 | 5.447 | 0.999 | yes |
+| stereovision2 | 88 | 15.825 | 15.782 | 0.997 | 15.778 | 0.997 | 15.772 | 1.000 | yes |
+| stereovision3 | 40 | 2.658 | 2.658 | 1.000 | 2.662 | 1.002 | 2.660 | 0.999 | yes |
+| Geomean |  |  |  | 1.003 |  | 0.998 |  | 0.999 |  |
 
 Wirelength at the relaxed width, in tiles of wire:
 
-| Circuit | VPR | guide | guide / VPR |
-| --- | --- | --- | --- |
-| LU32PEEng | 1310007 | 1297548 | 0.990 |
-| LU8PEEng | 325298 | 322552 | 0.992 |
-| arm_core | 184148 | 183390 | 0.996 |
-| bgm | 366218 | 365252 | 0.997 |
-| blob_merge | 66256 | 65834 | 0.994 |
-| boundtop | 3124 | 3150 | 1.008 |
-| ch_intrinsics | 1416 | 1485 | 1.049 |
-| diffeq1 | 8635 | 8726 | 1.011 |
-| diffeq2 | 9780 | 9799 | 1.002 |
-| mcml | 921573 | 918230 | 0.996 |
-| mkDelayWorker32B | 22576 | 22086 | 0.978 |
-| mkPktMerge | 13566 | 13395 | 0.987 |
-| mkSMAdapter4B | 17892 | 17939 | 1.003 |
-| or1200 | 43336 | 43678 | 1.008 |
-| raygentop | 18983 | 18933 | 0.997 |
-| sha | 15449 | 15463 | 1.001 |
-| spree | 12039 | 11963 | 0.994 |
-| stereovision0 | 55531 | 55592 | 1.001 |
-| stereovision1 | 114217 | 114462 | 1.002 |
-| stereovision2 | 422434 | 420551 | 0.996 |
-| stereovision3 | 783 | 777 | 0.992 |
-| Geomean |  |  | 1.000 |
+| Circuit | VPR | guide before | before / VPR | guide | guide / VPR |
+| --- | --- | --- | --- | --- | --- |
+| LU32PEEng | 1310007 | 1297548 | 0.990 | 1304833 | 0.996 |
+| LU8PEEng | 325298 | 322552 | 0.992 | 324858 | 0.999 |
+| arm_core | 184148 | 183390 | 0.996 | 184526 | 1.002 |
+| bgm | 366218 | 365252 | 0.997 | 370151 | 1.011 |
+| blob_merge | 66256 | 65834 | 0.994 | 67081 | 1.012 |
+| boundtop | 3124 | 3150 | 1.008 | 3154 | 1.010 |
+| ch_intrinsics | 1416 | 1485 | 1.049 | 1449 | 1.023 |
+| diffeq1 | 8635 | 8726 | 1.011 | 8644 | 1.001 |
+| diffeq2 | 9780 | 9799 | 1.002 | 9882 | 1.010 |
+| mcml | 921573 | 918230 | 0.996 | 919519 | 0.998 |
+| mkDelayWorker32B | 22576 | 22086 | 0.978 | 22082 | 0.978 |
+| mkPktMerge | 13566 | 13395 | 0.987 | 13358 | 0.985 |
+| mkSMAdapter4B | 17892 | 17939 | 1.003 | 18076 | 1.010 |
+| or1200 | 43336 | 43678 | 1.008 | 43888 | 1.013 |
+| raygentop | 18983 | 18933 | 0.997 | 18799 | 0.990 |
+| sha | 15449 | 15463 | 1.001 | 15476 | 1.002 |
+| spree | 12039 | 11963 | 0.994 | 12076 | 1.003 |
+| stereovision0 | 55531 | 55592 | 1.001 | 55464 | 0.999 |
+| stereovision1 | 114217 | 114462 | 1.002 | 114442 | 1.002 |
+| stereovision2 | 422434 | 420551 | 0.996 | 419730 | 0.994 |
+| stereovision3 | 783 | 777 | 0.992 | 756 | 0.966 |
+| Geomean |  |  | 1.000 |  | 1.000 |
 
 Runtime at the relaxed width, each ratio to VPR's time in the same run:
 
-| Circuit | VPR, s | VPR's lookahead, s | VPR iterations | guide, 1 thread, s | guide's lookahead, s | guide iterations | / VPR | guide, threads, s | / VPR | Its delay, ns | VPR accepts it |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| LU32PEEng | 22.40 | 4.09 | 22 | 10.67 | 4.91 | 11 | 0.48 | 9.48 | 0.42 | 76.130 | yes |
-| LU8PEEng | 6.72 | 0.92 | 22 | 2.17 | 1.12 | 12 | 0.32 | 2.07 | 0.31 | 75.655 | yes |
-| arm_core | 2.17 | 0.46 | 14 | 1.10 | 0.58 | 9 | 0.51 | 0.91 | 0.42 | 18.602 | yes |
-| bgm | 7.30 | 0.99 | 20 | 2.37 | 1.12 | 12 | 0.32 | 2.61 | 0.36 | 20.456 | yes |
-| blob_merge | 1.17 | 0.14 | 18 | 0.34 | 0.20 | 10 | 0.29 | 0.42 | 0.36 | 15.160 | yes |
-| boundtop | 0.04 | 0.01 | 11 | 0.01 | 0.02 | 11 | 0.22 | 0.03 | 0.65 | 3.552 | yes |
-| ch_intrinsics | 0.02 | 0.01 | 8 | 0.00 | 0.01 | 8 | 0.20 | 0.01 | 0.50 | 2.520 | yes |
-| diffeq1 | 0.12 | 0.03 | 20 | 0.06 | 0.04 | 12 | 0.51 | 0.08 | 0.64 | 17.451 | yes |
-| diffeq2 | 0.20 | 0.03 | 21 | 0.09 | 0.04 | 12 | 0.46 | 0.11 | 0.54 | 13.176 | yes |
-| mcml | 17.44 | 4.46 | 21 | 6.95 | 5.17 | 12 | 0.40 | 8.36 | 0.48 | 46.381 | yes |
-| mkDelayWorker32B | 0.45 | 0.32 | 15 | 0.15 | 0.46 | 13 | 0.33 | 0.18 | 0.40 | 8.463 | yes |
-| mkPktMerge | 0.12 | 0.07 | 15 | 0.07 | 0.14 | 10 | 0.62 | 0.07 | 0.58 | 4.262 | yes |
-| mkSMAdapter4B | 0.18 | 0.04 | 17 | 0.07 | 0.06 | 10 | 0.36 | 0.10 | 0.58 | 4.798 | yes |
-| or1200 | 0.58 | 0.12 | 19 | 0.25 | 0.22 | 10 | 0.43 | 0.26 | 0.45 | 8.634 | yes |
-| raygentop | 0.32 | 0.04 | 16 | 0.12 | 0.06 | 10 | 0.39 | 0.15 | 0.48 | 4.787 | yes |
-| sha | 0.24 | 0.03 | 21 | 0.05 | 0.05 | 11 | 0.21 | 0.10 | 0.40 | 10.214 | yes |
-| spree | 0.12 | 0.02 | 14 | 0.05 | 0.03 | 9 | 0.39 | 0.07 | 0.58 | 11.279 | yes |
-| stereovision0 | 0.97 | 0.17 | 14 | 0.20 | 0.21 | 9 | 0.20 | 0.35 | 0.36 | 3.601 | yes |
-| stereovision1 | 1.38 | 0.34 | 13 | 0.82 | 0.44 | 11 | 0.59 | 0.92 | 0.67 | 5.443 | yes |
-| stereovision2 | 4.83 | 2.36 | 19 | 2.15 | 3.03 | 11 | 0.45 | 3.04 | 0.63 | 15.775 | yes |
-| stereovision3 | 0.02 | 0.00 | 19 | 0.00 | 0.00 | 11 | 0.15 | 0.01 | 0.40 | 2.658 | yes |
-| Geomean |  |  |  |  |  |  | 0.35 |  | 0.47 |  |  |
+| Circuit | VPR, s | VPR's lookahead, s | VPR iterations | guide before, s | before / VPR | guide, 1 thread, s | guide's lookahead, s | guide iterations | / VPR | guide, threads, s | / VPR | Its delay, ns | VPR accepts it |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| LU32PEEng | 24.36 | 4.87 | 22 | 10.67 | 0.48 | 11.05 | 5.21 | 14 | 0.45 | 10.46 | 0.43 | 76.111 | yes |
+| LU8PEEng | 6.33 | 0.85 | 22 | 2.17 | 0.32 | 2.27 | 1.11 | 14 | 0.36 | 2.29 | 0.36 | 75.678 | yes |
+| arm_core | 2.44 | 0.45 | 14 | 1.10 | 0.51 | 1.21 | 0.56 | 10 | 0.50 | 1.05 | 0.43 | 18.598 | yes |
+| bgm | 7.29 | 0.89 | 20 | 2.37 | 0.32 | 2.83 | 1.10 | 14 | 0.39 | 3.12 | 0.43 | 20.465 | yes |
+| blob_merge | 0.98 | 0.12 | 18 | 0.34 | 0.29 | 0.24 | 0.16 | 10 | 0.25 | 0.49 | 0.50 | 15.166 | yes |
+| boundtop | 0.04 | 0.02 | 11 | 0.01 | 0.22 | 0.01 | 0.02 | 11 | 0.22 | 0.02 | 0.57 | 3.553 | yes |
+| ch_intrinsics | 0.01 | 0.01 | 8 | 0.00 | 0.20 | 0.01 | 0.01 | 10 | 0.50 | 0.01 | 1.40 | 2.452 | yes |
+| diffeq1 | 0.11 | 0.02 | 20 | 0.06 | 0.51 | 0.06 | 0.04 | 14 | 0.52 | 0.09 | 0.80 | 16.972 | yes |
+| diffeq2 | 0.18 | 0.03 | 21 | 0.09 | 0.46 | 0.11 | 0.04 | 13 | 0.59 | 0.12 | 0.64 | 13.143 | yes |
+| mcml | 17.31 | 5.04 | 21 | 6.95 | 0.40 | 7.34 | 5.22 | 14 | 0.42 | 9.01 | 0.52 | 46.367 | yes |
+| mkDelayWorker32B | 0.45 | 0.30 | 15 | 0.15 | 0.33 | 0.13 | 0.45 | 13 | 0.28 | 0.18 | 0.41 | 8.473 | yes |
+| mkPktMerge | 0.13 | 0.07 | 15 | 0.07 | 0.62 | 0.05 | 0.11 | 9 | 0.39 | 0.07 | 0.52 | 4.292 | yes |
+| mkSMAdapter4B | 0.26 | 0.04 | 17 | 0.07 | 0.36 | 0.07 | 0.06 | 11 | 0.28 | 0.12 | 0.46 | 4.800 | yes |
+| or1200 | 0.47 | 0.12 | 19 | 0.25 | 0.43 | 0.27 | 0.23 | 13 | 0.57 | 0.31 | 0.66 | 8.635 | yes |
+| raygentop | 0.26 | 0.04 | 16 | 0.12 | 0.39 | 0.13 | 0.06 | 12 | 0.50 | 0.17 | 0.65 | 4.740 | yes |
+| sha | 0.17 | 0.03 | 21 | 0.05 | 0.21 | 0.04 | 0.05 | 13 | 0.26 | 0.10 | 0.61 | 10.032 | yes |
+| spree | 0.13 | 0.02 | 14 | 0.05 | 0.39 | 0.06 | 0.03 | 11 | 0.43 | 0.10 | 0.73 | 11.282 | yes |
+| stereovision0 | 0.77 | 0.13 | 14 | 0.20 | 0.20 | 0.23 | 0.22 | 10 | 0.29 | 0.33 | 0.43 | 3.602 | yes |
+| stereovision1 | 1.42 | 0.34 | 13 | 0.82 | 0.59 | 0.87 | 0.47 | 13 | 0.61 | 0.95 | 0.67 | 5.457 | yes |
+| stereovision2 | 5.00 | 2.39 | 19 | 2.15 | 0.45 | 2.26 | 3.13 | 12 | 0.45 | 3.47 | 0.69 | 15.775 | yes |
+| stereovision3 | 0.02 | 0.00 | 19 | 0.00 | 0.15 | 0.00 | 0.00 | 9 | 0.20 | 0.01 | 0.40 | 2.658 | yes |
+| Geomean |  |  |  |  | 0.35 |  |  |  | 0.38 |  | 0.56 |  |  |
 
 What this shows:
 
-- **Channel width: `guide` needs 1.4% more tracks than VPR**, where it needs 4.1% fewer on
-  MCNC. It needs fewer on 4 circuits, by up to 4.3% (LU8PEEng, 88 against 92), as many on 9,
-  and more on 8, by up to 8.7% (diffeq2, 50 against 46). The largest circuits do best:
-  LU32PEEng needs 122 against 124, and mcml 126 against 124. Where `guide` fails, it is out
-  of its 50 iterations, not stuck: on blob_merge at VPR's 58 it is left with 12 overused nodes
-  after 50, and routes in 79 iterations given 200. See [the present factor](#the-present-factor-on-both-suites)
-  below.
-- **Delay: 0.3% longer critical paths than VPR**, where they are 1.3% shorter on MCNC. 14 of
-  21 are within 0.5% of VPR's either way. The worst are diffeq1, 3.1% slower, diffeq2, 2.7%,
-  and raygentop, 2.5%, all three with multipliers, and the best stereovision1, 2.4%
-  faster. As on MCNC, single circuits move by a few percent between
-  configurations: diffeq1 comes out anywhere from 17.12 ns to 17.62 ns with other options.
-- **Wirelength: the same as VPR's**, a geomean of 1.000 against 5.5% less on MCNC. From 2.2%
-  less on mkDelayWorker32B to 4.9% more on ch_intrinsics.
-- **Runtime: `guide` takes 0.35 times VPR's time**, from 0.15 times on stereovision3 to 0.62
-  on mkPktMerge, and 0.48 times on the largest, LU32PEEng, 10.7 s against 22.4 s. With each
-  tool's lookahead counted in, 0.56 times: `guide`'s lookahead is 1.1 to 2.2 times as slow as
-  VPR's, and on the smallest circuits takes longer than the routing.
-- **Threads help a little on some larger circuits only**: 16 threads with batches of 32 took
-  0.89 times as long as one thread on LU32PEEng and 0.83 on arm_core, but 1.36 times as long
-  over all 21.
+- **Channel width: `guide` needs 4.7% fewer tracks than VPR**, where it needed 1.4% more
+  before, and 6.0% fewer on MCNC. It needs fewer on 11 circuits, by up to 18% (sha, 56
+  against 68, and or1200, 76 against 92), as many on 8, and more on 2: blob_merge, 60 against
+  58, and mkDelayWorker32B, 40 against 38. Against before, it needs fewer on 13 circuits and
+  more on none. The largest circuits gain too: LU32PEEng needs 116 where it needed 122,
+  against VPR's 124, and mcml 112 where it needed 126. blob_merge and mkDelayWorker32B still
+  run out of their 50 iterations at VPR's width.
+- **Delay: 0.2% shorter critical paths than VPR**, where they were 0.3% longer. 17 of 21 are
+  within 0.5% of VPR's either way, and the three that were 2.5% to 3.1% slower, diffeq1,
+  diffeq2 and raygentop, all with multipliers, are now within 0.2%. The slowest is mkPktMerge,
+  0.7% slower, and the fastest stereovision1, 2.3% faster.
+- **Wirelength: the same as VPR's**, a geomean of 1.000 as before, from 3.4% less on
+  stereovision3 to 2.3% more on ch_intrinsics.
+- **Runtime: `guide` takes 0.38 times VPR's time**, where it took 0.35, from 0.20 times on
+  stereovision3 to 0.61 on stereovision1, and 0.45 times on the largest, LU32PEEng, 11.1 s
+  against 24.4 s. It takes 11.8 iterations where it took 10.6, against VPR's 16.6, and 6% more
+  expansions. With each tool's lookahead counted in, 0.59 times: `guide`'s lookahead is 1.1
+  to 2.2 times as slow as VPR's, and on the smallest circuits takes longer than the routing.
+- **Threads help on the largest circuits only**: 16 threads with batches of 32 took 0.95
+  times as long as one thread on LU32PEEng and 0.87 on arm_core, but 1.45 times as long over
+  all 21. See [threads](#threads-on-the-larger-circuits) below.
 - **`guide`'s own timing analysis agrees with VPR's** to within 0.5%, and to 0.1% on 19 of 21.
 
-#### The present factor on both suites
+#### Tuning the negotiation on both suites
 
-VPR's default present factor growth (`--pres_fac_mult`) is 1.3, and `guide`'s
-(`EngineOptions::present_growth`) is 1.8. Run with 1.3, on the 20 MCNC circuits and on the
-first 19 of these (LU32PEEng and mcml left out for time):
+`RrGraph::engine_options` was first tuned on MCNC alone, with a present factor growth of 1.8
+and a history of one tile of wire. VPR's growth is 1.3, and its history is in effect a whole
+wire. These were tuned again on both suites together, which changed three things: a growth of
+1.5, a history of two tiles, and giving up early on widths that will not route.
 
-| Suite | Present growth | Min W / VPR | Delay / VPR | Wire / VPR | Time / VPR | Iterations at the relaxed width |
-| --- | --- | --- | --- | --- | --- | --- |
-| MCNC | 1.8, the default | 0.959 | 0.987 | 0.945 | 0.28 | 9.0 |
-| MCNC | 1.3 | 0.945 | 0.986 | 0.934 | 0.35 | 14.6 |
-| Verilog | 1.8, the default | 1.015 | 1.003 | 1.000 | 0.34 | 10.5 |
-| Verilog | 1.3 | 0.993 | 0.999 | 0.991 | 0.44 | 16.6 |
+**How.** Each suite's circuits were split in two by alternating through them in alphabetical
+order, a tuning half and a held-out half, and options were chosen on the tuning halves only.
+LU32PEEng and mcml were left out for time, and stereovision2 too, as one width of its search
+took an hour and a half without giving up early. Each set of options ran the same search for
+the narrowest channel as above and one route at the relaxed width, on graphs that VPR wrote
+once and that every run then read, so that a run takes minutes. Delays here are `guide`'s own
+analysis, its worst slack, which agrees with VPR's to within 0.1% on most circuits and 1.2% on
+all, and wirelength is `guide`'s count, which agrees with VPR's on every circuit. Times are as
+expansions, since up to twenty sets of options ran at once.
 
-All four are geomeans of ratios, and iterations a geomean of counts. 1.3 needs fewer tracks on
-both suites, enough to come under VPR's on these circuits too, with slightly less wire and no
-loss of delay, for about 1.3 times the time. The default was left as it is: this is one run of
-each, at a different point of the trade between quality and time, and the engine's defaults
-were tuned for other problems.
+The rule for choosing was the narrowest channels on the tuning halves of both suites,
+without longer critical paths than before on either or more than a few tenths of a percent
+more wire, for at most about a tenth more expansions. All but expansions are geomeans of ratios to VPR's; tuning halves of 10 and
+9 circuits, held-out halves of 10 and 9:
+
+| Growth | History, tiles | Other | MCNC W, tuning | MCNC W, held out | Verilog W, tuning | Verilog W, held out | Delay, MCNC | Delay, Verilog | Wire, MCNC | Wire, Verilog | Expansions / default |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1.8 | 1 |  | 0.954 | 0.963 | 1.021 | 1.005 | 0.987 | 1.003 | 0.945 | 1.001 | 1.00 |
+| 1.5 | 1 |  | 0.948 | 0.970 | 0.993 | 1.000 | 0.988 | 0.998 | 0.940 | 0.996 | 1.09 |
+| 1.4 | 1 |  | 0.934 | 0.956 | 0.976 | 0.987 | 0.988 | 0.997 | 0.937 | 0.993 | 1.14 |
+| 1.3 | 1 |  | 0.926 | 0.964 | 0.996 | 0.992 | 0.986 | 0.998 | 0.934 | 0.991 | 1.21 |
+| 1.3 | 1 | first present 0 | 0.929 | 0.957 | 0.983 | 0.988 | 0.986 | 0.999 | 0.938 | 0.994 | 1.38 |
+| 1.3 | 1 | initial present 1 | 0.931 | 0.966 | 1.004 | 0.994 | 0.986 | 0.998 | 0.941 | 0.999 | 1.00 |
+| 1.3 | 1 | bound weight 1.2 | 0.934 | 0.956 | 0.982 | 0.992 | 0.989 | 1.000 | 0.933 | 0.994 | 1.14 |
+| 1.3 | 0.5 |  | 0.955 | 1.001 | 1.006 | 1.017 | 0.987 | 1.000 | 0.932 | 0.989 | 1.27 |
+| 1.8 | 1.5 |  | 0.948 | 0.959 | 0.974 | 0.981 | 0.986 | 1.004 | 0.948 | 1.003 | 0.98 |
+| 1.8 | 2 |  | 0.931 | 0.960 | 0.932 | 0.974 | 0.985 | 1.006 | 0.956 | 1.010 | 0.98 |
+| 1.8 | 3 |  | 0.930 | 0.959 | 0.943 | 0.975 | 0.986 | 1.001 | 0.961 | 1.014 | 0.99 |
+| 1.8 | 4 |  | 0.944 | 0.973 | 0.957 | 0.987 | 0.986 | 0.999 | 0.970 | 1.021 | 1.01 |
+| 1.6 | 1.5 |  | 0.929 | 0.969 | 0.967 | 0.985 | 0.986 | 1.001 | 0.943 | 0.999 | 1.02 |
+| 1.6 | 2 |  | 0.915 | 0.970 | 0.944 | 0.976 | 0.986 | 0.997 | 0.951 | 1.007 | 1.02 |
+| 1.5 | 1.5 |  | 0.932 | 0.960 | 0.958 | 0.991 | 0.987 | 1.000 | 0.942 | 0.998 | 1.06 |
+| **1.5** | **2** |  | **0.915** | **0.965** | **0.938** | **0.983** | **0.984** | **0.997** | **0.947** | **1.001** | **1.05** |
+| 1.5 | 2.5 |  | 0.930 | 0.963 | 0.930 | 0.976 | 0.984 | 1.001 | 0.953 | 1.008 | 1.06 |
+| 1.5 | 3 |  | 0.914 | 0.966 | 0.935 | 0.974 | 0.985 | 0.996 | 0.954 | 1.008 | 1.06 |
+| 1.5 | 2 | initial present 1 | 0.938 | 0.957 | 0.939 | 0.978 | 0.986 | 1.004 | 0.953 | 1.006 | 0.90 |
+| 1.5 | 2 | 2 timing iterations | 0.915 | 0.965 | 0.938 | 0.983 | 0.984 | 0.997 | 0.947 | 1.001 | 1.49 |
+| 1.4 | 2 |  | 0.927 | 0.946 | 0.941 | 0.980 | 0.986 | 0.999 | 0.947 | 1.001 | 1.11 |
+| 1.3 | 1.5 |  | 0.907 | 0.965 | 0.950 | 0.984 | 0.985 | 0.996 | 0.937 | 0.993 | 1.17 |
+| 1.3 | 2 |  | 0.906 | 0.949 | 0.961 | 0.973 | 0.986 | 0.996 | 0.943 | 0.997 | 1.16 |
+| 1.3 | 3 |  | 0.907 | 0.946 | 0.944 | 0.970 | 0.986 | 0.996 | 0.953 | 1.007 | 1.18 |
+| 1.3 | 4 |  | 0.904 | 0.952 | 0.933 | 0.968 | 0.986 | 0.997 | 0.963 | 1.016 | 1.20 |
+
+- **History matters more than growth.** Two tiles instead of one, at the old growth of 1.8,
+  took Verilog's tuning half from 1.021 to 0.932 of VPR's width for no more expansions, but
+  gave 0.3% longer critical paths and 1% more wire there. More history goes on narrowing
+  channels and adds more wire: four tiles gave 2% more on Verilog.
+- **Growth then trades time for wire and delay.** At two tiles, 1.5 gave the narrowest
+  channels on the tuning halves together, critical paths as short as any, and the wire of
+  before, for 5% more expansions. 1.3, VPR's, gave 0.906 of VPR's width on MCNC's tuning half
+  but 0.961 on Verilog's, for 16% more expansions.
+- **Held out, the gain is on Verilog only.** The chosen options give 0.983 of VPR's width on
+  Verilog's held-out half, against 1.005, but 0.965 on MCNC's, against 0.963: the gain on
+  MCNC's tuning half, 0.954 to 0.915, is partly the choice fitting those circuits. Every
+  set of options with a history of two tiles or more narrowed the held-out halves by less
+  than the tuning halves, and MCNC's by 1.8% at most. Delay and wire held out moved as on
+  the tuning halves.
+- **What did not help.** A first present factor of 0, as VPR has it, took 15% more
+  expansions than 0.5 at a growth of 1.3, for channels about as wide. Starting the second
+  iteration at 1 rather than 0.5 took 14% fewer expansions with the chosen options, but gave
+  longer critical paths and more wire on Verilog. A weight of 1.2 on the bound, rather than
+  1.1, gave longer critical paths on both. Rerouting critical nets for two more
+  iterations after the first legal result (`timing_iterations`) never found a better result
+  than the first, on any circuit, for 42% more expansions.
+
+**Giving up early.** VPR's search for the narrowest channel allows 50 iterations at each
+width, as here, but its routing failure predictor (`--routing_failure_predictor safe`) stops
+a width once the trend of its overused nodes says it would take more than three times that,
+if more than 100 nodes are overused. `EngineOptions::give_up_factor` does the same. Most of a
+search's time goes on the widths that fail: 84% of its expansions with the chosen options,
+whose failing widths all ran their 50 iterations. Over the same 38 circuits:
+
+| Give up at | Overused, at least | Searches' expansions / not giving up | Widths changed |
+| --- | --- | --- | --- |
+| Never |  | 1 |  |
+| 3 times 50 iterations, VPR's `safe` | 100 | 0.73 | none |
+| 1.5 times, VPR's `aggressive` | 100 | 0.67 | none |
+| **1 times** | **100** | **0.57** | **none** |
+| 0.75 times | 100 | 0.49 | none |
+| 1 times | 10 | 0.49 | apex2 and ex1010, 2 tracks wider |
+
+A factor of 1 is in `engine_options`, so that a run gives up only when its trend says it would
+not finish within the limit. 0.75 saved more and changed no width here either, but gives up on
+runs predicted to finish within the limit, and runs that did route took up to 50 iterations.
+Below 100 overused nodes, it gave up on runs that would have routed. On stereovision2, which
+the table leaves out, the search tried width 54, which took 5.6 billion expansions and an hour
+and a half in 50 iterations, and 0.26 billion and six minutes giving up after 13. Both searches
+found 60, where VPR finds 68.
+
+#### Threads on the larger circuits
+
+Batches of 32 on 16 threads are slower than one thread on most circuits. With the tuned
+options, on the graphs of the relaxed width, run one at a time, in seconds:
+
+| Circuit | 1 thread, batches of 1 | 16 threads, batches of 4 | 8 | 16 | 32 | 64 | 128 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| LU8PEEng | 2.00 | 2.38 | 2.31 | 2.25 | 2.40 | 2.53 | 2.73 |
+| bgm | 2.86 | 3.06 | 2.84 | 2.90 | 3.04 | 3.21 | 3.38 |
+| arm_core | 1.19 | 1.24 | 1.10 | 1.05 | 1.02 | 1.17 | 1.33 |
+| stereovision2 | 2.35 | 3.11 | 3.00 | 3.33 | 3.36 | 3.49 | 3.57 |
+| clma | 0.23 | 0.37 | 0.33 | 0.33 | 0.38 | 0.41 | 0.45 |
+
+No batch size makes 16 threads clearly faster than one but on arm_core, by 15% at most.
+Larger batches take more expansions, 1.08 to 1.42 times on LU8PEEng from 4 to 128, as more
+routes are found against an older table, and give up to 1.8% more wire, on clma at 128, and
+the same delays. Threads win back little of that: on LU8PEEng without timing, batches of 32
+took 3.38 s on one thread and 3.15 s on 16, against 2.19 s for one thread and batches of 1.
+So most of what batches cost is not in the searches that threads share, and searches are
+short once nets are rerouted incrementally. Where that time goes was not found: the engine
+starts its threads for every batch, and keeps or drops each route on one thread, and either
+could be it.
 
 #### What the Verilog benchmarks took
 
@@ -1104,8 +1210,9 @@ connections from one cluster's `cout` to the next one's `cin` like any other edg
   default flow now uses Yosys and Parmys, which was not built. Synthesized differently, the
   circuits would place and route differently, for both routers.
 - One placement per circuit, from one seed, and one architecture, as for MCNC.
-- The tuning of `RrGraph::engine_options` was done on MCNC, and these results were not
-  used to change it.
+- `RrGraph::engine_options` was [tuned on both suites](#tuning-the-negotiation-on-both-suites),
+  on half of each, so these results are not independent of it. The held-out halves gained
+  less than the tuning halves, and on MCNC nothing in channel width.
 
 ## FPGA placement against VPR
 

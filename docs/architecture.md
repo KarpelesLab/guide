@@ -257,7 +257,11 @@ lost a net to its USB pair, and routing it again with the pair as two nets doubl
 Routed last, each pair is taken out, routed side by side
 where it fits, and kept only if it connects what its two routes did, so no other net changes
 at all, and a pair that doesn't fit stays as two nets. Meanders come after that, for the same
-reason ([results](benchmarks.md#pcb-differential-pairs-and-lengths)).
+reason ([results](benchmarks.md#pcb-differential-pairs-and-lengths)). On the DRAM boards,
+though, routed last, no pair finds room through the buses around the BGA, even with the routes
+in its way ripped up and routed again, which was tried; so `Options::pairs_first` routes them
+first, before anything else, as fixed copper, for boards whose pairs matter most
+([results](benchmarks.md#pcb-routing-of-dram-boards)).
 
 **Zones are filled, not routed, and a net reaches its fill like a terminal.** `pcb::fill_zones`
 fills a zone as KiCad's `ZONE_FILLER` does, on polyclip: the outline less what other nets need

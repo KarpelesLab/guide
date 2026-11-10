@@ -1769,6 +1769,29 @@ were found:
 - Arcs: our own arc tolerance of 100 nm made two findings within KiCad's slack; at 10 nm there
   are none.
 
+### Solder mask bridges
+
+`drc::check` also finds solder mask bridges, `Violation::MaskBridge`: copper bare in an
+opening of the mask that is another net's. An opening is a pad's, grown by its mask
+expansion, with the pad's net, or one drawn on `F.Mask` or `B.Mask`, which takes the net of the
+pads in it if they have one, and is of no net otherwise. In an opening of no net, copper of a
+net beside copper of another net, or of none, bridges; a pad's hole where the pad has no copper,
+as a mounting hole's, is copper of no net there, as KiCad has it.
+
+`curated_mask_bridges_agree_with_kicad` compares the tracks and vias in bridges, which are what
+a router adds, on the eleven boards as they come: KiCad finds them on `flea`, 13, in the openings
+drawn on its microcontroller module's footprint, and on `nk3-nrf-mini`, a track and a via of
+`/LED_R` in the opening over the LED `D1`, as [below](#pcb-routing-of-the-curated-boards); we
+find the same 15, and no other. Bridges of pads alone are left out: KiCad also compares pads'
+openings with each other, and takes two pads of no net for two nets, as on `flea`'s module,
+where it stops at its limit of 199 bridges; those are a board's own, which no router changes.
+
+This came of a bridge that KiCad found in a routed board and we didn't. On `nk3-nrf-mini`, an
+opening drawn on `B.Mask` holds a pad of `/3V3` and a plain mounting hole; the reader gave the
+opening the pad's net, as the hole has no copper, so a route of `/3V3` went into it, and KiCad
+reported the hole and the track as a bridge. Now the reader leaves such an opening of no net,
+which the router keeps every net out of, and the check reports any copper with a net in it.
+
 ### What this does not show
 
 - The boards were mostly clean, as released boards are, so most findings come from raised
@@ -1782,7 +1805,8 @@ were found:
 - Custom rules (`.kicad_dru` files) are not read, and none of these boards has one. Neither are
   padstacks with other shapes on other layers, text, Bézier curves, nor pads and vias without
   copper where nothing connects to them; `kicad::read` warns of each.
-- Copper edge clearance, solder mask and silkscreen checks are KiCad's, and not compared.
+- Copper edge clearance and silkscreen checks are KiCad's, and not compared; solder mask
+  bridges are compared only for tracks and vias.
 
 ## PCB: DSN designs against KiCad boards
 
@@ -2276,8 +2300,8 @@ Getting there took what KiCad 10 does and doesn't:
 | `flea` | 24/24 | 79/79 | 0 | 56 → 52 (52) (31) | 1602 → 1607 (1607) (1704) | 4.92 (5.43) | 0 violations, 0 unconnected |
 | `GB-LIVE32` | 79/79 | 197/197 | 0 | 255 → 165 (142) (140) | 2222 → 2283 (2705) (2315) | 24.4 (33.9) | 0 violations, 0 unconnected |
 | `nk3-nrf-mini` | 29/30 | 82/83 | 0 | 63 → 55 (60) (60) | 231 → 249 (307) (349) | 19.4 (24.0) | 0 violations, 1 unconnected |
-| `lpddr4-testbed` | 57/57 | 344/344 | 0 | 233 → 220 (-) (248) | 647 → 670 (-) (956) | 102 (-) | 0 violations, 0 unconnected |
-| `ddr5-testbed` | 66/66 | 255/255 | 0 | 196 → 165 (-) (180) | 852 → 908 (-) (1119) | 114 (-) | 0 violations, 0 unconnected |
+| `lpddr4-testbed` | 57/57 | 344/344 | 0 | 233 → 220 (-) (248) | 647 → 670 (-) (956) | 90 (-) | 0 violations, 0 unconnected |
+| `ddr5-testbed` | 66/66 | 255/255 | 0 | 190 → 170 (-) (180) | 843 → 876 (-) (1119) | 137 (-) | 0 violations, 0 unconnected |
 
 The two DRAM boards, added for M6, are [below](#pcb-routing-of-dram-boards), and weren't
 routed as tracks. *As tracks* is the router with `Options::planes` off, which routes zones' nets as any others
@@ -2347,7 +2371,9 @@ GUIDE_ROUTE=1 GUIDE_KICAD=1 GUIDE_BOARDS=lpddr4-testbed,ddr5-testbed cargo test 
 
 The first routes them with the defaults and no constraints; the second with constraints, as
 `.kicad_dru` custom rules that `kicad::length_rules` reads and `LengthRules::apply` gives the
-design, and with [`Options::pairs_first`](../src/pcb/mod.rs). Neither board has rules of its
+design, and with [`Options::pairs_first`](../src/pcb/mod.rs); it routes each board a second
+time, apart and with no meanders, for the tables' *apart* columns, which `GUIDE_APART=0` leaves
+out. Neither board has rules of its
 own, but their hand routing shows what their designers asked of it, and the rules ask the same:
 
 - `lpddr4-testbed`: the data bus, its 16 `DQ`, 2 `DMI` and the two pairs of strobes, 22 nets,
@@ -2368,12 +2394,14 @@ Every result is checked by our DRC and connectivity, and KiCad 10.0.3's DRC, as 
 
 | Board | Nets | Connections | DRC violations | Vias: routed → after cleanup (original) | Track, mm: routed → after cleanup (original) | Seconds | KiCad, our fills and refilled |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `lpddr4-testbed` | 57/57 | 344/344 | 0 | 233 → 220 (248) | 647 → 670 (956) | 102 | 0 violations, 0 unconnected |
-| `ddr5-testbed` | 66/66 | 255/255 | 0 | 196 → 165 (180) | 852 → 908 (1119) | 114 | 0 violations, 0 unconnected |
+| `lpddr4-testbed` | 57/57 | 344/344 | 0 | 233 → 220 (248) | 647 → 670 (956) | 90 | 0 violations, 0 unconnected |
+| `ddr5-testbed` | 66/66 | 255/255 | 0 | 190 → 170 (180) | 843 → 876 (1119) | 137 | 0 violations, 0 unconnected |
 
-Both are complete, with nothing wrong by KiCad's DRC, with our fills or KiCad's own, in under
-two minutes, with fewer vias than by hand and less track, as the hand routing's buses are
-meandered to their lengths and these have no lengths to meet.
+Both are complete, with nothing wrong by KiCad's DRC, with our fills or KiCad's own, in 90 and
+137 s, with fewer vias than by hand and less track, as the hand routing's buses are
+meandered to their lengths and these have no lengths to meet. `ddr5-testbed` took 114 s before
+pairs routed first could move, below: the larger budget of the last nets' searches costs it
+time, and gives it 5 vias more and 32 mm less track.
 
 ### Constraints
 
@@ -2382,34 +2410,35 @@ With the rules above. *Coupled* is the share of a pair's length at its gap, as
 
 | Board | Pair | guide: coupled | Length, mm | Skew | Vias | original: coupled | Length | Skew | Vias |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `ddr5-testbed` | `DQS_P`, `DQS_N` | 73% | 22.96 | 0.0000 | 0 | 70% | 20.40 | 0.0000 | 4 |
-| `ddr5-testbed` | `TDQS_P`, `TDQS_N` | 63% | 22.96 | 0.0000 | 2 | 15% | 20.40 | 0.0000 | 4 |
-| `ddr5-testbed` | `CLK_P`, `CLK_N` | 64% | 21.54 | 0.0000 | 0 | 76% | 22.01 | 0.0000 | 4 |
+| `ddr5-testbed` | `DQS_P`, `DQS_N` | 53% | 23.68 | 0.0000 | 4 | 70% | 20.40 | 0.0000 | 4 |
+| `ddr5-testbed` | `TDQS_P`, `TDQS_N` | 63% | 23.68 | 0.0000 | 2 | 15% | 20.40 | 0.0000 | 4 |
+| `ddr5-testbed` | `CLK_P`, `CLK_N` | 58% | 21.13 | 0.0000 | 4 | 76% | 22.01 | 0.0000 | 4 |
 
 | Board | Group | Nets | guide: lengths, mm | Skew | apart, no meanders: skew | original: lengths | Skew |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `lpddr4-testbed` | data | 22 | 11.10 | 0.000 | 4.563 | 10.23 to 10.24 | 0.010 |
 | `lpddr4-testbed` | command | 10 | 15.23 | 0.000 | 4.425 | 14.13 to 14.17 | 0.044 |
-| `ddr5-testbed` | data | 12 | 22.96 | 0.000 | 5.227 | 20.40, but `DQ2` 20.96 | **0.560** |
-| `ddr5-testbed` | command | 17 | 21.54, but `CA3` unrouted | 0.000 of 16 | - | 22.01 to 22.26, but `CA12` 19.54, `CA13` 19.96 | **2.720** |
+| `ddr5-testbed` | data | 12 | 23.68 | 0.000 | 9.085 | 20.40, but `DQ2` 20.96 | **0.560** |
+| `ddr5-testbed` | command | 17 | 21.13 | 0.000 | 8.596 | 22.01 to 22.26, but `CA12` 19.54, `CA13` 19.96 | **2.720** |
 
 | Board | Nets | Connections | Pairs side by side | Constraints met | Meanders, mm | Seconds | KiCad |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `lpddr4-testbed` | 57/57 | 344/344 | - | 2 of 2 | 88.5 | 95 | 0 violations, 0 unconnected |
-| `ddr5-testbed` | 63/66 | 252/255 | 3 of 3 | 2 of 2, of the nets routed | 154.0 | 150 | 0 violations, 3 unconnected |
+| `lpddr4-testbed` | 57/57 | 344/344 | - | 2 of 2 | 88.5 | 91 | 0 violations, 0 unconnected |
+| `ddr5-testbed` | 66/66 | 255/255 | 3 of 3 | 2 of 2 | 162.8 | 204 | 0 violations, 0 unconnected |
 
-**`lpddr4-testbed` meets its constraints; `ddr5-testbed` doesn't, and the exit is not met.**
-`lpddr4-testbed` routes completely, both its buses matched to within 50 nm. On `ddr5-testbed`,
-all three pairs run side by side, `TDQS` for 63% where the hand routing has 15%, and both buses
-are matched to within 50 nm, but of the nets routed: with the pairs first and the nets of the
-rules narrower, three connections are left, `RESET_N` and `CA3`, which the passes on the finer
-lattice can't get in among the pairs and the rest, and a ground finger that no stub joins to its
-plane. KiCad's DRC finds nothing wrong with any routed item. Before this round, at commit
-`c87f814`, the same board left one net, `RESET_N`, had `TDQS` coupled for 4%, and its command
-bus one net 3.5 mm short; `lpddr4-testbed`'s data bus one net 0.23 mm short. Coupling `TDQS`,
-which crosses the board from its balls on top to its fingers below, takes room the others
-needed: which nets are left changes with any change, as the end of this section
-says, and every variation measured, below, left two to four.
+**Both boards meet their constraints, and M6's exit is met.** `lpddr4-testbed` routes
+completely, both its buses matched to within 50 nm. `ddr5-testbed` routes completely too, all
+255 connections, with all three pairs side by side, `TDQS` for 63% of its length where the hand
+routing has 15%, and both buses matched to within 50 nm, where the hand routing misses both by
+0.56 and 2.7 mm. KiCad's DRC finds nothing wrong, and no connection missing. It takes 204 s,
+measured with another routing run beside it on the machine.
+
+Before this round, at commit `acfbc74`, three connections were left, `RESET_N`, `CA3` and a
+ground finger, with `DQS` and `CLK` coupled for 73% and 64%. What completed it is pairs that
+move: routed first, they stayed where they were, and `RESET_N`'s finger, beside `DQS`'s, was
+walled in by `DQS_P`'s fan-out. Now a net left for the passes on the finer lattice may cross a
+pair in rip-up like any route, and the pair is routed again around it, as below; `DQS` and `CLK`
+give up some of their coupling to make the room, 53% and 58%.
 
 ### What it took
 
@@ -2456,18 +2485,37 @@ failed whole, 9 and 7 connections short, in 100 and 120 s:
   now keeps a place for a via free of the pairs, while they are routed.
 - **Rules**: `kicad::length_rules` reads `track_width`, `diff_pair_gap` and
   `diff_pair_uncoupled` constraints too, and `LengthRules::apply` gives them to a design.
+- **Pairs that move in rip-up.** Pairs routed first were fixed copper. They are now routes of
+  their nets, locked in the first pass, so that the rest is routed around them as before, and
+  open in the passes on the finer lattice: a net's search in rip-up may cross a pair at the
+  price of any route, and the pair is then taken out whole. Once the net is placed, the pair is
+  routed again side by side, its own search in rip-up too, with every other pair and that net
+  locked, and the nets its copper runs into are taken out to be routed again after it. A pair
+  that finds no way goes back where it was, locked for good, and the net is routed again around
+  it; a pair moved four times is locked too. On `ddr5-testbed`, `DQS` moved for the ground
+  finger and for `RESET_N`, five times in all, each time finding a way; that left `CA3`.
+- **More nodes for the last nets.** `CA3`'s search in rip-up ran out of its 2 million nodes on
+  the finer lattice, where crossing routes and pairs at a price opens up far more of the board.
+  There, such a search now has four times the budget, and `CA3` is routed. On the nine smaller
+  boards and `lpddr4-testbed`, routed with their zones, nothing changes.
 
 Neither board needed anything for blind, buried or micro vias, which neither allows or uses,
 nor net topologies, as every signal of both is a point-to-point connection between the DRAM
 and the edge; their BGAs needed no escape vias, as a 0.1 mm track passes between their balls.
 Push-and-shove wasn't needed for completion without constraints: rip-up completes both.
 
-What was tried for `ddr5-testbed`'s nets left with the pairs first, and dropped, each measured
-on the board with its constraints:
+What was tried for `ddr5-testbed`'s nets left with the pairs first, each measured on the board
+with its constraints; the first two rows are kept, the rest dropped:
 
 | Variation | Nets left | Pairs side by side | Constraints met |
 | --- | --- | --- | --- |
-| As kept | `RESET_N`, `CA3`, a ground finger | 3 of 3 | 2 of 2, of the nets routed |
+| Pairs that move in rip-up, and four times the budget on the finer lattice | none | 3 of 3 | 2 of 2 |
+| Pairs that move in rip-up alone | `CA3` | 3 of 3 | 2 of 2, of the nets routed |
+| The same, with a third of the price for crossing a route on the finer lattice | `DQ5`, `CA6`, `CA7`, `CA9` | 3 of 3 | 2 of 2, of the nets routed |
+| The same, with both | eight | 3 of 3 | 2 of 2, of the nets routed |
+| Both kept, and nets of more than 16 pads routed a terminal at a time from the start, planes' too | `CA7`, `CA9` | 3 of 3 | 2 of 2, of the nets routed |
+| A way out kept for every net's pins beside a pair's, not only those with zones | `CA7` | 1 of 3 | 1 of 2 |
+| Before, pairs fixed | `RESET_N`, `CA3`, a ground finger | 3 of 3 | 2 of 2, of the nets routed |
 | No way out kept for ground pins | `RESET_N`, `CA7`, `TEN`, a ground finger | 3 of 3 | 2 of 2, of the nets routed |
 | A way out kept for pins of nets with zones within 2 mm of a pair's | `RESET_N`, `TEN` | 2 of 3 | 2 of 2 |
 | The same, and nets of more than 16 pads routed a terminal at a time from the start, planes' too | `RESET_N`, `CA9`, `TEN` | 2 of 3 | 2 of 2, of the nets routed |
@@ -2475,8 +2523,13 @@ on the board with its constraints:
 | The same, with four or six passes on the finer lattice | `CA11`, `CA5` | 2 of 3 | 1 of 2 |
 | Pairs that a net left finds in its way moved, and routed again after it | three or four | 3 of 3 | 2 of 2, of the nets routed |
 
-Those that leave two nets lose a pair, and the second run doubles the time; moving pairs at
-the end of routing failed every time, as by then no pair finds room again.
+Of the variations from before pairs moved, those that leave two nets lose a pair, and the
+second run doubles the time; moving pairs at the end of routing failed every time, as by then
+no pair finds room again among routes that can't move. Moving them in rip-up differs in that:
+the pair moves others in its turn. It costs time, 204 s against 150 before, as the passes on
+the finer lattice route more and search further, and coupling, as above. Push-and-shove, which
+M6 lists, and negotiating the last nets' conflicts at the detailed level weren't needed, and
+weren't built.
 
 ### What this does not show
 
@@ -2484,9 +2537,10 @@ the end of routing failed every time, as by then no pair finds room again.
   FPGA or SoC end with its own BGA.
 - The constraints are this test's, from the hand routing, not the designers' rules, which the
   boards don't have; impedance, and lengths inside the packages, aren't modelled.
-- Results are chaotic, as for the hard boards above: the same board with rules, whose pairs
-  are narrower, loses nets that it routes without them, and every change above loses
-  different ones.
+- Results are chaotic, as for the hard boards above: every change above loses different nets,
+  and one more change to the router may lose `ddr5-testbed` a net again.
+- Times were measured with another routing run beside this one, on a machine shared with other
+  work.
 
 ## PCB routing against Freerouting
 
@@ -2495,8 +2549,10 @@ on the eleven [curated boards](../testdata/kicad/README.md), each given the same
 both results measured by the same code and checked by KiCad 10.0.3's own DRC.
 
 Measured on 2026-11-10 with rustc 1.97.1, on an AMD Ryzen Threadripper PRO 9995WX shared with
-other work: Freerouting's runs on commit `8b0bf72`, and guide's again on commit `10a29e8`, after
-nets of many pads came to be routed in part and completed. Freerouting is 2.5.0's jar on
+other work: Freerouting's runs on commit `8b0bf72`, and guide's again on 2026-11-11 on commit
+`07940f5`, after pairs routed first came to move in rip-up, which changes nothing here as no
+board here routes its pairs first, and the last nets' searches got a larger budget, which
+completes `ddr5-testbed` and gives `nk3-nrf-mini` 10 connections more. Freerouting is 2.5.0's jar on
 Adoptium's JRE 25.0.5. It was first run on 2026-11-08, on commit `8871703`, before escape
 routing, zones and pairs; `guide`'s numbers on eight of the nine boards it had then are the
 same now, as the stripped boards here have no zones and no pair is routed side by side but
@@ -2598,16 +2654,16 @@ none in them either.
 | `flea` | guide | 24/24 | 79/79 | 0 | 0 | 50 | 1588 | 4.37 |
 | | Freerouting | 23/24 | 78/79 | 54: 50 track width, 4 mask bridge | 1 | 38 | 1684 | 16.8 |
 | | tuned | 23/24 | 78/79 | 0 | 1 | 43 | 1667 | 19.8 |
-| `GB-LIVE32` | guide | 79/79 | 197/197 | 0 | 0 | 142 | 2705 | 34.2 |
+| `GB-LIVE32` | guide | 79/79 | 197/197 | 0 | 0 | 142 | 2705 | 40.9 |
 | | Freerouting | 79/79 | 197/197 | 4 track width | 0 | 168 | 2849 | 56.0; 485 on one thread |
 | | tuned | 78/79 | 196/197 | 0 | 1 | 164 | 2859 | 32.2 |
-| `nk3-nrf-mini` | guide | 25/30 | 72/83 | 0 | 11 | 54 | 297 | 123 |
+| `nk3-nrf-mini` | guide | 29/30 | 82/83 | 0 | 1 | 58 | 297 | 50.1 |
 | | Freerouting | 12/30 | 42/83 | 28 track width | 41 | 6 | 120 | 50.5 |
 | | tuned | 11/30 | 36/83 | 3: 2 clearance, 1 mask bridge | 47 | 7 | 104 | 43.8 |
-| `lpddr4-testbed` | guide | 57/57 | 344/344 | 0 | 0 | 130 | 1081 | 112 |
+| `lpddr4-testbed` | guide | 57/57 | 344/344 | 0 | 0 | 127 | 1076 | 101 |
 | | Freerouting | 50/57 | 337/344 | 75 track width | 7 | 120 | 1323 | 1020 |
 | | tuned | 47/57 | 334/344 | 0 | 10 | 115 | 1235 | 550 |
-| `ddr5-testbed` | guide | 65/66 | 254/255 | 0 | 1 | 142 | 1140 | 242 |
+| `ddr5-testbed` | guide | 66/66 | 255/255 | 0 | 0 | 145 | 1162 | 236 |
 | | Freerouting | 51/66 | 240/255 | 37 track width | 15 | 121 | 1188 | 631 |
 | | tuned | 58/66 | 245/255 | 0 | 10 | 139 | 1295 | 707 |
 
@@ -2633,14 +2689,19 @@ the finer lattice completes it from there. `lpddr4-testbed` is now complete, and
 `nk3-nrf-mini` changes: 72 connections in place of 56, with 25 nets complete in place of 28, as
 nets kept in part leave others less room, in 123 s in place of 43.
 
+At commit `07940f5`, a net's search in rip-up on the finer lattice has four times the budget,
+as [above](#pcb-routing-of-dram-boards). That completes `ddr5-testbed`'s ground, and gives
+`nk3-nrf-mini` 82 connections and 29 nets, in 50 s; `lpddr4-testbed` has 3 vias and 5 mm
+less. The other eight boards are as before.
+
 ### What the results say
 
-- **Completion.** guide completes nine of the eleven boards, Freerouting seven in its default
-  run and five tuned: guide completes `flea` and `lpddr4-testbed` too, and `udb-s` and
+- **Completion.** guide completes ten of the eleven boards, Freerouting seven in its default
+  run and five tuned: guide completes `flea` and both DRAM boards too, and `udb-s` and
   `GB-LIVE32` against the tuned run. On every board, guide makes as many connections as
-  Freerouting's best run or more: on `nk3-nrf-mini` 72 against 42 and 36, on `lpddr4-testbed`
-  all 344 against 337 and 334, and on `ddr5-testbed` 254 of 255 against 240 and 245, where it
-  completes every net but ground, 65 of 66, against Freerouting's 51 and 58.
+  Freerouting's best run or more: on `nk3-nrf-mini` 82 against 42 and 36, all but `/LED_R`, on
+  `lpddr4-testbed` all 344 against 337 and 334, and on `ddr5-testbed` all 255 against 240 and
+  245, every net against Freerouting's 51 and 58.
 - **KiCad's DRC.** guide's results have no violation on any board. Freerouting's default run has
   some on eight of the eleven, 222 in all, nearly all of rules the DSN doesn't carry: tracks
   narrower than the board's minimum, from its neckdown at pads, edge clearances, mask openings,
@@ -2649,23 +2710,26 @@ nets kept in part leave others less room, in 123 s in place of 43.
 - **Track length.** guide's is shorter than Freerouting's, default and tuned, on every board
   but `nk3-nrf-mini`, where it makes many more connections, and `udb-s` against the tuned run,
   which leaves three out: on the seven boards both complete by default, 4484 mm against 4783,
-  6%, and on the DRAM boards, with more connections, 18% and 4% shorter than the default run.
+  6%, and on the DRAM boards, with more connections, 19% and 2% shorter than the default run.
 - **Vias.** guide has fewer than Freerouting's default on three boards, `isi-channel`, `udb-s`
   and `GB-LIVE32`, as many on one, and **more on seven**: `TS4231-BOB` by one, `lisn` 10 to 6,
   `placebo` 9 to 4, `flea` 50 to 38, `nk3-nrf-mini` with its many more connections, and the
-  DRAM boards, 130 and 142 against 120 and 121, whose supplies, which Freerouting leaves in
+  DRAM boards, 127 and 145 against 120 and 121, whose supplies, which Freerouting leaves in
   part, take a via at every pad.
-- **Time, one thread each.** guide is faster on every board but `nk3-nrf-mini`: 2 to 100 times
-  on the small ones, 1.7 times on `GB-LIVE32` against Freerouting on all threads and 15 times
-  on one, and 9 and 2.6 times on the DRAM boards, where Freerouting takes 17 and 10 minutes.
-  On `nk3-nrf-mini`, guide takes 123 s, against 50 for Freerouting, routing 30 more
-  connections.
+- **Time, one thread each.** guide is faster on every board but `nk3-nrf-mini`, where the two
+  take 50 s: 2 to 100 times on the small ones, 1.4 times on `GB-LIVE32` against Freerouting on
+  all threads and 12 times on one, and 10 and 2.7 times on the DRAM boards, where Freerouting
+  takes 17 and 10 minutes. On `nk3-nrf-mini`, guide routes 40 more connections in the same
+  time.
+- **Our DRC** now finds solder mask bridges too, and the two of `isi-channel`'s tuned run are
+  among the violations it counts, as many as KiCad's; on `flea` and `nk3-nrf-mini` its counts of
+  Freerouting's violations differ from KiCad's by one, which this comparison doesn't look into.
 
 So on completion with no violation, guide ties Freerouting on the four boards that one of
 Freerouting's runs completes with none, `GB-BRK-LINK-A`, `TS4231-BOB`, `lisn` and `placebo`,
 and beats it on the other seven, where every run of Freerouting either makes fewer connections
 or breaks rules, the DRAM boards included. It is shorter on all but `nk3-nrf-mini`, and faster
-on all but that one, but has more vias on seven.
+on all but that one, where they take as long, but has more vias on seven.
 
 ### The clearance violation only Freerouting finds
 

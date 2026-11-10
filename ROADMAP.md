@@ -183,11 +183,13 @@ three boards. On one thread it was faster on seven boards, and slower on `flea` 
 done but for a fault in that board's design. To revisit: a route for `/LED_R` that KiCad accepts,
 if one can be found, or a better way to treat a board whose own design breaks its rules.
 
-### M6: PCB routing, advanced
+### M6: PCB routing, advanced (done)
 
 Each item is independently useful, and they can land in any order.
 
-- Push-and-shove detailed routing.
+- Push-and-shove detailed routing. Not done, and not needed for the exit: what the DRAM boards
+  needed was pairs routed first that move out of the way of the last nets, in rip-up, and
+  are routed again side by side, below.
 - Differential pairs. Done, in `pcb::route`: pairs found by their names as KiCad does, at
   their class's width and gap, are routed side by side after everything else, in place of
   their two nets' routes, kept only where they connect what those did, so that no other net
@@ -200,7 +202,9 @@ Each item is independently useful, and they can land in any order.
   a BGA fans out of it apart. A pair whose ends are on different layers changes layers side by
   side: `ddr5-testbed`'s `TDQS`, balls on top and fingers below, runs side by side for 63% of
   its length, against 15% by hand. Routed first, pairs keep a place for a via free beside the
-  pads of nets with zones next to theirs, such as a ground finger beside a pair's. Not yet: a
+  pads of nets with zones next to theirs, such as a ground finger beside a pair's, and a net
+  left for the passes on the finer lattice may cross them in rip-up: the pair is taken out, and
+  routed again side by side around the net, moving other nets in turn. Not yet: a
   pair whose pads leave no room for both tracks to get out together, as `nk3-nrf-mini`'s, which
   stays as two nets.
 - Length and skew matching. Done: lengths, skews within pairs and matched groups, from
@@ -209,8 +213,7 @@ Each item is independently useful, and they can land in any order.
   at their hand-routed 55, 150 and 300 mm, both nets of each within 50 nm of the target.
   Widths and pairs' gaps come from custom rules too. A net left short where its neighbours'
   meanders took the room gets it back: theirs are taken out, it is meandered first, and they
-  after it. On the DRAM boards, all four matched buses are met to within 50 nm, of the nets
-  routed; `ddr5-testbed`'s command bus has one net unrouted.
+  after it. On the DRAM boards, all four matched buses are met to within 50 nm.
 - BGA and fine-pitch escape routing. Started: pads that nothing passes between form
   clusters, and those that can't get out on their own layers get a through via, placed on a
   fine grid to leave room for the others, or where no via fits, their only way out, before
@@ -239,30 +242,32 @@ Each item is independently useful, and they can land in any order.
 **Exit:** a real high-density board (DDR memory or equivalent) routes with its
 constraints satisfied; results beat Freerouting on the curated suite.
 
-Not met yet: half of it is. Two DRAM boards are curated, Antmicro's `lpddr4-testbed` and
-`ddr5-testbed`, a BGA DRAM broken out to a SO-DIMM edge on six layers with 0.1 mm tracks, and
-both route completely, ground and power through their planes, with KiCad's DRC clean, in under
-two minutes, with fewer vias and less track than by hand
-([results](docs/benchmarks.md#pcb-routing-of-dram-boards)). With their buses' lengths and pairs
-as their hand routing has them, as custom rules, `lpddr4-testbed` meets them all: it routes
-completely, both its buses, 22 and 10 nets, matched within 50 nm. `ddr5-testbed` does not: its
-three pairs run side by side for 73%, 63% and 64%, against 70%, 15% and 76% by hand, and both its
-buses are matched within 50 nm, but with the pairs routed first and its nets narrower, 3 of its
-255 connections are left, `RESET_N`, `CA3` of the command bus, and a ground finger.
+Met. Two DRAM boards are curated, Antmicro's `lpddr4-testbed` and `ddr5-testbed`, a BGA DRAM
+broken out to a SO-DIMM edge on six layers with 0.1 mm tracks, and both route completely,
+ground and power through their planes, with KiCad's DRC clean, in 90 and 137 s, with fewer vias
+and less track than by hand ([results](docs/benchmarks.md#pcb-routing-of-dram-boards)). With
+their buses' lengths and pairs as their hand routing has them, as custom rules, both meet them
+all. `lpddr4-testbed` routes completely, both its buses, 22 and 10 nets, matched within 50 nm.
+`ddr5-testbed` routes completely too, all 255 connections, its pairs routed first and its nets
+narrower, with its three pairs side by side for 53%, 63% and 58% of their length, against 70%,
+15% and 76% by hand, and both its buses, 12 and 17 nets, matched within 50 nm, where the hand
+routing misses them by 0.56 and 2.7 mm; KiCad's DRC finds no violation and no connection
+missing. Its last three connections, `RESET_N`, `CA3` and a ground finger, came from pairs
+routed first that move out of the way of the last nets in rip-up and are routed again side by
+side, and a larger budget for those nets' searches; other variations, measured, left one to
+four.
 
 Against Freerouting, run again on all eleven boards with current guide
-([results](docs/benchmarks.md#pcb-routing-against-freerouting)), this half is met: on
-completion with no violation, guide ties on the four boards that a run of Freerouting completes
-with none, and beats it on the other seven, the DRAM boards included, stripped of their zones:
-344 of 344 connections and 254 of 255, against Freerouting's best 337 and 245, which break
-rules or leave more. guide's track is shorter on every board but `nk3-nrf-mini`, where it makes
-30 more connections, and it is faster on all but that one, but it has more vias on seven.
+([results](docs/benchmarks.md#pcb-routing-against-freerouting)): on completion with no
+violation, guide ties on the four boards that a run of Freerouting completes with none, and
+beats it on the other seven, the DRAM boards included, stripped of their zones: 344 of 344
+connections and 255 of 255, against Freerouting's best 337 and 245, which break rules or leave
+more, and 82 of 83 on `nk3-nrf-mini` against 42. guide's track is shorter on every board but
+`nk3-nrf-mini`, where it makes 40 more connections, and it is faster on all but that one,
+where the two take as long, but it has more vias on seven.
 
-Left for the exit: `ddr5-testbed`'s last three connections with its constraints. Which nets
-are left changes with any change to the router, as coupling `TDQS` across the board takes room
-others need; seven variations, measured, left two to four. Pairs that move out of a net's way,
-negotiated with the rest in rip-up rather than fixed first, or push-and-shove, are what is
-left to try.
+Not done of M6's list: push-and-shove, which the exit didn't need, blind, buried and micro
+vias, impedance, topologies, and pairs whose pads leave no room to get out together.
 
 ### M7: Generic placement (done)
 

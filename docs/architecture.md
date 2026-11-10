@@ -270,9 +270,15 @@ first, before anything else, as fixed copper, for boards whose pairs matter most
 ([results](benchmarks.md#pcb-routing-of-dram-boards)). Fixed, they can wall a pad in, so
 while they are routed, a pad of a net with zones beside a pair's pads keeps a place for its via
 free of them. Moving pairs out of the way of a net left at the end, and routing them again
-around it, was tried and dropped: by then no pair finds room again. Nor was a second run with
-the nets left routed first of all kept: it lost a pair and a bus where it gained a net, and
-doubled the time.
+around it, was tried and dropped: by then no pair finds room again among routes that can't
+move. Nor was a second run with the nets left routed first of all kept: it lost a pair and a
+bus where it gained a net, and doubled the time. What completed `ddr5-testbed` with its
+constraints is pairs that take part in rip-up: fixed in the first pass, but in the passes on
+the finer lattice a route like any other, which a net's search may cross at a price. The pair
+is then taken out whole, and once the net is placed, routed again side by side in rip-up of
+its own, moving other nets, but not pairs or that net, to be routed again after it; a pair
+that finds no way goes back, for good. That is rip-up extended to pairs, not push-and-shove,
+nor negotiation at the detailed level, which weren't needed.
 
 **A net of many pads that can't be routed whole keeps what it reaches.** Routed as tracks, a
 supply or ground of tens of pads fails whole in rip-up when one pad is shut in, and loses every
@@ -314,7 +320,8 @@ it is needed, it gets isolated in a small audited module and the lint relaxed th
 1. **What is a "resource" on a PCB?** Settled at M5, at least for now: tile sides and
    tiles' vias in global routing, and nothing in detailed routing, where exact clearance
    queries make conflicts impossible and rip-up with a history of conflicts by tile resolves
-   them. See [the decision](#decisions). Push-and-shove (M6) may change the detailed half.
+   them. See [the decision](#decisions). M6's DRAM boards didn't need more: rip-up, with
+   pairs taking part, completes them. Push-and-shove may yet change the detailed half.
 
 2. **Static or dynamic dispatch for spaces?** Generics give the FPGA inner loop full
    inlining, at a cost in compile time and API friction. A generic core with a

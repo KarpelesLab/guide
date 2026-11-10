@@ -10,7 +10,9 @@ evidence about real designs**. The comparisons on real designs so far are
 [those boards read from DSN](#pcb-dsn-designs-against-kicad-boards) against the same boards read
 from KiCad's files, [PCB routing of the same boards](#pcb-routing-of-the-curated-boards),
 checked by KiCad, and [their zones' fills](#pcb-zones-and-planes) against KiCad's, and
-[the same boards placed again](#pcb-placement-of-the-curated-boards) from nothing.
+[the same boards placed again](#pcb-placement-of-the-curated-boards) from nothing, and
+[engineering changes](#engineering-changes), routed and placed again incrementally, on generated
+problems and VTR's circuits.
 [Placement](#placement-on-synthetic-problems) is also measured on synthetic problems whose
 optimum is known.
 
@@ -3217,3 +3219,346 @@ Each of these was found by a board failing, by our DRC or KiCad's, or routing sh
   and parts turn by quarter turns only: free rotation is not done.
 - Thermal grouping is a term the caller fills from what it knows of heat; no board here says.
 - No other placer is compared: KiCad has none built in, and Freerouting doesn't place.
+
+## Engineering changes
+
+The roadmap's M9 asks for incremental re-routing after engineering changes, preserving existing
+work, and for small netlist changes to cause small layout changes. These measurements take a
+problem routed or placed, change it a little, and handle the change twice: from scratch, and
+incrementally, from what was there. They compare what each changed, against the routes or the
+placement before the change, and what each cost.
+
+The measures, in `guide::eco` and `guide::place`:
+
+- **Routes unchanged** (`RouteChange::unchanged_fraction`): of the nets routed both before and
+  after, the fraction whose route has the same nodes.
+- **Nodes changed** (`RouteChange::nodes_changed_fraction`): the `(net, node)` pairs added and
+  removed over those nets, as a fraction of those before. On VPR's graphs and grids, nodes are
+  the resources, so this is resources changed.
+- **Items moved** (`PlacementChange::moved_fraction`): of the movable items placed both before
+  and after, the fraction whose origin or rotation changed, and their **mean displacement**
+  (`PlacementChange::mean_displacement`), the Manhattan distance moved, over all of them.
+
+### How
+
+Routing incrementally is `Engine::seed_routes` with the routes before, and with
+`eco::stable_options`, unless a table says otherwise; placing incrementally is
+`place::place_incremental` with the placement before as priors and its default options. From
+scratch is the engine with its default options, and `place_analytic`.
+
+The changes:
+
+- **Nets**: of every hundred nets, 1 or 5 change, a third of them added, a third removed, and a
+  third given one sink more. The routes before are of the problem before the change.
+- **Cells blocked**: 10 or 50 cells of a grid that routes go through, other than terminals, are
+  blocked, which cuts every route through them.
+- **Blocks moved**, on VTR's circuits: 1% or 5% of the logic blocks, of those in no carry chain,
+  swap places in pairs, each with one at most 4 tiles away, so that the terminals of their nets
+  move. The routes before are of the design as placed.
+- **Items added**, **blocks added**: 1% or 5% of the movable items, of those in no macro, are
+  taken out with their pins by `place::restrict`, the rest is placed, and the whole problem is
+  then placed incrementally from that, and from scratch.
+- **Nets added**, for placement: the same with 1% or 5% of the nets.
+
+The generated problems are three of each kind, at seeds 1 to 3:
+
+```text
+cargo test --release --lib engine::seed_tests::measure -- --ignored --nocapture
+cargo test --release --lib place::eco_tests::measure -- --ignored --nocapture
+```
+
+The FPGA problems are VTR's circuits as VPR 9 packs and places them with seed 1, on the graph
+at 1.3 times the channel width VPR needs on its placement, as in [FPGA placement against
+VPR](#fpga-placement-against-vpr): three of the MCNC circuits and seven of the Verilog
+benchmarks, each with changes at seeds 1 to 3. Routing is timing-driven with
+`RrGraph::engine_options`, as for VTR's circuits elsewhere here, and incremental routing adds
+`eco::stable_options` to those. Placement there is by wirelength alone, `place_analytic` against
+`place_incremental`, as `place::restrict` can't take blocks out of `fpga::place_design`'s
+problem, and each placement is then routed from scratch, for its wire and critical path:
+
+```text
+KEEP_GRAPHS=1 scripts/vtr/place.sh DIR WORK [CIRCUIT...]   # for the graphs
+scripts/vtr/eco.sh WORK OUT [CIRCUIT...]                   # examples/vtr_eco.rs on each
+python3 scripts/vtr/eco_tables.py OUT                      # the tables below
+```
+
+Times are on one thread of a shared machine of 192 threads, with other work running.
+
+### Routing generated problems
+
+Means over the three instances, with cost and expansions as ratios to routing from scratch.
+The fabrics are the generated FPGA-like fabrics of the engine's tests and `benches/search.rs`,
+and the grids have nets of two to four terminals within 16 cells of each other.
+
+| Problem | Change | Way | Legal | Routes unchanged | Nodes changed | Cost vs scratch | Expansions vs scratch | Time (s) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Fabric 48x48, 1 track, 700 nets | 1% of nets | From scratch | 3 of 3 | 76.9% | 0.250 | 1.0000 | 1.000 | 0.1035 |
+| Fabric 48x48, 1 track, 700 nets | 1% of nets | Seeds, defaults | 3 of 3 | 98.1% | 0.018 | 1.0003 | 0.023 | 0.0054 |
+| Fabric 48x48, 1 track, 700 nets | 1% of nets | Seeds, incremental reroute | 3 of 3 | 98.8% | 0.012 | 1.0003 | 0.015 | 0.0044 |
+| Fabric 48x48, 1 track, 700 nets | 1% of nets | Seeds and history | 3 of 3 | 98.1% | 0.019 | 1.0005 | 0.023 | 0.0054 |
+| Fabric 48x48, 1 track, 700 nets | 1% of nets | `stable_options` | 3 of 3 | 99.9% | 0.001 | 1.0009 | 0.003 | 0.0029 |
+| Fabric 48x48, 1 track, 700 nets | 1% of nets | Seeds, first present 10 | 3 of 3 | 99.9% | 0.001 | 1.0009 | 0.003 | 0.0028 |
+| Fabric 64x64, 2 tracks, 1200 nets | 1% of nets | From scratch | 3 of 3 | 97.0% | 0.033 | 1.0000 | 1.000 | 0.4429 |
+| Fabric 64x64, 2 tracks, 1200 nets | 1% of nets | Seeds, defaults | 3 of 3 | 99.7% | 0.001 | 0.9999 | 0.002 | 0.0079 |
+| Fabric 64x64, 2 tracks, 1200 nets | 1% of nets | Seeds, incremental reroute | 3 of 3 | 99.7% | 0.001 | 0.9999 | 0.002 | 0.0075 |
+| Fabric 64x64, 2 tracks, 1200 nets | 1% of nets | Seeds and history | 3 of 3 | 99.7% | 0.001 | 0.9999 | 0.002 | 0.0076 |
+| Fabric 64x64, 2 tracks, 1200 nets | 1% of nets | `stable_options` | 3 of 3 | 99.8% | 0.001 | 0.9999 | 0.002 | 0.0074 |
+| Fabric 64x64, 2 tracks, 1200 nets | 1% of nets | Seeds, first present 10 | 3 of 3 | 99.8% | 0.001 | 0.9999 | 0.002 | 0.0076 |
+| Grid 256x256x2, 800 nets | 1% of nets | From scratch | 3 of 3 | 86.7% | 0.125 | 1.0000 | 1.000 | 0.1159 |
+| Grid 256x256x2, 800 nets | 1% of nets | Seeds, defaults | 3 of 3 | 90.6% | 0.097 | 0.9994 | 0.068 | 0.0149 |
+| Grid 256x256x2, 800 nets | 1% of nets | Seeds, incremental reroute | 3 of 3 | 94.3% | 0.045 | 0.9997 | 0.034 | 0.0112 |
+| Grid 256x256x2, 800 nets | 1% of nets | Seeds and history | 3 of 3 | 91.3% | 0.090 | 1.0004 | 0.092 | 0.0169 |
+| Grid 256x256x2, 800 nets | 1% of nets | `stable_options` | 3 of 3 | 98.7% | 0.008 | 1.0002 | 0.009 | 0.0081 |
+| Grid 256x256x2, 800 nets | 1% of nets | Seeds, first present 10 | 3 of 3 | 97.0% | 0.026 | 1.0002 | 0.022 | 0.0094 |
+| Fabric 48x48, 1 track, 700 nets | 5% of nets | From scratch | 3 of 3 | 63.3% | 0.404 | 1.0000 | 1.000 | 0.1138 |
+| Fabric 48x48, 1 track, 700 nets | 5% of nets | Seeds, defaults | 3 of 3 | 93.4% | 0.060 | 1.0005 | 0.065 | 0.0106 |
+| Fabric 48x48, 1 track, 700 nets | 5% of nets | Seeds, incremental reroute | 3 of 3 | 94.0% | 0.047 | 1.0011 | 0.050 | 0.0091 |
+| Fabric 48x48, 1 track, 700 nets | 5% of nets | Seeds and history | 3 of 3 | 93.2% | 0.060 | 1.0018 | 0.077 | 0.0128 |
+| Fabric 48x48, 1 track, 700 nets | 5% of nets | `stable_options` | 3 of 3 | 99.0% | 0.005 | 1.0044 | 0.012 | 0.0045 |
+| Fabric 48x48, 1 track, 700 nets | 5% of nets | Seeds, first present 10 | 3 of 3 | 99.0% | 0.005 | 1.0044 | 0.012 | 0.0045 |
+| Fabric 64x64, 2 tracks, 1200 nets | 5% of nets | From scratch | 3 of 3 | 90.1% | 0.105 | 1.0000 | 1.000 | 0.4497 |
+| Fabric 64x64, 2 tracks, 1200 nets | 5% of nets | Seeds, defaults | 3 of 3 | 98.3% | 0.011 | 1.0002 | 0.028 | 0.0186 |
+| Fabric 64x64, 2 tracks, 1200 nets | 5% of nets | Seeds, incremental reroute | 3 of 3 | 98.4% | 0.010 | 1.0001 | 0.026 | 0.0176 |
+| Fabric 64x64, 2 tracks, 1200 nets | 5% of nets | Seeds and history | 3 of 3 | 98.3% | 0.011 | 1.0002 | 0.028 | 0.0179 |
+| Fabric 64x64, 2 tracks, 1200 nets | 5% of nets | `stable_options` | 3 of 3 | 99.1% | 0.004 | 1.0005 | 0.012 | 0.0116 |
+| Fabric 64x64, 2 tracks, 1200 nets | 5% of nets | Seeds, first present 10 | 3 of 3 | 99.1% | 0.004 | 1.0005 | 0.012 | 0.0117 |
+| Grid 256x256x2, 800 nets | 5% of nets | From scratch | 3 of 3 | 59.6% | 0.403 | 1.0000 | 1.000 | 0.1136 |
+| Grid 256x256x2, 800 nets | 5% of nets | Seeds, defaults | 3 of 3 | 73.0% | 0.281 | 0.9978 | 0.202 | 0.0296 |
+| Grid 256x256x2, 800 nets | 5% of nets | Seeds, incremental reroute | 3 of 3 | 81.5% | 0.167 | 0.9991 | 0.113 | 0.0205 |
+| Grid 256x256x2, 800 nets | 5% of nets | Seeds and history | 3 of 3 | 72.6% | 0.273 | 1.0013 | 0.289 | 0.0382 |
+| Grid 256x256x2, 800 nets | 5% of nets | `stable_options` | 3 of 3 | 93.9% | 0.048 | 1.0008 | 0.043 | 0.0118 |
+| Grid 256x256x2, 800 nets | 5% of nets | Seeds, first present 10 | 3 of 3 | 89.1% | 0.107 | 0.9999 | 0.077 | 0.0152 |
+| Grid 256x256x2, 800 nets | 10 cells blocked | From scratch | 3 of 3 | 94.6% | 0.044 | 1.0000 | 1.000 | 0.1156 |
+| Grid 256x256x2, 800 nets | 10 cells blocked | Seeds, defaults | 3 of 3 | 87.0% | 0.133 | 0.9992 | 0.080 | 0.0164 |
+| Grid 256x256x2, 800 nets | 10 cells blocked | Seeds, incremental reroute | 3 of 3 | 92.6% | 0.064 | 0.9994 | 0.037 | 0.0119 |
+| Grid 256x256x2, 800 nets | 10 cells blocked | Seeds and history | 3 of 3 | 91.4% | 0.080 | 1.0002 | 0.085 | 0.0165 |
+| Grid 256x256x2, 800 nets | 10 cells blocked | `stable_options` | 3 of 3 | 98.8% | 0.010 | 1.0000 | 0.001 | 0.0068 |
+| Grid 256x256x2, 800 nets | 10 cells blocked | Seeds, first present 10 | 3 of 3 | 98.8% | 0.010 | 1.0000 | 0.001 | 0.0068 |
+| Grid 256x256x2, 800 nets | 50 cells blocked | From scratch | 3 of 3 | 77.2% | 0.184 | 1.0000 | 1.000 | 0.1190 |
+| Grid 256x256x2, 800 nets | 50 cells blocked | Seeds, defaults | 3 of 3 | 62.5% | 0.376 | 0.9978 | 0.254 | 0.0385 |
+| Grid 256x256x2, 800 nets | 50 cells blocked | Seeds, incremental reroute | 3 of 3 | 75.6% | 0.195 | 0.9981 | 0.125 | 0.0237 |
+| Grid 256x256x2, 800 nets | 50 cells blocked | Seeds and history | 3 of 3 | 67.0% | 0.306 | 1.0007 | 0.324 | 0.0439 |
+| Grid 256x256x2, 800 nets | 50 cells blocked | `stable_options` | 3 of 3 | 93.7% | 0.045 | 1.0001 | 0.012 | 0.0085 |
+| Grid 256x256x2, 800 nets | 50 cells blocked | Seeds, first present 10 | 3 of 3 | 93.4% | 0.049 | 1.0001 | 0.014 | 0.0086 |
+
+- **Routing from scratch is not stable**, even though it is deterministic: the order of the nets
+  and the negotiation spread a small change over the whole routing. It kept 60% to 97% of the
+  routes, and the more congested the problem, the fewer.
+- **`stable_options` kept 94% to 99.9%**, with nodes changed down from 0.03–0.40 to
+  0.001–0.05 of those before, for a cost within half a percent of routing from scratch, in 0.1%
+  to 4.3% of its expansions and 2% to 10% of its time.
+- **Seeds with the default options are not enough** on the grids: a net that changed routes at a
+  present factor of 0.5 in the first iteration, takes what unchanged nets hold, and sets off a
+  negotiation, so that with 50 cells blocked they kept fewer routes than routing from scratch
+  did, 62.5% against 77%. A first present factor of 10 makes changed nets go around unchanged
+  ones where they can, and incremental rerouting keeps what of a moved net is not in a conflict;
+  together they do better than either alone. A first present factor of 3 kept fewer routes, and
+  1000 took up to 2.5 times the expansions of routing from scratch, as prices that high make a
+  search's lower bound weak.
+- **History** carried over from the run before did not help, and cost up to 43% more
+  expansions than seeds alone, so `stable_options` leaves it out.
+
+### Placing generated problems
+
+Means over the three instances. Wirelength is against placing from scratch, and the method's
+number is the displacement factor, `IncrementalOptions::displacement_permille`, of which 1000 is
+the default. **From scratch, another seed** places the changed problem from scratch with another
+seed, which shows how much a placement moves for nothing, and how far apart two placements from
+scratch are in wirelength.
+
+| Problem | Change | Method | Wirelength vs scratch | Items moved | Mean displacement | Max | Time (s) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Peko 32x32 | 1% items added | From scratch | 1.000 | 99.3% | 18.25 | 61 | 0.365 |
+| Peko 32x32 | 1% items added | From scratch, another seed | 1.050 | 99.7% | 24.27 | 60 | 0.367 |
+| Peko 32x32 | 1% items added | Incremental, 0 | 1.023 | 76.6% | 1.75 | 29 | 0.122 |
+| Peko 32x32 | 1% items added | Incremental, 300 | 1.018 | 57.5% | 0.93 | 33 | 0.120 |
+| Peko 32x32 | 1% items added | Incremental, 1000 | 1.038 | 9.3% | 0.15 | 9 | 0.090 |
+| Peko 32x32 | 5% items added | From scratch | 1.000 | 99.7% | 23.74 | 62 | 0.358 |
+| Peko 32x32 | 5% items added | From scratch, another seed | 1.050 | 99.9% | 20.89 | 59 | 0.366 |
+| Peko 32x32 | 5% items added | Incremental, 0 | 1.071 | 81.3% | 1.99 | 35 | 0.120 |
+| Peko 32x32 | 5% items added | Incremental, 300 | 1.083 | 64.9% | 1.13 | 31 | 0.117 |
+| Peko 32x32 | 5% items added | Incremental, 1000 | 1.148 | 25.0% | 0.38 | 18 | 0.095 |
+| Peko 32x32 | 1% nets added | From scratch | 1.000 | 98.9% | 7.64 | 40 | 0.356 |
+| Peko 32x32 | 1% nets added | From scratch, another seed | 1.050 | 99.8% | 19.62 | 58 | 0.362 |
+| Peko 32x32 | 1% nets added | Incremental, 0 | 1.042 | 54.1% | 1.22 | 38 | 0.121 |
+| Peko 32x32 | 1% nets added | Incremental, 300 | 1.052 | 0.0% | 0.00 | 0 | 0.118 |
+| Peko 32x32 | 1% nets added | Incremental, 1000 | 1.052 | 0.0% | 0.00 | 0 | 0.089 |
+| Peko 32x32 | 5% nets added | From scratch | 1.000 | 99.8% | 17.38 | 51 | 0.355 |
+| Peko 32x32 | 5% nets added | From scratch, another seed | 1.050 | 99.9% | 22.35 | 56 | 0.361 |
+| Peko 32x32 | 5% nets added | Incremental, 0 | 1.053 | 80.5% | 2.08 | 43 | 0.123 |
+| Peko 32x32 | 5% nets added | Incremental, 300 | 1.081 | 39.5% | 0.74 | 33 | 0.116 |
+| Peko 32x32 | 5% nets added | Incremental, 1000 | 1.129 | 0.0% | 0.00 | 0 | 0.092 |
+| Peko 32x32, typed, pads | 1% items added | From scratch | 1.000 | 65.7% | 2.27 | 29 | 0.374 |
+| Peko 32x32, typed, pads | 1% items added | From scratch, another seed | 1.028 | 69.0% | 2.51 | 33 | 0.379 |
+| Peko 32x32, typed, pads | 1% items added | Incremental, 0 | 1.010 | 51.8% | 1.30 | 14 | 0.127 |
+| Peko 32x32, typed, pads | 1% items added | Incremental, 300 | 1.009 | 34.4% | 0.64 | 11 | 0.127 |
+| Peko 32x32, typed, pads | 1% items added | Incremental, 1000 | 1.018 | 9.3% | 0.18 | 17 | 0.108 |
+| Peko 32x32, typed, pads | 5% items added | From scratch | 1.000 | 67.5% | 2.36 | 52 | 0.372 |
+| Peko 32x32, typed, pads | 5% items added | From scratch, another seed | 1.028 | 71.4% | 2.54 | 52 | 0.372 |
+| Peko 32x32, typed, pads | 5% items added | Incremental, 0 | 1.008 | 52.6% | 1.33 | 52 | 0.126 |
+| Peko 32x32, typed, pads | 5% items added | Incremental, 300 | 0.998 | 40.3% | 0.84 | 52 | 0.123 |
+| Peko 32x32, typed, pads | 5% items added | Incremental, 1000 | 1.048 | 16.8% | 0.34 | 21 | 0.106 |
+| Peko 32x32, typed, pads | 1% nets added | From scratch | 1.000 | 62.7% | 1.79 | 36 | 0.372 |
+| Peko 32x32, typed, pads | 1% nets added | From scratch, another seed | 1.028 | 66.1% | 2.02 | 34 | 0.370 |
+| Peko 32x32, typed, pads | 1% nets added | Incremental, 0 | 1.018 | 15.8% | 0.36 | 15 | 0.130 |
+| Peko 32x32, typed, pads | 1% nets added | Incremental, 300 | 1.020 | 0.0% | 0.00 | 0 | 0.127 |
+| Peko 32x32, typed, pads | 1% nets added | Incremental, 1000 | 1.020 | 0.0% | 0.00 | 0 | 0.108 |
+| Peko 32x32, typed, pads | 5% nets added | From scratch | 1.000 | 65.2% | 2.05 | 36 | 0.374 |
+| Peko 32x32, typed, pads | 5% nets added | From scratch, another seed | 1.028 | 69.1% | 2.30 | 36 | 0.373 |
+| Peko 32x32, typed, pads | 5% nets added | Incremental, 0 | 1.016 | 52.6% | 1.34 | 36 | 0.130 |
+| Peko 32x32, typed, pads | 5% nets added | Incremental, 300 | 1.039 | 11.7% | 0.25 | 29 | 0.128 |
+| Peko 32x32, typed, pads | 5% nets added | Incremental, 1000 | 1.055 | 0.0% | 0.00 | 0 | 0.108 |
+| Free grid 16x16, room | 1% items added | From scratch | 1.000 | 100.0% | 116.68 | 190 | 0.125 |
+| Free grid 16x16, room | 1% items added | From scratch, another seed | 0.919 | 99.7% | 131.38 | 340 | 0.129 |
+| Free grid 16x16, room | 1% items added | Incremental, 0 | 0.944 | 33.6% | 2.84 | 25 | 0.011 |
+| Free grid 16x16, room | 1% items added | Incremental, 300 | 0.975 | 8.4% | 0.51 | 20 | 0.011 |
+| Free grid 16x16, room | 1% items added | Incremental, 1000 | 0.983 | 0.4% | 0.04 | 20 | 0.012 |
+| Free grid 16x16, room | 5% items added | From scratch | 1.000 | 100.0% | 147.72 | 355 | 0.127 |
+| Free grid 16x16, room | 5% items added | From scratch, another seed | 0.919 | 100.0% | 131.75 | 335 | 0.133 |
+| Free grid 16x16, room | 5% items added | Incremental, 0 | 1.149 | 57.9% | 6.56 | 95 | 0.014 |
+| Free grid 16x16, room | 5% items added | Incremental, 300 | 1.196 | 18.4% | 1.50 | 45 | 0.013 |
+| Free grid 16x16, room | 5% items added | Incremental, 1000 | 1.215 | 3.0% | 0.24 | 20 | 0.013 |
+| Free grid 16x16, room | 1% nets added | From scratch | 1.000 | 99.9% | 90.10 | 185 | 0.128 |
+| Free grid 16x16, room | 1% nets added | From scratch, another seed | 0.919 | 99.2% | 117.81 | 340 | 0.133 |
+| Free grid 16x16, room | 1% nets added | Incremental, 0 | 0.958 | 21.5% | 1.69 | 25 | 0.012 |
+| Free grid 16x16, room | 1% nets added | Incremental, 300 | 0.973 | 8.7% | 0.51 | 15 | 0.012 |
+| Free grid 16x16, room | 1% nets added | Incremental, 1000 | 0.981 | 0.0% | 0.00 | 0 | 0.012 |
+| Free grid 16x16, room | 5% nets added | From scratch | 1.000 | 100.0% | 125.09 | 190 | 0.128 |
+| Free grid 16x16, room | 5% nets added | From scratch, another seed | 0.919 | 99.9% | 115.70 | 345 | 0.133 |
+| Free grid 16x16, room | 5% nets added | Incremental, 0 | 0.996 | 63.9% | 6.15 | 150 | 0.013 |
+| Free grid 16x16, room | 5% nets added | Incremental, 300 | 1.029 | 22.0% | 1.58 | 200 | 0.012 |
+| Free grid 16x16, room | 5% nets added | Incremental, 1000 | 1.057 | 1.2% | 0.31 | 200 | 0.012 |
+
+- **Placing from scratch moves nearly everything**: 63% to 100% of the items, even when the
+  problem changed by one item in a hundred, and analytic placement from another seed is 3% to 5%
+  longer on Peko problems and 8% shorter on the free grid. That is the noise against which the
+  wirelength of the incremental placements is to be read.
+- **At the default factor, incremental placement moved 0% to 25% of the items**, a mean of at
+  most 0.4 units, for wirelength from 2% below to 15% above that from scratch, but for the weak
+  case below, in a quarter of the time on Peko problems and a tenth in free space. Where only
+  nets were added, it moved nothing or nearly: no single move gains as much as it costs, and the
+  price is that of the placement before, which never saw those nets.
+- **The factor trades one for the other.** At 0, items move freely in the cold, short-range
+  annealing, and 16% to 81% of them moved, by 0.4 to 7 units on average, for wirelength within
+  1% to 7% of that from scratch on Peko problems. 300 is in between.
+- **Free space with 5% of the items added is the weak case**: 15% to 22% above placing from
+  scratch, whatever the factor. The items added go to the free spot nearest to the median of
+  what they connect to, which in a packed placement can be far from it, and annealing over short
+  ranges does not bring them back.
+
+### VTR's circuits
+
+Unchanged and nodes changed are means over the three seeds, and wire, critical path, expansions
+and time are geometric means over them of incremental against from scratch. Legal counts the
+seeds legal from scratch and incrementally. Means are over the circuits, geometric for ratios.
+
+#### Nets changed
+
+| Circuit | Changed | Unchanged: scratch | Unchanged: incremental | Nodes changed: scratch | Nodes changed: incremental | Wire | Critical path | Expansions | Time | Legal |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| tseng | 1% | 76.9% | 99.8% | 0.248 | 0.001 | 1.001 | 1.000 | 0.002 | 0.218 | 3/3 |
+| clma | 1% | 33.5% | 99.2% | 0.662 | 0.002 | 1.001 | 1.000 | 0.003 | 0.146 | 3/3 |
+| ex1010 | 1% | 20.5% | 98.4% | 0.931 | 0.004 | 0.997 | 1.000 | 0.003 | 0.078 | 3/3 |
+| ch_intrinsics | 1% | 91.1% | 99.1% | 0.066 | 0.005 | 1.003 | 1.000 | 0.002 | 0.382 | 3/3 |
+| diffeq1 | 1% | 70.8% | 99.2% | 0.257 | 0.005 | 1.013 | 1.013 | 0.004 | 0.131 | 3/3 |
+| blob_merge | 1% | 42.7% | 99.0% | 0.653 | 0.003 | 1.001 | 1.000 | 0.005 | 0.220 | 3/3 |
+| or1200 | 1% | 50.2% | 97.8% | 0.490 | 0.010 | 1.004 | 1.004 | 0.010 | 0.255 | 3/3 |
+| stereovision2 | 1% | 70.1% | 99.5% | 0.299 | 0.003 | 1.001 | 1.000 | 0.006 | 0.308 | 3/3 |
+| bgm | 1% | 38.6% | 96.8% | 0.623 | 0.013 | 1.001 | 1.000 | 0.014 | 0.203 | 3/3 |
+| LU8PEEng | 1% | 46.9% | 99.3% | 0.494 | 0.002 | 1.000 | 1.000 | 0.005 | 0.205 | 3/3 |
+| **Mean** | 1% | 54.1% | 98.8% | 0.472 | 0.005 | 1.002 | 1.002 | 0.004 | 0.197 | |
+| tseng | 5% | 60.4% | 97.7% | 0.454 | 0.016 | 1.009 | 1.000 | 0.022 | 0.285 | 3/3 |
+| clma | 5% | 19.7% | 91.7% | 0.904 | 0.041 | 1.013 | 1.000 | 0.034 | 0.240 | 3/3 |
+| ex1010 | 5% | 12.4% | 79.6% | 1.065 | 0.138 | 1.006 | 0.999 | 0.079 | 0.240 | 3/3 |
+| ch_intrinsics | 5% | 82.6% | 98.7% | 0.132 | 0.007 | 1.001 | 1.000 | 0.024 | 0.437 | 3/3 |
+| diffeq1 | 5% | 58.5% | 94.3% | 0.362 | 0.043 | 1.004 | 1.010 | 0.078 | 0.216 | 3/3 |
+| blob_merge | 5% | 34.3% | 96.6% | 0.753 | 0.008 | 1.011 | 1.000 | 0.023 | 0.266 | 3/3 |
+| or1200 | 5% | 40.1% | 93.3% | 0.606 | 0.030 | 1.001 | 1.000 | 0.045 | 0.310 | 3/3 |
+| stereovision2 | 5% | 56.5% | 97.9% | 0.431 | 0.015 | 1.004 | 1.000 | 0.031 | 0.338 | 3/3 |
+| bgm | 5% | 29.4% | 90.7% | 0.737 | 0.046 | 1.006 | 1.000 | 0.050 | 0.265 | 3/3 |
+| LU8PEEng | 5% | 36.6% | 96.7% | 0.623 | 0.013 | 1.005 | 1.000 | 0.028 | 0.265 | 3/3 |
+| **Mean** | 5% | 43.0% | 93.7% | 0.607 | 0.036 | 1.006 | 1.001 | 0.037 | 0.281 | |
+
+#### Blocks moved
+
+| Circuit | Changed | Unchanged: scratch | Unchanged: incremental | Nodes changed: scratch | Nodes changed: incremental | Wire | Critical path | Expansions | Time | Legal |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| tseng | 1% | 96.8% | 99.6% | 0.030 | 0.005 | 1.001 | 1.000 | 0.004 | 0.197 | 3/3 |
+| clma | 1% | 17.6% | 89.9% | 0.977 | 0.060 | 0.999 | 0.999 | 0.027 | 0.221 | 3/3 |
+| ex1010 | 1% | 12.6% | 79.8% | 1.080 | 0.128 | 1.001 | 1.001 | 0.066 | 0.208 | 3/3 |
+| ch_intrinsics | 1% | 88.7% | 98.4% | 0.107 | 0.021 | 0.999 | 1.000 | 0.005 | 0.410 | 3/3 |
+| diffeq1 | 1% | 65.1% | 96.9% | 0.311 | 0.029 | 1.000 | 0.996 | 0.013 | 0.160 | 3/3 |
+| blob_merge | 1% | 27.7% | 91.0% | 0.858 | 0.047 | 1.008 | 1.005 | 0.026 | 0.225 | 3/3 |
+| or1200 | 1% | 68.9% | 98.7% | 0.279 | 0.011 | 1.003 | 1.000 | 0.003 | 0.198 | 3/3 |
+| stereovision2 | 1% | 71.7% | 98.9% | 0.300 | 0.016 | 1.001 | 1.000 | 0.011 | 0.232 | 3/3 |
+| bgm | 1% | 32.1% | 91.7% | 0.722 | 0.055 | 1.005 | 0.999 | 0.040 | 0.224 | 3/3 |
+| LU8PEEng | 1% | 39.9% | 95.5% | 0.599 | 0.029 | 1.002 | 1.000 | 0.017 | 0.243 | 3/3 |
+| **Mean** | 1% | 52.1% | 94.0% | 0.526 | 0.040 | 1.002 | 1.000 | 0.014 | 0.225 | |
+| tseng | 5% | 73.0% | 97.4% | 0.307 | 0.031 | 0.996 | 1.000 | 0.046 | 0.288 | 3/3 |
+| clma | 5% | 12.2% | 74.2% | 1.098 | 0.188 | 1.010 | 1.000 | 0.092 | 0.294 | 3/3 |
+| ex1010 | 5% | 7.6% | 59.2% | 1.196 | 0.372 | 1.009 | 1.001 | 0.188 | 0.336 | 3/3 |
+| ch_intrinsics | 5% | 69.7% | 93.7% | 0.279 | 0.082 | 1.008 | 1.000 | 0.049 | 0.429 | 3/3 |
+| diffeq1 | 5% | 56.8% | 94.0% | 0.392 | 0.062 | 1.004 | 0.994 | 0.062 | 0.207 | 3/3 |
+| blob_merge | 5% | 20.6% | 74.4% | 0.974 | 0.213 | 1.029 | 1.005 | 0.121 | 0.412 | 3/3 |
+| or1200 | 5% | 50.0% | 96.2% | 0.491 | 0.033 | 1.006 | 1.000 | 0.018 | 0.219 | 3/3 |
+| stereovision2 | 5% | 57.9% | 95.5% | 0.455 | 0.069 | 1.006 | 1.000 | 0.051 | 0.321 | 3/3 |
+| bgm | 5% | 20.9% | 73.1% | 0.900 | 0.227 | 1.014 | 1.000 | 0.148 | 0.348 | 3/3 |
+| LU8PEEng | 5% | 25.5% | 83.0% | 0.821 | 0.133 | 1.014 | 1.000 | 0.067 | 0.282 | 3/3 |
+| **Mean** | 5% | 39.4% | 84.1% | 0.691 | 0.141 | 1.009 | 1.000 | 0.069 | 0.306 | |
+
+#### Blocks added
+
+| Circuit | Added | Moved: scratch | Moved: incremental | Mean displacement: scratch | Mean displacement: incremental | BB estimate | Routed wire | Critical path | Place time | Legal |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| tseng | 2 | 92.6% | 0.1% | 6.71 | 0.002 | 0.991 | 0.982 | 0.992 | 0.333 | 3/3 |
+| clma | 5 | 93.4% | 23.2% | 8.78 | 0.710 | 1.012 | 1.023 | 1.004 | 0.267 | 3/3 |
+| ex1010 | 4 | 99.3% | 10.8% | 11.76 | 0.159 | 1.002 | 1.028 | 0.932 | 0.282 | 3/3 |
+| ch_intrinsics | 3 | 92.1% | 37.1% | 7.46 | 2.969 | 1.001 | 1.002 | 0.980 | 0.332 | 3/3 |
+| diffeq1 | 3 | 93.4% | 0.0% | 8.97 | 0.000 | 0.993 | 1.030 | 1.003 | 0.366 | 3/3 |
+| blob_merge | 7 | 98.8% | 44.2% | 15.58 | 2.108 | 1.019 | 1.015 | 1.016 | 0.302 | 3/3 |
+| or1200 | 8 | 97.2% | 0.0% | 16.19 | 0.000 | 0.992 | 0.997 | 1.020 | 0.348 | 3/3 |
+| stereovision2 | 14 | 99.4% | 0.0% | 47.29 | 0.000 | 1.010 | 1.010 | 0.995 | 0.318 | 3/3 |
+| bgm | 28 | 98.7% | 42.5% | 27.74 | 0.920 | 1.002 | 1.001 | 0.974 | 0.325 | 3/3 |
+| LU8PEEng | 21 | 98.0% | 43.6% | 26.91 | 1.218 | 1.001 | 1.000 | 0.992 | 0.311 | 3/3 |
+| **Mean** | 1% | 96.3% | 20.1% | 17.74 | 0.808 | 1.002 | 1.009 | 0.990 | 0.317 | |
+| tseng | 9 | 95.8% | 0.0% | 8.80 | 0.000 | 0.998 | 0.984 | 0.987 | 0.338 | 3/3 |
+| clma | 22 | 98.9% | 37.8% | 15.89 | 1.039 | 1.021 | 1.033 | 0.990 | 0.274 | 3/3 |
+| ex1010 | 17 | 99.4% | 34.2% | 10.57 | 0.563 | 1.011 | 1.020 | 0.971 | 0.311 | 3/3 |
+| ch_intrinsics | 12 | 94.6% | 12.5% | 7.64 | 1.008 | 1.000 | 0.988 | 0.990 | 0.340 | 3/3 |
+| diffeq1 | 13 | 92.3% | 0.0% | 10.56 | 0.000 | 0.974 | 0.993 | 0.996 | 0.374 | 3/3 |
+| blob_merge | 31 | 99.1% | 58.2% | 17.42 | 2.435 | 1.001 | 0.996 | 1.060 | 0.319 | 3/3 |
+| or1200 | 39 | 97.4% | 0.0% | 16.63 | 0.000 | 1.001 | 0.996 | 1.023 | 0.348 | 3/3 |
+| stereovision2 | 68 | 99.5% | 54.2% | 37.40 | 2.522 | 1.013 | 1.009 | 0.983 | 0.317 | 3/3 |
+| bgm | 136 | 99.1% | 64.9% | 28.84 | 1.714 | 1.006 | 1.003 | 0.993 | 0.333 | 3/3 |
+| LU8PEEng | 105 | 99.3% | 57.7% | 30.04 | 1.682 | 1.002 | 1.003 | 1.007 | 0.304 | 3/3 |
+| **Mean** | 5% | 97.5% | 31.9% | 18.38 | 1.096 | 1.003 | 1.002 | 1.000 | 0.325 | |
+
+- **Routing from scratch kept 39% to 54% of the routes on average**, and as few as 8% on the
+  larger MCNC circuits: on VPR's graphs, small changes anywhere move routes everywhere.
+- **Incremental routing kept 99% of the routes with 1% of the nets changed, and 94% with 5%**,
+  and 94% and 84% with 1% and 5% of the blocks moved. Every result was legal, as from scratch,
+  for wire 0.2% to 0.9% longer and a critical path as long within 0.2%, in 0.4% to 7% of the
+  expansions. The time is 20% to 31% of routing from scratch, more than the expansions say,
+  because both set up the same timing analysis, which takes most of the time once there is
+  little to route.
+- **ex1010, clma, blob_merge and bgm keep the fewest**, 59% to 74% with 5% of the blocks moved,
+  and they are also those whose routes from scratch change most.
+- **Incremental placement moved 20% and 32% of the blocks**, by 0.8 and 1.1 tiles on average,
+  where placing from scratch moved 96% and 98% of them, by 18 tiles. Its bounding-box estimate
+  was 0.2% and 0.3% above, and its routes had as much wire, within 1%, and as long a critical
+  path, in a third of the time.
+
+### What this does not show
+
+- **Real engineering changes.** The changes are synthetic: random nets added, removed or given a
+  sink, random nearby blocks swapped, random blocks or nets taken out and put back. Real changes
+  are clustered, in one part of a design, which should be easier to keep local.
+- **FPGA placement as `fpga::place_design` does it.** Its timing and congestion terms are left
+  out on both sides, as `place::restrict` works on the generic problem. `place_incremental` can
+  take any `CostTerm`, so they could be added.
+- **Changes to the device**, on VTR's circuits: blocked resources are only measured on grids.
+- **Larger changes.** At 5%, ex1010 already loses 40% of its routes. How far beyond that seeds
+  still pay is not measured.
+- **The quality of the placement before.** The placements before were of the netlist without
+  the change, so the incremental placement starts from one that never saw it. Where nets were
+  added, that is all the wirelength it loses on the generated problems.

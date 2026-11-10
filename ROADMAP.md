@@ -357,12 +357,33 @@ nine that have anything to move, and shorter track on six.
 Placement and routing as a single loop rather than two sequential passes.
 
 - Local re-placement around failed routes.
-- Incremental re-route after engineering changes, preserving existing work.
+- Incremental re-route after engineering changes, preserving existing work. Done in
+  `Engine::seed_routes`, which starts each net from the route it had, cut back to what is still
+  a step of the space and still leads to a terminal, and grown from where terminals were added;
+  `Engine::seed_history` for the negotiation's history; `eco::reroute` and
+  `eco::stable_options`, which route what changed around what did not; and, for placement,
+  `place::place_incremental`, which puts items back where they were when that is still legal,
+  places new ones near what they connect to, and improves with a `Displacement` cost term that
+  charges for moving. `fpga::route_seeds` and `fpga::placement_priors` carry routes and a
+  placement over to a changed netlist by name. `eco::route_change` and `place::placement_change`
+  measure what moved.
 - Pin and gate swapping where the netlist permits (FPGA pin permutation, MCU pin
   muxing, memory byte lanes).
 
 **Exit:** measurable completion or quality gains over the one-pass flow on the
 hardest benchmarks; small netlist changes cause small layout changes.
+
+The second half is met ([results](docs/benchmarks.md#engineering-changes)). On ten of VTR's
+circuits, with 1% and 5% of the nets changed, incremental routing kept 99% and 94% of the routes,
+where routing from scratch kept 54% and 43%, and with 1% and 5% of the blocks moved, 94% and 84%
+against 52% and 39%: all legal, for 0.2% to 0.9% more wire, a critical path as long within 0.2%,
+and 0.4% to 7% of the expansions. With 1% and 5% more blocks, incremental placement moved 20% and
+32% of the blocks by about a tile, where placing from scratch moved 96% and 98% by 18 tiles, for
+a bounding box 0.3% larger and as much routed wire, within 1%, in a third of the time. On
+generated problems, with nets changed or cells blocked, it kept 94% to 99.9% of the routes,
+against 60% to 97%. Left for later: FPGA placement's timing and congestion terms in incremental
+placement, measured changes to the device on real fabrics, and real engineering changes rather
+than random ones.
 
 ### M10: More domains and 1.0
 

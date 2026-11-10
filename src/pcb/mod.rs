@@ -44,6 +44,10 @@
 //!    vias side by side and each net's own fan-out near its pads. It is kept if it connects
 //!    all that the two routes did, so it can't cost another net its route. Pairs whose
 //!    two nets' pads are far apart are left as they are.
+//! 6. **Meanders**, for [`Design::lengths`]: nets shorter than they must be get trombone
+//!    meanders on their straight tracks, in free space, each checked exactly as routing
+//!    is, and pairs side by side get meanders of both tracks together, which keep their
+//!    gap.
 //!
 //! `docs/architecture.md` has why it is built this way, with the measurements, and
 //! `docs/benchmarks.md` has results on real boards.
@@ -62,6 +66,7 @@ mod global;
 mod measure;
 mod pairs;
 mod router;
+mod tune;
 mod verify;
 mod world;
 
@@ -124,6 +129,26 @@ pub struct DiffPair {
     pub gap: i64,
 }
 
+/// What lengths a net, or a group of nets, must route to: each net's length, the total
+/// length of its tracks, and how far the longest and the shortest may differ.
+///
+/// For the two nets of a [`DiffPair`], a skew within the pair; for a bus or the channels of
+/// an interface, a matched group.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LengthConstraint {
+    /// The nets.
+    pub nets: Vec<NetId>,
+    /// The shortest each net may be.
+    pub min: Option<i64>,
+    /// The longest each net may be.
+    pub max: Option<i64>,
+    /// The length to aim at, if not halfway between [`min`](LengthConstraint::min) and
+    /// [`max`](LengthConstraint::max).
+    pub target: Option<i64>,
+    /// How much longer the longest of the nets may be than the shortest.
+    pub max_skew: Option<i64>,
+}
+
 /// A board to route: what is fixed on it, its rules, its edge and its nets.
 #[derive(Clone, Debug)]
 pub struct Design {
@@ -146,6 +171,8 @@ pub struct Design {
     pub obstacles: Vec<(Shape, LayerId)>,
     /// Differential pairs, each net in one at most.
     pub pairs: Vec<DiffPair>,
+    /// Lengths to route nets to, which meanders make up after routing.
+    pub lengths: Vec<LengthConstraint>,
 }
 
 impl Design {
@@ -161,6 +188,10 @@ impl Design {
     /// The design of a KiCad board: every net with a name, at its class's track width and
     /// via size, and its differential pairs, as KiCad finds them by their names, at their
     /// class's width and gap. Enabled by the `kicad` feature.
+    ///
+    /// Lengths come from a board's custom rules, which
+    /// [`kicad::length_rules`](crate::kicad::length_rules) reads, into
+    /// [`lengths`](Design::lengths).
     #[cfg(feature = "kicad")]
     pub fn from_kicad(board: &crate::kicad::KicadBoard) -> Design {
         let mut pairs = board.routing.pairs.clone();
@@ -205,6 +236,7 @@ impl Design {
             masks: board.routing.masks.clone(),
             obstacles: board.routing.text.clone(),
             pairs,
+            lengths: Vec::new(),
         }
     }
 }
@@ -244,6 +276,10 @@ pub struct Options {
     /// Whether to route [differential pairs](Design::pairs) side by side. The default is
     /// true. Without, their nets are routed as any others.
     pub couple_pairs: bool,
+    /// Whether to add meanders for [lengths](Design::lengths). The default is true.
+    pub tune_lengths: bool,
+    /// How far a meander may reach out from the track it is added to. The default is 3 mm.
+    pub max_amplitude: i64,
 }
 
 impl Default for Options {
@@ -260,6 +296,8 @@ impl Default for Options {
             fine_pass: true,
             cleanup: true,
             couple_pairs: true,
+            tune_lengths: true,
+            max_amplitude: 3_000_000,
         }
     }
 }
@@ -293,6 +331,10 @@ pub struct Stats {
     /// Differential pairs with pads to connect, and of those, the pairs routed side by
     /// side.
     pub pairs: (usize, usize),
+    /// Length constraints, and of those, the constraints met after meanders.
+    pub lengths: (usize, usize),
+    /// The track that meanders added, in nanometres.
+    pub meanders: f64,
 }
 
 /// The result of [`route`].
@@ -363,6 +405,7 @@ impl std::error::Error for RouteError {}
 ///     masks: Vec::new(),
 ///     obstacles: Vec::new(),
 ///     pairs: Vec::new(),
+///     lengths: Vec::new(),
 ///     nets: vec![NetSpec {
 ///         route: true,
 ///         track_width: 200_000,

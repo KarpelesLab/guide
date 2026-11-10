@@ -61,6 +61,7 @@ pub(super) fn design(layers: usize, pads: Vec<Pad>, nets: usize) -> Design {
         masks: Vec::new(),
         obstacles: Vec::new(),
         pairs: Vec::new(),
+        lengths: Vec::new(),
     }
 }
 

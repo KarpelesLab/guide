@@ -270,13 +270,35 @@ fn curated_boards_route() {
     assert!(failures.is_empty(), "{failures:#?}");
 }
 
-/// The boards with differential pairs or lengths to match.
-const PAIRED: [(&str, &str); 4] = [
-    ("starshipraider", "isi-channel"),
-    ("udb-s", "udb-s"),
-    ("gekkio", "GB-LIVE32"),
-    ("nitrokey", "nk3-nrf-mini"),
+/// The boards with differential pairs or lengths to match, with custom rules for them. The
+/// boards have none of their own: these ask for what their designers did by hand.
+/// `isi-channel` has three channels of two nets on separate connectors, matched in length
+/// within each and of three lengths, about 55, 150 and 300 mm, and each of the other three
+/// has a USB pair.
+const PAIRED: [(&str, &str, &str); 4] = [
+    (
+        "starshipraider",
+        "isi-channel",
+        "(version 1)
+         (rule ch1 (condition \"A.inDiffPair('/CH1_')\")
+           (constraint length (min 54.85mm) (opt 55.1mm) (max 55.35mm))
+           (constraint skew (max 0.1mm) (within_diff_pairs)))
+         (rule ch2 (condition \"A.inDiffPair('/CH2_')\")
+           (constraint length (min 149.6mm) (opt 149.85mm) (max 150.1mm))
+           (constraint skew (max 0.1mm) (within_diff_pairs)))
+         (rule ch3 (condition \"A.inDiffPair('/CH3_')\")
+           (constraint length (min 299.75mm) (opt 300mm) (max 300.25mm))
+           (constraint skew (max 0.1mm) (within_diff_pairs)))",
+    ),
+    ("udb-s", "udb-s", USB_SKEW),
+    ("gekkio", "GB-LIVE32", USB_SKEW),
+    ("nitrokey", "nk3-nrf-mini", USB_SKEW),
 ];
+
+/// A skew of 0.1 mm at most within each differential pair.
+const USB_SKEW: &str = "(version 1)
+    (rule usb (condition \"A.inDiffPair('*')\")
+      (constraint skew (max 0.1mm) (within_diff_pairs)))";
 
 /// How a pair's two nets are routed: the fraction of the positive net's length at the
 /// pair's gap, to within 5 µm, the two lengths in millimetres, and the vias of both.
@@ -308,9 +330,31 @@ fn pair_measures(
     (coupled / total.max(1.0), p, n, v)
 }
 
-/// Routes the boards with differential pairs, and prints how their pairs are routed
-/// against the original hand routing. Runs only with `GUIDE_ROUTE=1`, as
-/// [`curated_boards_route`] does, with `GUIDE_KICAD=1` too for KiCad's DRC.
+/// How far a constraint's nets are from it, in millimetres: the most any is outside its
+/// length, and the skew past its own, or zero.
+fn length_error(c: &pcb::LengthConstraint, tracks: &[drc::Track]) -> (Vec<f64>, f64, f64) {
+    let lengths: Vec<f64> = c
+        .nets
+        .iter()
+        .map(|&n| pcb::net_length(tracks, n) / 1e6)
+        .collect();
+    let out = lengths
+        .iter()
+        .map(|&l| {
+            let below = c.min.map_or(0.0, |m| m as f64 / 1e6 - l);
+            let above = c.max.map_or(0.0, |m| l - m as f64 / 1e6);
+            below.max(above).max(0.0)
+        })
+        .fold(0.0, f64::max);
+    let skew = lengths.iter().copied().fold(0.0, f64::max)
+        - lengths.iter().copied().fold(f64::MAX, f64::min);
+    (lengths, out, skew)
+}
+
+/// Routes the boards with differential pairs, with lengths from [`PAIRED`]'s rules, and
+/// prints how their pairs and lengths come out against the original hand routing. Runs
+/// only with `GUIDE_ROUTE=1`, as [`curated_boards_route`] does, and with `GUIDE_KICAD=1`
+/// checks the results with KiCad's DRC too.
 #[test]
 fn curated_pairs() {
     if std::env::var_os("GUIDE_ROUTE").is_none() {
@@ -318,38 +362,88 @@ fn curated_pairs() {
         return;
     }
     let kicad = std::env::var_os("GUIDE_KICAD").is_some();
-    println!(
-        "| Board | Pair | Gap, mm | Coupled | P, N length, mm | Skew, mm | Vias | Original: coupled | P, N length | Skew | Vias |"
-    );
-    println!("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
+    let only = std::env::var("GUIDE_BOARDS").ok();
     let mut failures = Vec::new();
-    for &(dir, name) in &PAIRED {
-        let (row, text, routed, pro, design, read) = route_board_with(dir, name, |_, _| ());
+    let mut pairs = Vec::new();
+    let mut lengths = Vec::new();
+    for &(dir, name, dru) in &PAIRED {
+        if only
+            .as_ref()
+            .is_some_and(|o| !o.split(',').any(|b| b == name))
+        {
+            continue;
+        }
+        let (row, text, routed, pro, design, read) = route_board_with(dir, name, |read, d| {
+            d.lengths = super::length_rules(dru, read).unwrap().constraints;
+        });
+        let apart = pcb::route(
+            &design,
+            &Options {
+                couple_pairs: false,
+                tune_lengths: false,
+                ..Options::default()
+            },
+        )
+        .unwrap();
         for pair in &design.pairs {
             let ours = pair_measures(&routed.tracks, &routed.vias, &design, pair);
+            let plain = pair_measures(&apart.tracks, &apart.vias, &design, pair);
             let theirs = pair_measures(&read.board.tracks, &read.board.vias, &design, pair);
-            println!(
-                "| `{name}` | `{}`, `{}` | {:.3} | {:.0}% | {:.2}, {:.2} | {:.3} | {} | {:.0}% | {:.2}, {:.2} | {:.3} | {} |",
+            let cell = |m: (f64, f64, f64, usize)| {
+                format!(
+                    "{:.0}% | {:.2} | {:.3} | {}",
+                    100.0 * m.0,
+                    m.1.max(m.2),
+                    (m.1 - m.2).abs(),
+                    m.3
+                )
+            };
+            pairs.push(format!(
+                "| `{name}` | `{}`, `{}` | {:.2}, {:.2} | {} | {} | {} |",
                 read.nets[pair.positive.index()],
                 read.nets[pair.negative.index()],
+                pair.width as f64 / 1e6,
                 pair.gap as f64 / 1e6,
-                100.0 * ours.0,
-                ours.1,
-                ours.2,
-                (ours.1 - ours.2).abs(),
-                ours.3,
-                100.0 * theirs.0,
-                theirs.1,
-                theirs.2,
-                (theirs.1 - theirs.2).abs(),
-                theirs.3,
-            );
+                cell(ours),
+                cell(plain),
+                cell(theirs),
+            ));
+        }
+        for c in &design.lengths {
+            let names: Vec<&str> = c
+                .nets
+                .iter()
+                .map(|n| read.nets[n.index()].as_str())
+                .collect();
+            let window = match (c.min, c.max, c.max_skew) {
+                (Some(a), Some(b), _) => format!("{:.2} to {:.2}", a as f64 / 1e6, b as f64 / 1e6),
+                (_, _, Some(s)) => format!("skew {:.2}", s as f64 / 1e6),
+                _ => String::from("-"),
+            };
+            let cell = |(l, out, skew): (Vec<f64>, f64, f64)| {
+                let l: Vec<String> = l.iter().map(|x| format!("{x:.2}")).collect();
+                format!("{} | {:.3} | {:.3}", l.join(", "), out, skew)
+            };
+            lengths.push(format!(
+                "| `{name}` | {} | {window} | {} | {} | {} |",
+                names.join(", "),
+                cell(length_error(c, &routed.tracks)),
+                cell(length_error(c, &apart.tracks)),
+                cell(length_error(c, &read.board.tracks)),
+            ));
         }
         println!(
-            "{} pairs side by side: {:?}",
+            "{} pairs side by side {:?}, lengths met {:?}, meanders {:.1} mm",
             row.markdown(),
-            routed.stats.pairs
+            routed.stats.pairs,
+            routed.stats.lengths,
+            routed.stats.meanders / 1e6,
         );
+        if let Some(out) = std::env::var_os("GUIDE_WRITE") {
+            let base = std::path::Path::new(&out).join(name);
+            std::fs::write(base.with_extension("kicad_pcb"), &text).unwrap();
+            std::fs::write(base.with_extension("kicad_pro"), &pro).unwrap();
+        }
         if kicad {
             let (found, unconnected) = kicad_check(&text, &pro, name);
             println!(
@@ -360,6 +454,24 @@ fn curated_pairs() {
                 failures.push(format!("{name}: {found:?}"));
             }
         }
+    }
+    println!();
+    println!(
+        "| Board | Pair | Width, gap | Coupled | Longer, mm | Skew | Vias | Apart, no meanders: coupled | Longer | Skew | Vias | Original: coupled | Longer | Skew | Vias |"
+    );
+    println!(
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
+    );
+    for p in pairs {
+        println!("{p}");
+    }
+    println!();
+    println!(
+        "| Board | Nets | Constraint, mm | Lengths | Outside | Skew | Apart, no meanders: lengths | Outside | Skew | Original: lengths | Outside | Skew |"
+    );
+    println!("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
+    for l in lengths {
+        println!("{l}");
     }
     assert!(failures.is_empty(), "{failures:#?}");
 }

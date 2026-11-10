@@ -1,7 +1,7 @@
 //! Tests of differential pairs and lengths on small boards.
 
 use super::tests::{MM, design, outline, route_checked};
-use super::{Design, DiffPair, Options, Routed, coupling};
+use super::{Design, DiffPair, LengthConstraint, Options, Routed, coupling, net_length};
 use crate::geom::drc::{Keepout, Pad};
 use crate::geom::{LayerId, LayerSet, Point, Rect, Shape};
 use crate::id::NetId;
@@ -135,4 +135,94 @@ fn pairs_route_the_same_every_time() {
     let b = route_checked(&d, &Options::default());
     assert_eq!(a.tracks, b.tracks);
     assert_eq!(a.vias, b.vias);
+}
+
+/// The length of a net, in millimetres.
+fn mm(r: &Routed, net: u32) -> f64 {
+    net_length(&r.tracks, NetId(net)) / 1e6
+}
+
+#[test]
+fn a_net_is_meandered_to_its_length() {
+    let mut d = design(1, vec![pin(0, 0, 1), pin(20 * MM, 0, 1)], 2);
+    d.outline = outline(Rect::new(
+        Point::new(-5 * MM, -8 * MM),
+        Point::new(25 * MM, 8 * MM),
+    ));
+    d.lengths.push(LengthConstraint {
+        nets: vec![NetId(1)],
+        min: Some(30 * MM),
+        max: Some(30 * MM + 200_000),
+        ..LengthConstraint::default()
+    });
+    let r = route_checked(&d, &Options::default());
+    let l = mm(&r, 1);
+    assert!((30.0..=30.2).contains(&l), "{l}");
+    assert_eq!(r.stats.lengths, (1, 1));
+    assert!(r.stats.meanders > 9.0 * MM as f64);
+}
+
+#[test]
+fn a_matched_group_is_meandered_to_its_longest() {
+    // Three nets, 10, 15 and 20 mm long, side by side 3 mm apart.
+    let mut pads = Vec::new();
+    for (k, len) in [10, 15, 20].into_iter().enumerate() {
+        let y = 3 * MM * k as i64;
+        pads.push(pin(0, y, k as u32 + 1));
+        pads.push(pin(len * MM, y, k as u32 + 1));
+    }
+    let mut d = design(1, pads, 4);
+    d.outline = outline(Rect::new(
+        Point::new(-3 * MM, -3 * MM),
+        Point::new(23 * MM, 9 * MM),
+    ));
+    d.lengths.push(LengthConstraint {
+        nets: vec![NetId(1), NetId(2), NetId(3)],
+        max_skew: Some(100_000),
+        ..LengthConstraint::default()
+    });
+    let r = route_checked(&d, &Options::default());
+    let lengths = [mm(&r, 1), mm(&r, 2), mm(&r, 3)];
+    let (lo, hi) = (
+        lengths.iter().copied().fold(f64::MAX, f64::min),
+        lengths.iter().copied().fold(0.0, f64::max),
+    );
+    assert!(hi - lo <= 0.1, "{lengths:?}");
+    assert_eq!(r.stats.lengths, (1, 1));
+}
+
+#[test]
+fn a_pair_is_meandered_together_and_keeps_its_skew() {
+    let mut d = pair_design(2, 20 * MM, 10 * MM);
+    let apart = route_checked(&d, &Options::default());
+    let longer = mm(&apart, 1).max(mm(&apart, 2));
+    let target = ((longer + 6.0) * 1e6) as i64;
+    d.lengths.push(LengthConstraint {
+        nets: vec![NetId(1), NetId(2)],
+        min: Some(target - 100_000),
+        max: Some(target + 100_000),
+        max_skew: Some(20_000),
+        ..LengthConstraint::default()
+    });
+    let r = route_checked(&d, &Options::default());
+    let (p, n) = (mm(&r, 1), mm(&r, 2));
+    assert!((p - n).abs() <= 0.02, "{p} {n} {target} {:?}", r.stats);
+    assert!((p - target as f64 / 1e6).abs() <= 0.1, "{p} {target}");
+    assert_eq!(r.stats.lengths, (1, 1));
+    // Most of the pair still runs side by side, meanders included.
+    let f = coupled(&r);
+    assert!(f > 0.6, "coupled {f}");
+}
+
+#[test]
+fn a_net_already_too_long_is_left_as_it_is() {
+    let mut d = design(1, vec![pin(0, 0, 1), pin(20 * MM, 0, 1)], 2);
+    d.lengths.push(LengthConstraint {
+        nets: vec![NetId(1)],
+        max: Some(10 * MM),
+        ..LengthConstraint::default()
+    });
+    let r = route_checked(&d, &Options::default());
+    assert_eq!(r.stats.lengths, (1, 0));
+    assert_eq!(r.stats.meanders, 0.0);
 }

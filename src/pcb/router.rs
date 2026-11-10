@@ -1,5 +1,5 @@
 //! The whole run: nets from the design, escapes, global routing, detailed routing with
-//! rip-up, cleanup, and pairs side by side.
+//! rip-up, cleanup, pairs side by side, and meanders.
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -9,6 +9,7 @@ use super::escape;
 use super::geometry::NetCopper;
 use super::global::{self, GlobalSpace, Probe, TerminalPads};
 use super::pairs;
+use super::tune;
 use super::world::{Verdict, World};
 use super::{Design, DiffPair, Options, RouteError, Routed, Stats};
 use crate::geom::drc::{Track, Via};
@@ -357,7 +358,11 @@ fn most_common(values: impl Iterator<Item = i64>) -> Option<i64> {
 }
 
 pub(crate) fn run(design: &Design, options: &Options) -> Result<Routed, RouteError> {
-    route_all(design, options)
+    let mut routed = route_all(design, options)?;
+    if options.tune_lengths && !design.lengths.is_empty() {
+        tune::run(design, &mut routed, options).map_err(RouteError::Geometry)?;
+    }
+    Ok(routed)
 }
 
 /// Routes everything but meanders.

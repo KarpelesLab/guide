@@ -259,6 +259,10 @@ pub struct LoopOptions {
     pub gap_weight: f64,
     /// The weight of the router's history of overuse there. The default is 1.
     pub history_weight: f64,
+    /// Whether each routing after the first starts from the routes of the one before, with
+    /// [`Engine::seed_routes`], cut where blocks moved, rather than from nothing. The default is
+    /// false.
+    pub seed_routes: bool,
     /// How to place again.
     pub refine: RefineOptions,
     /// Threads to route with. The result is the same for any number. The default is 1.
@@ -273,6 +277,7 @@ impl Default for LoopOptions {
             whole: false,
             gap_weight: 1.0,
             history_weight: 1.0,
+            seed_routes: false,
             refine: RefineOptions::default(),
             threads: 1,
         }
@@ -408,6 +413,7 @@ pub fn place_route_loop(
         Outcome<NodeId, NodeId>,
     )> = None;
     let mut round = 0u32;
+    let mut seeds: Option<Vec<(crate::id::NetId, crate::net::Route<NodeId>)>> = None;
     loop {
         let file = problem.to_placement(netlist, &placement, "", "");
         let design =
@@ -421,13 +427,19 @@ pub fn place_route_loop(
                 let timed = device.timed_graph();
                 t.estimate_delays(&timed, &design);
                 let driven = t.timing_driven(&design, (*c).clone());
-                let engine = Engine::with_timing(&timed, design.nets(), engine_options, driven)
+                let mut engine = Engine::with_timing(&timed, design.nets(), engine_options, driven)
                     .map_err(LoopError::Engine)?;
+                if let Some(seeds) = seeds.take() {
+                    engine.seed_routes(seeds).map_err(LoopError::Engine)?;
+                }
                 negotiate(engine, device, &mut congestion, options.threads)
             }
             None => {
-                let engine = Engine::new(device.graph(), design.nets(), engine_options)
+                let mut engine = Engine::new(device.graph(), design.nets(), engine_options)
                     .map_err(LoopError::Engine)?;
+                if let Some(seeds) = seeds.take() {
+                    engine.seed_routes(seeds).map_err(LoopError::Engine)?;
+                }
                 negotiate(engine, device, &mut congestion, options.threads)
             }
         };
@@ -498,6 +510,15 @@ pub fn place_route_loop(
         } else {
             outcome.overused.len().max(1)
         };
+        if options.seed_routes && next.is_some() {
+            seeds = Some(
+                outcome
+                    .routes
+                    .routes()
+                    .map(|(net, route)| (net, route.clone()))
+                    .collect(),
+            );
+        }
         if best.as_ref().is_none_or(|(o, ..)| overused < *o) {
             best = Some((overused, placement.clone(), design, outcome));
         }

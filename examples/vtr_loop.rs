@@ -28,6 +28,7 @@
 //! | `--rounds N` | `LoopOptions::rounds` | 3 |
 //! | `--margin N` | `LoopOptions::margin` | 6 |
 //! | `--whole` | `LoopOptions::whole` | Off |
+//! | `--seed-routes` | `LoopOptions::seed_routes` | Off |
 //! | `--gap F` | `LoopOptions::gap_weight` | 1 |
 //! | `--history F` | `LoopOptions::history_weight` | 1 |
 //! | `--seed N` | `RefineOptions::seed` | 1 |
@@ -93,6 +94,10 @@ fn parse_args() -> Result<Args, String> {
             }
             "--whole" => {
                 args.options.whole = true;
+                continue;
+            }
+            "--seed-routes" => {
+                args.options.seed_routes = true;
                 continue;
             }
             _ => {}

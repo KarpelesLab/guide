@@ -157,10 +157,11 @@ for example) needs an implementation of our own.
 **Determinism includes parallelism.** Results must not depend on thread count or
 scheduling. A fixed number of nets, the batch size, route at once against a frozen
 state of the resource table, and one thread then commits them in net order. A route
-that uses what an earlier commit of the iteration has taken is thrown away, and the
-net routes again in a later batch. Batch membership depends only on the commits, and a
-route only on the table, so threads have no say in anything. Budgets are charged during
-the same walk through the nets, so that threads cannot race for them.
+that uses what an earlier commit of its batch has taken is thrown away, and the net
+routes again first in the next batch, after the rest of its batch. Batch membership
+depends only on the commits, and a route only on the table, so threads have no say in
+anything. Budgets are charged during the same walk through the nets, so that threads
+cannot race for them.
 
 Batch size is therefore an option that changes results, and thread count is one that
 cannot. A batch size of 1, the default, is exactly the sequential router, and any batch
@@ -173,12 +174,17 @@ did not survive measuring: 31% of routes on a congested fabric leave their termi
 box, and packing such nets by box left a limit of 1.4 times the speed at any thread count.
 Spaces also have no notion of region. Checking everything a search read, rather than only
 the route it found, reproduces sequential results at any batch size, but on hard problems
-it was slower than one thread. Batches of 32 add about 0.1% to route cost on fabrics and
-sparse grids, at most 1.1% on any one problem, with no sign of hurting convergence, though
-dense grids are too chaotic to say more than that. They reach 2 to 3 times the speed on
-problems that take seconds, and nothing on problems of milliseconds. The limit is mostly
-that a few searches are much bigger than the rest, and a net is the unit of work. The
-[engine's documentation](../src/engine.rs) has the measurements.
+it was slower than one thread. Keeping the order of the nets within a batch, so that the
+routes after a dropped one waited for it, was also tried and dropped: on FPGA graphs, where
+a fifth of routes are dropped, it left batches of 32 with 4 to 6 new nets each, and 16
+threads slower than one. Batches of 32 add about 0.1% to route cost on fabrics and sparse
+grids, at most 1.5% on any one problem, and about 0.15% to wire and to delay on VPR's
+graphs. Dense grids of crossing nets, where every net fights every other, take more
+iterations in batches. Batches reach 2.7 to 3.7 times the speed at 16 threads on problems
+that take seconds, and about twice it on the larger FPGA circuits, more with batches of
+64 or 128. The limit is mostly that a few searches are much bigger than the rest, and a
+net is the unit of work. The [engine's documentation](../src/engine.rs) has the
+measurements.
 
 Hash maps with randomized iteration order are not allowed in any path that affects
 results. Debugging, regression testing and benchmark comparison all rely on this, and

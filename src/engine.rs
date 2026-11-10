@@ -444,11 +444,12 @@
 //! | 800 short nets on a grid of 131 000 nodes | 96 ms | 32 | 0.85 → 0.92 | 1.25 → 2.00 | 1.42 → 2.78 | 1.25 → 2.38 |
 //! | 300 nets, narrow fabric of 27 000 nodes | 18 ms | 16 | 0.85 → 0.87 | 1.05 → 1.46 | 1.02 → 1.42 | 1.01 → 1.40 |
 //!
-//! So **expect 2.5 to 3.5 times the speed at 16 threads** on problems that take seconds, and
+//! So **expect 2.7 to 3.7 times the speed at 16 threads** on problems that take seconds, and
 //! little more beyond. Problems of milliseconds now gain too, up to 2.8 times. The dense grids
-//! are another story at one thread: batches now take more iterations there, the one of 128 rows
-//! all 100 of them, which [quality and convergence](#quality-and-convergence) explains, and
-//! threads only make up for it from about 8 of them.
+//! are another story: batches now take more iterations there, the one of 128 rows all 100 of
+//! them, which [quality and convergence](#quality-and-convergence) explains. So on one thread
+//! they are slower than batches of 1, and they only beat batches that kept the order of the
+//! nets from 16 threads.
 //!
 //! On the FPGA graphs that VPR writes, batches used to be slower on 16 threads than one thread
 //! with batches of 1, and are now about twice as fast on the larger circuits:

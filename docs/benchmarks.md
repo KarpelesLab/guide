@@ -734,9 +734,9 @@ What this shows:
   frisc to 0.43 on ex1010. It takes 10.2 iterations at the relaxed width where it took 9.0,
   against VPR's 21.7, and 5% more expansions. With each tool's lookahead counted in, it
   takes 0.42 times VPR's time, where it took 0.40.
-- **Threads still do not help**: 16 threads with batches of 32 took 1.7 times as long as one
-  thread with batches of 1. Searches are short, and batches bring more iterations' worth of
-  rerouting.
+- **Threads still did not help** here: 16 threads with batches of 32 took 1.7 times as long as
+  one thread with batches of 1. They do since, at 0.84 times on this suite and 0.56 on the
+  Verilog one: see [threads on the larger circuits](#threads-on-the-larger-circuits).
 - **`guide`'s own timing analysis agrees with VPR's**, by the worst slack as VPR counts it,
   to within 0.1% on 17 circuits, 0.8% under it on s38584.1, and 1.2% over it, pessimistic,
   on bigkey and dsip.
@@ -1042,9 +1042,10 @@ What this shows:
   against 24.4 s. It takes 11.8 iterations where it took 10.6, against VPR's 16.6, and 6% more
   expansions. With each tool's lookahead counted in, 0.59 times: `guide`'s lookahead is 1.1
   to 2.2 times as slow as VPR's, and on the smallest circuits takes longer than the routing.
-- **Threads help on the largest circuits only**: 16 threads with batches of 32 took 0.95
+- **Threads helped on the largest circuits only** here: 16 threads with batches of 32 took 0.95
   times as long as one thread on LU32PEEng and 0.87 on arm_core, but 1.45 times as long over
-  all 21. See [threads](#threads-on-the-larger-circuits) below.
+  all 21. Since, they take 0.56 times as long over all 21: see
+  [threads](#threads-on-the-larger-circuits) below.
 - **`guide`'s own timing analysis agrees with VPR's** to within 0.5%, and to 0.1% on 19 of 21.
 
 #### Tuning the negotiation on both suites
@@ -1145,26 +1146,139 @@ found 60, where VPR finds 68.
 
 #### Threads on the larger circuits
 
-Batches of 32 on 16 threads are slower than one thread on most circuits. With the tuned
-options, on the graphs of the relaxed width, run one at a time, in seconds:
+Batches of 32 on 16 threads used to be slower than one thread with batches of 1 on most
+circuits, and are now about twice as fast on the larger ones. "Before" is `6583518`, and
+"after" the commits that follow it, with the tuned options throughout. Times are the sum of
+`guide`'s route times over each suite, timing-driven, the better of two runs at the relaxed
+width, on a machine shared with other work and with other measurements running alongside:
 
-| Circuit | 1 thread, batches of 1 | 16 threads, batches of 4 | 8 | 16 | 32 | 64 | 128 |
+| Threads, batch size | MCNC (20), s | / before, 1 thread | Verilog (21), s | / before, 1 thread | Wire | Delay |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1, 1 | 1.68 → 1.68 | 1.00 → 1.00 | 29.0 → 29.1 | 1.00 → 1.00 | | |
+| 1, 32 | 2.62 → 2.08 | 1.56 → 1.24 | 36.0 → 33.9 | 1.24 → 1.17 | +0.39% → +0.14% | +0.11% → +0.15% |
+| 4, 32 | 2.95 → 1.48 | 1.75 → 0.88 | 32.4 → 18.1 | 1.12 → 0.62 | | |
+| 16, 32 | 2.94 → 1.41 | 1.75 → 0.84 | 32.4 → 16.2 | 1.12 → 0.56 | | |
+| 64, 32 | 2.92 → 1.55 | 1.74 → 0.92 | 32.9 → 16.8 | 1.13 → 0.58 | | |
+
+Wire and delay are the means over all 41 circuits against batches of 1, the same at every
+thread count, and the iterations went from 11.1 at batches of 1 to 11.3 before and 11.5 after.
+Every route was legal. The MCNC circuits route in 15 to 300 ms, which leaves threads little to
+share, and the geometric mean over them is 0.92 at 16 threads, against 1.87 before; over the
+Verilog circuits it is 0.77, against 1.62.
+
+On the larger circuits, in seconds:
+
+| Circuit | Before: 1 thread, batch 1 | 16 threads, batch 32 | After: 1 thread, batch 1 | 1 thread, batch 32 | 4 threads | 16 threads | 64 threads |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| LU8PEEng | 2.00 | 2.38 | 2.31 | 2.25 | 2.40 | 2.53 | 2.73 |
-| bgm | 2.86 | 3.06 | 2.84 | 2.90 | 3.04 | 3.21 | 3.38 |
-| arm_core | 1.19 | 1.24 | 1.10 | 1.05 | 1.02 | 1.17 | 1.33 |
-| stereovision2 | 2.35 | 3.11 | 3.00 | 3.33 | 3.36 | 3.49 | 3.57 |
-| clma | 0.23 | 0.37 | 0.33 | 0.33 | 0.38 | 0.41 | 0.45 |
+| LU32PEEng | 12.29 | 10.77 | 11.86 | 13.49 | 7.05 | 6.17 | 6.35 |
+| mcml | 7.06 | 8.89 | 7.34 | 7.92 | 4.94 | 4.73 | 4.79 |
+| LU8PEEng | 2.22 | 2.24 | 2.05 | 2.49 | 1.21 | 1.04 | 1.10 |
+| bgm | 2.30 | 3.02 | 2.59 | 3.49 | 1.41 | 1.09 | 1.12 |
+| stereovision2 | 2.21 | 3.27 | 2.27 | 2.66 | 1.51 | 1.33 | 1.43 |
+| arm_core | 0.92 | 1.00 | 0.94 | 1.22 | 0.56 | 0.52 | 0.54 |
+| stereovision1 | 0.76 | 1.05 | 0.67 | 0.90 | 0.46 | 0.43 | 0.47 |
+| clma | 0.21 | 0.35 | 0.24 | 0.28 | 0.18 | 0.18 | 0.18 |
 
-No batch size makes 16 threads clearly faster than one but on arm_core, by 15% at most.
-Larger batches take more expansions, 1.08 to 1.42 times on LU8PEEng from 4 to 128, as more
-routes are found against an older table, and give up to 1.8% more wire, on clma at 128, and
-the same delays. Threads win back little of that: on LU8PEEng without timing, batches of 32
-took 3.38 s on one thread and 3.15 s on 16, against 2.19 s for one thread and batches of 1.
-So most of what batches cost is not in the searches that threads share, and searches are
-short once nets are rerouted incrementally. Where that time goes was not found: the engine
-starts its threads for every batch, and keeps or drops each route on one thread, and either
-could be it.
+Beyond 16 threads nothing more comes: a batch of 32 has no work for more than 32, a batch is as
+slow as its biggest search, and searches take more CPU time the more threads share the
+machine's caches.
+
+Larger batches now pay. At 16 threads, after, in seconds and, below, as expansions, wire,
+delay and iterations against batches of 1 on one thread:
+
+| Circuit | 1 thread, batch 1 | Batch 4 | 8 | 16 | 32 | 64 | 128 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| LU32PEEng | 11.77 | 8.77 | 7.83 | 6.49 | 6.02 | 5.71 | 5.42 |
+| mcml | 7.49 | 6.19 | 5.54 | 5.48 | 4.75 | 4.46 | 4.37 |
+| LU8PEEng | 2.36 | 1.63 | 1.44 | 1.24 | 1.00 | 0.93 | 0.83 |
+| bgm | 2.52 | 2.17 | 1.67 | 1.39 | 1.12 | 0.94 | 0.93 |
+| stereovision2 | 2.31 | 2.05 | 1.85 | 1.52 | 1.33 | 1.17 | 1.08 |
+| arm_core | 1.13 | 0.83 | 0.69 | 0.59 | 0.52 | 0.45 | 0.43 |
+| clma | 0.30 | 0.23 | 0.22 | 0.20 | 0.17 | 0.17 | 0.15 |
+
+| Circuit | Batch 4 | 8 | 16 | 32 | 64 | 128 |
+| --- | --- | --- | --- | --- | --- | --- |
+| LU32PEEng | 1.06, +0.08%, +0.04%, 14 | 1.12, +0.14%, +0.03%, 15 | 1.19, +0.23%, +0.02%, 13 | 1.25, +0.30%, +0.02%, 16 | 1.31, +0.41%, +0.01%, 14 | 1.35, +0.35%, +0.00%, 14 |
+| mcml | 1.07, -0.01%, +0.03%, 13 | 1.13, -0.01%, +0.03%, 13 | 1.20, +0.06%, +0.02%, 13 | 1.23, -0.07%, +0.02%, 14 | 1.28, +0.06%, +0.02%, 13 | 1.32, +0.14%, +0.03%, 13 |
+| LU8PEEng | 1.06, -0.01%, +0.02%, 15 | 1.14, +0.27%, +0.00%, 14 | 1.22, +0.04%, -0.03%, 15 | 1.30, +0.17%, -0.02%, 14 | 1.34, +0.15%, -0.01%, 14 | 1.40, +0.19%, +0.02%, 14 |
+| bgm | 1.15, -0.16%, +0.05%, 16 | 1.19, +0.25%, +0.06%, 13 | 1.31, +0.16%, +0.03%, 14 | 1.46, +0.10%, +0.10%, 13 | 1.62, +0.35%, +0.04%, 12 | 1.73, +0.56%, +0.04%, 15 |
+| stereovision2 | 1.11, +0.10%, -0.01%, 13 | 1.18, +0.12%, -0.01%, 13 | 1.24, +0.09%, -0.01%, 12 | 1.32, +0.12%, +0.02%, 14 | 1.37, +0.12%, +0.01%, 12 | 1.40, +0.09%, -0.01%, 14 |
+| arm_core | 1.05, -0.06%, +0.03%, 10 | 1.08, -0.37%, +0.02%, 11 | 1.15, -0.30%, +0.03%, 11 | 1.19, +0.05%, +0.01%, 11 | 1.22, -0.30%, +0.03%, 11 | 1.30, -0.01%, +0.02%, 11 |
+| clma | 1.09, +0.09%, +0.01%, 10 | 1.16, +0.79%, -0.03%, 12 | 1.23, +0.47%, -0.05%, 11 | 1.23, +0.00%, -0.03%, 10 | 1.27, -0.28%, -0.02%, 11 | 1.32, +0.05%, -0.02%, 10 |
+
+Batches of 1 take 14, 14, 14, 14, 12, 10 and 13 iterations. So on 16 threads batches of 128
+are 1.7 to 2.8 times as fast as one thread with batches of 1 on these circuits, and batches
+of 32 are 1.6 to 2.4 times as fast, for up to 0.56% more wire, on bgm at 128, and the same
+delays to 0.1%. This was measured on the relaxed width only: `RrGraph::engine_options` still
+has batches of 1, and the minimum-width searches below used batches of 32.
+
+The minimum-width searches gain as much or more, as their failing widths take many more
+iterations. Each circuit was routed at every width that its tuned search tried, at most 50
+iterations each and giving up early as tuned, and the times summed, in seconds. LU32PEEng
+and mcml are left out, as a width took up to half an hour on one thread, and stereovision2
+is apart, as it is most of the time. Four ran at once; "before" has no 4 or 64 threads:
+
+| Threads, batch size | MCNC (20 circuits, 78 widths) | Verilog (18, 62) | stereovision2 (6) |
+| --- | --- | --- | --- |
+| 1, 1 | 31.0 → 31.0 | 389 → 389 | 1227 → 1271 |
+| 1, 32 | 48.3 → 37.0 | 569 → 558 | 1571 → 1791 |
+| 4, 32 | → 24.0 | → 219 | → 573 |
+| 16, 32 | 39.5 → 24.1 | 278 → 178 | 651 → 334 |
+| 64, 32 | → 25.7 | → 179 | → 321 |
+
+Batches of 32 move the narrowest width that routes, both ways, as they did before. After, of
+the MCNC circuits, apex2, clma, ex5p, pdc and seq route 2 tracks narrower, alu4, apex4 and
+diffeq need 2 more, s298 and ex1010 4 more, and dsip routes at none of the widths tried,
+which stop at its width at batches of 1. Of the Verilog ones, diffeq2, mkSMAdapter4B, or1200
+and stereovision1 route 2 narrower, and sha and stereovision2 need 2 more. Before, it was 3
+narrower and 4 wider on MCNC, and 3 narrower and 5 wider on Verilog, with blob_merge routing
+at none of the widths tried and stereovision2 needing 6 more. A search in batches would try
+other widths than these, so its time would differ too.
+
+##### Where the time went
+
+Measured with timers in the engine, since `perf` does not run on this machine, on LU8PEEng at
+the relaxed width without timing, where batches of 32 took 3.4 s on one thread and 3.2 s on 16,
+against 2.2 s for batches of 1:
+
+- **A few nets of hundreds of terminals.** The 22 routes of nets of 256 terminals or more
+  took 865 ms of 3.2 s, ten times as long per expansion as nets of 2 or 3 terminals. A search's
+  heuristic is the lowest bound over every terminal still to connect, and every node of the
+  tree is a source of the next search, so such a net asks for bounds on the order of `n`
+  cubed times. They also held up their batch, which is as slow as its slowest search: on 2 to
+  16 threads the longest search of each batch added up to 2.4 to 2.6 s of 3.0 s of batches.
+  And they were dropped and routed again: once their heuristics were kept, as below, 0.48 s
+  of 0.86 s of searches thrown away on one thread was 26 routes of nets of 128 terminals or
+  more.
+- **Batches that ran short.** A route dropped for a conflict, which is a fifth of them on
+  these graphs, held up every route after it, so that the next batch could only take in as
+  many new nets as had been committed. Batches of 32 held 5.6 new nets on average on
+  LU8PEEng, and 4.1 on stereovision2 with timing, which is what left 16 threads with nothing
+  to do.
+- **Starting threads for each batch**, at up to 50 us a batch over 8105 batches, or 0.4 s.
+- **CPU time per search grew with threads**: 1.2 to 1.6 times as much with 8 threads in one
+  8-core group of this machine, and 2.2 times with 16 spread over it. That is caches.
+- Not the search state of each thread, which a generation counter resets in no time; not the
+  table, which was never copied, only shared; not the map lookahead or timing data, which
+  are read-only and shared.
+
+What changed, in the order it was found:
+
+- Searches of a tree keep the heuristics that cannot have changed since the last one, which
+  only the bounds to the terminals just connected can tell, and give the same results. That
+  took the nets of 256 terminals from 865 ms to 575 ms on one thread, and the run from 2.3 s
+  to 1.8 s, without timing. With timing, critical connections are routed one at a time and
+  this does little.
+- A net of 64 terminals or more only routes first in its batch, where it cannot be dropped:
+  on one thread with batches of 32, without timing, 0.40 s of searches were thrown away
+  where 0.93 s were.
+- Threads are started once an iteration, keep their worker, and are lent the table for a
+  batch through a lock that only the committing thread writes to, between batches.
+- A dropped net routes again first in the next batch, after the rest of its batch, so that
+  batches stay full: 1917 batches on LU8PEEng where there were 10093, and 3420 on
+  stereovision2 where there were 27480. That gives up the order of the nets within a batch,
+  which costs dense grids of crossing nets more iterations: the [engine's
+  documentation](../src/engine.rs) has the numbers.
 
 #### What the Verilog benchmarks took
 

@@ -356,8 +356,17 @@ nine that have anything to move, and shorter track on six.
 
 Placement and routing as a single loop rather than two sequential passes.
 
-- Local re-placement around failed routes.
-- Incremental re-route after engineering changes, preserving existing work. Done in
+- Local re-placement around failed routes. Done on PCBs, in `kicad::place_and_route`: after the
+  first placement and routing, rounds that place again, by `pcb::place::refine_components`, a
+  window of the parts on the nets that cost most in vias and detours or failed, with their nets
+  weighed more, congestion from a map of what routing used, and parts sent to the side where
+  most of their connections are; reroute only what moved; and keep the round if it routes
+  better, by connections, starved thermal reliefs, vias and track. The first placement's sides
+  now go first to parts that nothing holds to theirs.
+- Incremental re-route after engineering changes, preserving existing work. On PCBs,
+  `pcb::eco::reroute` keeps a routed board's copper that a change leaves alone as fixed copper
+  and routes only what is left apart, and `pcb::eco::relieve` gives starved thermal reliefs a
+  second spoke. Elsewhere, done in
   `Engine::seed_routes`, which starts each net from the route it had, cut back to what is still
   a step of the space and still leads to a terminal, and grown from where terminals were added;
   `Engine::seed_history` for the negotiation's history; `eco::reroute` and
@@ -368,7 +377,10 @@ Placement and routing as a single loop rather than two sequential passes.
   placement over to a changed netlist by name. `eco::route_change` and `place::placement_change`
   measure what moved.
 - Pin and gate swapping where the netlist permits (FPGA pin permutation, MCU pin
-  muxing, memory byte lanes).
+  muxing, memory byte lanes). On PCBs, `pcb::swap`: groups of equivalent pins from the caller,
+  such as a byte lane's DQ bits or a microcontroller's GPIOs, and the two pins of passives from
+  `kicad::swap_groups`, swapped where that shortens their nets, and written back by
+  `kicad::replace_pad_nets` with a list of the pads changed for the schematic.
 
 **Exit:** measurable completion or quality gains over the one-pass flow on the
 hardest benchmarks; small netlist changes cause small layout changes.
@@ -384,6 +396,23 @@ generated problems, with nets changed or cells blocked, it kept 94% to 99.9% of 
 against 60% to 97%. Left for later: FPGA placement's timing and congestion terms in incremental
 placement, measured changes to the device on real fabrics, and real engineering changes rather
 than random ones.
+
+On PCBs ([results](docs/benchmarks.md#pcb-placement-and-routing-in-a-loop)), the loop routes
+every curated board to completion, as the one pass does, and KiCad 10.0.3 finds nothing wrong
+with either. It is better than the one pass on five boards of the nine with parts to move, and
+by construction never worse by its measure: `TS4231-BOB` from 11 vias and 71 mm to 8 and 64,
+`udb-s` from 16 and 143 to 13 and 125, `ddr5-testbed` from 177 and 932 to 170 and 904, as many
+vias as by hand, and `lisn` and `lpddr4-testbed` by a via or 6 mm. It gains nothing on
+`GB-LIVE32`, `placebo` and `nk3-nrf-mini`: windows of a few parts don't reach what makes the
+hand placements cheaper, and the hand placements still route with fewer vias on six boards.
+Engineering changes on the routed boards keep every track and via when nothing changed, and
+change about the copper the change touches: where routing from scratch changed 31% to 174% of
+a board's track for one part or net, incremental routing changed 0% to 53%, with as many
+connections or more, in seconds where routing from scratch takes minutes on the large boards. DQ swaps for length undo a careless byte-lane assignment on
+`ddr5-testbed`, but make the designers' own assignment worse on both DRAM boards: swaps that
+pay need judging by routing. Left for later on PCBs: placement that prices vias, larger
+re-placements than windows, swaps judged by routing, and making the loop's rounds cheaper than
+the first routing on the small boards.
 
 ### M10: More domains and 1.0
 

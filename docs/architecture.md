@@ -318,6 +318,31 @@ it does see is where its nets' fills will be:
 Fills are not obstacles to other nets' routing, as a zone of a lower priority isn't to one of
 a higher in KiCad: the cost of a plane, and the repair after, take their place.
 
+**On PCBs, placement and routing meet in a loop of windows, judged by routing.** M9's loop,
+`kicad::place_and_route`, places once, routes once, and then each round places a window of
+parts again, those on the nets that cost most beyond their half-perimeter in vias and detours,
+and routes again only what that moved, with `pcb::eco::reroute`; a round is kept only if the
+board it routes is better. Three things shaped it:
+
+- *The judge is routing, not a placement estimate.* Weights and a map of what routing used
+  steer the window's annealing, but the round is kept or dropped by its routed connections,
+  starved thermal reliefs, vias and track. So the loop is never worse than the one pass by that
+  measure, and estimates that mislead cost time, not quality.
+- *Incremental routing keeps what nothing touched, byte for byte.* The copper kept becomes fixed
+  copper of the design, nets it leaves complete are not routed at all, nor given escapes, and
+  the lattice keeps the whole board's pitch, so a change of nothing keeps everything. Nets with
+  zones lose only the stubs where parts were and are, not their whole plane's. That made a round
+  cost seconds where the first routing of a large board costs minutes, and made engineering
+  changes on routed boards the same mechanism.
+- *Thermal reliefs are counted, and repaired.* Moved parts packed closer made routes crowd the
+  pads of planes' nets, which KiCad reports when a relief has one spoke. The fill knows its
+  spokes, so it counts such reliefs, the loop prefers boards with fewer, and a starved relief
+  gets a place for a second spoke kept free while the nets across it route again.
+
+Swapping equivalent pins is a separate step, by length, which the loop makes once after
+placement if given groups: on the DRAM boards, length undid a careless DQ assignment but made
+the designers' own worse, so a swap that pays has to be judged by routing too.
+
 **No `unsafe`, at least initially.** The crate forbids it. If profiling later proves
 it is needed, it gets isolated in a small audited module and the lint relaxed there.
 

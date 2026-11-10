@@ -12,7 +12,9 @@ from KiCad's files, [PCB routing of the same boards](#pcb-routing-of-the-curated
 checked by KiCad, and [their zones' fills](#pcb-zones-and-planes) against KiCad's, and
 [the same boards placed again](#pcb-placement-of-the-curated-boards) from nothing, and
 [engineering changes](#engineering-changes), routed and placed again incrementally, on generated
-problems and VTR's circuits.
+problems and VTR's circuits, and [placement and routing in a
+loop](#pcb-placement-and-routing-in-a-loop) on the curated boards, with engineering changes and
+pin swaps there.
 [Placement](#placement-on-synthetic-problems) is also measured on synthetic problems whose
 optimum is known.
 
@@ -3562,3 +3564,284 @@ seeds legal from scratch and incrementally. Means are over the circuits, geometr
 - **The quality of the placement before.** The placements before were of the netlist without
   the change, so the incremental placement starts from one that never saw it. Where nets were
   added, that is all the wirelength it loses on the generated problems.
+
+## PCB placement and routing in a loop
+
+M9 on PCBs: the [curated boards](../testdata/kicad/README.md) placed from nothing, as in [PCB
+placement of the curated boards](#pcb-placement-of-the-curated-boards), routed, and then placed
+again where routing found trouble and rerouted incrementally, round after round while that
+pays, by `kicad::place_and_route`; against the one-pass flow it starts from, and against the
+boards as their designers placed them. Then engineering changes on the boards as placed by
+hand, rerouted by `pcb::eco::reroute`, and pin swaps. Measured on 2026-11-11 with rustc 1.97.1,
+on the AMD Ryzen Threadripper PRO 9995WX, shared with other work, one thread a board, the
+boards side by side, with the default options, on commit `c0a93fd`.
+
+### How
+
+```text
+GUIDE_LOOP=1 GUIDE_KICAD=1 cargo test --release --features kicad curated_boards_loop -- --nocapture
+GUIDE_ECO=1 cargo test --release --features kicad curated_boards_eco -- --nocapture
+GUIDE_SWAP=1 GUIDE_KICAD=1 cargo test --release --features kicad curated_boards_swap -- --nocapture
+scripts/loop-boards.sh GUIDE_LOOP curated_boards_loop BOARD...   # a process for each board
+```
+
+[`flow_tests.rs`](../src/kicad/flow_tests.rs) runs the loop on each board and checks both
+boards it returns, the one-pass flow's and the loop's, as written, read back: our DRC must find
+no violation involving a routed item or a pad of a part that moved, beyond what the board has
+before routing, and KiCad 10.0.3's DRC at error severity must find none of those that it
+doesn't find on the board as placed by hand and routed alike, as in the placement benchmark,
+courtyards, silkscreen and thermal reliefs included, and no connection missing.
+
+The loop, round by round:
+
+1. **Feedback.** Each net that no zone connects is charged what it costs beyond the
+   half-perimeter of its pads: 3 mm a via (`FlowOptions::via_mm`), its track beyond its
+   half-perimeter, and much more if it failed. Each movable part is charged its nets' charges;
+   the dearest 40% of the parts, by count, are the window, and the share halves after each
+   round that keeps nothing. The window's nets weigh 100% to 400% of what they did, by their
+   charge against their half-perimeter, and congestion is priced from a map of what routing
+   used, each track's length spread along it and a via as 3 mm, against half of what the layers
+   carry, in place of the RUDY estimate.
+2. **Sides.** A window's part whose connections, by its nets of 12 pins at most, are mostly to
+   parts on the other side alone goes there.
+3. **Placing again**, by `pcb::place::refine_components`: the window's parts are legalized from
+   where they are, among the others, fixed and taking their room, then annealed at a low
+   temperature, within 5 mm of where they and their nets' pins are (`FlowOptions::reach`). If
+   the parts sent to the other side don't fit there, the round is placed again without.
+4. **Routing again**, by `pcb::eco::reroute`: the nets of the parts that moved lose their
+   copper, but those with zones, which lose only their stubs where parts were and are; copper
+   that the parts' new places make a violation of goes too; the rest is fixed copper, and only
+   what it leaves apart is routed.
+5. **Thermal reliefs.** Routes that crowd a pad of a plane's net can leave its relief one spoke,
+   which KiCad reports as `starved_thermal`. Such reliefs are counted from the fills, and
+   `pcb::eco::relieve` keeps a place for a second spoke free, as an obstacle, and reroutes the
+   nets that crossed it, twice at most, if that pays.
+6. **Judging**: a round is kept if it leaves fewer connections missing, or as many and fewer
+   starved reliefs, or as many of both and less track plus 3 mm a via. The loop stops after 6
+   rounds, or 3 in a row that keep nothing.
+
+### Results
+
+Connections, vias and track, in millimetres, over the whole board as written: every track and
+via, stubs to zones included, which is why the numbers by hand are a little above those of
+the placement benchmark's table. Seconds are placing and routing, the loop's including the
+one pass it starts from. "Moved" is how many parts the loop's placement has elsewhere than the
+one pass's, and how far on average and at most, by the Manhattan distance of their origins:
+a part turned or flipped in place counts as moved by 0 mm. KiCad's column has the violations
+that count and the missing connections, for the one pass, then the loop.
+
+| Board | By hand | One pass | Loop | Rounds kept of run | Moved: parts, mean, most, mm | Seconds: one pass, loop | Our DRC | KiCad |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `GB-BRK-LINK-A` | 8/8, 0, 93 | 8/8, 0, 93 | 8/8, 0, 93 | 0 of 0 | 0 | 0.1, 0.1 | 0 | 0, 0; 0, 0 |
+| `TS4231-BOB` | 13/13, 0, 31 | 13/13, 11, 71 | 13/13, **8**, **64** | 1 of 1 | 1, 7.8, 7.8 | 0.6, 5.7 | 0 | 0, 0; 0, 0 |
+| `lisn` | 60/60, 7, 144 | 60/60, 14, 253 | 60/60, **13**, 255 | 1 of 4 | 3, 3.1, 5.3 | 0.7, 21.7 | 0 | 0, 0; 0, 0 |
+| `isi-channel` | 29/29, 0, 453 | 29/29, 0, 453 | 29/29, 0, 453 | 0 of 0 | 0 | 0.2, 0.2 | 0 | 0, 0; 0, 0 |
+| `placebo` | 50/50, 9, 292 | 50/50, 17, 257 | 50/50, 17, 257 | 0 of 3 | 0 | 1.0, 2.7 | 0 | 0, 0; 0, 0 |
+| `udb-s` | 33/33, 11, 149 | 33/33, 16, 143 | 33/33, **13**, **125** | 1 of 1 | 1, 0, 0 | 2.1, 3.7 | 0 | 0, 0; 0, 0 |
+| `flea` | 79/79, 52, 1607 | 79/79, 47, 1521 | 79/79, 47, 1521 | 0 of 0 | 0 | 1.6, 1.6 | 0 | 0, 0; 0, 0 |
+| `GB-LIVE32` | 197/197, 165, 2283 | 197/197, 243, 2155 | 197/197, 243, 2155 | 0 of 2 | 0 | 82.5, 141.6 | 0 | 0, 0; 0, 0 |
+| `nk3-nrf-mini` | 82/83, 55, 249 | 83/83, 63, 305 | 83/83, 63, 305 | 0 of 2 | 0 | 299.9, 333.4 | 0 | 0, 0; 0, 0 |
+| `lpddr4-testbed` | 344/344, 220, 670 | 344/344, 219, 684 | 344/344, 219, **678** | 3 of 6 | 3, 0.9, 1.6 | 126.4, 138.9 | 0 | 0, 0; 0, 0 |
+| `ddr5-testbed` | 255/255, 170, 876 | 255/255, 177, 932 | 255/255, **170**, **904** | 2 of 6 | 10, 3.1, 11.1 | 160.9, 217.0 | 0 | 0, 0; 0, 0 |
+
+- **The loop gains where the one pass costs most against the hand placement, and never
+  loses.** Of the nine boards with parts to move, it kept a round on five: fewer vias on
+  four, as few as by hand on `ddr5-testbed`, and less track on four. Where nothing it tried
+  was better, the one pass's board is the result, so the loop is never worse by its own
+  measure. Completion was already full on every board but `nk3-nrf-mini` as placed by hand.
+- **`TS4231-BOB`** loses 3 of its 11 vias and 7 mm of 71: the part that one pass sent to the
+  back, whose connections are all on the front, comes back to the front, which with spacing
+  has room for it after all. Packing the front crowds the ground plane's pads: an earlier run,
+  with vias at 2 mm, kept a round of 7 vias only once a place for a second spoke had been freed
+  at three thermal reliefs that routing had left one, which KiCad reports.
+- **`udb-s`** loses 3 vias and 18 mm of 143, by turning one part in place.
+- **`ddr5-testbed`** puts four parts on the other side, where most of their connections are,
+  and moves ten by 3 mm on average, for 7 vias and 28 mm less; `lpddr4-testbed` gains 6 mm.
+- **`GB-LIVE32`, `placebo` and `nk3-nrf-mini`** keep nothing. On `GB-LIVE32`, rounds moving 5
+  and 6 parts gave 239 vias for 33 mm more track, and 246; on `placebo`, 19 to 21 vias for 5
+  to 9 mm less; on `nk3-nrf-mini`, rounds that put two parts and one on the other side gave 68
+  and 64 vias against 63. Routing incrementally around everything else takes the moved parts' nets where there is
+  room, which is rarely where fewer vias are: the hand placements' 78 fewer vias on `GB-LIVE32`
+  come from where its 44 parts are, packed by function, which windows of a few parts at a time
+  don't reach.
+- **Time.** A round routes again only what moved: 0.5 to 16 seconds on the small boards, the
+  longest where starved reliefs were routed again, 1.3 to 44 on the DRAM boards, 12 and 21 on
+  `nk3-nrf-mini` and 2 and 57 on `GB-LIVE32`, against 83 to 300 seconds for the first routing
+  of those boards. The loop adds 10% (`lpddr4-testbed`, `nk3-nrf-mini`) to 72% (`GB-LIVE32`) to
+  the one pass on the large boards; on the small ones, where the one pass takes a second or
+  two, it takes up to 30 times as long, 22 seconds at most.
+- **Sides, in the one pass too.** Parts sent to the other side are now those whose connections
+  hold them least to theirs, two-pin parts first: `udb-s`'s one pass went from 13 vias and
+  162 mm in the placement benchmark to 16 and 143; `TS4231-BOB`'s and `nk3-nrf-mini`'s are
+  unchanged. Ordering them by how many vias they would need, before size, sent larger parts
+  to the back on `nk3-nrf-mini`, for 22% more half-perimeter and a routing that ran for over
+  40 minutes before it was stopped; so only whether anything holds a part to its side comes
+  before its size.
+
+### Engineering changes on the boards
+
+Each board as placed by hand, routed by `pcb::route`, then changed, and routed again two ways:
+incrementally by `pcb::eco::reroute`, from the routing before, and from nothing by
+`pcb::route`. The changes, those each board has room and nets for:
+
+- **nothing**: the same board, which must keep every track and via;
+- **a part turned**: the first movable part of two pins, both on nets that routing used, turned
+  half a turn, so that its pads change places;
+- **a part moved**: the movable part of most pins, up to 16, moved 1 mm in the first of eight
+  directions where its courtyard overlaps nothing new and stays clear of the edge;
+- **a net removed**: the first routed net of two pads with no zone, whose pads lose their net;
+- **a net added**: the two nearest pads, on different parts and the outer layers, of nets of
+  one pad each, joined by a new net;
+- **a part added**: two pads of 0.6 by 0.5 mm, 1 mm apart, on the front, between the first
+  routed signal net of two pads or more and ground, where they clear every courtyard, pad,
+  mask opening and keepout, nearest the net's first pad.
+
+"Copper changed" is the length of the tracks of the routing before that the routing after
+doesn't have, exactly, and of those it has that the routing before doesn't, as a fraction of
+the track before, with the vias removed and added. Both routings are checked by our DRC, which
+must find nothing wrong with routed copper, and for connectivity. Connections are over the
+whole board.
+
+| Board | Change | Incrementally: connections, vias, track, s | Copper changed | From nothing: connections, vias, track, s | Copper changed |
+| --- | --- | --- | --- | --- | --- |
+| `TS4231-BOB` | nothing | 13/13, 0, 31, 0.14 | 0% (0 vias) | 13/13, 0, 31, 0.12 | 0% (0 vias) |
+| `TS4231-BOB` | D1 turned 180° | 13/13, 2, 33, 0.15 | 65% (2 vias) | 13/13, 2, 33, 0.13 | 74% (2 vias) |
+| `TS4231-BOB` | U1 moved 1 mm | 13/13, 0, 31, 0.15 | 147% (0 vias) | 13/13, 0, 31, 0.12 | 147% (0 vias) |
+| `TS4231-BOB` | net Net-(U1-AVDD) removed | 12/12, 0, 29, 0.14 | 5% (0 vias) | 12/12, 0, 29, 0.12 | 5% (0 vias) |
+| `TS4231-BOB` | part added, +3.3V to GND | 15/15, 2, 37, 0.41 | 33% (2 vias) | 15/15, 2, 37, 0.20 | 33% (2 vias) |
+| `lisn` | nothing | 60/60, 7, 144, 0.65 | 0% (0 vias) | 60/60, 7, 144, 0.52 | 0% (0 vias) |
+| `lisn` | R2 turned 180° | 60/60, 9, 151, 0.64 | 21% (2 vias) | 60/60, 9, 151, 0.52 | 21% (2 vias) |
+| `lisn` | T1 moved 1 mm | 60/60, 7, 140, 1.43 | 73% (8 vias) | 60/60, 7, 140, 0.65 | 73% (8 vias) |
+| `lisn` | net /DIFF_MODE removed | 59/59, 7, 125, 0.66 | 13% (0 vias) | 59/59, 7, 125, 0.52 | 13% (0 vias) |
+| `lisn` | part added, /OUTPUT to GND | 62/62, 7, 144, 0.66 | 49% (4 vias) | 61/62, 7, 147, 0.52 | 14% (0 vias) |
+| `placebo` | nothing | 50/50, 9, 292, 0.36 | 0% (0 vias) | 50/50, 9, 292, 0.42 | 0% (0 vias) |
+| `placebo` | R4 turned 180° | 50/50, 9, 293, 0.38 | 15% (0 vias) | 50/50, 9, 293, 0.44 | 15% (0 vias) |
+| `placebo` | C4 moved 1 mm | 50/50, 9, 293, 0.41 | 11% (0 vias) | 50/50, 10, 292, 0.44 | 22% (1 vias) |
+| `placebo` | net /PA2 removed | 49/49, 9, 282, 0.37 | 4% (0 vias) | 49/49, 9, 280, 0.45 | 14% (2 vias) |
+| `udb-s` | nothing | 33/33, 11, 149, 0.48 | 0% (0 vias) | 33/33, 11, 149, 1.23 | 0% (0 vias) |
+| `udb-s` | F1 turned 180° | 33/33, 11, 143, 0.51 | 39% (0 vias) | 33/33, 12, 148, 1.32 | 23% (1 vias) |
+| `udb-s` | U1 moved 1 mm | 33/33, 13, 161, 0.57 | 83% (12 vias) | 33/33, 13, 161, 1.14 | 83% (12 vias) |
+| `udb-s` | net Net-(J1-PadA5) removed | 32/32, 9, 139, 0.47 | 7% (2 vias) | 32/32, 8, 126, 1.39 | 85% (11 vias) |
+| `udb-s` | part added, VBUS to GND | 35/35, 11, 141, 0.52 | 47% (0 vias) | 35/35, 11, 152, 1.56 | 32% (0 vias) |
+| `flea` | nothing | 79/79, 52, 1607, 0.01 | 0% (0 vias) | 79/79, 52, 1607, 5.85 | 0% (0 vias) |
+| `flea` | net unconnected-(PSW1-Pad3) removed | 78/78, 51, 1601, 0.01 | 0% (1 vias) | 78/78, 52, 1584, 5.29 | 31% (26 vias) |
+| `flea` | part added, unconnected-(PSW1-Pad3) to GND | 81/81, 58, 1635, 7.35 | 29% (20 vias) | 81/81, 52, 1653, 5.98 | 10% (12 vias) |
+| `GB-LIVE32` | nothing | 197/197, 165, 2283, 0.39 | 0% (0 vias) | 197/197, 165, 2283, 29.95 | 0% (0 vias) |
+| `GB-LIVE32` | R4 turned 180° | 197/197, 170, 2267, 0.72 | 10% (17 vias) | 197/197, 165, 2290, 29.07 | 1% (0 vias) |
+| `GB-LIVE32` | U1 moved 1 mm | 197/197, 165, 2281, 0.53 | 4% (0 vias) | 197/197, 165, 2283, 25.19 | 1% (0 vias) |
+| `GB-LIVE32` | net Net-(D1-Pad1) removed | 196/196, 165, 2281, 0.39 | 0% (0 vias) | 196/196, 165, 2281, 23.84 | 0% (0 vias) |
+| `GB-LIVE32` | net added, pad 4 of J2 to pad 34 of U2 | 197/198, 165, 2283, 7.40 | 0% (0 vias) | 197/198, 165, 2283, 25.12 | 0% (0 vias) |
+| `GB-LIVE32` | part added, Net-(C1-Pad2) to GND | 199/199, 166, 2283, 0.45 | 2% (5 vias) | 199/199, 163, 2306, 26.46 | 3% (6 vias) |
+| `nk3-nrf-mini` | nothing | 82/83, 55, 249, 0.26 | 0% (0 vias) | 82/83, 55, 249, 20.83 | 0% (0 vias) |
+| `nk3-nrf-mini` | U3 moved 1 mm | 78/83, 50, 238, 111.43 | 53% (27 vias) | 77/83, 53, 233, 52.94 | 174% (96 vias) |
+| `nk3-nrf-mini` | net Net-(C3-Pad2) removed | 81/82, 55, 248, 0.27 | 0% (0 vias) | 81/82, 55, 248, 23.35 | 0% (0 vias) |
+| `nk3-nrf-mini` | net added, pad B3 of U1 to pad 5 of D2 | 82/84, 55, 249, 21.25 | 0% (0 vias) | 82/84, 55, 263, 36.72 | 143% (58 vias) |
+| `lpddr4-testbed` | nothing | 344/344, 220, 670, 1.25 | 0% (0 vias) | 344/344, 220, 670, 113.38 | 0% (0 vias) |
+| `lpddr4-testbed` | R2 turned 180° | 344/344, 220, 668, 1.21 | 7% (2 vias) | 344/344, 193, 721, 95.80 | 33% (49 vias) |
+| `lpddr4-testbed` | IC1 moved 1 mm | 344/344, 220, 671, 1.95 | 30% (12 vias) | 344/344, 219, 677, 102.95 | 25% (13 vias) |
+| `lpddr4-testbed` | net Net-(IC1-P0) removed | 343/343, 218, 660, 1.08 | 2% (2 vias) | 343/343, 218, 660, 108.02 | 2% (2 vias) |
+| `lpddr4-testbed` | net added, pad 5 of U2 to pad 13 of IC1 | 344/345, 217, 675, 4.78 | 11% (7 vias) | 344/345, 220, 670, 102.17 | 0% (0 vias) |
+| `lpddr4-testbed` | part added, Net-(IC1-P0) to GND | 346/346, 220, 677, 1.30 | 3% (0 vias) | 346/346, 221, 673, 99.90 | 5% (5 vias) |
+| `ddr5-testbed` | nothing | 255/255, 170, 876, 0.91 | 0% (0 vias) | 255/255, 170, 876, 164.70 | 0% (0 vias) |
+| `ddr5-testbed` | R12 turned 180° | 255/255, 170, 877, 1.06 | 4% (4 vias) | 255/255, 170, 877, 159.11 | 4% (4 vias) |
+| `ddr5-testbed` | IC1 moved 1 mm | 255/255, 170, 880, 1.59 | 19% (16 vias) | 255/255, 169, 885, 153.99 | 17% (17 vias) |
+| `ddr5-testbed` | net RESET_N removed | 254/254, 168, 866, 0.85 | 1% (2 vias) | 254/254, 153, 890, 154.13 | 142% (183 vias) |
+| `ddr5-testbed` | net added, pad 5 of U2 to pad 13 of IC1 | 255/256, 167, 881, 4.11 | 6% (7 vias) | 255/256, 170, 876, 153.97 | 0% (0 vias) |
+| `ddr5-testbed` | part added, RESET_N to GND | 257/257, 168, 887, 1.09 | 18% (18 vias) | 253/257, 153, 801, 198.10 | 128% (169 vias) |
+
+- **Nothing changed keeps everything**, every track and via on every board, in 0.01 to 1.3
+  seconds. Routing from scratch is deterministic, so it gives the same board too, but in its
+  full time, up to 165 seconds.
+- **Incrementally, a change costs about the copper it touches.** Removing a net changed 0% to
+  13% of the track, adding a net 0% to 11%, adding a part 2% to 49%, and turning or moving a
+  part 4% to 83%, or 147% on `TS4231-BOB`, whose `U1` has every net.
+- **From scratch, one change can move most of a dense board.** On the small boards, nets route
+  one at a time in an order that a change hardly moves, so routing from scratch changes little
+  more than the change. But it changed 142% of `ddr5-testbed`'s track for a net removed and
+  128% for a part added, 174% and 143% of `nk3-nrf-mini`'s for a part moved and a net added,
+  85% of `udb-s`'s and 31% of `flea`'s for a net removed, and 33% of `lpddr4-testbed`'s, with
+  49 vias, for a resistor turned; incrementally, those were 0% to 53%.
+- **Quality is the same, within a few vias, and completion as good or better.** Incrementally,
+  no change left more connections out than from scratch did, and three left fewer: 4 on
+  `ddr5-testbed`'s added part, 1 on `lisn`'s, 1 on `nk3-nrf-mini`'s moved `U3`, which leaves 5
+  out either way. Vias and track went either way: `GB-LIVE32`'s turned resistor took 5 vias
+  more, `flea`'s added part 6 more, while from scratch `ddr5-testbed` found 15 fewer vias and
+  24 mm more track for its removed net, and `lpddr4-testbed` 27 fewer for 53 mm more.
+- **Time.** On the large boards, a change took 0.3 to 8 seconds incrementally, where routing
+  from scratch took 24 to 30 seconds on `GB-LIVE32`, 21 to 53 on `nk3-nrf-mini` and 96 to 198
+  on the DRAM boards; but moving `nk3-nrf-mini`'s `U3`, which leaves connections out, took 111
+  seconds, as the area taken out is widened twice around them. On the small boards it costs
+  about what routing from scratch does, which there is mostly filling zones and checking.
+
+### Pin swaps
+
+Equivalent pins are the caller's to give, as `pcb::swap::SwapGroup`s, as a board file says
+nothing of them; `kicad::swap_groups` gives the safe automatic ones, the two pins of
+resistors, capacitors other than polarized ones, inductors and ferrite beads. Swaps are made
+where they shorten the nets, two-pin nets by the distance between their pins, which uncrosses
+them, others by half-perimeter, with nets that zones connect left out, and written back with
+`kicad::replace_pad_nets`, with a list of the pads changed for the schematic.
+
+**Passives**, after the one pass's placement, by the half-perimeter of the nets that count:
+
+| Board | Two-pin passives | Swapped | Half-perimeter, mm: placed → swapped |
+| --- | --- | --- | --- |
+| `TS4231-BOB` | 3 | 0 | 61.5 → 61.5 |
+| `lisn` | 20 | 0 | 156.7 → 156.7 |
+| `placebo` | 9 | 2 | 251.5 → 252.9 |
+| `udb-s` | 3 | 1 | 104.4 → 103.4 |
+| `GB-LIVE32` | 29 | 0 | 1899.7 → 1899.7 |
+| `nk3-nrf-mini` | 17 | 0 | 156.9 → 156.9 |
+| `lpddr4-testbed` | 54 | 0 | 522.8 → 522.8 |
+| `ddr5-testbed` | 50 | 1 | 760.9 → 760.8 |
+
+Placement already turns parts by half turns, which is the same as swapping a passive's pins,
+so few swaps are left to make: 4 on three boards. `placebo`'s two shorten their nets' distances
+but not their half-perimeters. These were not routed.
+
+**DQ bits within byte lanes**, on the DRAM boards as placed by hand: the bits of each byte lane
+on the DRAM, by the names of their nets (`DQ0` to `DQ7` on `ddr5-testbed`, `DQ00_A` to
+`DQ15_A`, two lanes, on `lpddr4-testbed`), swapped for length, from the designers' assignment,
+and from that assignment reversed within each lane, as a netlist drawn without the layout in
+mind might have it. Each routed with the default options.
+
+| Board, bits | DQ bits | Pads changed | Connections | Vias | Track, mm | Routing, s | Our DRC | KiCad |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `lpddr4-testbed`, as designed | 16 | 0 | 344/344 | 220 | 670 | 105.1 | 0 | 0 violations, 0 unconnected |
+| `lpddr4-testbed`, as designed, swapped | 16 | 8 | 344/344 | 224 | 676 | 131.6 | 0 | 0 violations, 0 unconnected |
+| `lpddr4-testbed`, reversed | 16 | 16 | 344/344 | 221 | 762 | 163.1 | 0 | 0 violations, 0 unconnected |
+| `lpddr4-testbed`, reversed, swapped | 16 | 14 | 344/344 | 227 | 771 | 148.4 | 0 | 0 violations, 0 unconnected |
+| `ddr5-testbed`, as designed | 8 | 0 | 255/255 | 170 | 876 | 160.1 | 0 | 0 violations, 0 unconnected |
+| `ddr5-testbed`, as designed, swapped | 8 | 4 | 249/255 | 147 | 845 | 459.4 | 0 | 0 violations, 6 unconnected |
+| `ddr5-testbed`, reversed | 8 | 8 | 255/255 | 175 | 902 | 290.6 | 0 | 0 violations, 0 unconnected |
+| `ddr5-testbed`, reversed, swapped | 8 | 7 | 255/255 | 171 | 878 | 357.8 | 0 | 0 violations, 0 unconnected |
+
+- **On `ddr5-testbed`, swaps undo a careless assignment**: reversed, its lane costs 5 vias and
+  26 mm more than as designed; swapped for length, it comes back to within a via and 2 mm of
+  the designers' assignment.
+- **Swapping the designers' own assignment for length doesn't pay.** It rotates four bits on
+  each board, and `ddr5-testbed` then routes 6 connections short, in three times the time,
+  where `lpddr4-testbed` takes 4 vias more. The designers' order follows how the balls escape
+  the BGA and reach the edge connector's pins on the layers available, which the distance
+  between two pins doesn't see.
+- **On `lpddr4-testbed`, length is the wrong measure either way**: from the reversed lanes,
+  swaps for length made it 6 vias and 9 mm worse. A swap that pays would have to be judged by
+  routing, which the loop does for placement: swaps are kept out of its default, and given as
+  `FlowOptions::swaps` they are made once, after placement.
+
+### What this does not show
+
+- **Gains are modest, and on the boards with most to gain, nothing.** The loop's windows are
+  a few parts, near where they were; what makes `GB-LIVE32`'s hand placement 78 vias cheaper is
+  where everything is. Pricing vias in placement itself, beyond sides, is not done.
+- **One seed.** Each round anneals with the next seed, but the loop was run once a board.
+  Results on the hard boards are chaotic, as [above](#what-changes-what): a round that moves one
+  part can change a hundred vias on `nk3-nrf-mini`.
+- **Thermal reliefs** are counted by our fill's own spokes, which reach the fill where KiCad's
+  do, but are not KiCad's count: they found one relief starved on `TS4231-BOB`'s one pass that
+  KiCad's check didn't count, and three on a round where KiCad found two.
+- **Changes are generated**, one at a time, by rules that pick the first part or net that
+  qualifies, not by a designer.
+- **Pin swaps are judged by length**, not by routing, and only DQ bits and passives were
+  tried: no connector pins, resistor networks or pin multiplexers, which the API takes but no
+  curated board says.

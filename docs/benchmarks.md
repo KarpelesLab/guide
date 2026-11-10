@@ -8,7 +8,8 @@ evidence about real designs**. The comparisons on real designs so far are
 [clearance check against KiCad's](#pcb-clearance-checks-against-kicad), on real boards,
 [those boards read from DSN](#pcb-dsn-designs-against-kicad-boards) against the same boards read
 from KiCad's files, and [PCB routing of the same boards](#pcb-routing-of-the-curated-boards),
-checked by KiCad.
+checked by KiCad. [Placement](#placement-on-synthetic-problems) is measured on synthetic problems
+whose optimum is known.
 
 ## Running
 
@@ -19,6 +20,12 @@ GUIDE_ENGINE_SWEEP=refine cargo bench --bench engine   # refinement after negoti
 GUIDE_ENGINE_SWEEP=expansion cargo bench --bench engine  # time per expansion, about 4 minutes
 GUIDE_ENGINE_SWEEP=timing cargo bench --bench engine   # timing-driven routing, about a minute
 GUIDE_ENGINE_SWEEP=all cargo bench --bench engine      # all four sweeps
+```
+
+```text
+cargo bench --bench place                            # placement timings, by criterion
+GUIDE_PLACE_SWEEP=quality cargo bench --bench place  # placement against the optimum, a minute
+GUIDE_PLACE_SWEEP=threads cargo bench --bench place  # the same placements on 1 and 16 threads
 ```
 
 The sweeps print Markdown tables and skip criterion. The default bench prints each instance's
@@ -1473,4 +1480,102 @@ errs safe, but it costs Freerouting room near every via, which is part of why it
   26 s in an earlier run.
 - KiCad's DRC is the only judge of validity, and track length and vias the only measures of
   quality. Neither says how good a board is to make, or how its signals fare.
+
+## Placement on synthetic problems
+
+The roadmap's exit for generic placement (M7) asks for legal placements with wirelength close to
+known reference solutions, deterministic like the router. Real placement benchmarks have no
+known optimum, so these problems are made to have one, by `guide::place::synth`, and every
+result is divided by it.
+
+### How
+
+Each generator lays out a reference placement first and then builds nets that are as short as
+any net of their size can be: a net of `d` pins on distinct sites of a unit lattice spans at
+least the least `w + h - 2` over boxes of `w` by `h` sites with `w * h >= d`, and every net of the
+reference meets that bound. So the reference is optimal, and the optimum is a lower bound that
+no legal placement can beat, which every run checks. Items are numbered in a shuffled order so
+that nothing of the answer is left in the numbering.
+
+| Family | Layout | Nets | Optimum |
+| --- | --- | --- | --- |
+| Grid | Full grid of sites | Each item to its right and upper neighbours | 1 per net |
+| Grid, pads | The grid in a ring of fixed pads, on sites of another kind | The same, and each edge item to its pad | 1 per net |
+| Grid, pads, macros of 4 | The same, with each column cut into rigid vertical macros of 4 | The same | 1 per net |
+| Chain | 200 items on a 16 x 16 grid of sites, 56 left empty | Each item to the next | 199, a snake |
+| Peko | Full grid of sites, optionally with pads, and with every eighth column for a second kind of item, like an FPGA's memory columns | One per item, as in Peko (Chang, Cong and Xie, 2003): 58% of 2 pins, 17% of 3, 8% of 4, 5% of 5, 8% of 6 to 10, 4% of 11 to 20, each in a box of least half-perimeter for its size | Sum of the bounds |
+| Free space | 10 x 10 squares that can turn, pins at their centres, on a lattice of pitch 5, in an area that holds them exactly or with 20% to spare on each side | The grid's | 10 per net: squares that don't overlap have centres at least 10 apart |
+
+The methods, all from `guide::place` with default options but for the seed:
+
+- **Annealing**: `anneal`, from a random legal placement. VPR's schedule with `inner_num` 1.
+- **Annealing, 10x moves**: the same with `inner_num` 10.
+- **Analytic, legalized**: `place_analytic`'s global placement and legalization, before
+  detailed placement (`AnalyticReport::legalized`).
+- **Analytic, detailed**: its result, after detailed placement by low-temperature annealing.
+
+Each family is run at seeds 1 to 3, one run at a time, on one thread of a shared 192-thread
+machine. Ratios are the mean over the seeds, with the worst in brackets, and times are means in
+seconds. `GUIDE_PLACE_SWEEP=quality cargo bench --bench place` prints the table.
+
+### Results
+
+| Problem | Items | Nets | Optimum | Annealing | Annealing, 10x moves | Analytic, legalized | Analytic, detailed | Annealing s | 10x s | Analytic s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Grid 16 x 16 | 256 | 480 | 480 | 1.778 (1.904) | 1.499 (1.600) | 1.000 (1.000) | 1.000 (1.000) | 0.030 | 0.29 | 0.010 |
+| Grid 16 x 16, pads | 320 | 544 | 544 | 1.496 (1.724) | 1.085 (1.158) | 1.000 (1.000) | 1.000 (1.000) | 0.031 | 0.31 | 0.008 |
+| Grid 32 x 32, pads | 1152 | 2112 | 2112 | 1.860 (2.014) | 1.188 (1.207) | 1.000 (1.000) | 1.000 (1.000) | 0.243 | 2.39 | 0.052 |
+| Grid 16 x 16, pads, macros of 4 | 320 | 544 | 544 | 1.999 (2.239) | 1.420 (1.562) | 1.000 (1.000) | 1.000 (1.000) | 0.007 | 0.07 | 0.004 |
+| Chain of 200 on 16 x 16 | 200 | 199 | 199 | 1.328 (1.387) | 1.057 (1.070) | 1.414 (1.432) | 1.060 (1.070) | 0.014 | 0.14 | 0.006 |
+| Peko 16 x 16 | 256 | 272 | 471 | 1.444 (1.489) | 1.253 (1.291) | 1.504 (1.560) | 1.259 (1.283) | 0.058 | 0.56 | 0.017 |
+| Peko 32 x 32, pads | 1152 | 1196 | 2020 | 1.611 (1.683) | 1.186 (1.210) | 1.462 (1.470) | 1.267 (1.280) | 0.459 | 4.50 | 0.108 |
+| Peko 32 x 32, pads, typed columns | 1152 | 1196 | 2020 | 1.877 (1.936) | 1.298 (1.433) | 1.635 (1.688) | 1.325 (1.360) | 0.461 | 4.44 | 0.156 |
+| Free space 8 x 8, full | 64 | 112 | 1120 | 1.568 (1.625) | 1.259 (1.286) | 1.143 (1.214) | 1.143 (1.214) | 0.015 | 0.16 | 0.005 |
+| Free space 12 x 12, full | 144 | 264 | 2640 | 1.856 (2.030) | 1.451 (1.602) | 3.867 (3.867) | 1.702 (1.860) | 0.050 | 0.50 | 0.019 |
+| Free space 12 x 12, 20% wider | 144 | 264 | 2640 | 2.105 (2.227) | 1.268 (1.396) | 1.665 (1.665) | 1.188 (1.216) | 0.052 | 0.53 | 0.019 |
+| Geometric mean | | | | 1.704 | 1.262 | 1.390 | 1.161 | | | |
+
+Every placement is legal by `place::check`, which shares no code with the placers.
+
+**Determinism.** The same seed gives the same placement: property tests check it on random
+problems for every method, and a regression test pins the wirelengths of one problem. Nothing
+runs in parallel inside a placer, so thread counts can't change anything; to check the claim
+anyway, `GUIDE_PLACE_SWEEP=threads` runs all 33 instances of the table with every method on one
+thread and then 16 at once, and gets the same wirelengths. Floating point is used only in a fixed
+order, with `math::exp` for the acceptance test and Newton's method for a cube root.
+
+### What the results say
+
+- **Analytic placement is the better default.** It finds the optimum on every grid, with or
+  without pads, and with macros, where a quadratic placement held by its pads is the grid itself
+  and spreading keeps it. On Peko problems it is within 26% to 33% of the optimum, about where
+  annealing gets with ten times its moves (19% to 30%), in a thirtieth to a fortieth of that
+  time, and a third of the time annealing takes at its default effort. Detailed placement takes
+  13% to 25% off what legalization leaves on sites.
+- **Annealing alone needs effort.** At VPR's `inner_num` of 1 it is 33% to 111% above the
+  optimum, and at 10 it is 6% to 50% above, gaining as annealing does with time. Grids are hard
+  for it, as for any annealer: regions settle into the grid's pattern at different orientations,
+  and undoing the walls between them takes moves that only lose at first. Macros are harder
+  still, as one only trades places with another of its shape that it lands on exactly.
+- **For context**, Peko's authors found the placers of 2003 far from the optimum on their
+  problems, which were much larger, of tens of thousands of cells and more. Small problems are
+  easier, so that is no comparison.
+- **Free space is the weak spot**, and legalization is why. Packed exactly, with a pitch of half
+  an item, greedy legalization leaves gaps of half an item that nothing fits, and the fallback,
+  packing from the bottom left, ignores the global placement: 12 x 12 squares legalize at 3.9
+  times the optimum, which detailed placement brings back to 1.7. With 20% to spare, the result is
+  1.19. Annealing does better than the analytic flow when space is exactly full.
+
+### What this does not show
+
+- These are synthetic problems, in which every net is as short as its size allows. Real
+  netlists have nets that can't all be short at once, and the ratio to a known optimum says
+  nothing about how a placement routes. The roadmap's measure for FPGA placement is wirelength
+  and delay after routing, against VPR, which is M8's.
+- They are small: at most 1152 items. Neither placer has been tuned or profiled at the sizes of
+  real FPGAs, and annealing, at `units^(4/3)` moves per temperature, grows quickly.
+- Congestion feedback is only tested for doing what it should on a tiny case; nothing here
+  measures what it does to routability.
+- Free-space problems are squares of one size. Mixed sizes, which PCBs have, are only tested for
+  legality.
 

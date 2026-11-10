@@ -193,13 +193,33 @@ constraints satisfied; results beat Freerouting on the curated suite.
 ### M7: Generic placement
 
 - Placement problem model: movable and fixed items, sites or free space, rotations,
-  macros, region constraints.
-- Simulated annealing with an adaptive schedule.
-- Analytic global placement, then legalization, then detailed placement.
-- Congestion estimates from the routing engine feed back into placement.
+  macros, region constraints. Done, in `place::PlacementProblem`: typed sites or a free-space
+  area with a pitch, quarter turns, rigid macros, rectangular regions, weighted nets, and a cost
+  that is a sum over nets of a `CostTerm`, half-perimeter wirelength by default. `place::check`
+  says whether a placement is legal, sharing no code with the placers.
+- Simulated annealing with an adaptive schedule. Done, in `place::Annealer`: VPR's schedule,
+  range limit and incremental cost, a temperature at a time, with a move budget and a cancel
+  flag.
+- Analytic global placement, then legalization, then detailed placement. Done, in
+  `place::place_analytic`: bound-to-bound quadratic placement by conjugate gradients, spread by
+  recursive bisection as in SimPL, Tetris-like legalization, and low-temperature annealing.
+- Congestion estimates from the routing engine feed back into placement. The interface is done:
+  `place::CongestionEstimate`, with a RUDY map, `place::CongestionGrid`, that a router can fill
+  instead, priced by `place::CongestionCost`. Filling it from the global router, and iterating,
+  is M9's.
 
 **Exit:** on synthetic problems, legal placements with wirelength close to known
 reference solutions; deterministic like the router.
+
+Met on problems built with a known optimum, grids, chains and Peko-style netlists on sites and in
+free space, up to 1152 items ([results](docs/benchmarks.md#placement-on-synthetic-problems)).
+Every placement is legal, and the same seed gives the same placement, on any number of threads.
+Analytic placement finds the optimum on every grid, with pads, macros or neither, and is 26% to
+33% above it on Peko problems, which annealing matches with ten times its default moves. Left:
+free space packed exactly full, where greedy legalization runs out of room and falls back to
+packing that ignores the global placement (1.7 times the optimum on 144 squares, against 1.19 with
+20% to spare); annealing macros, which only trade places with macros of their shape; and an FPGA
+hookup, building a problem from a VTR netlist and architecture, which comes with M8.
 
 ### M8: Domain placement
 

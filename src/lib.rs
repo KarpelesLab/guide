@@ -7,6 +7,9 @@
 //! **This crate is at an early stage and is not usable for routing yet.** See the
 //! [roadmap] for the plan and the [architecture notes] for the intended design.
 //!
+//! [`place`] places items on sites or in free space, by simulated annealing or analytic
+//! placement, and needs no feature.
+//!
 //! The `fpga` feature adds support for FPGA routing problems, and the `pcb` feature adds
 //! the geometry layer, `geom`, and PCB routing over it, `pcb`. The `kicad` feature, which
 //! implies `pcb`, reads KiCad boards into them, for clearance checks and routing, and the `dsn`

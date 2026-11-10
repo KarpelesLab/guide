@@ -48,6 +48,10 @@ name = "engine"
 harness = false
 
 [[bench]]
+name = "place"
+harness = false
+
+[[bench]]
 name = "geom"
 harness = false
 required-features = ["pcb"]

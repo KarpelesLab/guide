@@ -1,8 +1,8 @@
 # Algorithms
 
 Candidate algorithms and where each applies. This is a survey to guide
-implementation, **not a list of what is implemented** (at this stage, nothing is).
-Inclusion means "worth evaluating"; benchmarks decide what stays.
+implementation, **not a list of what is implemented**, though notes say where something has
+been built. Inclusion means "worth evaluating"; benchmarks decide what stays.
 
 ## Point-to-point search
 
@@ -92,14 +92,49 @@ between pads, vias and branches with the longest octilinear shortcuts that are l
 
 | Algorithm | Use | Notes |
 | --- | --- | --- |
-| Simulated annealing | All | Simple and strong on small and medium problems; the VPR baseline, and a natural fit for mixed constraints. Scales poorly alone. |
+| Simulated annealing | All | Simple and strong on small and medium problems; the VPR baseline, and a natural fit for mixed constraints. Scales poorly alone. Built as `place::Annealer`, with VPR's adaptive schedule. |
 | Min-cut partitioning (Fiduccia-Mattheyses) | Clustering, seeding | Divide large netlists; also useful for grouping PCB functional blocks. |
-| Quadratic and analytic placement (HeAP) | Large FPGA | Solve a relaxed problem, then spread and legalize. |
+| Quadratic and analytic placement (SimPL, HeAP) | Large FPGA | Solve a relaxed problem, then spread and legalize. Built as `place::place_analytic`, after SimPL with bound-to-bound net models. |
 | Electrostatic placement (ePlace, DREAMPlace) | Very large | State of the art for wirelength at scale. Heavier machinery; GPU optional. |
 | Force-directed | PCB | Natural for free-space placement with few items. |
-| Legalization (Tetris, Abacus, min-cost flow) | All discrete | Snaps a global solution to legal sites with minimum displacement. |
-| Detailed placement | All | Local window swaps after legalization. |
+| Legalization (Tetris, Abacus, min-cost flow) | All discrete | Snaps a global solution to legal sites with minimum displacement. Tetris-like greedy legalization built as `place::legalize`, for sites and free space. |
+| Detailed placement | All | Local window swaps after legalization. Built as low-temperature annealing over a few steps. |
 | Timing-driven weighting | FPGA, ASIC | Re-weights critical connections between iterations. |
+| RUDY congestion estimate | All | Spreads each net's wire evenly over its bounding box. Built as `place::CongestionGrid::rudy`, priced by `place::CongestionCost`. |
+
+### What `place` does
+
+Generic placement (roadmap M7) is in `src/place`, measured in
+[`docs/benchmarks.md`](benchmarks.md#placement-on-synthetic-problems).
+
+- **Model.** Items go on typed sites, one each, or in free space, where outlines may not overlap.
+  Items can be fixed, limited to a rectangle, turned by quarter turns, and tied into rigid macros.
+  A placement's cost is a sum over nets of a `CostTerm`, by default weighted half-perimeter
+  wirelength, kept per net so that a move only prices the nets it touches.
+- **Annealing.** VPR's schedule: the first temperature is 20 standard deviations of random moves'
+  cost changes, each temperature tries `inner_num * units^(4/3)` moves, the temperature falls by
+  0.5 to 0.8 depending on the fraction accepted, and the range limit, counted in columns and rows
+  of the item's kind of site or in pitches, follows that fraction towards 44%. Moves are moves to
+  empty places, swaps, quarter turns, macro shifts that push single items into the sites they
+  leave, and swaps of macros of one shape. The acceptance test uses `math::exp`.
+- **Analytic.** Bound-to-bound springs (Spindler, Schlichtmann and Johannes, 2008), whose
+  quadratic cost equals half-perimeter wirelength at the positions they were built from, solved
+  per axis by conjugate gradients with a Jacobi preconditioner, written here with a fixed order of
+  operations. Spreading by recursive bisection makes an upper bound, each further solve is
+  anchored to it with growing weight, as in SimPL (Kim, Lee and Markov, 2012), until the bounds
+  are within 10%. A quadratic placement of an unanchored netlist collapses to a point; the
+  first spreading then decides its shape, which on grids happened to be the right one.
+- **Legalization.** Tetris-like: macros from the bottom up, then items from left to right, each to
+  the nearest free spot by Manhattan distance, searched in rings. Items limited to a region go
+  first. When greedy choices leave gaps that later units can't use, it packs instead (Hill's
+  Tetris, then bottom-left packing in free space), which is legal but ignores the targets.
+- **Congestion feedback.** `CongestionEstimate` is the narrow interface: an overflow, in
+  thousandths, for a rectangle. `CongestionGrid` implements it from RUDY (Spindler and Johannes,
+  2007) or from demand and capacity a router fills in, and `CongestionCost` adds a net's
+  wirelength times that overflow to its cost. Closing the loop with the global router is M9.
+- **Known optima.** Generators build problems whose reference placement meets a per-net lower
+  bound, after Peko (Chang, Cong and Xie, 2003): grids, chains, Peko netlists with pads and typed
+  columns, and squares in free space.
 
 ## Support structures
 
@@ -131,13 +166,24 @@ between pads, vias and branches with the longest octilinear shortcuts that are l
   Router for FPGAs", *FPGA*, 1995.
 - V. Betz, J. Rose, "VPR: A New Packing, Placement and Routing Tool for FPGA
   Research", *FPL*, 1997.
+- D. Hill, "Method and System for High Speed Detailed Placement of Cells Within an
+  Integrated Circuit Design", US patent 6,370,673, 2002. Tetris legalization.
+- J. Cong, M. Romesis, M. Xie, "Optimality and Scalability Study of Partitioning and Placement
+  Algorithms", *ISPD*, 2003; and C.-C. Chang, J. Cong, M. Xie, "Optimality and Scalability Study
+  of Existing Placement Algorithms", *ASP-DAC*, 2003. The Peko benchmarks.
+- P. Spindler, F. Johannes, "Fast and Accurate Routing Demand Estimation for Efficient
+  Routability-Driven Placement", *DATE*, 2007. RUDY.
 - C. Chu, Y.-C. Wong, "FLUTE: Fast Lookup Table Based Rectilinear Steiner Minimal
   Tree Algorithm for VLSI Design", *IEEE TCAD*, 2008.
 - P. Spindler, U. Schlichtmann, F. Johannes, "Abacus: Fast Legalization of Standard
   Cell Circuits with Minimal Movement", *ISPD*, 2008.
+- P. Spindler, U. Schlichtmann, F. Johannes, "Kraftwerk2: A Fast Force-Directed Quadratic
+  Placement Approach Using an Accurate Net Model", *IEEE TCAD*, 2008. The bound-to-bound model.
 - K. Daniel, A. Nash, S. Koenig, A. Felner, "Theta\*: Any-Angle Path Planning on
   Grids", *JAIR*, 2010.
 - M. Gort, J. Anderson, "Analytical Placement for Heterogeneous FPGAs", *FPL*, 2012.
+- M.-C. Kim, D.-J. Lee, I. Markov, "SimPL: An Effective Placement Algorithm", *IEEE TCAD*,
+  2012.
 - J. Lu et al., "ePlace: Electrostatics-Based Placement Using Fast Fourier Transform
   and Nesterov's Method", *ACM TODAES*, 2015.
 - G. Sharon, R. Stern, A. Felner, N. Sturtevant, "Conflict-Based Search for Optimal

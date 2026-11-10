@@ -1,8 +1,8 @@
 # Architecture
 
 This records the intended design, and it changes as implementation teaches us things.
-The core model, search, multi-net engine, validator, timing analysis, geometry layer and
-PCB routing exist; see the [roadmap](../ROADMAP.md) for what doesn't yet. Code sketches are
+The core model, search, multi-net engine, validator, timing analysis, geometry layer,
+PCB routing and generic placement exist; see the [roadmap](../ROADMAP.md) for what doesn't yet. Code sketches are
 illustrative, not an API.
 
 ## Layers
@@ -121,7 +121,11 @@ time and keep the best result so far.
 
 Placement engines mirror this through a `PlacementProblem` of items, legal locations
 and a cost. They query routing engines for congestion estimates through a narrow
-interface, so that the two can be iterated together (roadmap M9).
+interface, so that the two can be iterated together (roadmap M9). In `src/place`: the annealer
+steps a temperature at a time with a budget and a cancel flag, as the routing engine steps
+iterations, and the interface is `CongestionEstimate`, an overflow for a rectangle, which a
+RUDY map or a router's own demand can answer. Placement costs are `u64` sums over nets of a
+`CostTerm`, cached per net so that a move prices only the nets it touches.
 
 ## Decisions
 

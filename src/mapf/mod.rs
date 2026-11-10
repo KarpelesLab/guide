@@ -17,10 +17,17 @@
 //!
 //! # Staying on the goal
 //!
-//! An agent's route ends with a step from its goal at some time `t` into [`State::Goal`], which
-//! holds the goal from `t + 1` to the horizon. Another agent passing through later conflicts
-//! with that, so the engine sees the rule like any other. The step costs 1, as moves and waits
-//! do, and a route's base cost is its agent's arrival time plus 1.
+//! An agent that arrives on its goal for good at time `t` goes on from there through a
+//! [`State::Stay`] at each time to the horizon, which holds the goal at that time, and then into
+//! [`State::Goal`], the target of every route. Another agent passing through later conflicts
+//! with a stay, so the engine sees the rule like any other. Moves and waits cost 2 and stays 1,
+//! so that a route's cost is the horizon plus 1 plus its arrival time: [`TimeSpace`] has why.
+//!
+//! The first version held the goal to the horizon in one step from the goal into
+//! [`State::Goal`]. That step had to be priced over every time to the horizon each time a search
+//! reached the goal, at each time it did, and on den520d, with a horizon of about 420, pricing
+//! it was most of the time. Chains of stays took a run of 600 agents there from 10.4 s to
+//! 4.7 s, and gave a lower sum of costs on every map measured (`docs/benchmarks.md`).
 //!
 //! # The horizon
 //!

@@ -5,9 +5,9 @@ use crate::geom::drc::{self, Board, Item, Keepout, Pad, Track, Violation};
 use crate::geom::{LayerId, LayerSet, Point, Rect, RuleSpec, Rules, Shape};
 use crate::id::NetId;
 
-const MM: i64 = 1_000_000;
+pub(super) const MM: i64 = 1_000_000;
 
-fn rules(layers: usize) -> Rules {
+pub(super) fn rules(layers: usize) -> Rules {
     let names: Vec<String> = (0..layers).map(|l| format!("L{l}")).collect();
     let names: Vec<&str> = names.iter().map(String::as_str).collect();
     let mut spec = RuleSpec::new(&names, 150_000, 200_000);
@@ -16,7 +16,7 @@ fn rules(layers: usize) -> Rules {
     Rules::new(spec).unwrap()
 }
 
-fn smd(x: i64, y: i64, net: u32) -> Pad {
+pub(super) fn smd(x: i64, y: i64, net: u32) -> Pad {
     Pad {
         shape: Shape::rect(Rect::new(
             Point::new(x - 300_000, y - 300_000),
@@ -30,7 +30,7 @@ fn smd(x: i64, y: i64, net: u32) -> Pad {
     }
 }
 
-fn through(x: i64, y: i64, net: u32, layers: usize) -> Pad {
+pub(super) fn through(x: i64, y: i64, net: u32, layers: usize) -> Pad {
     Pad {
         shape: Shape::circle(Point::new(x, y), 1_200_000).unwrap(),
         layers: LayerSet::first(layers),
@@ -40,7 +40,7 @@ fn through(x: i64, y: i64, net: u32, layers: usize) -> Pad {
     }
 }
 
-fn design(layers: usize, pads: Vec<Pad>, nets: usize) -> Design {
+pub(super) fn design(layers: usize, pads: Vec<Pad>, nets: usize) -> Design {
     let spec = NetSpec {
         route: true,
         track_width: 200_000,
@@ -60,11 +60,12 @@ fn design(layers: usize, pads: Vec<Pad>, nets: usize) -> Design {
         nets: vec![spec; nets],
         masks: Vec::new(),
         obstacles: Vec::new(),
+        pairs: Vec::new(),
     }
 }
 
 /// Routes, and checks that what is routed breaks no rule and connects its nets.
-fn route_checked(design: &Design, options: &Options) -> Routed {
+pub(super) fn route_checked(design: &Design, options: &Options) -> Routed {
     let routed = route(design, options).unwrap();
     let board = routed.board(design);
     let found = drc::check(&board, &design.rules).unwrap();
@@ -74,7 +75,7 @@ fn route_checked(design: &Design, options: &Options) -> Routed {
 }
 
 /// A rectangle's outline as four thin lines.
-fn outline(r: Rect) -> Vec<Shape> {
+pub(super) fn outline(r: Rect) -> Vec<Shape> {
     let (a, c) = (r.min(), r.max());
     let corners = [a, Point::new(c.x, a.y), c, Point::new(a.x, c.y)];
     (0..4)

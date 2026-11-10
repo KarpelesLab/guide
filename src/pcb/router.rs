@@ -1,5 +1,5 @@
-//! The whole run: nets from the design, global routing, detailed routing with rip-up, and
-//! cleanup.
+//! The whole run: nets from the design, escapes, global routing, detailed routing with
+//! rip-up, cleanup, and pairs side by side.
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -8,8 +8,9 @@ use super::detail::{self, Corridor, Failure, History, NetCtx, Params, RipUp, Ste
 use super::escape;
 use super::geometry::NetCopper;
 use super::global::{self, GlobalSpace, Probe, TerminalPads};
+use super::pairs;
 use super::world::{Verdict, World};
-use super::{Design, Options, RouteError, Routed, Stats};
+use super::{Design, DiffPair, Options, RouteError, Routed, Stats};
 use crate::geom::drc::{Track, Via};
 use crate::geom::{LayerId, LayerSet, Point, Rect, Shape};
 use crate::id::NetId;
@@ -35,7 +36,7 @@ const PRECHECK: u64 = 50_000;
 const FINE: i64 = 2;
 
 /// How many pitches from a pad routes may move onto its lattice.
-const LATTICE_REACH: i64 = 8;
+pub(crate) const LATTICE_REACH: i64 = 8;
 
 /// A point inside a pad, for its routes to end at: the centre of its box if that is in
 /// the pad, as for any convex pad, or else the first of a grid of points in the box.
@@ -239,6 +240,110 @@ fn jobs(design: &Design, world: &World<'_>, pitch: i64) -> Vec<Job> {
     out
 }
 
+/// The length of a straight track.
+fn track_length(t: &Track) -> f64 {
+    let (dx, dy) = ((t.end.x - t.start.x) as f64, (t.end.y - t.start.y) as f64);
+    (dx * dx + dy * dy).sqrt()
+}
+
+/// Routes a pair whose two nets are routed already side by side, in place of their routes,
+/// if it can, with any terminals that the pair's ends leave out joined to it. Otherwise the
+/// two routes stay as they were.
+fn couple_in_place(
+    design: &Design,
+    world: &mut World<'_>,
+    pair: &DiffPair,
+    jobs: &[Job],
+    by_net: &BTreeMap<NetId, usize>,
+    copper: &mut [Option<NetCopper>],
+    params: Params,
+) -> Option<pairs::PairRoute> {
+    let (&jp, &jn) = (by_net.get(&pair.positive)?, by_net.get(&pair.negative)?);
+    if jp == jn || copper[jp].is_none() || copper[jn].is_none() {
+        return None;
+    }
+    let old = [copper[jp].take()?, copper[jn].take()?];
+    let restore = |world: &mut World<'_>, copper: &mut [Option<NetCopper>], old: [NetCopper; 2]| {
+        for (j, mut c) in [jp, jn].into_iter().zip(old) {
+            c.place(world, &jobs[j].ctx);
+            copper[j] = Some(c);
+        }
+    };
+    let mut old = old;
+    for c in &mut old {
+        c.unplace(world);
+    }
+    let Some(route) = pairs::route_pair(design, world, pair, &jobs[jp], &jobs[jn], params) else {
+        restore(world, copper, old);
+        return None;
+    };
+    // The terminals the pair's ends leave out, joined to its copper or to each other.
+    let mut rest: Vec<(usize, NetCopper)> = Vec::new();
+    for (k, j) in [jp, jn].into_iter().enumerate() {
+        let ctx = &jobs[j].ctx;
+        let joined = route.terminals[k];
+        if ctx.terminals <= 2 {
+            continue;
+        }
+        let mut number: Vec<usize> = vec![0; ctx.terminals];
+        let mut next = 1;
+        for (t, n) in number.iter_mut().enumerate() {
+            if !joined.contains(&t) {
+                *n = next;
+                next += 1;
+            }
+        }
+        let mut pads: Vec<TermPad> = ctx
+            .pads
+            .iter()
+            .map(|p| TermPad {
+                terminal: number[p.terminal],
+                ..p.clone()
+            })
+            .collect();
+        for t in route.tracks.iter().filter(|t| t.net == Some(ctx.net)) {
+            for at in [t.start, t.end] {
+                pads.push(TermPad {
+                    center: at,
+                    layers: LayerSet::EMPTY.with(t.layer),
+                    bbox: Rect::new(at, at),
+                    terminal: 0,
+                });
+            }
+        }
+        let others = NetCtx::new(
+            ctx.net,
+            ctx.widths.clone(),
+            ctx.via,
+            pads,
+            next,
+            LATTICE_REACH * params.pitch,
+        );
+        let steps = StepCache::default();
+        match detail::route_net(world, &others, &steps, params, None, None) {
+            Ok(tree) => {
+                let mut c = NetCopper::from_tree(&others, &tree);
+                c.place(world, &others);
+                rest.push((j, c));
+            }
+            Err(_) => {
+                for (_, mut c) in rest {
+                    c.unplace(world);
+                }
+                route.undo.undo(world);
+                restore(world, copper, old);
+                return None;
+            }
+        }
+    }
+    copper[jp] = Some(NetCopper::default());
+    copper[jn] = Some(NetCopper::default());
+    for (j, c) in rest {
+        copper[j] = Some(c);
+    }
+    Some(route)
+}
+
 /// The most common value, the smallest among equals.
 fn most_common(values: impl Iterator<Item = i64>) -> Option<i64> {
     let mut counts: BTreeMap<i64, usize> = BTreeMap::new();
@@ -252,6 +357,11 @@ fn most_common(values: impl Iterator<Item = i64>) -> Option<i64> {
 }
 
 pub(crate) fn run(design: &Design, options: &Options) -> Result<Routed, RouteError> {
+    route_all(design, options)
+}
+
+/// Routes everything but meanders.
+fn route_all(design: &Design, options: &Options) -> Result<Routed, RouteError> {
     let rules = &design.rules;
     let world_of = |design: &Design| {
         World::new(
@@ -299,10 +409,6 @@ pub(crate) fn run(design: &Design, options: &Options) -> Result<Routed, RouteErr
         with_escapes = d;
         &with_escapes
     };
-    let mut world = world_of(design)?;
-    let mut jobs = jobs(design, &world, pitch);
-    jobs.sort_by_key(|j| (j.span, j.ctx.net));
-
     let pad_bounds = design
         .board
         .pads
@@ -316,12 +422,30 @@ pub(crate) fn run(design: &Design, options: &Options) -> Result<Routed, RouteErr
         .reduce(|a, b| a.union(&b))
         .or(pad_bounds.map(|b| b.expand(5_000_000)))
         .unwrap_or_default();
+    let params = Params {
+        pitch,
+        via_cost: options.via_cost,
+        layer_bias: options.layer_bias,
+        bounds,
+        max_expansions: options.max_expansions,
+        under_pads: false,
+        precheck: 0,
+    };
 
+    let mut world = world_of(design)?;
+    let mut jobs = jobs(design, &world, pitch);
+    jobs.sort_by_key(|j| (j.span, j.ctx.net));
     let mut stats = Stats {
         nets: jobs.len(),
         connections: jobs.iter().map(|j| j.ctx.terminals - 1).sum(),
         ..Stats::default()
     };
+    let has_job = |net: NetId| jobs.iter().any(|j| j.ctx.net == net);
+    stats.pairs.0 = design
+        .pairs
+        .iter()
+        .filter(|p| has_job(p.positive) && has_job(p.negative))
+        .count();
 
     // Global routing.
     let tile = options.tile.unwrap_or(16 * pitch).max(pitch);
@@ -368,16 +492,6 @@ pub(crate) fn run(design: &Design, options: &Options) -> Result<Routed, RouteErr
     let mut history = History {
         grid: space.grid(),
         cost: vec![0.0; space.grid().cells.len()],
-    };
-
-    let params = Params {
-        pitch,
-        via_cost: options.via_cost,
-        layer_bias: options.layer_bias,
-        bounds,
-        max_expansions: options.max_expansions,
-        under_pads: false,
-        precheck: 0,
     };
 
     // Detailed routing, with rip-up.
@@ -503,41 +617,60 @@ pub(crate) fn run(design: &Design, options: &Options) -> Result<Routed, RouteErr
         .filter(|&j| outside[j] && copper[j].is_some())
         .count();
 
-    // The escapes of nets routed are part of their routes.
-    let escaped: Vec<&escape::Escape> = escapes
+    // The escapes and pairs of nets routed are part of their routes.
+    let kept = |net: Option<NetId>| net.is_some_and(|n| unrouted.binary_search(&n).is_err());
+    let mut tracks: Vec<Track> = escapes
         .iter()
-        .filter(|e| by_net.get(&e.net).is_some_and(|&j| copper[j].is_some()))
+        .filter(|e| kept(Some(e.net)))
+        .flat_map(|e| e.tracks.iter().cloned())
         .collect();
-    let escape_length: f64 = escaped
+    let mut vias: Vec<Via> = escapes
         .iter()
-        .flat_map(|e| &e.tracks)
-        .map(|t| {
-            let (dx, dy) = ((t.end.x - t.start.x) as f64, (t.end.y - t.start.y) as f64);
-            (dx * dx + dy * dy).sqrt()
-        })
-        .sum();
+        .filter(|e| kept(Some(e.net)))
+        .filter_map(|e| e.via.clone())
+        .collect();
+    let fixed_length: f64 = tracks.iter().map(track_length).sum();
+    let fixed_vias = vias.len();
     let measure = |copper: &[Option<NetCopper>]| -> (usize, f64) {
-        copper.iter().flatten().fold(
-            (
-                escaped.iter().filter(|e| e.via.is_some()).count(),
-                escape_length,
-            ),
-            |(v, l), c| (v + c.vias.len(), l + c.length()),
-        )
+        copper
+            .iter()
+            .flatten()
+            .fold((fixed_vias, fixed_length), |(v, l), c| {
+                (v + c.vias.len(), l + c.length())
+            })
     };
     stats.before_cleanup = measure(&copper);
     if options.cleanup {
         stats.expanded += cleanup::run(&mut world, &jobs, &mut copper, params, options);
     }
-    stats.after_cleanup = measure(&copper);
+    // Pairs side by side, in place of the routes they were given as two nets.
+    let mut paired = (0, 0.0);
+    if options.couple_pairs {
+        for pair in &design.pairs {
+            if let Some(route) = couple_in_place(
+                design,
+                &mut world,
+                pair,
+                &jobs,
+                &by_net,
+                &mut copper,
+                params,
+            ) {
+                stats.pairs.1 += 1;
+                paired.0 += route.vias.len();
+                paired.1 += route.tracks.iter().map(track_length).sum::<f64>();
+                tracks.extend(route.tracks);
+                vias.extend(route.vias);
+            }
+        }
+    }
+    let (v, l) = measure(&copper);
+    stats.after_cleanup = (v + paired.0, l + paired.1);
     stats.routed = copper.iter().flatten().count();
     stats.connected = (0..jobs.len())
         .filter(|&j| copper[j].is_some())
         .map(|j| jobs[j].ctx.terminals - 1)
         .sum();
-
-    let mut tracks: Vec<Track> = escaped.iter().flat_map(|e| e.tracks.clone()).collect();
-    let mut vias: Vec<Via> = escaped.iter().filter_map(|e| e.via.clone()).collect();
     let top = LayerId(0);
     let bottom = LayerId((rules.layer_count() - 1) as u8);
     for (job, c) in jobs.iter().zip(&copper) {

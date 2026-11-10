@@ -348,6 +348,47 @@ impl<'r> World<'r> {
         verdict
     }
 
+    /// Whether a track that stands for both tracks of a pair may be `shape` on `layer`.
+    /// Everything is in its way, the two nets' own copper too, as either track may be the
+    /// one beside it: other nets' copper keeps the larger of the two nets' clearances from
+    /// it, and copper of the pair's own nets the clearance between the two.
+    pub(crate) fn track_pair(&self, nets: (NetId, NetId), layer: LayerId, shape: &Shape) -> bool {
+        let l = usize::from(layer.0);
+        let Some(index) = self.layers.get(l) else {
+            return false;
+        };
+        let mut near = self.scratch.borrow_mut();
+        index.query(&shape.bbox().expand(self.reach), &mut near);
+        let (a, b) = (
+            (nets.0, self.clearance(Some(nets.0), layer)),
+            (nets.1, self.clearance(Some(nets.1), layer)),
+        );
+        let ours = |m: &Meta| m.net == Some(nets.0) || m.net == Some(nets.1);
+        for &id in near.iter() {
+            let meta = self.meta[l][id.slot() as usize];
+            let Some(other) = index.get(id) else { continue };
+            let hit = match meta.kind {
+                Kind::Copper => {
+                    let required = if ours(&meta) {
+                        self.rules
+                            .clearance_between(Some(nets.0), Some(nets.1), layer)
+                    } else {
+                        self.required(a, meta).max(self.required(b, meta))
+                    };
+                    violates(shape, other, required)
+                }
+                Kind::Hole => self.hole_hit(shape, other, None, meta.own),
+                Kind::Keepout { tracks, .. } => tracks && shape.touches(other),
+                Kind::Edge => self.edge_hit(shape, other),
+                Kind::Mask { margin } => violates(shape, other, margin + MASK_GUARD),
+            };
+            if hit {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Whether `net`'s through via may be at `at`, as [`track`](World::track) says.
     pub(crate) fn via(
         &self,
@@ -444,16 +485,7 @@ impl<'r> World<'r> {
         meta: Meta,
         layer: LayerId,
     ) -> bool {
-        // What `drc::clearance` comes to, with ours resolved once for the query and theirs
-        // when they were added.
-        let required = match (meta.own, meta.net) {
-            (Some(own), _) => own.max(self.rules.spec().min_clearance),
-            (None, Some(theirs)) => match self.rules.pair_clearance(ours.0, theirs) {
-                Some(pair) => pair.max(self.rules.spec().min_clearance),
-                None => ours.1.max(meta.clearance),
-            },
-            (None, None) => ours.1.max(meta.clearance),
-        };
+        let required = self.required(ours, meta);
         debug_assert_eq!(
             required,
             drc::clearance(
@@ -464,6 +496,20 @@ impl<'r> World<'r> {
             )
         );
         violates(shape, other, required)
+    }
+
+    /// The clearance between copper of `ours`, a net and its clearance on the layer, and an
+    /// entry: what `drc::clearance` comes to, with ours resolved once for the query and
+    /// theirs when they were added.
+    fn required(&self, ours: (NetId, i64), meta: Meta) -> i64 {
+        match (meta.own, meta.net) {
+            (Some(own), _) => own.max(self.rules.spec().min_clearance),
+            (None, Some(theirs)) => match self.rules.pair_clearance(ours.0, theirs) {
+                Some(pair) => pair.max(self.rules.spec().min_clearance),
+                None => ours.1.max(meta.clearance),
+            },
+            (None, None) => ours.1.max(meta.clearance),
+        }
     }
 
     /// Whether copper is too close to a hole of another net.

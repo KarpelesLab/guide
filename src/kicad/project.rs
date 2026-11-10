@@ -15,6 +15,8 @@ pub(crate) struct ClassDef {
     pub(crate) name: String,
     pub(crate) clearance: Option<i64>,
     pub(crate) pair_gap: Option<i64>,
+    /// The width of each track of its differential pairs, for routing.
+    pub(crate) pair_width: Option<i64>,
     pub(crate) priority: Option<i64>,
     pub(crate) track_width: Option<i64>,
     pub(crate) via_diameter: Option<i64>,
@@ -60,6 +62,7 @@ pub(crate) fn defaults() -> ProjectRules {
             name: "Default".into(),
             clearance: Some(200_000),
             pair_gap: Some(250_000),
+            pair_width: Some(200_000),
             priority: None,
             track_width: Some(200_000),
             via_diameter: Some(600_000),
@@ -109,6 +112,7 @@ pub(crate) fn parse(text: &str) -> Result<ProjectRules, KicadError> {
                 name: name.to_string(),
                 clearance: length(class.get("clearance")),
                 pair_gap: length(class.get("diff_pair_gap")),
+                pair_width: length(class.get("diff_pair_width")),
                 priority: class
                     .get("priority")
                     .and_then(Json::as_number)

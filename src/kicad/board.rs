@@ -210,12 +210,50 @@ fn routing(project: &ProjectRules, names: &[String], outline: Vec<Shape>) -> Rou
             via_drill: drill,
         });
     }
+    // Differential pairs, by their names, at the class's width and gap: the class that
+    // gives the positive net its track width, or failing that, `Default`.
+    let ids: BTreeMap<&str, usize> = names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.as_str(), i))
+        .collect();
+    let mut pairs = Vec::new();
+    for (i, name) in names.iter().enumerate() {
+        let Some(partner) = project::pair_partner(name) else {
+            continue;
+        };
+        let Some(&j) = ids.get(partner.as_str()) else {
+            continue;
+        };
+        // Each pair once, from its positive net: `P` or `+`.
+        let stem = name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '_');
+        let positive = stem.ends_with('P') || stem.ends_with('+');
+        if !positive || name.is_empty() {
+            continue;
+        }
+        let class = project
+            .routing_class(name)
+            .map_or(default, |c| &project.classes[c]);
+        let pick = |f: fn(&ClassDef) -> Option<i64>| {
+            f(class)
+                .or_else(|| f(default))
+                .or_else(|| f(&defaults))
+                .unwrap_or(0)
+        };
+        pairs.push(crate::pcb::DiffPair {
+            positive: NetId(i as u32),
+            negative: NetId(j as u32),
+            width: pick(|c| c.pair_width).max(project.min_track_width).max(1),
+            gap: pick(|c| c.pair_gap),
+        });
+    }
     Routing {
         outline,
         edge_clearance: project.edge_clearance,
         nets,
         masks: Vec::new(),
         text: Vec::new(),
+        pairs,
     }
 }
 
@@ -1228,6 +1266,7 @@ impl Reader {
                     name: name.to_string(),
                     clearance: length(class, "clearance"),
                     pair_gap: length(class, "diff_pair_gap"),
+                    pair_width: length(class, "diff_pair_width"),
                     priority: None,
                     track_width: length(class, "trace_width"),
                     via_diameter: length(class, "via_dia"),

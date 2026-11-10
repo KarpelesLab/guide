@@ -38,6 +38,12 @@
 //! 4. **Cleanup**: nets with vias are rerouted with dearer vias, kept only if they lose
 //!    vias; then each run of tracks between pads, vias and branches is pulled tight, by
 //!    replacing runs with straight or 45° shortcuts where those are legal.
+//! 5. **Differential pairs**, [`Design::pairs`]: each pair's two routes are taken out, and
+//!    the pair is routed side by side in their place, at its gap, where it fits: a search
+//!    for its centreline, wide enough for both tracks, offset into the two tracks, with
+//!    vias side by side and each net's own fan-out near its pads. It is kept if it connects
+//!    all that the two routes did, so it can't cost another net its route. Pairs whose
+//!    two nets' pads are far apart are left as they are.
 //!
 //! `docs/architecture.md` has why it is built this way, with the measurements, and
 //! `docs/benchmarks.md` has results on real boards.
@@ -53,6 +59,8 @@ mod detail;
 mod escape;
 mod geometry;
 mod global;
+mod measure;
+mod pairs;
 mod router;
 mod verify;
 mod world;
@@ -63,6 +71,7 @@ use crate::geom::drc::{Board, Track, Via};
 use crate::geom::{GeomError, LayerId, Rules, Shape};
 use crate::id::NetId;
 
+pub use measure::{coupling, net_length};
 pub use verify::unconnected;
 
 /// The size of a net's through vias.
@@ -100,6 +109,21 @@ pub struct NetSpec {
     pub via: Option<ViaSize>,
 }
 
+/// The two nets of a differential pair, routed side by side at a constant gap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DiffPair {
+    /// The positive net, such as `D+` or `TX_P`.
+    pub positive: NetId,
+    /// The negative net.
+    pub negative: NetId,
+    /// The width of each of the two tracks where they run together. Raised to the rules'
+    /// minimum track width if it is less.
+    pub width: i64,
+    /// The gap between the two tracks, edge to edge. Raised to the clearance the rules
+    /// keep between the two nets if it is less.
+    pub gap: i64,
+}
+
 /// A board to route: what is fixed on it, its rules, its edge and its nets.
 #[derive(Clone, Debug)]
 pub struct Design {
@@ -120,6 +144,8 @@ pub struct Design {
     /// Copper with no net that the board doesn't hold, such as text, which routes keep
     /// clear of as of any copper. The check doesn't see it.
     pub obstacles: Vec<(Shape, LayerId)>,
+    /// Differential pairs, each net in one at most.
+    pub pairs: Vec<DiffPair>,
 }
 
 impl Design {
@@ -133,9 +159,29 @@ impl Design {
     }
 
     /// The design of a KiCad board: every net with a name, at its class's track width and
-    /// via size. Enabled by the `kicad` feature.
+    /// via size, and its differential pairs, as KiCad finds them by their names, at their
+    /// class's width and gap. Enabled by the `kicad` feature.
     #[cfg(feature = "kicad")]
     pub fn from_kicad(board: &crate::kicad::KicadBoard) -> Design {
+        let mut pairs = board.routing.pairs.clone();
+        // Pairs that the rules give a gap of their own, if the names didn't.
+        for &(a, b, gap) in &board.rules.spec().pairs {
+            if !pairs.iter().any(|p| [p.positive, p.negative].contains(&a))
+                && !pairs.iter().any(|p| [p.positive, p.negative].contains(&b))
+            {
+                let width = board
+                    .routing
+                    .nets
+                    .get(a.index())
+                    .map_or(0, |n| n.track_width);
+                pairs.push(DiffPair {
+                    positive: a,
+                    negative: b,
+                    width,
+                    gap,
+                });
+            }
+        }
         let nets = board
             .routing
             .nets
@@ -158,6 +204,7 @@ impl Design {
             nets,
             masks: board.routing.masks.clone(),
             obstacles: board.routing.text.clone(),
+            pairs,
         }
     }
 }
@@ -194,6 +241,9 @@ pub struct Options {
     pub fine_pass: bool,
     /// Whether to clean up after routing. The default is true.
     pub cleanup: bool,
+    /// Whether to route [differential pairs](Design::pairs) side by side. The default is
+    /// true. Without, their nets are routed as any others.
+    pub couple_pairs: bool,
 }
 
 impl Default for Options {
@@ -209,6 +259,7 @@ impl Default for Options {
             max_expansions: 2_000_000,
             fine_pass: true,
             cleanup: true,
+            couple_pairs: true,
         }
     }
 }
@@ -239,6 +290,9 @@ pub struct Stats {
     pub before_cleanup: (usize, f64),
     /// Vias and track length after.
     pub after_cleanup: (usize, f64),
+    /// Differential pairs with pads to connect, and of those, the pairs routed side by
+    /// side.
+    pub pairs: (usize, usize),
 }
 
 /// The result of [`route`].
@@ -308,6 +362,7 @@ impl std::error::Error for RouteError {}
 ///     edge_clearance: 0,
 ///     masks: Vec::new(),
 ///     obstacles: Vec::new(),
+///     pairs: Vec::new(),
 ///     nets: vec![NetSpec {
 ///         route: true,
 ///         track_width: 200_000,
@@ -330,5 +385,7 @@ pub fn route(design: &Design, options: &Options) -> Result<Routed, RouteError> {
     router::run(design, options)
 }
 
+#[cfg(test)]
+mod pair_tests;
 #[cfg(test)]
 mod tests;

@@ -9,7 +9,7 @@ use super::world::{Verdict, World};
 use crate::geom::{LayerId, Point, Shape};
 
 /// How much dearer vias are when a net is rerouted to lose some.
-const VIA_COST_FACTOR: f64 = 10.0;
+pub(crate) const VIA_COST_FACTOR: f64 = 10.0;
 
 /// Cleans up every routed net, and returns the nodes its searches expanded.
 pub(crate) fn run(
@@ -128,7 +128,7 @@ fn ways(a: Point, b: Point) -> Vec<Vec<Point>> {
 
 /// Replaces each run of tracks between pads, vias and branches with shortcuts where they
 /// are legal, longest first.
-fn pull_tight(world: &World<'_>, ctx: &NetCtx, c: &mut NetCopper) {
+pub(crate) fn pull_tight(world: &World<'_>, ctx: &NetCtx, c: &mut NetCopper) {
     let mut anchors: Vec<Point> = ctx.pads.iter().map(|p| p.center).collect();
     anchors.extend(c.vias.iter().copied());
     anchors.sort_unstable();

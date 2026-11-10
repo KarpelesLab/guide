@@ -17,7 +17,8 @@
 //! - zones' fills, as saved: `kicad-cli pcb drc` doesn't refill them either, unless asked;
 //! - rule areas that keep tracks, vias or pads out, as [keepouts](drc::Keepout);
 //! - for routing, in [`KicadBoard::routing`], the board's edge, the copper-to-edge
-//!   clearance, and the track width and via size of each net's class;
+//!   clearance, the track width and via size of each net's class, and differential pairs
+//!   with their class's width and gap;
 //! - the rules: net classes, their patterns and assignments, differential pairs' gaps, the
 //!   minimum clearance, the hole clearance and the hole-to-hole clearance, from the
 //!   project, or from the board itself for KiCad 5 files and boards without a project.
@@ -150,6 +151,10 @@ pub struct Routing {
     /// Boxes around text on copper, which the reader doesn't take as copper, a little
     /// larger than the text, with their layers.
     pub text: Vec<(crate::geom::Shape, crate::geom::LayerId)>,
+    /// Differential pairs, as KiCad finds them by their names: past any digits and
+    /// underscores at the end, `P` pairs with `N` and `+` with `-`. Each has the width and
+    /// gap of the class that gives its positive net its track width.
+    pub pairs: Vec<crate::pcb::DiffPair>,
 }
 
 /// What new routes of one net take, from its net class: see [`Routing`].

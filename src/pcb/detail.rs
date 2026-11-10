@@ -32,7 +32,7 @@ impl DNode {
 }
 
 /// The eight directions, as steps of one pitch.
-const DIRS: [(i64, i64); 8] = [
+pub(crate) const DIRS: [(i64, i64); 8] = [
     (1, 0),
     (1, 1),
     (0, 1),

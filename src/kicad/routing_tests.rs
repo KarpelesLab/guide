@@ -105,9 +105,21 @@ impl Row {
 
 /// Routes a board, checks it, and returns what it did with the routed board's text.
 fn route_board(dir: &str, name: &'static str) -> (Row, String, Routed, String) {
+    let (row, text, routed, pro, _, _) = route_board_with(dir, name, |_, _| ());
+    (row, text, routed, pro)
+}
+
+/// [`route_board`], with the design changed by `change` first, and also returning the
+/// design and the board as read.
+fn route_board_with(
+    dir: &str,
+    name: &'static str,
+    change: impl FnOnce(&KicadBoard, &mut Design),
+) -> (Row, String, Routed, String, Design, KicadBoard) {
     let (pcb, pro) = load(dir, name);
     let read = super::read(&pcb, Some(&pro)).unwrap();
-    let design = stripped(&read);
+    let mut design = stripped(&read);
+    change(&read, &mut design);
     let start = Instant::now();
     let routed = pcb::route(&design, &Options::default()).unwrap();
     let seconds = start.elapsed().as_secs_f64();
@@ -159,7 +171,7 @@ fn route_board(dir: &str, name: &'static str) -> (Row, String, Routed, String) {
         seconds,
     };
     let text = replace_routing(&pcb, &routed.tracks, &routed.vias, &read.nets, &read.rules);
-    (row, text, routed, pro)
+    (row, text, routed, pro, design, read)
 }
 
 #[test]
@@ -256,4 +268,132 @@ fn curated_boards_route() {
         println!();
     }
     assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// The boards with differential pairs or lengths to match.
+const PAIRED: [(&str, &str); 4] = [
+    ("starshipraider", "isi-channel"),
+    ("udb-s", "udb-s"),
+    ("gekkio", "GB-LIVE32"),
+    ("nitrokey", "nk3-nrf-mini"),
+];
+
+/// How a pair's two nets are routed: the fraction of the positive net's length at the
+/// pair's gap, to within 5 µm, the two lengths in millimetres, and the vias of both.
+fn pair_measures(
+    tracks: &[drc::Track],
+    vias: &[drc::Via],
+    design: &Design,
+    pair: &pcb::DiffPair,
+) -> (f64, f64, f64, usize) {
+    let rules = &design.rules;
+    let gap = (0..rules.layer_count())
+        .map(|l| {
+            rules.clearance_between(
+                Some(pair.positive),
+                Some(pair.negative),
+                crate::geom::LayerId(l as u8),
+            )
+        })
+        .fold(pair.gap, i64::max);
+    let (coupled, total) = pcb::coupling(tracks, pair.positive, pair.negative, gap, 5000);
+    let (p, n) = (
+        pcb::net_length(tracks, pair.positive) / 1e6,
+        pcb::net_length(tracks, pair.negative) / 1e6,
+    );
+    let v = vias
+        .iter()
+        .filter(|v| v.net == Some(pair.positive) || v.net == Some(pair.negative))
+        .count();
+    (coupled / total.max(1.0), p, n, v)
+}
+
+/// Routes the boards with differential pairs, and prints how their pairs are routed
+/// against the original hand routing. Runs only with `GUIDE_ROUTE=1`, as
+/// [`curated_boards_route`] does, with `GUIDE_KICAD=1` too for KiCad's DRC.
+#[test]
+fn curated_pairs() {
+    if std::env::var_os("GUIDE_ROUTE").is_none() {
+        eprintln!("skipped: set GUIDE_ROUTE=1 to route the curated boards");
+        return;
+    }
+    let kicad = std::env::var_os("GUIDE_KICAD").is_some();
+    println!(
+        "| Board | Pair | Gap, mm | Coupled | P, N length, mm | Skew, mm | Vias | Original: coupled | P, N length | Skew | Vias |"
+    );
+    println!("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
+    let mut failures = Vec::new();
+    for &(dir, name) in &PAIRED {
+        let (row, text, routed, pro, design, read) = route_board_with(dir, name, |_, _| ());
+        for pair in &design.pairs {
+            let ours = pair_measures(&routed.tracks, &routed.vias, &design, pair);
+            let theirs = pair_measures(&read.board.tracks, &read.board.vias, &design, pair);
+            println!(
+                "| `{name}` | `{}`, `{}` | {:.3} | {:.0}% | {:.2}, {:.2} | {:.3} | {} | {:.0}% | {:.2}, {:.2} | {:.3} | {} |",
+                read.nets[pair.positive.index()],
+                read.nets[pair.negative.index()],
+                pair.gap as f64 / 1e6,
+                100.0 * ours.0,
+                ours.1,
+                ours.2,
+                (ours.1 - ours.2).abs(),
+                ours.3,
+                100.0 * theirs.0,
+                theirs.1,
+                theirs.2,
+                (theirs.1 - theirs.2).abs(),
+                theirs.3,
+            );
+        }
+        println!(
+            "{} pairs side by side: {:?}",
+            row.markdown(),
+            routed.stats.pairs
+        );
+        if kicad {
+            let (found, unconnected) = kicad_check(&text, &pro, name);
+            println!(
+                "{name}: KiCad: {} violations, {unconnected} unconnected",
+                found.len()
+            );
+            if !found.is_empty() {
+                failures.push(format!("{name}: {found:?}"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+#[test]
+fn differential_pairs_are_read_with_their_class() {
+    for (dir, name, expected) in [
+        ("udb-s", "udb-s", vec![("D+", "D-", 250_000, 200_000)]),
+        (
+            "starshipraider",
+            "isi-channel",
+            vec![
+                ("/CH1_P", "/CH1_N", 200_000, 250_000),
+                ("/CH2_P", "/CH2_N", 200_000, 250_000),
+                ("/CH3_P", "/CH3_N", 200_000, 250_000),
+            ],
+        ),
+    ] {
+        let (pcb, pro) = load(dir, name);
+        let read = super::read(&pcb, Some(&pro)).unwrap();
+        let pairs: Vec<(&str, &str, i64, i64)> = read
+            .routing
+            .pairs
+            .iter()
+            .map(|p| {
+                (
+                    read.nets[p.positive.index()].as_str(),
+                    read.nets[p.negative.index()].as_str(),
+                    p.width,
+                    p.gap,
+                )
+            })
+            .collect();
+        assert_eq!(pairs, expected, "{name}");
+        assert_eq!(Design::from_kicad(&read).pairs, read.routing.pairs);
+    }
 }

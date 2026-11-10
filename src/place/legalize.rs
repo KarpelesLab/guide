@@ -7,11 +7,16 @@
 //! way, items limited to a region go first, smallest region first, so that others don't take
 //! their room.
 //!
+//! In free space, greedy choices leave gaps that nothing fits when space is tight, so rows
+//! after Abacus, in the `abacus` module, are tried too, four ways, and the legal result with the
+//! shortest wirelength wins.
+//!
 //! Searches go in rings of growing distance, counted in the grid of the item's kind or in
 //! pitches, and stop one ring after the first that has room. Nearest is by Manhattan distance,
 //! with ties to the lowest site or the lowest coordinates, so results never depend on anything
 //! but the problem and the targets.
 
+use super::abacus::{Rows, legalize_rows};
 use super::netlist::{KindGrid, Netlist, Unit};
 use super::problem::rotate_rect;
 use super::spatial::SpatialIndex;
@@ -27,8 +32,8 @@ use super::{ItemId, Layout, PlaceError, Placement, PlacementProblem, Point, Rect
 /// # Errors
 ///
 /// [`PlaceError::Problem`] if the problem is malformed, and [`PlaceError::NoRoom`] if an item
-/// finds no legal spot, which in free space can happen before space runs out, as greedy
-/// packing leaves gaps.
+/// finds no legal spot, which in free space can happen before space runs out, when neither
+/// greedy packing nor rows leave a gap it fits.
 ///
 /// # Panics
 ///
@@ -85,12 +90,14 @@ pub fn legalize(
 /// Legalizes units towards anchor targets, with a rotation for each unit.
 ///
 /// Greedy placement near targets can leave room only in gaps too small for what comes next:
-/// columns cut too short for the macros still to come, or space between outlines. If any unit
-/// finds no room, this tries again packing. On sites, macros go largest first, each to the
-/// lowest room near its column. In free space, units go from left to right, each to the
-/// leftmost spot with room in the row where that is nearest its target, as in the Tetris
-/// legalizer, and if that fails too, largest first to the lowest and then leftmost spot, which
-/// is bottom-left packing.
+/// columns cut too short for the macros still to come, or space between outlines. In free
+/// space, rows after Abacus are tried as well, along x and along y, with each unit in the row
+/// where it moves least or with rows filled in order, and the result with the shortest
+/// wirelength, greedy or by rows, wins. If none is legal, this tries again packing. On sites,
+/// macros go largest first, each to the lowest room near its column. In free space, units go
+/// from left to right, each to the leftmost spot with room in the row where that is nearest its
+/// target, as in the Tetris legalizer, and if that fails too, largest first to the lowest and
+/// then leftmost spot, which is bottom-left packing.
 pub(crate) fn legalize_units(
     problem: &PlacementProblem,
     netlist: &Netlist,
@@ -99,6 +106,30 @@ pub(crate) fn legalize_units(
 ) -> Result<Placement, PlaceError> {
     let free = matches!(problem.layout(), Layout::FreeSpace { .. });
     let mut result = legalize_once(problem, netlist, anchors, rotations, Mode::Nearest);
+    if free {
+        // Rows both ways, each unit to its nearest row or rows filled in order, and the greedy
+        // result if there is one: the shortest wins.
+        let mut best = result
+            .as_ref()
+            .ok()
+            .map(|p| (problem.wirelength(p), p.clone()));
+        for (rows, balanced) in [
+            (Rows::Horizontal, false),
+            (Rows::Vertical, false),
+            (Rows::Horizontal, true),
+            (Rows::Vertical, true),
+        ] {
+            if let Some(p) = legalize_rows(problem, netlist, anchors, rotations, rows, balanced) {
+                let w = problem.wirelength(&p);
+                if best.as_ref().is_none_or(|(b, _)| w < *b) {
+                    best = Some((w, p));
+                }
+            }
+        }
+        if let Some((_, p)) = best {
+            return Ok(p);
+        }
+    }
     if matches!(result, Err(PlaceError::NoRoom(_))) && (free || !problem.macros().is_empty()) {
         result = legalize_once(problem, netlist, anchors, rotations, Mode::Tetris);
     }
@@ -478,7 +509,7 @@ fn packed_spot(
 }
 
 /// The free spot for a unit's anchor nearest to `target`, on its lattice, or `None`.
-fn nearest_free_spot(
+pub(crate) fn nearest_free_spot(
     problem: &PlacementProblem,
     unit: &Unit,
     rotation: i32,

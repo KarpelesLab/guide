@@ -30,14 +30,18 @@ pub struct AnnealOptions<'c> {
     pub seed: u64,
     /// Moves per temperature, as a multiple of `units^(4/3)`, which is VPR's `--inner_num`.
     /// The default is 1. More gives better results more slowly: on the synthetic problems of
-    /// `docs/benchmarks.md`, 10 instead of 1 took results from 1.33 to 2.1 times the optimum
-    /// down to 1.06 to 1.5.
+    /// `docs/benchmarks.md`, 10 instead of 1 takes the geometric mean of the ratios to the
+    /// optimum from about 1.5 to about 1.13.
     pub inner_num: f64,
     /// The first temperature, as a multiple of the standard deviation of random moves' cost
     /// changes. The default is 20, as in VPR, which accepts nearly everything at first.
     pub initial_temperature_factor: f64,
     /// The first range limit, in steps. The default is `None`, the whole layout.
     pub initial_range: Option<u32>,
+    /// The fraction of moves that send a single item to a random place in the median region
+    /// of its nets, where it adds least to their half-perimeters, as VPR's median moves do,
+    /// instead of to a random place within the range limit. The default is 0.3.
+    pub median_moves: f64,
     /// Annealing ends when the temperature is below this times the average cost of a net.
     /// The default is 0.005, as in VPR.
     pub exit_factor: f64,
@@ -55,6 +59,7 @@ impl Default for AnnealOptions<'_> {
             inner_num: 1.0,
             initial_temperature_factor: 20.0,
             initial_range: None,
+            median_moves: 0.3,
             exit_factor: 0.005,
             max_moves: u64::MAX,
             cancel: None,
@@ -65,11 +70,13 @@ impl Default for AnnealOptions<'_> {
 impl AnnealOptions<'_> {
     /// Options for detailed placement: annealing that starts cold, over a few steps, to
     /// improve a placement that is already good without undoing it. The temperature starts
-    /// at a twentieth of the standard deviation of moves within 3 steps.
+    /// at a twentieth of the standard deviation of moves within 8 steps, and each temperature
+    /// tries three times the default number of moves.
     pub fn detailed() -> Self {
         AnnealOptions {
             initial_temperature_factor: 0.05,
-            initial_range: Some(3),
+            initial_range: Some(8),
+            inner_num: 3.0,
             ..AnnealOptions::default()
         }
     }
@@ -134,6 +141,15 @@ enum Phase {
     Quench,
 }
 
+/// Where a move sends a unit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Aim {
+    /// Somewhere random within the range limit.
+    Random,
+    /// Somewhere random in the median region of its nets.
+    Median,
+}
+
 /// An item's state before a move, to take the move back.
 #[derive(Clone, Copy, Debug)]
 struct Old {
@@ -150,14 +166,19 @@ struct Old {
 /// Each move picks a movable unit, an item or a macro, at random, and a place for it within
 /// the range limit of where it is: a site of its kind at most that many columns and rows away,
 /// counted among the columns and rows that have sites of the kind, or a point at most that many
-/// pitches away in free space. If another single item is there, the two swap. On sites, a macro
-/// may go as much further as it is long, and one that lands on single items sends each of them
-/// to the site a member left, following the chain of a shift that overlaps itself, as VPR
-/// does, or trades places with a macro of the same shape that it lands on exactly. In free space, a macro only moves to
-/// where nothing is. An item allowed several rotations is sometimes turned in place instead.
-/// A move that would break legality, by leaving a region, overlapping or swapping with a
-/// macro member or a fixed item, is abandoned and counts as rejected, so every placement the
-/// annealer holds is legal.
+/// pitches away in free space, where a unit can always reach as far as it is wide. A fraction
+/// of the moves of single items, [`median_moves`](AnnealOptions::median_moves), go instead to a
+/// random place in the median region of the item's nets, as VPR's median moves do: of the
+/// edges of the bounding boxes of its nets' other pins, the middle two in each direction. If
+/// another single item is there, the two swap.
+///
+/// On sites, a macro may go as much further as it is long. Single items it lands on go to the
+/// nearest sites its members leave, and a macro it lands on is pushed the opposite way, into
+/// the room it leaves, sending the single items it lands on to what is left; two macros of one
+/// shape trade places this way. In free space, a macro only moves to where nothing is. An item
+/// allowed several rotations is sometimes turned in place instead. A move that would break
+/// legality, by leaving a region, overlapping, or landing on a fixed item or on a macro that
+/// can't be pushed, is abandoned, so every placement the annealer holds is legal.
 ///
 /// # Cost
 ///
@@ -173,7 +194,8 @@ struct Old {
 ///   deviation of the cost changes of one random move per unit, each tried and taken back.
 /// - Each temperature tries `inner_num * units^(4/3)` moves, and at least 100, which only
 ///   matters below about 30 units.
-/// - After it, with `a` the fraction of moves accepted, the temperature is multiplied by 0.5
+/// - After it, with `a` the fraction of moves accepted, of those not abandoned as illegal,
+///   which say nothing about the temperature, the temperature is multiplied by 0.5
 ///   when `a > 0.96`, 0.9 when `a > 0.8`, 0.95 when `a > 0.15` or the range limit is above one
 ///   step, and 0.8 otherwise. The range limit is multiplied by `0.56 + a`, within one step and
 ///   the size of the layout, so that about 44% of moves are accepted.
@@ -220,6 +242,7 @@ pub struct Annealer<'a, C> {
     touched: Vec<NetId>,
     new_costs: Vec<u64>,
     pins: Vec<Point>,
+    edges: [Vec<i64>; 2],
     moved: Vec<Old>,
     proposal: Vec<(ItemId, Point, i32, Option<SiteId>)>,
     temperature: f64,
@@ -323,6 +346,7 @@ impl<'a, C: CostTerm> Annealer<'a, C> {
             touched: Vec::new(),
             new_costs: Vec::new(),
             pins: Vec::new(),
+            edges: [Vec::new(), Vec::new()],
             moved: Vec::new(),
             proposal: Vec::new(),
             temperature: 0.0,
@@ -401,6 +425,7 @@ impl<'a, C: CostTerm> Annealer<'a, C> {
         };
         let mut tried = 0;
         let mut accepted = 0;
+        let mut priced = 0u64;
         while tried < self.moves_per_temperature {
             if self.moves >= self.options.max_moves {
                 self.stop = Some(PlaceStop::BudgetExhausted);
@@ -413,6 +438,7 @@ impl<'a, C: CostTerm> Annealer<'a, C> {
             self.moves += 1;
             tried += 1;
             if let Some(delta) = self.try_move() {
+                priced += 1;
                 let accept = delta <= 0
                     || (temperature > 0.0 && self.rng.unit() < exp(-(delta as f64) / temperature));
                 if accept {
@@ -444,7 +470,9 @@ impl<'a, C: CostTerm> Annealer<'a, C> {
         match self.phase {
             Phase::Quench => self.stop = Some(PlaceStop::Converged),
             _ => {
-                let rate = accepted as f64 / tried.max(1) as f64;
+                // Moves abandoned as illegal say nothing about the temperature, so the rate
+                // is of the moves priced.
+                let rate = accepted as f64 / priced.max(1) as f64;
                 self.update_schedule(rate);
                 let average = self.total as f64 / self.live_nets.max(1) as f64;
                 if self.temperature < self.options.exit_factor * average || self.total == 0 {
@@ -552,14 +580,22 @@ impl<'a, C: CostTerm> Annealer<'a, C> {
     fn try_move(&mut self) -> Option<i128> {
         self.proposal.clear();
         let unit = self.rng.below(self.netlist.units.len() as u64) as usize;
+        let directed = self.options.median_moves > 0.0
+            && !self.netlist.units[unit].is_macro
+            && self.rng.unit() < self.options.median_moves;
+        let aim = if directed { Aim::Median } else { Aim::Random };
         let ok = match self.problem.layout() {
-            Layout::Sites(_) => self.propose_on_sites(unit),
-            Layout::FreeSpace { .. } => self.propose_in_free_space(unit),
+            Layout::Sites(_) => self.propose_on_sites(unit, aim),
+            Layout::FreeSpace { .. } => self.propose_in_free_space(unit, aim),
         };
         if !ok || self.proposal.is_empty() {
             return None;
         }
-        // Apply.
+        Some(self.apply_proposal())
+    }
+
+    /// Applies the proposal and returns the change in cost.
+    fn apply_proposal(&mut self) -> i128 {
         self.moved.clear();
         for &(item, origin, rotation, site) in &self.proposal {
             let i = item.index();
@@ -597,7 +633,7 @@ impl<'a, C: CostTerm> Annealer<'a, C> {
             delta += i128::from(c) - i128::from(self.net_cost[net.index()]);
             self.new_costs.push(c);
         }
-        Some(delta)
+        delta
     }
 
     /// Keeps the move just tried.
@@ -721,15 +757,72 @@ impl<'a, C: CostTerm> Annealer<'a, C> {
         None
     }
 
-    fn propose_on_sites(&mut self, unit: usize) -> bool {
-        let members = self.netlist.units[unit].members.len();
+    /// A random point in the median region of a single item's nets.
+    fn median_target(&mut self, item: ItemId) -> Option<Point> {
+        let region = self.median_region(item)?;
+        Some(Point::new(
+            region.min.x + self.rng.below(region.width() + 1) as i64,
+            region.min.y + self.rng.below(region.height() + 1) as i64,
+        ))
+    }
+
+    /// The median region of a single item's nets: of the edges of the bounding boxes of its
+    /// nets' other pins, the middle two in each direction bound it. Anywhere in it, the item
+    /// adds the least to the half-perimeters of its nets.
+    fn median_region(&mut self, item: ItemId) -> Option<Rect> {
+        let [xs, ys] = &mut self.edges;
+        xs.clear();
+        ys.clear();
+        for &net in self.netlist.nets_of(item) {
+            let mut bounds: Option<Rect> = None;
+            for &pin in self.problem.net_pins(net) {
+                if pin.item != item {
+                    let at = self.problem.pin_position(&self.placement, pin);
+                    bounds = Some(bounds.map_or(Rect::point(at), |b| b.including(at)));
+                }
+            }
+            if let Some(b) = bounds {
+                xs.push(b.min.x);
+                xs.push(b.max.x);
+                ys.push(b.min.y);
+                ys.push(b.max.y);
+            }
+        }
+        if xs.is_empty() {
+            return None;
+        }
+        xs.sort_unstable();
+        ys.sort_unstable();
+        let half = xs.len() / 2;
+        Some(Rect::new(
+            Point::new(xs[half - 1], ys[half - 1]),
+            Point::new(xs[half], ys[half]),
+        ))
+    }
+
+    /// A site of the kind of `from` at the median of `item`'s nets, other than `from`.
+    fn site_at_median(&mut self, item: ItemId, from: SiteId) -> Option<SiteId> {
+        let target = self.median_target(item)?;
+        let kind = self.problem.sites()[from.index()].kind;
+        let grid = &self.netlist.grids[self.netlist.grid_of(kind)?];
+        let cell = grid.cell(grid.nearest_column(target.x), grid.nearest_row(target.y));
+        if cell.is_empty() {
+            return None;
+        }
+        let site = cell[self.rng.below(cell.len() as u64) as usize];
+        (site != from && self.region_allows_site(item, site)).then_some(site)
+    }
+
+    fn propose_on_sites(&mut self, unit: usize, aim: Aim) -> bool {
         if !self.netlist.units[unit].is_macro {
             let item = self.netlist.units[unit].members[0].0;
             let i = item.index();
             let Some(from) = self.placement.sites[i] else {
                 return false;
             };
-            if let Some(rotation) = self.other_rotation(item) {
+            if aim == Aim::Random
+                && let Some(rotation) = self.other_rotation(item)
+            {
                 self.proposal
                     .push((item, self.placement.origins[i], rotation, Some(from)));
                 return true;
@@ -739,7 +832,11 @@ impl<'a, C: CostTerm> Annealer<'a, C> {
                 .item(item)
                 .region
                 .map(|r| self.problem.regions()[r.index()]);
-            let Some(to) = self.random_site_near(from, region, 0) else {
+            let to = match aim {
+                Aim::Median => self.site_at_median(item, from),
+                Aim::Random => self.random_site_near(from, region, 0),
+            };
+            let Some(to) = to else {
                 return false;
             };
             let sites = self.problem.sites();
@@ -784,126 +881,146 @@ impl<'a, C: CostTerm> Annealer<'a, C> {
         };
         let sites = self.problem.sites();
         let shift = sites[to.index()].at.minus(sites[from.index()].at);
-        let mut targets = Vec::with_capacity(members);
-        let mut sources = Vec::with_capacity(members);
-        for m in 0..members {
-            let (item, _) = self.netlist.units[unit].members[m];
-            let Some(source) = self.placement.sites[item.index()] else {
-                return false;
-            };
-            let kind = self.problem.item(item).kind;
-            let Some(g) = self.netlist.grid_of(kind) else {
-                return false;
-            };
-            let grid = &self.netlist.grids[g];
-            let Some((x, y)) = grid.locate(sites[source.index()].at.offset(shift)) else {
-                return false;
-            };
-            let cell = grid.cell(x, y);
-            let sub = self.netlist.site_cell[source.index()].2 as usize;
-            let Some(&target) = cell.get(sub) else {
-                return false;
-            };
-            if !self.region_allows_site(item, target) {
-                return false;
-            }
-            sources.push(source);
-            targets.push(target);
-        }
-        // Onto another macro of the same shape, exactly: the two trade places.
-        let first_other = self.occupant[targets[0].index()];
-        if first_other != EMPTY {
-            let other_unit = self.netlist.unit_of[first_other as usize];
-            if other_unit != NO_UNIT
-                && other_unit != unit as u32
-                && self.netlist.units[other_unit as usize].is_macro
-            {
-                let theirs = &self.netlist.units[other_unit as usize].members;
-                let same = theirs.len() == members
-                    && (0..members).all(|m| {
-                        let (mine, _) = self.netlist.units[unit].members[m];
-                        let (their, _) = theirs[m];
-                        self.occupant[targets[m].index()] == their.0
-                            && self.problem.item(mine).kind == self.problem.item(their).kind
-                            && self.region_allows_site(their, sources[m])
-                    });
-                if !same {
+        let Some((sources, targets)) = self.shifted_sites(unit, shift) else {
+            return false;
+        };
+        // Macros it lands on shift the other way, and single items it or they land on go to
+        // the nearest sites that the shifts leave free.
+        let mut shifted: Vec<(usize, Vec<SiteId>, Vec<SiteId>)> = vec![(unit, sources, targets)];
+        let mut k = 0;
+        while k < shifted.len() {
+            for t in 0..shifted[k].2.len() {
+                let other = self.occupant[shifted[k].2[t].index()];
+                if other == EMPTY {
+                    continue;
+                }
+                let other_unit = self.netlist.unit_of[other as usize];
+                if other_unit == NO_UNIT {
                     return false;
                 }
-                for m in 0..members {
-                    let (mine, _) = self.netlist.units[unit].members[m];
-                    let (their, _) = self.netlist.units[other_unit as usize].members[m];
-                    self.proposal.push((
-                        their,
-                        sites[sources[m].index()].at,
-                        self.placement.rotations[their.index()],
-                        Some(sources[m]),
-                    ));
-                    self.proposal.push((
-                        mine,
-                        sites[targets[m].index()].at,
-                        self.placement.rotations[mine.index()],
-                        Some(targets[m]),
-                    ));
-                }
-                return true;
-            }
-        }
-        for m in 0..members {
-            let (item, _) = self.netlist.units[unit].members[m];
-            let target = targets[m];
-            let other = self.occupant[target.index()];
-            if other != EMPTY && self.netlist.unit_of[other as usize] != unit as u32 {
-                if !self.swappable(other) {
-                    return false;
-                }
-                // Follow the shift back to a site that no member takes.
-                let mut free = sources[m];
-                let mut guard = 0;
-                while let Some(k) = targets.iter().position(|&t| t == free) {
-                    free = sources[k];
-                    guard += 1;
-                    if guard > members {
-                        return false;
-                    }
-                }
-                if sites[free.index()].kind != self.problem.item(ItemId(other)).kind
-                    || !self.region_allows_site(ItemId(other), free)
+                let other_unit = other_unit as usize;
+                if !self.netlist.units[other_unit].is_macro
+                    || shifted.iter().any(|(u, ..)| *u == other_unit)
                 {
+                    continue;
+                }
+                // Only the macro moved first pushes others, and only once.
+                if k > 0 {
                     return false;
+                }
+                let back = Point::new(-shift.x, -shift.y);
+                let Some((s, t)) = self.shifted_sites(other_unit, back) else {
+                    return false;
+                };
+                shifted.push((other_unit, s, t));
+            }
+            k += 1;
+        }
+        let moving = |item: u32, shifted: &[(usize, Vec<SiteId>, Vec<SiteId>)]| {
+            let u = self.netlist.unit_of[item as usize];
+            shifted.iter().any(|(m, ..)| *m as u32 == u)
+        };
+        let mut taken: Vec<SiteId> = shifted
+            .iter()
+            .flat_map(|(_, _, t)| t.iter().copied())
+            .collect();
+        taken.sort_unstable();
+        if taken.windows(2).any(|w| w[0] == w[1]) {
+            return false;
+        }
+        let mut pool: Vec<SiteId> = shifted
+            .iter()
+            .flat_map(|(_, s, _)| s.iter().copied())
+            .filter(|s| taken.binary_search(s).is_err())
+            .collect();
+        pool.sort_unstable();
+        for (m, _, targets) in &shifted {
+            let members = &self.netlist.units[*m].members;
+            for (i, &(item, _)) in members.iter().enumerate() {
+                let target = targets[i];
+                let other = self.occupant[target.index()];
+                if other != EMPTY && !moving(other, &shifted) {
+                    // A single item, sent to the nearest free site of its kind.
+                    let o = ItemId(other);
+                    let kind = self.problem.item(o).kind;
+                    let here = sites[target.index()].at;
+                    let mut best: Option<(u64, usize)> = None;
+                    for (p, &site) in pool.iter().enumerate() {
+                        if sites[site.index()].kind == kind && self.region_allows_site(o, site) {
+                            let d = sites[site.index()].at.manhattan(here);
+                            if best.is_none_or(|(b, _)| d < b) {
+                                best = Some((d, p));
+                            }
+                        }
+                    }
+                    let Some((_, p)) = best else {
+                        return false;
+                    };
+                    let free = pool.remove(p);
+                    self.proposal.push((
+                        o,
+                        sites[free.index()].at,
+                        self.placement.rotations[o.index()],
+                        Some(free),
+                    ));
                 }
                 self.proposal.push((
-                    ItemId(other),
-                    sites[free.index()].at,
-                    self.placement.rotations[other as usize],
-                    Some(free),
+                    item,
+                    sites[target.index()].at,
+                    self.placement.rotations[item.index()],
+                    Some(target),
                 ));
             }
-            self.proposal.push((
-                item,
-                sites[target.index()].at,
-                self.placement.rotations[item.index()],
-                Some(target),
-            ));
         }
         true
     }
 
-    fn propose_in_free_space(&mut self, unit: usize) -> bool {
-        let r = self.range_steps();
+    /// The sites a macro's members are on, and would be on if shifted by `shift`, or `None`
+    /// if a member would have no site of its kind there, or leave its region.
+    fn shifted_sites(&self, unit: usize, shift: Point) -> Option<(Vec<SiteId>, Vec<SiteId>)> {
+        let sites = self.problem.sites();
+        let members = &self.netlist.units[unit].members;
+        let mut targets = Vec::with_capacity(members.len());
+        let mut sources = Vec::with_capacity(members.len());
+        for &(item, _) in members {
+            let source = self.placement.sites[item.index()]?;
+            let grid = &self.netlist.grids[self.netlist.grid_of(self.problem.item(item).kind)?];
+            let (x, y) = grid.locate(sites[source.index()].at.offset(shift))?;
+            let sub = self.netlist.site_cell[source.index()].2 as usize;
+            let &target = grid.cell(x, y).get(sub)?;
+            if !self.region_allows_site(item, target) {
+                return None;
+            }
+            sources.push(source);
+            targets.push(target);
+        }
+        Some((sources, targets))
+    }
+
+    fn propose_in_free_space(&mut self, unit: usize, aim: Aim) -> bool {
         let (area, pitch) = (self.area, self.pitch);
         let is_macro = self.netlist.units[unit].is_macro;
         let (first, first_offset) = self.netlist.units[unit].members[0];
         let anchor = self.placement.origins[first.index()].minus(first_offset);
         let mut rotation = self.placement.rotations[first.index()];
+        // A unit can always reach as far as it is wide, or, where space is tight, it could
+        // never trade places with its neighbours once the range limit is small.
+        let size = unit_box(self.problem, &self.netlist.units[unit], rotation);
+        let reach = (size.width().max(size.height()) as i64 + pitch - 1) / pitch;
+        let r = self.range_steps().max(reach);
         let mut target = anchor;
-        let turned = if is_macro {
+        let turned = if is_macro || aim != Aim::Random {
             None
         } else {
             self.other_rotation(first)
         };
         if let Some(turn) = turned {
             rotation = turn;
+        } else if aim == Aim::Median {
+            let Some(median) = self.median_target(first) else {
+                return false;
+            };
+            target = median;
         } else {
             let dx = self.rng.below((2 * r + 1) as u64) as i64 - r;
             let dy = self.rng.below((2 * r + 1) as u64) as i64 - r;

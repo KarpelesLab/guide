@@ -104,6 +104,31 @@ fn small_anchored_problems_reach_their_optimum() {
     let (placed, report) = analytic(&generated.problem);
     assert_eq!(report.legalized, generated.optimum);
     assert_eq!(placed.wirelength, generated.optimum);
+
+    // Macros trade places with macros they land on, pushing them back the other way.
+    let generated = synth::grid_with_macros(8, 8, 4, 5);
+    let options = AnnealOptions {
+        inner_num: 10.0,
+        ..AnnealOptions::default()
+    };
+    let annealed = anneal(&generated.problem, Wirelength, options).expect("anneal");
+    assert_eq!(annealed.wirelength, generated.optimum);
+}
+
+#[test]
+fn full_free_space_legalizes_near_the_global_placement() {
+    // Squares that fill the area exactly: greedy legalization leaves gaps of half a square,
+    // and rows after Abacus don't.
+    let generated = synth::free_grid(12, 12, 10, 5, 0, 1);
+    let (placed, report) = analytic(&generated.problem);
+    assert_legal(&generated.problem, &placed.placement);
+    let ratio = |w: u64| w as f64 / generated.optimum as f64;
+    assert!(ratio(report.legalized) < 1.7, "{}", ratio(report.legalized));
+    assert!(
+        ratio(placed.wirelength) < 1.3,
+        "{}",
+        ratio(placed.wirelength)
+    );
 }
 
 #[test]
@@ -176,7 +201,7 @@ fn results_have_not_changed() {
             report.legalized,
             placed.wirelength
         ),
-        (112, 145, 23616, 160, 133)
+        (112, 142, 23360, 160, 127)
     );
 }
 

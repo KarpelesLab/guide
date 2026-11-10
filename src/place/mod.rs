@@ -17,8 +17,9 @@
 //! # Placers
 //!
 //! - [`Annealer`] is simulated annealing after VPR: moves and swaps within a range limit that
-//!   shrinks as fewer moves are accepted, a temperature that falls by how many are, and cost
-//!   updated incrementally, net by net. It is a state machine like the routing
+//!   shrinks as fewer moves are accepted, or into the median region of an item's nets, a
+//!   temperature that falls by how many are, and cost updated incrementally, net by net. It is
+//!   a state machine like the routing
 //!   [`Engine`](crate::engine::Engine): [`step`](Annealer::step) runs one temperature, and a
 //!   run stops at its move budget or a cancel flag with the best placement it has seen.
 //!   [`anneal`] runs one from a random legal placement.
@@ -38,6 +39,7 @@
 //! are `u64`. The annealer's range limit is in steps: sites of the item's kind, counted as
 //! distinct columns and rows, or multiples of the free space's pitch.
 
+mod abacus;
 mod analytic;
 mod anneal;
 mod check;

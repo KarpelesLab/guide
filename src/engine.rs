@@ -22,6 +22,10 @@
 //! taking turns on the same resource for ever. A step that consumes several resources adds
 //! up their histories and their overuses. See [`EngineOptions`] for the schedule.
 //!
+//! [`crowding`](EngineOptions::crowding), off by default, adds to the second factor a term for
+//! how full each resource would be, so that nets also keep away from what is nearly full, as
+//! global routers do on grids with many tracks to an edge.
+//!
 //! The formula is additive in history, unlike the multiplicative form that some routers
 //! use, because a zero-cost step has to be able to get dearer: multiplying a base of zero
 //! gives zero, and nets would share free resources for ever. A consequence is that
@@ -722,6 +726,17 @@ pub struct EngineOptions<'c> {
     /// How many resources must be overused for [`give_up_factor`](EngineOptions::give_up_factor)
     /// to give up. The default is 100, as in VPR.
     pub give_up_overused: u32,
+    /// A price on resources as they fill up, before they are overused. The default is 0, which
+    /// leaves prices as the [module documentation](self#the-negotiation) has them.
+    ///
+    /// Above 0, the factor on a step's base and history cost gains this times the square of
+    /// how full each resource it consumes would be with the net added, as a fraction of its
+    /// capacity of at most 1, so that a step into a resource left with no room costs `1 +
+    /// crowding` times as much even before it is overused. Nets then keep away from what is
+    /// nearly full while there is room elsewhere, as global routers' congestion costs have them
+    /// do, and a resource of many tracks that is full is dearer than one that is half full. A
+    /// resource of capacity 0 adds nothing here: its overuse is priced already.
+    pub crowding: Cost,
 }
 
 impl Default for EngineOptions<'_> {
@@ -744,6 +759,7 @@ impl Default for EngineOptions<'_> {
             incremental_reroute: false,
             give_up_factor: 0.0,
             give_up_overused: 100,
+            crowding: Cost::ZERO,
         }
     }
 }
@@ -1470,6 +1486,8 @@ struct Priced<'a, S: RoutingSpace> {
     inner: &'a S,
     table: &'a ResourceTable<S>,
     present: Cost,
+    /// [`EngineOptions::crowding`].
+    crowding: Cost,
     /// What the current net already holds. Using these again takes nothing from anyone.
     held: &'a FastSet<S::Resource>,
     /// A buffer for the space's answers. It is here because expansion only gets `&self`, and
@@ -1567,11 +1585,13 @@ impl<S: RoutingSpace> Priced<'_, S> {
 
         let mut history = Cost::ZERO;
         let mut overuse = 0u32;
+        let crowded = self.crowding > Cost::ZERO;
+        let mut fill = 0.0;
         for &resource in resources.iter() {
             if !self.held.is_empty() && self.held.contains(&resource) {
                 continue;
             }
-            let here = match self.table.read(resource) {
+            let (others, capacity) = match self.table.read(resource) {
                 Some(state) => {
                     history = history + state.history;
                     // Occupied comes first because free resources are the common case, and
@@ -1581,21 +1601,30 @@ impl<S: RoutingSpace> Priced<'_, S> {
                     } else {
                         state.occupancy
                     };
-                    overuse_with_one_more(others, state.capacity)
+                    (others, state.capacity)
                 }
                 // Free, and yet it can still be overused by a first net if its capacity is
                 // zero, and a search must see that up front. Otherwise each iteration would
                 // discover only those it blundered into, and a problem with many would run
                 // out of iterations.
-                None => overuse_with_one_more(0, self.inner.capacity(resource)),
+                None => (0, self.inner.capacity(resource)),
             };
-            overuse = overuse.saturating_add(here);
+            overuse = overuse.saturating_add(overuse_with_one_more(others, capacity));
+            if crowded && capacity > 0 {
+                let full = f64::from(others.saturating_add(1).min(capacity)) / f64::from(capacity);
+                fill += full * full;
+            }
         }
 
-        if history == Cost::ZERO && overuse == 0 {
+        if history == Cost::ZERO && overuse == 0 && fill == 0.0 {
             return base;
         }
-        (base + history) * (Cost::ONE + self.present * Cost::from(overuse))
+        let crowding = if crowded {
+            self.crowding * Cost::new(fill).unwrap_or(Cost::ZERO)
+        } else {
+            Cost::ZERO
+        };
+        (base + history) * (Cost::ONE + self.present * Cost::from(overuse) + crowding)
     }
 
     /// Returns what it costs to start a tree at `node`, given its access cost.
@@ -2034,6 +2063,7 @@ struct RouteContext<'a, S: RoutingSpace> {
     space: &'a S,
     table: &'a ResourceTable<S>,
     present: Cost,
+    crowding: Cost,
     cancel: Option<&'a AtomicBool>,
     timing: Option<RouteTiming<'a, S>>,
     bound_weight: f64,
@@ -2112,6 +2142,7 @@ fn route_net<S: RoutingSpace>(
                 inner: space,
                 table: context.table,
                 present: context.present,
+                crowding: context.crowding,
                 held: &worker.held,
                 buffer: &worker.buffer,
                 replacing: &worker.replacing,
@@ -3398,6 +3429,7 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
                 space: self.space,
                 table: &self.table,
                 present: self.present,
+                crowding: self.options.crowding,
                 cancel: self.options.cancel,
                 timing: self.timing.as_ref().map(TimingState::route_timing),
                 bound_weight: self.options.bound_weight,
@@ -3728,6 +3760,7 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
             space: self.space,
             table: &self.table,
             present: self.present,
+            crowding: self.options.crowding,
             cancel: self.options.cancel,
             timing: self.timing.as_ref().map(TimingState::route_timing),
             bound_weight: self.options.bound_weight,
@@ -4029,6 +4062,7 @@ where
             space: self.space,
             nets: self.nets,
             present: self.present,
+            crowding: self.options.crowding,
             cancel: self.options.cancel,
             bound_weight: self.options.bound_weight,
             incremental: self.incremental(),
@@ -4145,6 +4179,7 @@ struct IterationContext<'a, S: RoutingSpace> {
     space: &'a S,
     nets: &'a [Net<S::Node>],
     present: Cost,
+    crowding: Cost,
     cancel: Option<&'a AtomicBool>,
     bound_weight: f64,
     incremental: bool,
@@ -4158,6 +4193,7 @@ impl<S: RoutingSpace> IterationContext<'_, S> {
                 space: self.space,
                 table: &lent.table,
                 present: self.present,
+                crowding: self.crowding,
                 cancel: self.cancel,
                 timing: lent.timing.as_ref().map(TimingState::route_timing),
                 bound_weight: self.bound_weight,
@@ -5630,6 +5666,45 @@ mod tests {
     // The pricing wrapper.
 
     #[test]
+    fn crowding_prices_resources_as_they_fill() {
+        let space = BusSpace {
+            graph: graph(4, &[(0, 1), (1, 2), (0, 2)]),
+            bus_capacity: 2,
+            reports_bus_twice: false,
+            root_resource: false,
+        };
+        let mut table = ResourceTable::new(&space);
+        let bus = table.intern(&space, BUS);
+        let held = FastSet::default();
+        let buffer = RefCell::new(Vec::new());
+        let price = |table: &ResourceTable<BusSpace>, crowding: u32| {
+            let priced = Priced {
+                inner: &space,
+                table,
+                present: Cost::from(10),
+                crowding: Cost::from(crowding),
+                held: &held,
+                buffer: &buffer,
+                replacing: &FastSet::default(),
+                tied: None,
+            };
+            priced.price(Cost::ONE, &mut vec![BUS]).get()
+        };
+        // Off, a resource with room is priced at its base cost.
+        assert_eq!(price(&table, 0), 1.0);
+        // Half full with this net: 1 + 4 * (1/2)^2.
+        assert_eq!(price(&table, 4), 2.0);
+        // Full with this net: 1 + 4.
+        table.states[bus].occupancy = 1;
+        assert_eq!(price(&table, 4), 5.0);
+        assert_eq!(price(&table, 0), 1.0);
+        // Overused by 2, where fullness stops at 1: 1 + 10 * 2 + 4.
+        table.states[bus].occupancy = 3;
+        assert_eq!(price(&table, 4), 25.0);
+        assert_eq!(price(&table, 0), 21.0);
+    }
+
+    #[test]
     fn prices_follow_the_formula() {
         let space = BusSpace {
             graph: graph(4, &[(0, 1), (1, 2), (0, 2)]),
@@ -5651,6 +5726,7 @@ mod tests {
             inner: &space,
             table: &table,
             present: Cost::from(10),
+            crowding: Cost::ZERO,
             held: &held,
             buffer: &buffer,
             replacing: &FastSet::default(),
@@ -5679,6 +5755,7 @@ mod tests {
             inner: &space,
             table: &table,
             present: Cost::from(10),
+            crowding: Cost::ZERO,
             held: &held,
             buffer: &buffer,
             replacing: &FastSet::default(),
@@ -5708,6 +5785,7 @@ mod tests {
             inner: &space,
             table: &table,
             present: Cost::from(10),
+            crowding: Cost::ZERO,
             held: &held,
             buffer: &buffer,
             replacing: &FastSet::default(),
@@ -5737,6 +5815,7 @@ mod tests {
                             inner: &space,
                             table: &table,
                             present: Cost::from(present),
+                            crowding: Cost::ZERO,
                             held: &held,
                             buffer: &buffer,
                             replacing: &FastSet::default(),
@@ -5759,6 +5838,7 @@ mod tests {
             inner: space,
             table,
             present: Cost::from(present),
+            crowding: Cost::ZERO,
             held: &held,
             buffer: &buffer,
             replacing: &FastSet::default(),
@@ -5795,6 +5875,7 @@ mod tests {
             inner: &space,
             table: &table,
             present: Cost::from(10),
+            crowding: Cost::ZERO,
             held: &held,
             buffer: &buffer,
             replacing: &FastSet::default(),
@@ -5815,6 +5896,7 @@ mod tests {
             inner: &space,
             table: &table,
             present: Cost::from(10),
+            crowding: Cost::ZERO,
             held: &held,
             buffer: &buffer,
             replacing: &FastSet::default(),

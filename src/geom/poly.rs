@@ -392,7 +392,7 @@ impl Area {
     }
 
     /// What one of the two has and the other doesn't.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(all(test, feature = "kicad"))]
     pub(crate) fn xor(&self, other: &Area) -> Result<Area, GeomError> {
         self.boolean(Op::Xor, other)
     }
@@ -451,6 +451,7 @@ impl Area {
 
 /// A polygon shape as one ring, with each hole joined to the outside by a cut of no width,
 /// as KiCad saves zone fills. `None` for any other shape.
+#[cfg(feature = "kicad")]
 pub(crate) fn fractured(shape: &super::shape::Shape) -> Option<Vec<Point>> {
     match &shape.core {
         Core::Polygon(p) if shape.radius2 == 0 => polyclip::fracture(p)

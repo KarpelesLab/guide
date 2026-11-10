@@ -42,6 +42,14 @@ jobs:
       - name: Clippy (all features, warnings denied)
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      - name: Clippy (each feature alone, warnings denied)
+        if: runner.os == 'Linux' # feature gating is platform-independent
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          for feature in fpga pcb kicad dsn; do
+            cargo clippy --all-targets --features "$feature" -- -D warnings
+          done
+
       - name: Test (all features)
         run: cargo test --all-features
 

@@ -1420,7 +1420,7 @@ fn placed_point(comp: &Component, placed: &Placed, q: Point) -> Option<Point> {
 }
 
 /// Where a component's pins are, with it where `placed` puts it.
-#[cfg(test)]
+#[cfg(all(test, feature = "kicad"))]
 pub(crate) fn pin_positions(design: &PlacementDesign, c: usize, placed: &Placed) -> Vec<Point> {
     let comp = &design.components[c];
     comp.pins

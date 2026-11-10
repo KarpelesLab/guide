@@ -14,9 +14,21 @@ contended resources*:
 - **Anything else** where the same algorithms apply: ASIC global routing,
   multi-agent path finding, qubit mapping, harnesses, piping.
 
-> **Status: pre-alpha.** Version 0.0.0 is an empty scaffold. There is no routing
-> or placement code yet, and everything below describes intent, not features.
-> See the [roadmap](ROADMAP.md).
+> **Status: pre-alpha.** The API is not stable yet and changes between 0.0.x releases.
+> Routing and placement work for FPGAs and PCBs, measured against VPR, KiCad and
+> Freerouting in [docs/benchmarks.md](docs/benchmarks.md). See the
+> [roadmap](ROADMAP.md) for what is done and what is next.
+
+## Features
+
+All optional, so the default build has no dependencies:
+
+| Feature | Adds |
+| --- | --- |
+| `fpga` | VTR's routing resource graphs, netlists, placements and architectures; `.route` and `.place` output |
+| `pcb` | The geometry layer, clearance checks, zone filling, PCB routing and placement |
+| `kicad` | Reading KiCad boards and rules, and writing routes, fills and placements back (implies `pcb`) |
+| `dsn` | Specctra DSN import and SES export (implies `pcb`) |
 
 ## Why one engine?
 
@@ -59,6 +71,7 @@ tools handle what comes before and after.
 | [Architecture](docs/architecture.md) | Layers, core abstractions, design decisions, open questions |
 | [Domains](docs/domains.md) | What each target domain requires and how it maps onto the core |
 | [Algorithms](docs/algorithms.md) | Candidate algorithms, where each applies, and references |
+| [Benchmarks](docs/benchmarks.md) | Measured results, against VPR, KiCad and Freerouting |
 
 ## Development
 

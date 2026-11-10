@@ -80,7 +80,9 @@ mod types;
 
 pub use clearance::Gap;
 pub use index::{EntryId, ShapeIndex, SpatialIndex};
-pub(crate) use poly::{ArcSide, Area, fractured};
+#[cfg(feature = "kicad")]
+pub(crate) use poly::fractured;
+pub(crate) use poly::{ArcSide, Area};
 pub use rules::{
     ClassId, LayerId, LayerSet, MAX_LAYERS, NetClass, Overrides, RuleError, RuleSpec, Rules,
     ViaDef, ViaId,

@@ -377,7 +377,7 @@ pub(crate) fn ring(
 }
 
 /// The sites for a unit's members, with its anchor nearest to `target`, or `None`.
-fn nearest_sites(
+pub(crate) fn nearest_sites(
     problem: &PlacementProblem,
     netlist: &Netlist,
     unit: &Unit,

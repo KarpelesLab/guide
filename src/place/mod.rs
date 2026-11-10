@@ -45,6 +45,9 @@ mod anneal;
 mod check;
 mod congestion;
 mod cost;
+mod eco;
+#[cfg(test)]
+mod eco_tests;
 mod legalize;
 mod netlist;
 mod problem;
@@ -60,6 +63,10 @@ pub use anneal::{AnnealOptions, Annealer, PlaceOutcome, PlaceStop, TemperatureRe
 pub use check::{Violation, check};
 pub use congestion::{CongestionCost, CongestionEstimate, CongestionGrid};
 pub use cost::{CostTerm, NetView, Wirelength};
+pub use eco::{
+    Displacement, IncrementalOptions, IncrementalOutcome, PlacementChange, Prior, Restricted,
+    place_incremental, placement_change, restrict,
+};
 pub use legalize::legalize;
 pub use problem::{
     Fixed, Item, Layout, Pin, Placement, PlacementProblem, ProblemError, Site, rotate,

@@ -256,6 +256,9 @@ pub struct Annealer<'a, C> {
     best: Placement,
     best_cost: u64,
     reports: Vec<TemperatureReport>,
+    /// By item, whether it keeps its rotation, for incremental placement. Empty, for no item,
+    /// unless [`hold_rotations`](Annealer::hold_rotations) says otherwise.
+    held_rotations: Vec<bool>,
 }
 
 impl<'a, C: CostTerm> Annealer<'a, C> {
@@ -360,6 +363,7 @@ impl<'a, C: CostTerm> Annealer<'a, C> {
             best: start,
             best_cost: 0,
             reports: Vec::new(),
+            held_rotations: Vec::new(),
             netlist,
         };
         let mut total = 0u64;
@@ -739,7 +743,16 @@ impl<'a, C: CostTerm> Annealer<'a, C> {
         }
         let current = self.placement.rotations[item.index()];
         let r = allowed[self.rng.below(allowed.len() as u64) as usize];
+        // After the draws, so that holding no rotation leaves the random stream as it was.
+        if self.held_rotations.get(item.index()) == Some(&true) {
+            return None;
+        }
         (r != current).then_some(r)
+    }
+
+    /// Keeps the rotation of each item for which `held` is true, for the rest of the run.
+    pub(crate) fn hold_rotations(&mut self, held: Vec<bool>) {
+        self.held_rotations = held;
     }
 
     fn range_steps(&self) -> i64 {

@@ -391,7 +391,7 @@ fn curated_pairs() {
             let theirs = pair_measures(&read.board.tracks, &read.board.vias, &design, pair);
             let cell = |m: (f64, f64, f64, usize)| {
                 format!(
-                    "{:.0}% | {:.2} | {:.3} | {}",
+                    "{:.0}% | {:.2} | {:.4} | {}",
                     100.0 * m.0,
                     m.1.max(m.2),
                     (m.1 - m.2).abs(),
@@ -422,7 +422,7 @@ fn curated_pairs() {
             };
             let cell = |(l, out, skew): (Vec<f64>, f64, f64)| {
                 let l: Vec<String> = l.iter().map(|x| format!("{x:.2}")).collect();
-                format!("{} | {:.3} | {:.3}", l.join(", "), out, skew)
+                format!("{} | {:.4} | {:.4}", l.join(", "), out, skew)
             };
             lengths.push(format!(
                 "| `{name}` | {} | {window} | {} | {} | {} |",

@@ -1160,7 +1160,7 @@ with the default options.
 | `lisn` | 18/18 | 60/60 | 0 | 15 → 10 (0) | 312 → 329 (328) | 0.08 | 0 violations, 0 unconnected |
 | `isi-channel` | 7/7 | 29/29 | 0 | 2 → 0 (0) | 780 → 771 (1319) | 0.21 | 0 violations, 0 unconnected |
 | `placebo` | 23/23 | 50/50 | 0 | 19 → 9 (10) | 306 → 321 (286) | 0.13 | 0 violations, 0 unconnected |
-| `udb-s` | 8/8 | 33/33 | 0 | 15 → 6 (24) | 180 → 171 (172) | 0.70 | 0 violations, 0 unconnected |
+| `udb-s` | 8/8 | 33/33 | 0 | 15 → 12 (24) | 180 → 187 (172) | 0.95 | 0 violations, 0 unconnected |
 | `flea` | 24/24 | 79/79 | 0 | 56 → 52 (31) | 1602 → 1607 (1704) | 5.43 | 0 violations, 0 unconnected |
 | `GB-LIVE32` | 79/79 | 197/197 | 0 | 186 → 142 (140) | 2654 → 2705 (2315) | 33.9 | 0 violations, 0 unconnected |
 | `nk3-nrf-mini` | 29/30 | 82/83 | 0 | 62 → 60 (60) | 311 → 307 (349) | 24.0 | 0 violations, 1 unconnected |
@@ -1198,6 +1198,10 @@ bridge with nothing routed. KiCad reports any copper of `/LED_R` in the opening 
 leaving the pad in any direction, and a via in the pad, as written and checked by hand, and the
 original board's own via there, which KiCad's DRC of the original board reports as well.
 The router keeps every net out of an opening of several nets, so it leaves `/LED_R` unrouted.
+
+`udb-s`'s USB pair is routed side by side, which takes it 6 vias and 16 mm more than as two
+nets, as [below](#pcb-differential-pairs-and-lengths); its other nets, and every other board,
+are as they were before pairs.
 
 Cleanup removed 77 of 357 vias over the nine boards, 22%, and made the track 1% longer: rerouting
 a net for fewer vias may lengthen it by up to 5 mm for each via saved, and pulling runs tight
@@ -1277,10 +1281,113 @@ above rest on several boards moving the same way, never on one.
 
 - Nine boards, all small: the largest has 79 nets. Larger boards would test global routing far
   more than these do.
-- Tracks are octilinear and every via goes through the board. No differential pairs, length
-  matching or zones are routed.
+- Tracks are octilinear and every via goes through the board. No zones are routed, and these
+  results have no lengths to meet: [those below](#pcb-differential-pairs-and-lengths) do.
 - Times are of one thread. Most of the time left on the large boards goes into rip-up's
   searches, and into those that find no path.
+
+## PCB differential pairs and lengths
+
+Differential pairs routed side by side, and nets meandered to their lengths, by `pcb::route`
+on the curated boards that have pairs, stripped as [above](#pcb-routing-of-the-curated-boards).
+Measured on 2026-11-10 on the same machine, one thread.
+
+### How
+
+```text
+GUIDE_ROUTE=1 GUIDE_KICAD=1 cargo test --release --features kicad curated_pairs -- --nocapture
+```
+
+`curated_pairs` in [`src/kicad/routing_tests.rs`](../src/kicad/routing_tests.rs) routes each
+board three ways and measures each the same way, with `pcb::coupling` and `pcb::net_length`:
+
+- **guide**, with the defaults: pairs side by side, and meanders.
+- **apart**, with pairs routed as two nets and no meanders: the router as it was before.
+- **original**: the board's own hand routing.
+
+A pair is *coupled* where its positive net's nearest track of the negative net on the same layer
+is at the pair's gap, edge to edge, to within 5 µm, measured every 10 µm; arcs are measured as
+the arcs they are. The results are checked as all routing is, by `drc::check`, connectivity and
+KiCad 10.0.3's DRC, which find nothing wrong on any of the four boards.
+
+The pairs are KiCad's: nets named alike but for a final `P` and `N`, or `+` and `-`, at their
+class's `diff_pair_width` and `diff_pair_gap`. The lengths come from custom rules, which
+`kicad::length_rules` reads from a `.kicad_dru`. None of these boards has one, so the test gives
+them rules for what their designers did by hand:
+
+- `isi-channel` has three channels, each a pair of nets on two coaxial connectors 20 mm apart,
+  matched in length within the pair, and of three lengths. Its rules ask for each channel's
+  hand-routed length, 55.1, 149.85 and 300 mm, give or take 0.25 mm, and a skew of 0.1 mm at
+  most within each pair (`within_diff_pairs`).
+- `udb-s`, `GB-LIVE32` and `nk3-nrf-mini` each have a USB pair, which is asked for a skew of
+  0.1 mm at most.
+
+### Results
+
+Pairs, after meanders. *Longer* is the longer net's length in millimetres, and *skew* the
+difference between the two.
+
+| Board | Pair | Width, gap, mm | guide: coupled | Longer | Skew | Vias | apart: coupled | Longer | Skew | Vias | original: coupled | Longer | Skew | Vias |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `isi-channel` | `/CH1_P`, `/CH1_N` | 0.20, 0.25 | - | 55.10 | 0.0000 | 0 | - | 51.32 | 28.268 | 0 | - | 55.10 | 0.0125 | 0 |
+| `isi-channel` | `/CH2_P`, `/CH2_N` | 0.20, 0.25 | - | 149.85 | 0.0000 | 0 | - | 94.88 | 0.1250 | 0 | - | 149.92 | 0.1250 | 0 |
+| `isi-channel` | `/CH3_P`, `/CH3_N` | 0.20, 0.25 | - | 300.00 | 0.0000 | 0 | - | 94.75 | 0.0000 | 0 | - | 300.00 | 0.0000 | 0 |
+| `udb-s` | `D+`, `D-` | 0.25, 0.20 | 46% | 32.66 | 0.0000 | 6 | 0% | 25.90 | 3.6011 | 0 | 28% | 49.90 | 0.2335 | 10 |
+| `GB-LIVE32` | `/USB_P`, `/USB_N` | 0.32, 0.32 | 52% | 10.37 | 0.0736 | 0 | 0% | 10.30 | 0.0000 | 0 | 73% | 10.39 | 0.0000 | 0 |
+| `nk3-nrf-mini` | `/D+`, `/D-` | 0.20, 0.25 | 0% | 14.81 | 0.0000 | 4 | 0% | 14.81 | 2.3291 | 4 | 1% | 16.50 | 8.5720 | 4 |
+
+Lengths. *Outside* is how far the farthest net is outside its length, in millimetres.
+
+| Board | Nets | Constraint, mm | guide: lengths | Outside | Skew | apart: lengths | Outside | Skew | original: lengths | Outside | Skew |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `isi-channel` | `/CH1_P`, `/CH1_N` | 54.85 to 55.35, skew 0.1 | 55.10, 55.10 | 0 | 0.0000 | 23.05, 51.32 | 31.80 | 28.268 | 55.10, 55.08 | 0 | 0.0125 |
+| `isi-channel` | `/CH2_P`, `/CH2_N` | 149.60 to 150.10, skew 0.1 | 149.85, 149.85 | 0 | 0.0000 | 94.88, 94.75 | 54.85 | 0.1250 | 149.92, 149.80 | 0 | **0.1250** |
+| `isi-channel` | `/CH3_P`, `/CH3_N` | 299.75 to 300.25, skew 0.1 | 300.00, 300.00 | 0 | 0.0000 | 94.75, 94.75 | 205.00 | 0.0000 | 300.00, 300.00 | 0 | 0.0000 |
+| `udb-s` | `D+`, `D-` | skew 0.1 | 32.66, 32.66 | - | 0.0000 | 22.30, 25.90 | - | **3.6011** | 49.90, 49.67 | - | **0.2335** |
+| `GB-LIVE32` | `/USB_P`, `/USB_N` | skew 0.1 | 10.37, 10.30 | - | 0.0736 | 10.30, 10.30 | - | 0.0000 | 10.39, 10.39 | - | 0.0000 |
+| `nk3-nrf-mini` | `/D+`, `/D-` | skew 0.1 | 14.81, 14.81 | - | 0.0000 | 14.81, 12.48 | - | **2.3291** | 16.50, 7.93 | - | **8.5720** |
+
+Skews and lengths in bold break their constraint. guide meets all nine, with 556 mm of
+meanders on `isi-channel`, 1.4 mm on `udb-s` and 2.3 mm on `nk3-nrf-mini`; a skew of 0.0000
+is under 50 nm. The hand routing breaks three, which its designers never asked of it: the skew
+rules here are this test's. Completion, our DRC and KiCad's are as without pairs or lengths on
+all four boards, and so are the times, to within the machine's noise: 0.21, 0.89, 33.4 and
+20.7 s.
+
+### What the results say
+
+- **Coupling.** The two USB pairs that can get out side by side run so for about half their
+  length: 46% on `udb-s`, against 28% by hand, and 52% on `GB-LIVE32`, against 73%. What isn't
+  coupled is the fan-outs, near the pads, where each net goes its own way to the coupled run,
+  and on `udb-s`, the stubs to the USB-C connector's second row of pins. Routed as two nets,
+  neither pair has any length at its gap.
+- **Pairs are routed last.** Each pair is routed side by side after everything else, in place of
+  its two nets' routes, and kept only if it connects what they did, so no other net changes:
+  every board's other nets are as before pairs. Routing pairs first did slightly better on
+  `udb-s`, 60%, but lost `GB-LIVE32` a net ([the decision](architecture.md#decisions)).
+- **What pairs cost.** `udb-s`'s pair takes 6 vias and 33 mm, where as two nets it took none and
+  26 mm: the top layer is full by the time it is routed, and it goes down to an inner layer as
+  two pairs of vias, which the hand routing does too, with 10. `GB-LIVE32`'s costs nothing.
+- **Pairs not routed side by side.** `nk3-nrf-mini`'s USB pair runs from the edge connector into
+  the 0.5 mm-pitch aQFN, where two tracks of 0.2 mm at a gap of 0.25 mm can't get out together,
+  so it stays as two nets; a skew meander of 2.3 mm on the shorter matches them. `isi-channel`'s
+  pairs are named as pairs but have their two nets on connectors 20 mm apart, beyond the 5 mm
+  that two pads may be apart for a pair to start side by side, so they are routed as two nets,
+  as their designer did.
+- **Meanders.** `isi-channel`'s channels need up to 205 mm more than their shortest routes, and
+  get it, each net to within 50 nm of its target, in meanders of up to 3 mm on their straight
+  runs. Skews within pairs come out under 50 nm when they have to be met, and are left alone
+  under the limit, as `GB-LIVE32`'s 0.074 mm: meanders are only added where a constraint asks.
+
+### What this does not show
+
+- Four boards, and few pairs: two coupled, all USB at 12 Mbit/s or less. No board has a bus of
+  matched lengths with many nets, such as DDR, nor a pair through a BGA.
+- The constraints are this test's, not the designers': none of these boards has custom rules.
+- Coupling is measured, not impedance or crosstalk. Fan-outs, vias and meanders all change both,
+  and nothing here models them.
+- Meanders are trombones of square corners, on one side of a track at a time; there are no
+  sawtooth or rounded meanders, and none on arcs.
 
 ## PCB routing against Freerouting
 

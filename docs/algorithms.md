@@ -88,6 +88,16 @@ routing is: via removal, by routing each net with vias again at ten times the pr
 and keeping the result if it has fewer, and track pulling, by replacing each run of tracks
 between pads, vias and branches with the longest octilinear shortcuts that are legal.
 
+Two more come after those. Differential pairs are routed again, side by side, in place of
+the routes their two nets were given: an A* search for the pair's centreline, whose nodes
+carry the direction they were reached in so that it turns by 45° at most and runs straight
+around a layer change, checking a track as wide as both tracks and their gap, which is then
+offset into the two tracks with mitred corners. The pair is kept only if it connects what the
+two routes did, so it never costs another net its route. Then length tuning: trombone
+meanders on the straight tracks of nets shorter than their constraints ask, as high as there
+is room for, the last just high enough to land on the length, and for a pair, meanders of
+both tracks together, which add the same length to both.
+
 ## Placement
 
 | Algorithm | Use | Notes |

@@ -250,6 +250,15 @@ The measurements behind it, on the nine [curated boards](../testdata/kicad/READM
   option moves `nk3-nrf-mini` between 23 and 28 of 30 nets. Conclusions above come from
   several boards agreeing, not from one.
 
+**Differential pairs are routed side by side last, in place of their nets' routes.** Routing
+pairs first, before anything else, as fixed copper, coupled `udb-s`'s USB pair a little better,
+60% of its length side by side in place of 50%, but cost other nets their room: `GB-LIVE32`
+lost a net to its USB pair, and routing it again with the pair as two nets doubled its time.
+Routed last, each pair is taken out, routed side by side
+where it fits, and kept only if it connects what its two routes did, so no other net changes
+at all, and a pair that doesn't fit stays as two nets. Meanders come after that, for the same
+reason ([results](benchmarks.md#pcb-differential-pairs-and-lengths)).
+
 **No `unsafe`, at least initially.** The crate forbids it. If profiling later proves
 it is needed, it gets isolated in a small audited module and the lint relaxed there.
 

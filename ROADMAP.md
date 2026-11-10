@@ -175,8 +175,20 @@ if one can be found, or a better way to treat a board whose own design breaks it
 Each item is independently useful, and they can land in any order.
 
 - Push-and-shove detailed routing.
-- Differential pairs.
-- Length and skew matching.
+- Differential pairs. Done, in `pcb::route`: pairs found by their names as KiCad does, at
+  their class's width and gap, are routed side by side after everything else, in place of
+  their two nets' routes, kept only where they connect what those did, so that no other net
+  ever changes: a search for the centreline wide enough for both tracks, offset into two
+  mitred tracks, vias side by side, and each net's own fan-out near its pads. Both curated
+  USB pairs that the router can reach run side by side for about half their length, against
+  28% and 73% by hand, and KiCad's DRC accepts them
+  ([results](docs/benchmarks.md#pcb-differential-pairs-and-lengths)). Not yet: pairs routed
+  first, which cost other nets their room, and a pair whose pads leave no room for both
+  tracks to get out together, as `nk3-nrf-mini`'s, which stays as two nets.
+- Length and skew matching. Done: lengths, skews within pairs and matched groups, from
+  `.kicad_dru` custom rules or the API, met with trombone meanders added after routing,
+  checked exactly, together on both tracks of a pair. `isi-channel`'s three channels come out
+  at their hand-routed 55, 150 and 300 mm, both nets of each within 50 nm of the target.
 - BGA and fine-pitch escape routing. Started: pads that nothing passes between form
   clusters, and those that can't get out on their own layers get a through via, placed on a
   fine grid to leave room for the others, or where no via fits, their only way out, before

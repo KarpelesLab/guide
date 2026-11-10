@@ -58,7 +58,7 @@
 //!    two nets' pads are far apart are left as they are. With [`Options::pairs_first`],
 //!    pairs are routed this way before anything else instead, as fixed copper, with a
 //!    place for a via kept free of them beside each pad of a net with zones next to their
-//!    pads, such as a ground pin between two pairs' pins.
+//!    pads, such as a ground pin beside a pair's pins.
 //! 6. **Meanders**, for [`Design::lengths`]: nets shorter than they must be get trombone
 //!    meanders on their straight tracks, in free space, each checked exactly as routing
 //!    is, and pairs side by side get meanders of both tracks together, which keep their

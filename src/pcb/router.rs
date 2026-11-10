@@ -1196,9 +1196,9 @@ fn route_all(design: &Design, options: &Options) -> Result<Routed, RouteError> {
 const EXIT_REACH: i64 = 3_000_000;
 
 /// Keeps a way out free of pairs routed first for the pads of nets with zones beside the
-/// pairs' pads, which a via takes to their planes, such as a ground pin between the pins of
-/// two pairs: the nearest place outside the pad where a via of its net fits, and a track to
-/// there, as keepouts in `world`. Returns them, to take out again.
+/// pairs' pads, which a via takes to their planes, such as a ground pin beside a pair's pins:
+/// the nearest place outside the pad where a via of its net fits, and a track to there, as
+/// keepouts in `world`. Returns them, to take out again.
 fn keep_exits(design: &Design, world: &mut World<'_>, pitch: i64, jobs: &[Job]) -> Vec<Placed> {
     let rules = &design.rules;
     // Closer to a pad of a pair than the pair's width and gap, as the pins of a connector

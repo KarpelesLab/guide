@@ -261,7 +261,20 @@ reason ([results](benchmarks.md#pcb-differential-pairs-and-lengths)). On the DRA
 though, routed last, no pair finds room through the buses around the BGA, even with the routes
 in its way ripped up and routed again, which was tried; so `Options::pairs_first` routes them
 first, before anything else, as fixed copper, for boards whose pairs matter most
-([results](benchmarks.md#pcb-routing-of-dram-boards)).
+([results](benchmarks.md#pcb-routing-of-dram-boards)). Fixed, they can wall a pad in, so
+while they are routed, a pad of a net with zones beside a pair's pads keeps a place for its via
+free of them. Moving pairs out of the way of a net left at the end, and routing them again
+around it, was tried and dropped: by then no pair finds room again. Nor was a second run with
+the nets left routed first of all kept: it lost a pair and a bus where it gained a net, and
+doubled the time.
+
+**A net of many pads that can't be routed whole keeps what it reaches.** Routed as tracks, a
+supply or ground of tens of pads fails whole in rip-up when one pad is shut in, and loses every
+connection. A net of more than 16 terminals that rip-up can't route whole on the finer lattice
+is searched for a terminal at a time instead, and keeps what it reaches; the next pass completes
+it from that copper, rather than routing it all again. Only on the finer lattice: doing it from
+the first pass, or for nets with planes too, changed the routing of the smaller boards and lost
+`GB-LIVE32` and `nk3-nrf-mini` a net each.
 
 **Zones are filled, not routed, and a net reaches its fill like a terminal.** `pcb::fill_zones`
 fills a zone as KiCad's `ZONE_FILLER` does, on polyclip: the outline less what other nets need

@@ -197,14 +197,20 @@ Each item is independently useful, and they can land in any order.
   28% and 73% by hand, and KiCad's DRC accepts them
   ([results](docs/benchmarks.md#pcb-differential-pairs-and-lengths)). Pairs can be routed
   first instead, `Options::pairs_first`, which the DRAM boards need, and a pair whose end is in
-  a BGA fans out of it apart. Not yet: a pair whose pads leave no room for both tracks to get
-  out together, as `nk3-nrf-mini`'s, which stays as two nets.
+  a BGA fans out of it apart. A pair whose ends are on different layers changes layers side by
+  side: `ddr5-testbed`'s `TDQS`, balls on top and fingers below, runs side by side for 63% of
+  its length, against 15% by hand. Routed first, pairs keep a place for a via free beside the
+  pads of nets with zones next to theirs, such as a ground finger beside a pair's. Not yet: a
+  pair whose pads leave no room for both tracks to get out together, as `nk3-nrf-mini`'s, which
+  stays as two nets.
 - Length and skew matching. Done: lengths, skews within pairs and matched groups, from
   `.kicad_dru` custom rules or the API, met with trombone meanders added after routing,
   checked exactly, together on both tracks of a pair. `isi-channel`'s three channels come out
   at their hand-routed 55, 150 and 300 mm, both nets of each within 50 nm of the target.
-  Widths and pairs' gaps come from custom rules too. On the DRAM boards, two of four matched
-  buses are met; in the other two, one net each is left short where no meander fits.
+  Widths and pairs' gaps come from custom rules too. A net left short where its neighbours'
+  meanders took the room gets it back: theirs are taken out, it is meandered first, and they
+  after it. On the DRAM boards, all four matched buses are met to within 50 nm, of the nets
+  routed; `ddr5-testbed`'s command bus has one net unrouted.
 - BGA and fine-pitch escape routing. Started: pads that nothing passes between form
   clusters, and those that can't get out on their own layers get a through via, placed on a
   fine grid to leave room for the others, or where no via fits, their only way out, before
@@ -233,30 +239,30 @@ Each item is independently useful, and they can land in any order.
 **Exit:** a real high-density board (DDR memory or equivalent) routes with its
 constraints satisfied; results beat Freerouting on the curated suite.
 
-Not met yet. Two DRAM boards are curated, Antmicro's `lpddr4-testbed` and `ddr5-testbed`, a
-BGA DRAM broken out to a SO-DIMM edge on six layers with 0.1 mm tracks, and both route
-completely, ground and power through their planes, with KiCad's DRC clean, in under two
-minutes, with fewer vias and less track than by hand
-([results](docs/benchmarks.md#pcb-routing-of-dram-boards)). That took search budgets by
-connection, nets of many pads routed a terminal at a time and kept in part, a second fine pass,
-and planes joined again after meanders. With their buses' lengths and pairs as their hand
-routing has them, as custom rules: `ddr5-testbed`'s data bus, 12 nets, is matched within 50 nm,
-and its strobe and clock pairs run side by side for 73% and 66%, against 70% and 76% by hand,
-and `lpddr4-testbed`'s command bus is matched; but its data bus has one net 0.23 mm short, and
-`ddr5-testbed`'s command bus one 3.5 mm short, where no meander fits, and with the pairs routed
-first, `ddr5-testbed` loses `RESET_N`.
+Not met yet: half of it is. Two DRAM boards are curated, Antmicro's `lpddr4-testbed` and
+`ddr5-testbed`, a BGA DRAM broken out to a SO-DIMM edge on six layers with 0.1 mm tracks, and
+both route completely, ground and power through their planes, with KiCad's DRC clean, in under
+two minutes, with fewer vias and less track than by hand
+([results](docs/benchmarks.md#pcb-routing-of-dram-boards)). With their buses' lengths and pairs
+as their hand routing has them, as custom rules, `lpddr4-testbed` meets them all: it routes
+completely, both its buses, 22 and 10 nets, matched within 50 nm. `ddr5-testbed` does not: its
+three pairs run side by side for 73%, 63% and 64%, against 70%, 15% and 76% by hand, and both its
+buses are matched within 50 nm, but with the pairs routed first and its nets narrower, 3 of its
+255 connections are left, `RESET_N`, `CA3` of the command bus, and a ground finger.
 
 Against Freerouting, run again on all eleven boards with current guide
-([results](docs/benchmarks.md#pcb-routing-against-freerouting)): on the nine of M5, guide
-completes more boards, eight to seven, with no violation where Freerouting has some on six,
-shorter track on every board it completes, and in less time, but more vias on four. On the DRAM
-boards stripped of their zones, which Freerouting is given no planes for, guide completes every
-net but ground, and Freerouting makes more connections, 337 and 240 against 302 and 233, with
-75 and 37 violations.
+([results](docs/benchmarks.md#pcb-routing-against-freerouting)), this half is met: on
+completion with no violation, guide ties on the four boards that a run of Freerouting completes
+with none, and beats it on the other seven, the DRAM boards included, stripped of their zones:
+344 of 344 connections and 254 of 255, against Freerouting's best 337 and 245, which break
+rules or leave more. guide's track is shorter on every board but `nk3-nrf-mini`, where it makes
+30 more connections, and it is faster on all but that one, but it has more vias on seven.
 
-Left for the exit: meanders that make room, by moving or rerouting the tracks around a short
-net, or length-aware routing of the nets of a bus; and ground nets of many pads routed as tracks
-to completion.
+Left for the exit: `ddr5-testbed`'s last three connections with its constraints. Which nets
+are left changes with any change to the router, as coupling `TDQS` across the board takes room
+others need; seven variations, measured, left two to four. Pairs that move out of a net's way,
+negotiated with the rest in rip-up rather than fixed first, or push-and-shove, are what is
+left to try.
 
 ### M7: Generic placement (done)
 

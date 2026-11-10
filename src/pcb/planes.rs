@@ -405,6 +405,8 @@ fn search(
         max_expansions: budget,
         under_pads: false,
         precheck: 0,
+        partial: false,
+        stubs: false,
     };
     let tree = detail::route_net(world, &ctx, &StepCache::default(), params, None, None).ok()?;
     let mut copper = NetCopper::from_tree(&ctx, &tree);

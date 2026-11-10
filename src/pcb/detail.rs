@@ -210,6 +210,16 @@ pub(crate) struct Params {
     /// other nets' routes is found out by a search from it in far fewer nodes than one to
     /// it, which has to search everything outside first.
     pub(crate) precheck: u64,
+    /// Whether to route what can be reached and give up on the rest, rather than fail:
+    /// when the search to the terminals left fails, each is searched from on its own, to
+    /// the tree, and those that aren't reached are left out, in [`Tree::missing`].
+    pub(crate) partial: bool,
+    /// Whether the net's terminals are stubs to its first, a plane, rather than pads to
+    /// join in a tree: each search is then for one terminal, the nearest the first of
+    /// those left, with a share of the budget, [`PARTIAL_SHARE`]. Searches for every
+    /// terminal at once cost a lower bound to each for every node, which a ground net of a
+    /// hundred pads can't afford.
+    pub(crate) stubs: bool,
 }
 
 /// Verdicts of the world on steps of one pitch, by node and direction, which hold for as
@@ -519,6 +529,8 @@ impl RoutingSpace for DetailSpace<'_> {
 pub(crate) struct Tree {
     pub(crate) edges: Vec<(DNode, DNode)>,
     pub(crate) expanded: u64,
+    /// The terminals a [partial](Params::partial) route gave up on.
+    pub(crate) missing: Vec<usize>,
 }
 
 /// Why a net could not be routed.
@@ -528,6 +540,35 @@ pub(crate) enum Failure {
     NoPath,
     /// The expansion budget ran out.
     Budget,
+}
+
+/// How many connections a net's search budget, [`Params::max_expansions`], is for: a net
+/// with more has that budget for each of them or fewer, so that a ground net of a hundred
+/// pads doesn't run out where a net of two wouldn't.
+pub(crate) const BUDGET_TERMINALS: usize = 64;
+
+/// What share of [`Params::max_expansions`] a partial route's search from one terminal
+/// may expand.
+const PARTIAL_SHARE: u64 = 8;
+
+/// The terminals other than the first, nearest the first first: by the distance between
+/// the centres of their nearest pads.
+fn stub_order(ctx: &NetCtx) -> Vec<usize> {
+    let first: Vec<Point> = ctx
+        .pads
+        .iter()
+        .filter(|p| p.terminal == 0)
+        .map(|p| p.center)
+        .collect();
+    let mut near = vec![f64::INFINITY; ctx.terminals];
+    for p in ctx.pads.iter().filter(|p| p.terminal != 0) {
+        for &q in &first {
+            near[p.terminal] = near[p.terminal].min(octile(p.center, q));
+        }
+    }
+    let mut order: Vec<usize> = (1..ctx.terminals).collect();
+    order.sort_by(|&a, &b| near[a].total_cmp(&near[b]).then(a.cmp(&b)));
+    order
 }
 
 /// Routes one net: a tree from its first terminal that reaches all of the others, each
@@ -560,15 +601,33 @@ pub(crate) fn route_net(
             .get(&(n.point(), n.l))
             .map(|&i| ctx.pads[i].terminal)
     };
-    let mut budget = params.max_expansions;
-    while connected.iter().any(|c| !c) {
-        let targets: Vec<DNode> = (0..ctx.terminals)
-            .filter(|&t| !connected[t])
-            .flat_map(|t| ctx.terminal_nodes(t))
-            .collect();
+    // The budget is for each [`BUDGET_TERMINALS`] connections, or fewer.
+    let mut budget = params
+        .max_expansions
+        .saturating_mul((ctx.terminals.saturating_sub(2) / BUDGET_TERMINALS + 1) as u64);
+    // Terminals given up on, in a partial route.
+    let mut missing = vec![false; ctx.terminals];
+    // Stubs are searched for one terminal at a time, nearest the first terminal first.
+    let order = if params.stubs {
+        stub_order(ctx)
+    } else {
+        Vec::new()
+    };
+    while (0..ctx.terminals).any(|t| !connected[t] && !missing[t]) {
+        let stub = order
+            .iter()
+            .copied()
+            .find(|&t| !connected[t] && !missing[t]);
+        let targets: Vec<DNode> = match stub {
+            Some(t) => ctx.terminal_nodes(t),
+            None => (0..ctx.terminals)
+                .filter(|&t| !connected[t] && !missing[t])
+                .flat_map(|t| ctx.terminal_nodes(t))
+                .collect(),
+        };
         if params.precheck > 0 {
             let mut shut_in = true;
-            for t in (0..ctx.terminals).filter(|&t| !connected[t]) {
+            for t in (0..ctx.terminals).filter(|&t| !connected[t] && !missing[t]) {
                 let outcome = back.find_path_with(
                     &space,
                     ctx.net,
@@ -591,7 +650,11 @@ pub(crate) fn route_net(
             }
         }
         let limits = SearchLimits {
-            max_expansions: budget,
+            max_expansions: if stub.is_some() {
+                budget.min(params.max_expansions / PARTIAL_SHARE)
+            } else {
+                budget
+            },
             cancel: None,
         };
         let outcome = search.find_path_with(
@@ -601,7 +664,7 @@ pub(crate) fn route_net(
             targets.iter().map(|&n| Target::new(n)),
             limits,
         );
-        let path: Result<Vec<DNode>, Failure> = match outcome {
+        let mut path: Result<Vec<DNode>, Failure> = match outcome {
             SearchOutcome::Found(found) => Ok(found.path.to_vec()),
             SearchOutcome::LimitReached | SearchOutcome::Cancelled => Err(Failure::Budget),
             SearchOutcome::Unreachable => Err(Failure::NoPath),
@@ -609,6 +672,42 @@ pub(crate) fn route_net(
         let expanded = search.stats().expanded;
         tree.expanded += expanded;
         budget = budget.saturating_sub(expanded);
+        // A partial route searches from each terminal left to the tree on its own, with a
+        // budget of its own, and gives up on those it doesn't reach.
+        if path.is_err() && params.partial {
+            // A stub's search from its terminal, or every terminal's.
+            for t in 0..ctx.terminals {
+                if connected[t] || missing[t] || stub.is_some_and(|s| s != t) {
+                    continue;
+                }
+                let outcome = back.find_path_with(
+                    &space,
+                    ctx.net,
+                    ctx.terminal_nodes(t).into_iter().map(Source::new),
+                    sources.iter().map(|&n| Target::new(n)),
+                    SearchLimits {
+                        max_expansions: params.max_expansions / PARTIAL_SHARE,
+                        cancel: None,
+                    },
+                );
+                let found = match outcome {
+                    SearchOutcome::Found(found) => Some(found.path.to_vec()),
+                    _ => None,
+                };
+                tree.expanded += back.stats().expanded;
+                if let Some(found) = found {
+                    path = Ok(found);
+                    break;
+                }
+                missing[t] = true;
+            }
+            if path.is_err() {
+                if stub.is_some() {
+                    continue;
+                }
+                break;
+            }
+        }
         let path = path.map_err(|f| (f, tree.expanded))?;
         // The path's vias, which must keep clear of each other and of the net's others.
         let mut new_vias: Vec<Point> = Vec::new();
@@ -628,6 +727,9 @@ pub(crate) fn route_net(
         if let Some(p) = clash {
             retries += 1;
             if retries > 16 {
+                if params.partial {
+                    break;
+                }
                 return Err((Failure::NoPath, tree.expanded));
             }
             space.keep_off(p);
@@ -658,6 +760,9 @@ pub(crate) fn route_net(
         }
         if connected.iter().filter(|&&c| c).count() == before {
             // Can't happen, as every target is a terminal's, but a loop must not hang.
+            if params.partial {
+                break;
+            }
             return Err((Failure::NoPath, tree.expanded));
         }
         // A terminal reached on one layer of a pad is on the tree on all of them.
@@ -671,6 +776,7 @@ pub(crate) fn route_net(
             }
         }
     }
+    tree.missing = (0..ctx.terminals).filter(|&t| !connected[t]).collect();
     Ok(tree)
 }
 

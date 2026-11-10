@@ -18,7 +18,7 @@ use crate::id::NetId;
 use crate::pcb::{self, Design, Options};
 
 /// The boards, in the order of `docs/benchmarks.md`.
-const BOARDS: [&str; 9] = [
+const BOARDS: [&str; 11] = [
     "GB-BRK-LINK-A",
     "TS4231-BOB",
     "lisn",
@@ -28,6 +28,8 @@ const BOARDS: [&str; 9] = [
     "flea",
     "GB-LIVE32",
     "nk3-nrf-mini",
+    "lpddr4-testbed",
+    "ddr5-testbed",
 ];
 
 /// For each net with two pads or more, how many pads it has and how many islands of copper

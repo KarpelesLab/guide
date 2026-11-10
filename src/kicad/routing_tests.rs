@@ -2,7 +2,7 @@
 //! nets are routed again by [`crate::pcb::route`], and the result is checked by our DRC and
 //! for connectivity, and with `GUIDE_KICAD=1`, by KiCad's own DRC on the board written back.
 //!
-//! The three smallest boards route in every test run. `GUIDE_ROUTE=1` routes all nine, in a
+//! The three smallest boards route in every test run. `GUIDE_ROUTE=1` routes all eleven, in a
 //! release build, and prints the table that `docs/benchmarks.md` has.
 
 use std::time::Instant;
@@ -12,7 +12,7 @@ use super::{KicadBoard, replace_routing_and_fills};
 use crate::geom::drc::{self, Item, Violation};
 use crate::pcb::{self, Design, Options, Routed};
 
-const BOARDS: [(&str, &str); 9] = [
+const BOARDS: [(&str, &str); 11] = [
     ("gekkio", "GB-BRK-LINK-A"),
     ("dotbots", "TS4231-BOB"),
     ("tem-cell", "lisn"),
@@ -22,6 +22,8 @@ const BOARDS: [(&str, &str); 9] = [
     ("bugs", "flea"),
     ("gekkio", "GB-LIVE32"),
     ("nitrokey", "nk3-nrf-mini"),
+    ("lpddr4-testbed", "lpddr4-testbed"),
+    ("ddr5-testbed", "ddr5-testbed"),
 ];
 
 /// The UUIDs that [`replace_routing_and_fills`] gives new items start with this.
@@ -121,15 +123,16 @@ fn options() -> Options {
 
 /// Routes a board, checks it, and returns what it did with the routed board's text.
 fn route_board(dir: &str, name: &'static str) -> (Row, String, Routed, String) {
-    let (row, text, routed, pro, _, _) = route_board_with(dir, name, |_, _| ());
+    let (row, text, routed, pro, _, _) = route_board_with(dir, name, options(), |_, _| ());
     (row, text, routed, pro)
 }
 
-/// [`route_board`], with the design changed by `change` first, and also returning the
-/// design and the board as read.
+/// [`route_board`], with these options, and the design changed by `change` first, and also
+/// returning the design and the board as read.
 fn route_board_with(
     dir: &str,
     name: &'static str,
+    options: Options,
     change: impl FnOnce(&KicadBoard, &mut Design),
 ) -> (Row, String, Routed, String, Design, KicadBoard) {
     let (pcb, pro) = load(dir, name);
@@ -137,7 +140,7 @@ fn route_board_with(
     let mut design = stripped(&read);
     change(&read, &mut design);
     let start = Instant::now();
-    let routed = pcb::route(&design, &options()).unwrap();
+    let routed = pcb::route(&design, &options).unwrap();
     let seconds = start.elapsed().as_secs_f64();
     let board = routed.board(&design);
     let ours = |item: Item| matches!(item, Item::Track(_) | Item::Via(_));
@@ -243,7 +246,7 @@ fn kicad_check(text: &str, project: &str, name: &str, refill: bool) -> (Vec<Stri
     (found, unconnected)
 }
 
-/// Routes all nine boards, and prints the table of `docs/benchmarks.md`. Runs only with
+/// Routes all eleven boards, and prints the table of `docs/benchmarks.md`. Runs only with
 /// `GUIDE_ROUTE=1`, and is meant for a release build. With `GUIDE_KICAD=1` as well, it writes
 /// each routed board and checks that `kicad-cli pcb drc` finds no violation of a routed
 /// item, and a missing connection only where a net could not be routed. `GUIDE_BOARDS`, a
@@ -298,9 +301,12 @@ fn curated_boards_route() {
 /// The boards with differential pairs or lengths to match, with custom rules for them. The
 /// boards have none of their own: these ask for what their designers did by hand.
 /// `isi-channel` has three channels of two nets on separate connectors, matched in length
-/// within each and of three lengths, about 55, 150 and 300 mm, and each of the other three
-/// has a USB pair.
-const PAIRED: [(&str, &str, &str); 4] = [
+/// within each and of three lengths, about 55, 150 and 300 mm, and each of the next three
+/// has a USB pair. The DRAM boards have their data and their command and address buses
+/// each matched in length, the strobes and clocks with them, which their designers met to
+/// within 0.05 mm but for a few nets of `ddr5-testbed`; and on that board, the pairs are
+/// at the width and gap of its hand routing, 0.1016 and 0.25 mm, not its net class's.
+const PAIRED: [(&str, &str, &str); 6] = [
     (
         "starshipraider",
         "isi-channel",
@@ -318,7 +324,32 @@ const PAIRED: [(&str, &str, &str); 4] = [
     ("udb-s", "udb-s", USB_SKEW),
     ("gekkio", "GB-LIVE32", USB_SKEW),
     ("nitrokey", "nk3-nrf-mini", USB_SKEW),
+    (
+        "lpddr4-testbed",
+        "lpddr4-testbed",
+        "(version 1)
+         (rule dq (condition \"A.NetName == 'DQ??_A' || A.NetName == 'DQ_S?_?A' || A.NetName == 'DMI_?A'\")
+           (constraint skew (max 0.1mm)))
+         (rule ca (condition \"A.NetName == 'CA?_A' || A.NetName == 'CKE0_A' || A.NetName == 'CS0_A' || A.NetName == 'CK_?_A'\")
+           (constraint skew (max 0.1mm)))",
+    ),
+    (
+        "ddr5-testbed",
+        "ddr5-testbed",
+        "(version 1)
+         (rule dq (condition \"A.NetName == 'DQ?' || A.inDiffPair('DQS_') || A.inDiffPair('TDQS_')\")
+           (constraint skew (max 0.1mm)))
+         (rule ca (condition \"A.NetName == 'CA0' || A.NetName == 'CA1' || A.NetName == 'CA2' || A.NetName == 'CA3' || A.NetName == 'CA4' || A.NetName == 'CA5' || A.NetName == 'CA6' || A.NetName == 'CA7' || A.NetName == 'CA8' || A.NetName == 'CA9' || A.NetName == 'CA1?' || A.NetName == 'CS_N' || A.inDiffPair('CLK_')\")
+           (constraint skew (max 0.1mm)))
+         (rule pairs (condition \"A.inDiffPair('*')\")
+           (constraint track_width (opt 0.1016mm))
+           (constraint diff_pair_gap (opt 0.25mm)))",
+    ),
 ];
+
+/// The boards whose pairs are routed first, [`Options::pairs_first`]: on the DRAM boards,
+/// routed last, they find no room through the buses around their BGAs.
+const PAIRS_FIRST: [&str; 2] = ["lpddr4-testbed", "ddr5-testbed"];
 
 /// A skew of 0.1 mm at most within each differential pair.
 const USB_SKEW: &str = "(version 1)
@@ -398,9 +429,14 @@ fn curated_pairs() {
         {
             continue;
         }
-        let (row, text, routed, pro, design, read) = route_board_with(dir, name, |read, d| {
-            d.lengths = super::length_rules(dru, read).unwrap().constraints;
-        });
+        let options = Options {
+            pairs_first: PAIRS_FIRST.contains(&name),
+            ..options()
+        };
+        let (row, text, routed, pro, design, read) =
+            route_board_with(dir, name, options, |read, d| {
+                super::length_rules(dru, read).unwrap().apply(d);
+            });
         let apart = pcb::route(
             &design,
             &Options {

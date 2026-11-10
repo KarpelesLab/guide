@@ -29,6 +29,7 @@ pub(crate) struct Job {
 /// What a penalty for crossing another net's route costs, in millimetres, and how much a
 /// conflict adds to its tile's history.
 const RIP_PENALTY: f64 = 10.0;
+
 const HISTORY_STEP: f64 = 0.5;
 
 /// How many nodes a search from a terminal may expand to find it shut in, before a search
@@ -37,6 +38,10 @@ const PRECHECK: u64 = 50_000;
 
 /// How much finer the lattice of the second pass is.
 const FINE: i64 = 2;
+
+/// How many passes on the finer lattice there are at most, each for the nets the one
+/// before left, with every net free to be ripped up again.
+const FINE_PASSES: usize = 2;
 
 /// How many pitches from a pad routes may move onto its lattice.
 pub(crate) const LATTICE_REACH: i64 = 8;
@@ -427,8 +432,34 @@ pub(crate) fn run(design: &Design, options: &Options) -> Result<Routed, RouteErr
     let mut routed = route_all(design, options)?;
     if options.tune_lengths && !design.lengths.is_empty() {
         tune::run(design, &mut routed, options).map_err(RouteError::Geometry)?;
-        // Meanders change what zones fill around.
+        // Meanders change what zones fill around, and may cut a plane in pieces, which are
+        // joined up again as after routing.
         if routed.stats.meanders > 0.0 && !design.zones.zones.is_empty() {
+            if options.planes && design.zones.zones.iter().any(|z| z.net.is_some()) {
+                let board = with_routes(design, &routed.tracks, &routed.vias);
+                let mut world = World::new(
+                    &board,
+                    &design.rules,
+                    &design.outline,
+                    design.edge_clearance,
+                    &design.masks,
+                    &design.obstacles,
+                )
+                .map_err(RouteError::Geometry)?;
+                let mut joined = Joined {
+                    tracks: &mut routed.tracks,
+                    vias: &mut routed.vias,
+                    stats: &mut routed.stats,
+                    unrouted: &mut routed.unrouted,
+                };
+                join_planes(
+                    design,
+                    &mut world,
+                    &mut joined,
+                    pitch(design, options),
+                    options,
+                )?;
+            }
             routed.fills =
                 zones::fill_zones(&with_routes(design, &routed.tracks, &routed.vias), design)
                     .map_err(RouteError::Geometry)?;
@@ -438,6 +469,42 @@ pub(crate) fn run(design: &Design, options: &Options) -> Result<Routed, RouteErr
         count_connections(design, &mut routed);
     }
     Ok(routed)
+}
+
+/// The lattice's pitch: half the tightest pitch of the tracks routed, unless the options
+/// set one.
+fn pitch(design: &Design, options: &Options) -> i64 {
+    let rules = &design.rules;
+    options.pitch.unwrap_or_else(|| {
+        (0..design.nets.len())
+            .filter(|&i| design.nets[i].route)
+            .map(|i| {
+                let net = Some(NetId(i as u32));
+                design.nets[i]
+                    .track_width
+                    .max(rules.track_width(net, LayerId(0)))
+                    + rules.clearance(net, LayerId(0))
+            })
+            .min()
+            .map_or(100_000, |p| (p / 2).max(1000))
+    })
+}
+
+/// Where routes may go: the board's edge's box, or failing that, the pads' grown by 5 mm.
+fn bounds_of(design: &Design) -> Rect {
+    let pad_bounds = design
+        .board
+        .pads
+        .iter()
+        .map(|p| p.shape.bbox())
+        .reduce(|a, b| a.union(&b));
+    design
+        .outline
+        .iter()
+        .map(Shape::bbox)
+        .reduce(|a, b| a.union(&b))
+        .or(pad_bounds.map(|b| b.expand(5_000_000)))
+        .unwrap_or_default()
 }
 
 /// A design's board with tracks and vias added.
@@ -482,6 +549,72 @@ fn count_connections(design: &Design, routed: &mut Routed) {
     }
     let s = &mut routed.stats;
     (s.nets, s.routed, s.connections, s.connected) = (nets, done, needed, made);
+}
+
+/// What [`join_planes`] adds to.
+struct Joined<'a> {
+    tracks: &'a mut Vec<Track>,
+    vias: &'a mut Vec<Via>,
+    stats: &'a mut Stats,
+    unrouted: &'a mut Vec<NetId>,
+}
+
+/// Fills the zones around everything routed, and joins up the pieces of their nets that
+/// the fills leave apart, a few times at most; what can't be joined is unrouted. Islands
+/// are kept until the end, as a plane that nothing reaches yet is still one to reach, and
+/// they join nothing.
+fn join_planes(
+    design: &Design,
+    world: &mut World<'_>,
+    out: &mut Joined<'_>,
+    pitch: i64,
+    options: &Options,
+) -> Result<(), RouteError> {
+    let keeping = keep_islands(design);
+    for round in 0..=REPAIRS {
+        let board = with_routes(design, out.tracks, out.vias);
+        let all = zones::fill_zones(&board, &keeping).map_err(RouteError::Geometry)?;
+        let mut added = false;
+        let mut left = Vec::new();
+        for (net, pieces) in planes::pieces_by_net(design, &all) {
+            if !design.nets.get(net.index()).is_some_and(|n| n.route)
+                || planes::pieces(&board, design, net, &pieces).with_pads() < 2
+            {
+                continue;
+            }
+            left.push(net);
+            if round == REPAIRS {
+                continue;
+            }
+            let joins = planes::connect(
+                design,
+                world,
+                &board,
+                net,
+                &pieces,
+                pitch,
+                options.via_cost,
+                true,
+            );
+            for s in joins {
+                out.stats.after_cleanup.0 += s.vias.len();
+                out.stats.after_cleanup.1 += s.tracks.iter().map(track_length).sum::<f64>();
+                out.tracks.extend(s.tracks);
+                out.vias.extend(s.vias);
+                out.stats.stubs += 1;
+                added = true;
+            }
+        }
+        // What nothing more joins is left in pieces.
+        if !added || round == REPAIRS {
+            out.stats.planes_broken = left.len();
+            out.unrouted.extend(left);
+            out.unrouted.sort_unstable();
+            out.unrouted.dedup();
+            break;
+        }
+    }
+    Ok(())
 }
 
 /// The fills of a net that its stubs and grouping take as connected before routing: its
@@ -531,23 +664,7 @@ fn route_all(design: &Design, options: &Options) -> Result<Routed, RouteError> {
         .map_err(RouteError::Geometry)
     };
 
-    // The lattice: half the tightest pitch of tracks routed.
-    let routed_nets: Vec<usize> = (0..design.nets.len())
-        .filter(|&i| design.nets[i].route)
-        .collect();
-    let pitch = options.pitch.unwrap_or_else(|| {
-        routed_nets
-            .iter()
-            .map(|&i| {
-                let net = Some(NetId(i as u32));
-                design.nets[i]
-                    .track_width
-                    .max(rules.track_width(net, LayerId(0)))
-                    + rules.clearance(net, LayerId(0))
-            })
-            .min()
-            .map_or(100_000, |p| (p / 2).max(1000))
-    });
+    let pitch = pitch(design, options);
     // Escapes from fine-pitch footprints, which become fixed copper of their nets.
     let escapes = {
         let mut world = world_of(design)?;
@@ -564,6 +681,57 @@ fn route_all(design: &Design, options: &Options) -> Result<Routed, RouteError> {
         }
         with_escapes = d;
         &with_escapes
+    };
+    // Pairs first, if asked, side by side on the board as it is before anything else is
+    // routed, as fixed copper of their nets, which the rest completes.
+    let mut first: Vec<Track> = Vec::new();
+    let mut first_vias: Vec<Via> = Vec::new();
+    let mut first_pairs = 0;
+    let with_pairs;
+    let design = if options.couple_pairs && options.pairs_first && !design.pairs.is_empty() {
+        let mut world = world_of(design)?;
+        let pair_jobs = jobs(design, &world, pitch, &[]);
+        let params = Params {
+            pitch,
+            via_cost: options.via_cost,
+            layer_bias: options.layer_bias,
+            bounds: bounds_of(design),
+            max_expansions: options.max_expansions,
+            under_pads: false,
+            precheck: 0,
+            partial: false,
+            stubs: false,
+        };
+        let job_of = |net: NetId| pair_jobs.iter().position(|j| j.ctx.net == net);
+        for pair in &design.pairs {
+            let (Some(p), Some(n)) = (job_of(pair.positive), job_of(pair.negative)) else {
+                continue;
+            };
+            let routed = pairs::route_pair(
+                design,
+                &mut world,
+                pair,
+                &pair_jobs[p],
+                &pair_jobs[n],
+                params,
+            );
+            if let Some(route) = routed {
+                first_pairs += 1;
+                first.extend(route.tracks);
+                first_vias.extend(route.vias);
+            }
+        }
+        if first_pairs == 0 {
+            design
+        } else {
+            let mut d = design.clone();
+            d.board.tracks.extend(first.iter().cloned());
+            d.board.vias.extend(first_vias.iter().cloned());
+            with_pairs = d;
+            &with_pairs
+        }
+    } else {
+        design
     };
     // Zones filled around the fixed copper, islands kept, which their nets' terminals
     // take as connected and reach with stubs.
@@ -587,19 +755,7 @@ fn route_all(design: &Design, options: &Options) -> Result<Routed, RouteError> {
         grouped = d;
         &grouped
     };
-    let pad_bounds = design
-        .board
-        .pads
-        .iter()
-        .map(|p| p.shape.bbox())
-        .reduce(|a, b| a.union(&b));
-    let bounds = design
-        .outline
-        .iter()
-        .map(Shape::bbox)
-        .reduce(|a, b| a.union(&b))
-        .or(pad_bounds.map(|b| b.expand(5_000_000)))
-        .unwrap_or_default();
+    let bounds = bounds_of(design);
     let params = Params {
         pitch,
         via_cost: options.via_cost,
@@ -608,6 +764,8 @@ fn route_all(design: &Design, options: &Options) -> Result<Routed, RouteError> {
         max_expansions: options.max_expansions,
         under_pads: false,
         precheck: 0,
+        partial: false,
+        stubs: false,
     };
 
     let mut world = world_of(design)?;
@@ -680,6 +838,13 @@ fn route_all(design: &Design, options: &Options) -> Result<Routed, RouteError> {
         ));
     }
 
+    // Nets with planned fills, whose routes are stubs to them.
+    let plane_net = |net: NetId| {
+        planned
+            .iter()
+            .any(|f| design.zones.zones.get(f.zone).and_then(|z| z.net) == Some(net))
+    };
+
     // Detailed routing, with rip-up.
     let mut copper: Vec<Option<NetCopper>> = vec![None; jobs.len()];
     let mut ripped = vec![0u32; jobs.len()];
@@ -690,9 +855,11 @@ fn route_all(design: &Design, options: &Options) -> Result<Routed, RouteError> {
         .map(|(i, j)| (j.ctx.net, i))
         .collect();
     let mut outside = vec![false; jobs.len()];
+    // By job, how many terminals its partial route left out.
+    let mut missing = vec![0usize; jobs.len()];
     // A second pass, on a finer lattice, for the nets the first leaves unrouted, with every
     // net that can be ripped up again.
-    for pass in 0..2 {
+    for pass in 0..=FINE_PASSES {
         let params = if pass == 0 {
             params
         } else {
@@ -700,7 +867,9 @@ fn route_all(design: &Design, options: &Options) -> Result<Routed, RouteError> {
             if left.is_empty() || !options.fine_pass {
                 break;
             }
-            stats.fine_pass = left.len();
+            if pass == 1 {
+                stats.fine_pass = left.len();
+            }
             queue.extend(left);
             for (j, job) in jobs.iter().enumerate() {
                 ripped[j] = 0;
@@ -714,6 +883,13 @@ fn route_all(design: &Design, options: &Options) -> Result<Routed, RouteError> {
         };
         while let Some(j) = queue.pop_front() {
             let job = &jobs[j];
+            // A net of many pads is routed a terminal at a time, as stubs to its plane if it
+            // has one.
+            let many = job.ctx.terminals > detail::BUDGET_TERMINALS;
+            let params = Params {
+                stubs: many,
+                ..params
+            };
             let mut tree = None;
             // The world doesn't change until the net is placed.
             let steps = StepCache::default();
@@ -754,12 +930,19 @@ fn route_all(design: &Design, options: &Options) -> Result<Routed, RouteError> {
                     Err((_, e)) => stats.expanded += e,
                 }
             }
+            // A net with a plane, or of many pads, keeps what it can reach, and a plane's
+            // pieces are joined up after routing: one pad shut in doesn't cost it all the
+            // others.
+            let partial = Params {
+                partial: plane_net(job.ctx.net) || many,
+                ..params
+            };
             if tree.is_none() && options.rip_ups > 0 {
                 let rip = RipUp {
                     penalty: Some(RIP_PENALTY),
                     history: &history,
                 };
-                match detail::route_net(&world, &job.ctx, &steps, params, None, Some(rip)) {
+                match detail::route_net(&world, &job.ctx, &steps, partial, None, Some(rip)) {
                     Ok(t) => {
                         stats.expanded += t.expanded;
                         let (victims, at) = detail::victims(&world, &job.ctx, &t);
@@ -786,25 +969,42 @@ fn route_all(design: &Design, options: &Options) -> Result<Routed, RouteError> {
                     Err((_, e)) => stats.expanded += e,
                 }
             }
+            if tree.is_none() && partial.partial && options.rip_ups == 0 {
+                let rip = RipUp {
+                    penalty: None,
+                    history: &history,
+                };
+                match detail::route_net(&world, &job.ctx, &steps, partial, None, Some(rip)) {
+                    Ok(t) => {
+                        stats.expanded += t.expanded;
+                        tree = Some(t);
+                    }
+                    Err((_, e)) => stats.expanded += e,
+                }
+            }
             if let Some(t) = tree {
                 let mut c = NetCopper::from_tree(&job.ctx, &t);
                 c.place(&mut world, &job.ctx);
                 copper[j] = Some(c);
+                missing[j] = t.missing.len();
             }
         }
     }
     // A net ripped up and then not routed again is unrouted too.
     // A plane net's pieces are joined after routing, if they can be, so it isn't unrouted
     // yet.
-    let plane_net = |net: NetId| {
-        planned
-            .iter()
-            .any(|f| design.zones.zones.get(f.zone).and_then(|z| z.net) == Some(net))
-    };
-    let mut unrouted: Vec<NetId> = (0..jobs.len())
+    // A net of many pads left in pieces keeps them, and is unrouted too.
+    let mut dropped: Vec<NetId> = (0..jobs.len())
         .filter(|&j| copper[j].is_none())
         .map(|j| jobs[j].ctx.net)
         .filter(|&n| !plane_net(n))
+        .collect();
+    dropped.sort_unstable();
+    let mut unrouted: Vec<NetId> = (0..jobs.len())
+        .filter(|&j| copper[j].is_some() && missing[j] > 0)
+        .map(|j| jobs[j].ctx.net)
+        .filter(|&n| !plane_net(n))
+        .chain(dropped.iter().copied())
         .collect();
     unrouted.sort_unstable();
     stats.outside_corridor = (0..jobs.len())
@@ -812,7 +1012,7 @@ fn route_all(design: &Design, options: &Options) -> Result<Routed, RouteError> {
         .count();
 
     // The escapes and pairs of nets routed are part of their routes.
-    let kept = |net: Option<NetId>| net.is_some_and(|n| unrouted.binary_search(&n).is_err());
+    let kept = |net: Option<NetId>| net.is_some_and(|n| dropped.binary_search(&n).is_err());
     let mut tracks: Vec<Track> = escapes
         .iter()
         .filter(|e| kept(Some(e.net)))
@@ -823,6 +1023,10 @@ fn route_all(design: &Design, options: &Options) -> Result<Routed, RouteError> {
         .filter(|e| kept(Some(e.net)))
         .filter_map(|e| e.via.clone())
         .collect();
+    tracks.extend(first.iter().filter(|t| kept(t.net)).cloned());
+    vias.extend(first_vias.iter().filter(|v| kept(v.net)).cloned());
+    stats.pairs.0 += first_pairs;
+    stats.pairs.1 += first_pairs;
     let fixed_length: f64 = tracks.iter().map(track_length).sum();
     let fixed_vias = vias.len();
     let measure = |copper: &[Option<NetCopper>]| -> (usize, f64) {
@@ -860,10 +1064,12 @@ fn route_all(design: &Design, options: &Options) -> Result<Routed, RouteError> {
     }
     let (v, l) = measure(&copper);
     stats.after_cleanup = (v + paired.0, l + paired.1);
-    stats.routed = copper.iter().flatten().count();
+    stats.routed = (0..jobs.len())
+        .filter(|&j| copper[j].is_some() && missing[j] == 0)
+        .count();
     stats.connected = (0..jobs.len())
         .filter(|&j| copper[j].is_some())
-        .map(|j| jobs[j].ctx.terminals - 1)
+        .map(|j| jobs[j].ctx.terminals - 1 - missing[j])
         .sum();
     let top = LayerId(0);
     let bottom = LayerId((rules.layer_count() - 1) as u8);
@@ -897,50 +1103,13 @@ fn route_all(design: &Design, options: &Options) -> Result<Routed, RouteError> {
     // kept until the end, as a plane that nothing reaches yet is still one to reach, and
     // they join nothing.
     if planes_on {
-        let keeping = keep_islands(original);
-        for round in 0..=REPAIRS {
-            let board = with_routes(original, &tracks, &vias);
-            let all = zones::fill_zones(&board, &keeping).map_err(RouteError::Geometry)?;
-            let mut added = false;
-            let mut left = Vec::new();
-            for (net, pieces) in planes::pieces_by_net(original, &all) {
-                if !original.nets.get(net.index()).is_some_and(|n| n.route)
-                    || planes::pieces(&board, original, net, &pieces).with_pads() < 2
-                {
-                    continue;
-                }
-                left.push(net);
-                if round == REPAIRS {
-                    continue;
-                }
-                let joins = planes::connect(
-                    original,
-                    &mut world,
-                    &board,
-                    net,
-                    &pieces,
-                    params.pitch,
-                    options.via_cost,
-                    true,
-                );
-                for s in joins {
-                    stats.after_cleanup.0 += s.vias.len();
-                    stats.after_cleanup.1 += s.tracks.iter().map(track_length).sum::<f64>();
-                    tracks.extend(s.tracks);
-                    vias.extend(s.vias);
-                    stats.stubs += 1;
-                    added = true;
-                }
-            }
-            // What nothing more joins is left in pieces.
-            if !added || round == REPAIRS {
-                stats.planes_broken = left.len();
-                unrouted.extend(left);
-                unrouted.sort_unstable();
-                unrouted.dedup();
-                break;
-            }
-        }
+        let mut joined = Joined {
+            tracks: &mut tracks,
+            vias: &mut vias,
+            stats: &mut stats,
+            unrouted: &mut unrouted,
+        };
+        join_planes(original, &mut world, &mut joined, params.pitch, options)?;
     }
     let mut fills = Vec::new();
     if !original.zones.zones.is_empty() {

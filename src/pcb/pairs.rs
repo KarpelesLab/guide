@@ -391,6 +391,40 @@ fn ends(p: &NetCtx, n: &NetCtx) -> Option<[(usize, usize); 2]> {
     best.map(|(_, e)| e)
 }
 
+/// The fewest pads an array has, such as a BGA's.
+const MIN_ARRAY: usize = 8;
+
+/// The box of the array of pads that the pad at `at` is in, if it is in one: pads of any
+/// net closer to each other than `passage`, which a pair can't pass between, at least
+/// [`MIN_ARRAY`] of them.
+fn array_reach(design: &Design, at: Point, passage: i64) -> Option<Rect> {
+    let pads = &design.board.pads;
+    let start = pads
+        .iter()
+        .position(|p| p.shape.bbox().intersects(&Rect::new(at, at)))?;
+    let mut seen = vec![false; pads.len()];
+    seen[start] = true;
+    let mut queue = vec![start];
+    let mut bbox = pads[start].shape.bbox();
+    let mut count = 0;
+    while let Some(i) = queue.pop() {
+        count += 1;
+        let reach = pads[i].shape.bbox().expand(passage);
+        for (j, q) in pads.iter().enumerate() {
+            if !seen[j]
+                && q.layers.0 & pads[i].layers.0 != 0
+                && q.shape.bbox().intersects(&reach)
+                && q.shape.violates(&pads[i].shape, passage) == Ok(true)
+            {
+                seen[j] = true;
+                bbox = bbox.union(&q.shape.bbox());
+                queue.push(j);
+            }
+        }
+    }
+    (count >= MIN_ARRAY).then_some(bbox)
+}
+
 /// Half the diagonal of a box.
 fn half_diagonal(r: &Rect) -> i64 {
     let (w, h) = (
@@ -472,19 +506,43 @@ pub(crate) fn route_pair(
         via_cost: params.via_cost * VIA_COST_FACTOR,
         ..params
     };
-    // Near the pads first, and if the pair can't get out from there, farther.
-    for extra in [footprint / 2 + params.pitch, footprint + params.pitch] {
-        let disk = |(i, j): (usize, usize)| {
+    // Near the pads first, and if the pair can't get out from there, farther, and then out
+    // of the array of pads it is in, such as a BGA's, which the two nets fan out of apart.
+    let passage = footprint + 2 * rules.max_clearance();
+    let arrays = [
+        array_reach(design, pc.pads[pa].center, passage),
+        array_reach(design, pc.pads[pb].center, passage),
+    ];
+    let extras = [footprint / 2 + params.pitch, footprint + params.pitch];
+    for (round, extra) in extras
+        .into_iter()
+        .chain([footprint + params.pitch])
+        .enumerate()
+    {
+        if round == 2 && arrays.iter().all(Option::is_none) {
+            break;
+        }
+        let disk = |e: usize, (i, j): (usize, usize)| {
             let (a, b) = (&pc.pads[i], &nc.pads[j]);
             let center = Point::new(
                 a.center.x + (b.center.x - a.center.x) / 2,
                 a.center.y + (b.center.y - a.center.y) / 2,
             );
             let apart = octile(a.center, b.center) as i64 / 2;
-            let radius = apart + half_diagonal(&a.bbox).max(half_diagonal(&b.bbox)) + extra;
+            let mut radius = apart + half_diagonal(&a.bbox).max(half_diagonal(&b.bbox)) + extra;
+            if round == 2
+                && let Some(bbox) = arrays[e]
+            {
+                let out = (center.x - bbox.min().x)
+                    .min(bbox.max().x - center.x)
+                    .min(center.y - bbox.min().y)
+                    .min(bbox.max().y - center.y)
+                    .max(0);
+                radius = radius.max(out + extra);
+            }
             Disk { center, radius }
         };
-        let disks = [disk(ends_at[0]), disk(ends_at[1])];
+        let disks = [disk(0, ends_at[0]), disk(1, ends_at[1])];
         if octile(disks[0].center, disks[1].center) as i64
             <= disks[0].radius + disks[1].radius + 2 * params.pitch
         {

@@ -297,6 +297,13 @@ pub struct Options {
     /// Whether to route [differential pairs](Design::pairs) side by side. The default is
     /// true. Without, their nets are routed as any others.
     pub couple_pairs: bool,
+    /// Whether to route [differential pairs](Design::pairs) side by side first, before
+    /// anything else, as fixed copper, rather than last, in place of their nets' routes.
+    /// The default is false: first, pairs take room that other nets need, and last, a
+    /// pair that finds no room through what is routed stays as two nets. Boards whose pairs
+    /// matter most, such as DRAM's clocks and strobes, route them first: see
+    /// `docs/benchmarks.md`.
+    pub pairs_first: bool,
     /// Whether to add meanders for [lengths](Design::lengths). The default is true.
     pub tune_lengths: bool,
     /// How far a meander may reach out from the track it is added to. The default is 3 mm.
@@ -325,6 +332,7 @@ impl Default for Options {
             fine_pass: true,
             cleanup: true,
             couple_pairs: true,
+            pairs_first: false,
             tune_lengths: true,
             max_amplitude: 3_000_000,
             planes: true,
@@ -383,7 +391,7 @@ pub struct Routed {
     pub fills: Vec<Fill>,
     /// The nets that could not be routed, in order. Nothing of theirs is in the result, but
     /// for a net with zones, which keeps what joins it to them, though they leave it in
-    /// pieces.
+    /// pieces, and a net of many pads, which keeps the pieces it was routed in.
     pub unrouted: Vec<NetId>,
     /// Measurements.
     pub stats: Stats,

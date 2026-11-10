@@ -223,7 +223,7 @@ impl<'a> Tuner<'a> {
         let c = self.clearance(net, t.layer);
         // Legs a clearance apart, and as far from the track's ends.
         let s = ((t.width + c) as f64 / ul).ceil() as i64;
-        let margin = 2 * s;
+        let margin = s;
         let cap = (self.amplitude as f64 / ul) as i64;
         let lowest = ((t.width as f64 / ul).ceil() as i64).max(1);
         let mut left = need;
@@ -657,8 +657,10 @@ pub(crate) fn run(
         // Then each net on its own, to what is left, with the pairs' skews.
         let lengths: Vec<f64> = nets.iter().map(|&n| tuner.length(n)).collect();
         let (lo, aim) = window(c, &lengths);
-        for &n in &nets {
-            let have = tuner.length(n);
+        // The shortest first, as they need the most room.
+        let mut order: Vec<(f64, NetId)> = nets.iter().map(|&n| (tuner.length(n), n)).collect();
+        order.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        for (have, n) in order {
             if have < lo {
                 added += tuner.lengthen(n, aim - have);
             }

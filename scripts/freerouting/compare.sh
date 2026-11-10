@@ -1,5 +1,5 @@
 #!/bin/bash
-# Routes the nine curated boards with Freerouting and with guide, from the same stripped
+# Routes the eleven curated boards with Freerouting and with guide, from the same stripped
 # boards, and prints the table of docs/benchmarks.md, "PCB routing against Freerouting".
 #
 #     JAVA=/path/to/jre/bin/java FREEROUTING_JAR=/path/to/freerouting-2.5.0.jar \
@@ -17,7 +17,8 @@
 #   <board>.guide.kicad_pcb               guide's routing of the stripped board
 #   *.drc.json                            kicad-cli's DRC report on each routed board
 #
-# RUNS limits the runs, by name, for example RUNS="default tuned". With KEEP=1, a run whose
+# RUNS limits the runs, by name, for example RUNS="default tuned", and BOARDS the boards, by
+# their paths under testdata/kicad, for example BOARDS="udb-s/udb-s". With KEEP=1, a run whose
 # routed board is already in OUT_DIR is not run again.
 set -u
 
@@ -28,8 +29,9 @@ java=${JAVA:-java}
 jar=${FREEROUTING_JAR:?set FREEROUTING_JAR to freerouting-2.5.0.jar}
 python=${PYTHON:-python3}
 
-boards="gekkio/GB-BRK-LINK-A dotbots/TS4231-BOB tem-cell/lisn starshipraider/isi-channel
-placebo/placebo udb-s/udb-s bugs/flea gekkio/GB-LIVE32 nitrokey/nk3-nrf-mini"
+boards=${BOARDS:-"gekkio/GB-BRK-LINK-A dotbots/TS4231-BOB tem-cell/lisn starshipraider/isi-channel
+placebo/placebo udb-s/udb-s bugs/flea gekkio/GB-LIVE32 nitrokey/nk3-nrf-mini
+lpddr4-testbed/lpddr4-testbed ddr5-testbed/ddr5-testbed"}
 
 # Freerouting's runs: a name, and its options. `-mt` doesn't reach the optimizer in 2.5.0,
 # so its thread count is set by its setting. The autorouter itself is single-threaded, and

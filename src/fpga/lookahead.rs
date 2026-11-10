@@ -315,7 +315,7 @@ impl MapLookahead {
 }
 
 /// The delay of every edge, in the order of the graph's edges.
-fn edge_delays(graph: &RrGraph) -> Vec<u32> {
+pub(super) fn edge_delays(graph: &RrGraph) -> Vec<u32> {
     let space = graph.graph();
     let mut delays = Vec::with_capacity(space.num_edges() as usize);
     let mut steps = Vec::new();
@@ -369,14 +369,14 @@ fn pick_places(places: &[(u16, u16)], per_axis: u32) -> Vec<(u16, u16)> {
 }
 
 /// A plain Dijkstra over node numbers, for building the tables.
-struct Dijkstra {
+pub(super) struct Dijkstra {
     distance: Vec<f64>,
     heap: BinaryHeap<Reverse<(u64, u32)>>,
     out: Vec<(u32, f64)>,
 }
 
 impl Dijkstra {
-    fn new(count: usize) -> Self {
+    pub(super) fn new(count: usize) -> Self {
         Dijkstra {
             distance: vec![f64::INFINITY; count],
             heap: BinaryHeap::new(),
@@ -386,7 +386,11 @@ impl Dijkstra {
 
     /// Finds the least distance to every node from `sources`, with `expand` giving the steps
     /// out of a node and their lengths, which are not negative.
-    fn run(&mut self, sources: &[u32], mut expand: impl FnMut(u32, &mut Vec<(u32, f64)>)) {
+    pub(super) fn run(
+        &mut self,
+        sources: &[u32],
+        mut expand: impl FnMut(u32, &mut Vec<(u32, f64)>),
+    ) {
         self.distance.fill(f64::INFINITY);
         self.heap.clear();
         for &source in sources {
@@ -414,7 +418,7 @@ impl Dijkstra {
     }
 
     /// The distance to `node` in the last run, if it was reached.
-    fn reached(&self, node: usize) -> Option<f64> {
+    pub(super) fn reached(&self, node: usize) -> Option<f64> {
         let distance = self.distance[node];
         distance.is_finite().then_some(distance)
     }

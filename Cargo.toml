@@ -59,3 +59,7 @@ required-features = ["pcb"]
 [[example]]
 name = "vtr_route"
 required-features = ["fpga"]
+
+[[example]]
+name = "vtr_place"
+required-features = ["fpga"]

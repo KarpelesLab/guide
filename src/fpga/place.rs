@@ -3,9 +3,10 @@
 //! The format is lines of text, as `read_place.cpp` in VPR parses them: an optional header
 //! naming the netlist, the size of the device, and then a line for each block, as
 //! `name x y subblk [layer] [#comment]`. A `#` that starts a token begins a comment.
+//! [`write_placement`] writes it as VPR's `print_place` does.
 
 use std::collections::HashMap;
-use std::io::{BufRead, ErrorKind};
+use std::io::{self, BufRead, ErrorKind, Write};
 
 use super::ImportError;
 
@@ -39,6 +40,37 @@ pub struct Placement {
 }
 
 impl Placement {
+    /// An empty placement, whose header, if it is written, names the netlist file and its
+    /// digest, and the size of the device as width and height.
+    ///
+    /// VPR checks the digest against the netlist it has loaded, and the size against its
+    /// device: `SHA256:` and the hex of the digest of the `.net` file's bytes, and the size of
+    /// the whole grid, which [`RrGraph::grid_size`](super::RrGraph::grid_size) gives.
+    pub fn new(
+        netlist_file: Option<String>,
+        netlist_id: Option<String>,
+        array_size: Option<(u32, u32)>,
+    ) -> Placement {
+        Placement {
+            netlist_file,
+            netlist_id,
+            array_size,
+            ..Placement::default()
+        }
+    }
+
+    /// Adds a block at the end, or returns `false` and leaves the placement as it was if a
+    /// block of that name is already placed.
+    pub fn add_block(&mut self, block: PlacedBlock) -> bool {
+        let index = self.blocks.len() as u32;
+        if self.by_name.contains_key(&block.name) {
+            return false;
+        }
+        self.by_name.insert(block.name.clone(), index);
+        self.blocks.push(block);
+        true
+    }
+
     /// Returns the netlist file that the header names, if there's a header.
     pub fn netlist_file(&self) -> Option<&str> {
         self.netlist_file.as_deref()
@@ -216,6 +248,56 @@ pub fn read_placement<R: BufRead>(mut reader: R) -> Result<Placement, ImportErro
     }
 }
 
+/// Writes a placement in VPR's `.place` format, as VPR's `print_place` writes it: a header if
+/// the placement names a netlist, then a line per block, in order, with its number in the
+/// placement as a comment.
+///
+/// VPR numbers blocks as the netlist does, so for its comments to match VPR's, blocks should
+/// be added in the netlist's order. VPR itself ignores them when it reads the file.
+///
+/// # Errors
+///
+/// Fails if a write fails.
+///
+/// # Examples
+///
+/// ```
+/// use guide::fpga::{PlacedBlock, Placement, read_placement, write_placement};
+///
+/// let mut placement = Placement::new(
+///     Some("top.net".to_owned()),
+///     Some("SHA256:ab".to_owned()),
+///     Some((4, 4)),
+/// );
+/// placement.add_block(PlacedBlock { name: "n27".to_owned(), x: 1, y: 1, sub_block: 0, layer: 0 });
+/// let mut text = Vec::new();
+/// write_placement(&mut text, &placement)?;
+/// assert!(String::from_utf8(text.clone())?.ends_with("n27\t\t1\t1\t0\t0\t#0\n"));
+/// assert_eq!(read_placement(text.as_slice())?, placement);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub fn write_placement<W: Write>(mut out: W, placement: &Placement) -> io::Result<()> {
+    if let Some(file) = &placement.netlist_file {
+        let id = placement.netlist_id.as_deref().unwrap_or("SHA256:0");
+        writeln!(out, "Netlist_File: {file} Netlist_ID: {id}")?;
+    }
+    if let Some((width, height)) = placement.array_size {
+        writeln!(out, "Array size: {width} x {height} logic blocks")?;
+    }
+    writeln!(out)?;
+    writeln!(out, "#block name\tx\ty\tsubblk\tlayer\tblock number")?;
+    writeln!(out, "#----------\t--\t--\t------\t-----\t------------")?;
+    for (index, block) in placement.blocks.iter().enumerate() {
+        let pad = if block.name.len() < 8 { "\t" } else { "" };
+        writeln!(
+            out,
+            "{}\t{pad}{}\t{}\t{}\t{}\t#{index}",
+            block.name, block.x, block.y, block.sub_block, block.layer
+        )?;
+    }
+    Ok(())
+}
+
 fn truncated(text: &str) -> String {
     text.chars().take(64).collect()
 }
@@ -352,6 +434,32 @@ mod tests {
         line.extend_from_slice(b"a 1 2 3");
         let placement = read_placement(line.as_slice()).unwrap();
         assert_eq!(placement.blocks().len(), 1);
+    }
+
+    #[test]
+    fn a_genuine_placement_is_written_back_as_vpr_wrote_it() {
+        let placement = read_placement(GENUINE.as_bytes()).unwrap();
+        let mut text = Vec::new();
+        write_placement(&mut text, &placement).unwrap();
+        assert_eq!(String::from_utf8(text).unwrap(), GENUINE);
+    }
+
+    #[test]
+    fn blocks_are_added_once() {
+        let mut placement = Placement::new(None, None, None);
+        let block = PlacedBlock {
+            name: "a".to_owned(),
+            x: 1,
+            y: 2,
+            sub_block: 0,
+            layer: 0,
+        };
+        assert!(placement.add_block(block.clone()));
+        assert!(!placement.add_block(PlacedBlock { x: 3, ..block }));
+        assert_eq!(placement.block("a").map(|block| block.x), Some(1));
+        let mut text = Vec::new();
+        write_placement(&mut text, &placement).unwrap();
+        assert_eq!(read_placement(text.as_slice()).unwrap(), placement);
     }
 
     proptest! {

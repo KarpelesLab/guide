@@ -1,8 +1,9 @@
 //! Architecture files: VPR's `arch.xml`, read for the delays inside blocks.
 //!
-//! [`read_architecture`] reads what [`build_timing`](super::build_timing) needs and skips
-//! everything else: the device's layout, its routing and power are in the routing resource
-//! graph or don't matter here.
+//! [`read_architecture`] reads what [`build_timing`](super::build_timing) needs, and the direct
+//! connections between blocks that placement keeps carry chains on, and skips everything
+//! else: the device's layout, its routing and power are in the routing resource graph or don't
+//! matter here.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::BufRead;
@@ -35,12 +36,39 @@ pub struct ArchPrimitive {
     pub kind: PrimitiveKind,
 }
 
+/// A direct connection between two blocks, from the architecture's `<directlist>`, which
+/// bypasses the routing channels: a carry chain's `cout` to the next block's `cin`.
+///
+/// VPR keeps the blocks that such connections join at these offsets from each other when it
+/// places them, as one macro, or the connection could not be routed.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct ArchDirect {
+    /// The connection's name.
+    pub name: String,
+    /// The type of the block it leaves, as in `clb`.
+    pub from_type: String,
+    /// The port it leaves from, as in `cout`.
+    pub from_port: String,
+    /// The type of the block it reaches.
+    pub to_type: String,
+    /// The port it reaches, as in `cin`.
+    pub to_port: String,
+    /// How many columns the block it reaches is from the one it leaves.
+    pub x_offset: i32,
+    /// How many rows, as in `-1` for a chain that runs downwards.
+    pub y_offset: i32,
+    /// How many positions within the tile.
+    pub z_offset: i32,
+}
+
 /// What [`read_architecture`] took from an architecture file.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Architecture {
     delays: LogicDelays,
     primitives: Vec<ArchPrimitive>,
     interconnects: u32,
+    directs: Vec<ArchDirect>,
 }
 
 impl Architecture {
@@ -70,6 +98,11 @@ impl Architecture {
     /// `class`.
     pub fn interconnects(&self) -> u32 {
         self.interconnects
+    }
+
+    /// Returns the direct connections between blocks, in file order.
+    pub fn directs(&self) -> &[ArchDirect] {
+        &self.directs
     }
 }
 
@@ -156,6 +189,7 @@ enum Context {
         output: bool,
     },
     BlockList,
+    DirectList,
     PbType,
     Mode,
     Interconnects,
@@ -310,6 +344,41 @@ fn port_names(text: &str, line: u64) -> Result<Vec<String>, ImportError> {
 }
 
 /// Reads one delay attribute, in seconds, as picoseconds.
+/// Reads a `<direct>` of a `<directlist>`.
+fn read_direct(tag: &Tag<'_>) -> Result<ArchDirect, ImportError> {
+    let line = tag.line();
+    let pin = |attribute: &'static str| -> Result<(String, String), ImportError> {
+        let text = required(tag, attribute)?;
+        let (block, port) = text
+            .split_once('.')
+            .ok_or_else(|| invalid(line, attribute, &text))?;
+        // A pin range, as in `clb.cout[0:0]`, names the same port.
+        let port = port.split_once('[').map_or(port, |(port, _)| port);
+        Ok((block.to_owned(), port.to_owned()))
+    };
+    let offset = |attribute: &'static str| -> Result<i32, ImportError> {
+        match tag.attr(attribute) {
+            None => Ok(0),
+            Some(text) => text
+                .trim()
+                .parse()
+                .map_err(|_| invalid(line, attribute, text)),
+        }
+    };
+    let (from_type, from_port) = pin("from_pin")?;
+    let (to_type, to_port) = pin("to_pin")?;
+    Ok(ArchDirect {
+        name: required(tag, "name")?,
+        from_type,
+        from_port,
+        to_type,
+        to_port,
+        x_offset: offset("x_offset")?,
+        y_offset: offset("y_offset")?,
+        z_offset: offset("z_offset")?,
+    })
+}
+
 fn delay_attr(tag: &Tag<'_>, attribute: &'static str) -> Result<Option<u32>, ImportError> {
     match tag.attr(attribute) {
         Some(value) => picoseconds(value)
@@ -381,6 +450,11 @@ impl Reader {
         Ok(match (context, tag.name()) {
             (Context::Root, "models") => Context::Models,
             (Context::Root, "complexblocklist") => Context::BlockList,
+            (Context::Root, "directlist") => Context::DirectList,
+            (Context::DirectList, "direct") => {
+                self.arch.directs.push(read_direct(tag)?);
+                Context::Skip
+            }
             (Context::Models, "model") => {
                 let name = required(tag, "name")?;
                 self.models.insert(name.clone(), Model::default());

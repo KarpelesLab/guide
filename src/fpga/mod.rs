@@ -175,6 +175,7 @@ mod design;
 mod lookahead;
 mod netlist;
 mod place;
+mod placer;
 mod route_file;
 mod rr_graph;
 mod timing;
@@ -183,14 +184,18 @@ mod xml;
 #[cfg(test)]
 mod tests;
 
-pub use arch::{ArchPrimitive, Architecture, PrimitiveKind, read_architecture};
+pub use arch::{ArchDirect, ArchPrimitive, Architecture, PrimitiveKind, read_architecture};
 pub use design::{Design, GlobalPort, NetInfo, NetOptions, NetPin, NetStatus, resolve_nets};
 pub use lookahead::{LookaheadOptions, MapLookahead};
 pub use netlist::{
     HopEnds, Interconnect, InternalPath, InternalPin, PackedBlock, PackedNet, PackedNetlist,
     PackedPin, PackedPrimitive, PortPin, read_netlist,
 };
-pub use place::{PlacedBlock, Placement, read_placement};
+pub use place::{PlacedBlock, Placement, read_placement, write_placement};
+pub use placer::{
+    PlaceDelayModel, PlaceMethod, PlaceProblem, PlaceResult, PlacerOptions, ProblemOptions,
+    build_place_problem, estimate_slack, place_design,
+};
 pub use route_file::{RouteFileError, RouteHeader, RouteSummary, write_route};
 pub use rr_graph::{
     BlockType, ChannelDirection, GridTile, LocationBound, NodeKind, NodeLocation, Pin, PinClass,
@@ -341,6 +346,13 @@ pub enum ImportError {
         /// The port on the block.
         port: String,
     },
+    /// A block's type is not a tile type of the device, so there is nowhere to place it.
+    NoTileType {
+        /// The block's name.
+        block: String,
+        /// Its type.
+        pb_type: String,
+    },
 }
 
 impl ImportError {
@@ -429,6 +441,10 @@ impl fmt::Display for ImportError {
             ImportError::PinDirection { block, port } => write!(
                 f,
                 "port {port} of block {block} connects to a pin class of the opposite direction"
+            ),
+            ImportError::NoTileType { block, pb_type } => write!(
+                f,
+                "block {block} is a {pb_type}, and the device has no tile of that type"
             ),
         }
     }

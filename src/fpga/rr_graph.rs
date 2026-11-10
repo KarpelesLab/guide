@@ -252,6 +252,7 @@ pub struct BlockType {
     /// Pins by position, port and pin number, for looking them up from a netlist.
     by_slot: HashMap<(u32, String, u32), u32>,
     is_io: bool,
+    capacity: u32,
 }
 
 impl BlockType {
@@ -265,11 +266,25 @@ impl BlockType {
         self.is_io
     }
 
+    /// Returns how many blocks the tile holds: one more than the highest position that its
+    /// pins' names give, or 0 for a tile without pins, which holds nothing.
+    pub fn capacity(&self) -> u32 {
+        self.capacity
+    }
+
     /// Finds the `ptc` of a pin from a block at `sub_block` of this tile.
     pub(crate) fn find_pin(&self, sub_block: u32, port: &str, bit: u32) -> Option<&PinSlot> {
         // Port names are short and pins are few per block, so a key per lookup costs little.
         let ptc = self.by_slot.get(&(sub_block, port.to_owned(), bit))?;
         self.by_ptc.get(ptc)
+    }
+
+    /// Finds the `ptc` of a pin, which is that of its `IPIN` or `OPIN` nodes, from a block at
+    /// `sub_block` of this tile.
+    pub(crate) fn find_pin_ptc(&self, sub_block: u32, port: &str, bit: u32) -> Option<u32> {
+        self.by_slot
+            .get(&(sub_block, port.to_owned(), bit))
+            .copied()
     }
 
     /// Finds a pin from its `ptc`.
@@ -335,6 +350,11 @@ impl BlockType {
             );
         }
         self.is_io = is_io;
+        self.capacity = by_ptc
+            .values()
+            .map(|slot: &PinSlot| slot.sub_block.saturating_add(1))
+            .max()
+            .unwrap_or(0);
         self.by_ptc = by_ptc;
         self.by_slot = by_slot;
     }
@@ -1490,6 +1510,7 @@ pub fn read_rr_graph<R: BufRead>(reader: R) -> Result<RrGraph, ImportError> {
                                 by_ptc: HashMap::new(),
                                 by_slot: HashMap::new(),
                                 is_io: false,
+                                capacity: 0,
                             });
                         }
                         Section::BlockTypes if depth == 4 && tag.name() == "pin_class" => {

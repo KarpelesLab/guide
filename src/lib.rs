@@ -30,6 +30,7 @@ pub mod math;
 pub mod net;
 #[cfg(feature = "pcb")]
 pub mod pcb;
+pub mod place;
 pub mod rng;
 pub mod search;
 #[cfg(any(feature = "kicad", feature = "dsn"))]

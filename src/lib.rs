@@ -31,6 +31,8 @@ pub mod geom;
 pub mod id;
 #[cfg(feature = "kicad")]
 pub mod kicad;
+#[cfg(feature = "mapf")]
+pub mod mapf;
 pub mod math;
 pub mod net;
 #[cfg(feature = "pcb")]

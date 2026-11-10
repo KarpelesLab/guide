@@ -1,0 +1,231 @@
+//! Multi-agent path finding, by the negotiated-congestion engine.
+//!
+//! Agents start on vertices of a graph and have to reach their goals, one step or one wait per
+//! time step, without two of them ever being on the same vertex at once or swapping places
+//! along an edge, and stay on their goals once there. That is the classic problem of Stern et
+//! al., *Multi-Agent Pathfinding: Definitions, Variants, and Benchmarks* (SoCS 2019), with
+//! vertex and swap conflicts, agents that stay at their targets, and the sum of costs as the
+//! objective.
+//!
+//! Nothing here is a new algorithm. [`TimeSpace`] expands an [`Instance`] in time, as a
+//! [`RoutingSpace`](crate::space::RoutingSpace) whose nodes are a vertex at a time and whose
+//! resources are a vertex at a time and an edge during a move, each of capacity 1, and
+//! [`solve`] hands it to [`crate::engine`], which negotiates the conflicts away as PathFinder
+//! does on an FPGA. Agents are nets, and each net has two terminals, its start at time 0 and
+//! its goal. This is what MAPF-LNS2 (Li et al., AAAI 2022) calls soft conflicts: an agent may
+//! collide at a price, and the price rises until nobody does.
+//!
+//! # Staying on the goal
+//!
+//! An agent's route ends with a step from its goal at some time `t` into [`State::Goal`], which
+//! holds the goal from `t + 1` to the horizon. Another agent passing through later conflicts
+//! with that, so the engine sees the rule like any other. The step costs 1, as moves and waits
+//! do, and a route's base cost is its agent's arrival time plus 1.
+//!
+//! # The horizon
+//!
+//! Time has to stop somewhere, and the horizon is a trade: too short and no solution fits, too
+//! long and every final step holds more resources. [`solve`] starts from the longest of the
+//! agents' shortest paths plus [`slack`](SolveOptions::slack), and, if negotiation doesn't
+//! settle within the engine's iterations, lengthens it and runs again from the routes and
+//! history it ended with (iterative deepening). Searches are never offered a state from which
+//! the goal can't be reached by the horizon, so a horizon costs nothing where no route goes.
+//!
+//! # Checking
+//!
+//! [`check`](check::check) checks plans against the graph and the agents only, and knows
+//! nothing of the space or the engine. [`movingai`] reads the MovingAI benchmarks.
+
+pub mod check;
+mod graph;
+pub mod movingai;
+mod space;
+
+pub use graph::{Agent, Graph, GraphError};
+pub use space::{Instance, InstanceError, Resource, State, TimeSpace};
+
+use crate::engine::{Engine, EngineOptions, StopReason};
+
+/// How [`solve`] runs.
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub struct SolveOptions<'c> {
+    /// The engine's options for each round. Its expansion budget and cancel flag cover the
+    /// whole of a solve. The default is [`engine_options`].
+    pub engine: EngineOptions<'c>,
+    /// How far the first horizon is past the longest of the agents' shortest paths. The
+    /// default is 16.
+    pub slack: u32,
+    /// How many rounds to run at most, each with a longer horizon. The default is 4.
+    pub rounds: u32,
+    /// How many threads search at once, which only helps with a
+    /// [`batch_size`](EngineOptions::batch_size) above 1, and never changes results. The
+    /// default is 1.
+    pub threads: usize,
+}
+
+impl Default for SolveOptions<'_> {
+    fn default() -> Self {
+        SolveOptions {
+            engine: engine_options(),
+            slack: 16,
+            rounds: 4,
+            threads: 1,
+        }
+    }
+}
+
+/// The engine's options for multi-agent path finding.
+pub fn engine_options() -> EngineOptions<'static> {
+    EngineOptions::default()
+}
+
+/// What one round of [`solve`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Round {
+    /// Its horizon.
+    pub horizon: u32,
+    /// Why it stopped.
+    pub stop: StopReason,
+    /// How many iterations it ran.
+    pub iterations: u64,
+    /// How many nodes its searches expanded.
+    pub nodes_expanded: u64,
+    /// How many resources its best routes left overused.
+    pub conflicts: usize,
+}
+
+/// The result of [`solve`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Solution {
+    /// One plan per agent, the vertex at each time from 0 to its last arrival on its goal, if
+    /// every conflict was settled.
+    pub plans: Option<Vec<Vec<u32>>>,
+    /// Each round, in order.
+    pub rounds: Vec<Round>,
+}
+
+impl Solution {
+    /// Returns the sum over agents of the time of their last arrival on their goal, for a
+    /// solution.
+    pub fn sum_of_costs(&self) -> Option<u64> {
+        let plans = self.plans.as_ref()?;
+        Some(
+            plans
+                .iter()
+                .map(|plan| u64::from(check::plan_cost(plan)))
+                .sum(),
+        )
+    }
+
+    /// Returns the latest arrival, for a solution.
+    pub fn makespan(&self) -> Option<u32> {
+        let plans = self.plans.as_ref()?;
+        Some(
+            plans
+                .iter()
+                .map(|plan| check::plan_cost(plan))
+                .max()
+                .unwrap_or(0),
+        )
+    }
+
+    /// Returns how many nodes all rounds expanded.
+    pub fn nodes_expanded(&self) -> u64 {
+        self.rounds.iter().map(|round| round.nodes_expanded).sum()
+    }
+
+    /// Returns how many iterations all rounds ran.
+    pub fn iterations(&self) -> u64 {
+        self.rounds.iter().map(|round| round.iterations).sum()
+    }
+}
+
+/// Solves `instance` with the negotiated-congestion engine. See the [module
+/// documentation](self).
+///
+/// The result is the same for any number of threads and on any platform.
+///
+/// # Examples
+///
+/// Two agents swap ends of a corridor with a siding. One steps into the siding to let the other
+/// by, which takes it 4 steps, and the other waits a step, which takes it 3.
+///
+/// ```
+/// use guide::mapf::{Agent, Graph, Instance, SolveOptions, check, solve};
+///
+/// //  0 - 1 - 2
+/// //      |
+/// //      3
+/// let graph = Graph::from_edges(4, &[(0, 1), (1, 2), (1, 3)])?;
+/// let agents = vec![Agent { start: 0, goal: 2 }, Agent { start: 2, goal: 0 }];
+/// let instance = Instance::new(&graph, agents.clone())?;
+///
+/// let solution = solve(&instance, &SolveOptions::default());
+/// let plans = solution.plans.as_ref().expect("the siding lets them pass");
+/// let summary = check::check(&graph, &agents, plans).expect("the plans are legal");
+/// assert_eq!(summary.sum_of_costs, 3 + 4);
+/// assert_eq!(solution.sum_of_costs(), Some(7));
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub fn solve(instance: &Instance<'_>, options: &SolveOptions<'_>) -> Solution {
+    let nets = instance.nets();
+    let mut horizon = instance.longest_shortest().saturating_add(options.slack);
+    let mut rounds = Vec::new();
+    let mut seeds = Vec::new();
+    let mut history = Vec::new();
+    let mut budget = options.engine.max_expansions;
+    for round in 0..options.rounds.max(1) {
+        let space = TimeSpace::new(instance, horizon);
+        let mut engine_options = options.engine;
+        engine_options.max_expansions = budget;
+        let Ok(mut engine) = Engine::new(&space, &nets, engine_options) else {
+            // Nets are numbered by agent, so they can't share an ID.
+            unreachable!("agents have distinct nets");
+        };
+        if round > 0 {
+            // Both were taken from an engine on the same nets, so neither can fail.
+            let _ = engine.seed_routes(seeds.drain(..));
+            let _ = engine.seed_history(history.drain(..));
+        }
+        while engine.step_parallel(options.threads).is_some() {}
+        let outcome = engine.outcome();
+        let stats = outcome.routes.stats;
+        budget = budget.saturating_sub(stats.nodes_expanded);
+        rounds.push(Round {
+            horizon,
+            stop: outcome.stop,
+            iterations: stats.iterations,
+            nodes_expanded: stats.nodes_expanded,
+            conflicts: outcome.overused.len(),
+        });
+        if outcome.is_success() {
+            let plans = outcome
+                .routes
+                .routes()
+                .map(|(_, route)| TimeSpace::plan(route))
+                .collect::<Option<Vec<_>>>();
+            return Solution { plans, rounds };
+        }
+        if matches!(
+            outcome.stop,
+            StopReason::Cancelled | StopReason::BudgetExhausted
+        ) {
+            break;
+        }
+        history = engine.history();
+        seeds = outcome
+            .routes
+            .routes()
+            .map(|(net, route)| (net, route.clone()))
+            .collect();
+        horizon = horizon.saturating_add(options.slack.max(horizon / 4));
+    }
+    Solution {
+        plans: None,
+        rounds,
+    }
+}
+
+#[cfg(test)]
+mod tests;

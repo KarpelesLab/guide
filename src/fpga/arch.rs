@@ -69,6 +69,8 @@ pub struct Architecture {
     primitives: Vec<ArchPrimitive>,
     interconnects: u32,
     directs: Vec<ArchDirect>,
+    /// The `complete` interconnects, by the type of the block that holds them and their name.
+    complete: BTreeSet<(String, String)>,
 }
 
 impl Architecture {
@@ -103,6 +105,14 @@ impl Architecture {
     /// Returns the direct connections between blocks, in file order.
     pub fn directs(&self) -> &[ArchDirect] {
         &self.directs
+    }
+
+    /// Returns whether the interconnect of this name in blocks of this type is a `complete`
+    /// crossbar, which connects every input to every output, so that what reaches its outputs
+    /// can be permuted.
+    pub fn is_complete(&self, container: &str, name: &str) -> bool {
+        self.complete
+            .contains(&(container.to_owned(), name.to_owned()))
     }
 }
 
@@ -492,7 +502,7 @@ impl Reader {
             }
             (Context::PbType, "mode") => Context::Mode,
             (Context::PbType | Context::Mode, "interconnect") => Context::Interconnects,
-            (Context::Interconnects, "direct" | "mux" | "complete") => {
+            (Context::Interconnects, kind @ ("direct" | "mux" | "complete")) => {
                 let container = self
                     .pb_types
                     .last()
@@ -504,6 +514,11 @@ impl Reader {
                     output: required(tag, "output")?,
                     container,
                 };
+                if kind == "complete" {
+                    self.arch
+                        .complete
+                        .insert((interconnect.container.clone(), interconnect.name.clone()));
+                }
                 self.add_interconnect(&interconnect.container, &interconnect.name);
                 self.interconnect = Some(interconnect);
                 Context::Interconnect

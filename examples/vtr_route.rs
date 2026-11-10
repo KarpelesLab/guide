@@ -35,6 +35,7 @@
 //! | `--lookahead-samples N` | `LookaheadOptions::samples_per_axis` | The default, 2 |
 //! | `--astar F` | `EngineOptions::bound_weight` | From `RrGraph::engine_options` |
 //! | `--incremental on/off` | `EngineOptions::incremental_reroute` | From `RrGraph::engine_options` |
+//! | `--rotate-luts FILE` | After a legal timing-driven routing, rotate the LUTs' inputs for timing with `fpga::rotate_luts_for_timing`, and write the packed netlist with them to FILE | Off |
 //! | `--report-timing` | Print the delays that fell back on defaults, and the critical path with each pin's arrival, to standard error | Off |
 //!
 //! It prints one line of `key=value` pairs, which the scripts parse, and exits with status 0 if
@@ -50,7 +51,8 @@ use guide::engine::{Outcome, route_parallel, route_timed_parallel};
 use guide::fpga::{
     DesignTiming, InternalPin, LookaheadOptions, NetOptions, NodeKind, PackedNetlist, RouteHeader,
     RrGraph, TimingOptions, build_timing, constant_nets, read_architecture, read_netlist,
-    read_placement, read_rr_graph, resolve_nets, write_route,
+    read_placement, read_rr_graph, resolve_nets, rotatable_luts, rotate_luts_for_timing,
+    write_rotated_netlist, write_route,
 };
 use guide::id::NodeId;
 use guide::timing::{Constraints, TimingAnalysis};
@@ -81,6 +83,7 @@ struct Args {
     astar: Option<f64>,
     incremental: Option<bool>,
     report_timing: bool,
+    rotate_luts: Option<String>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -107,6 +110,7 @@ fn parse_args() -> Result<Args, String> {
         astar: None,
         incremental: None,
         report_timing: false,
+        rotate_luts: None,
     };
     let mut given = std::env::args().skip(1);
     while let Some(flag) = given.next() {
@@ -157,6 +161,7 @@ fn parse_args() -> Result<Args, String> {
                     _ => return Err(format!("{flag} is map or location, not {value:?}")),
                 }
             }
+            "--rotate-luts" => args.rotate_luts = Some(value),
             "--lookahead-samples" => args.lookahead_samples = Some(number(&value)?),
             "--astar" => args.astar = Some(factor(&value)?),
             "--incremental" => {
@@ -245,6 +250,40 @@ fn report_timing(timing: &DesignTiming, netlist: &PackedNetlist, constraints: &C
     }
 }
 
+/// Rotates the LUTs' inputs for timing, with every connection's delay in `timing` already,
+/// writes the packed netlist with them, and says what it did as key-value pairs.
+fn rotate(
+    args: &Args,
+    arch: &guide::fpga::Architecture,
+    netlist: &PackedNetlist,
+    timing: &mut DesignTiming,
+    constraints: &Constraints,
+    path: &str,
+) -> Result<String, String> {
+    let started = Instant::now();
+    let mut analysis = TimingAnalysis::new(timing.graph());
+    analysis.run(timing.graph(), constraints);
+    let before = analysis.worst_slack();
+    let rotatable =
+        rotatable_luts(open(&args.net)?, arch).map_err(|e| format!("{}: {e}", args.net))?;
+    let rotation =
+        rotate_luts_for_timing(timing, netlist, arch.delays(), constraints, &rotatable, 8);
+    analysis.run(timing.graph(), constraints);
+    let after = analysis.worst_slack();
+    let file = File::create(path).map_err(|e| format!("{path}: {e}"))?;
+    let written = write_rotated_netlist(open(&args.net)?, BufWriter::new(file), arch, &rotation)
+        .map_err(|e| format!("{path}: {e}"))?;
+    let slack = |s: Option<i64>| s.map_or_else(|| "none".to_owned(), |s| s.to_string());
+    Ok(format!(
+        " rotatable_luts={} rotated_luts={written} slack_before_rotation_ps={} \
+         slack_after_rotation_ps={} rotation_s={:.3}",
+        rotatable.len(),
+        slack(before),
+        slack(after),
+        started.elapsed().as_secs_f64(),
+    ))
+}
+
 fn run(args: &Args) -> Result<bool, String> {
     let started = Instant::now();
     let arch = read_architecture(open(&args.arch)?).map_err(|e| format!("{}: {e}", args.arch))?;
@@ -306,6 +345,7 @@ fn run(args: &Args) -> Result<bool, String> {
 
     let timed = device.timed_graph();
     let started = Instant::now();
+    let mut rotation_text = String::new();
     let outcome = if args.timing {
         let mut timing = build_timing(&netlist, arch.delays(), &TimingOptions::default())
             .map_err(|e| format!("timing graph: {e}"))?;
@@ -316,12 +356,18 @@ fn run(args: &Args) -> Result<bool, String> {
         let driven = timing.timing_driven(&design, constraints.clone());
         let connections = driven.connections.clone();
         let outcome = route_timed_parallel(&timed, design.nets(), options, driven, args.threads);
-        if args.report_timing
-            && let Ok(outcome) = &outcome
+        if let Ok(outcome) = &outcome
             && let Some(result) = &outcome.timing
         {
             timing.set_connection_delays(&connections, &result.connection_delays);
-            report_timing(&timing, &netlist, &constraints);
+            if args.report_timing {
+                report_timing(&timing, &netlist, &constraints);
+            }
+            if let Some(path) = &args.rotate_luts
+                && outcome.is_success()
+            {
+                rotation_text = rotate(args, &arch, &netlist, &mut timing, &constraints, path)?;
+            }
         }
         outcome
     } else {
@@ -360,7 +406,7 @@ fn run(args: &Args) -> Result<bool, String> {
          stop={:?} nets={} constant_nets={constants} wirelength={} critical_path_ps={} worst_slack_ps={} total_cost={:.6e} \
          expansions={} read_s={read_seconds:.3} lookahead_s={lookahead_seconds:.3} \
          route_s={route_seconds:.3} threads={} \
-         batch={} written={written}",
+         batch={} written={written}{rotation_text}",
         report.faults().len(),
         outcome.overused.len(),
         outcome.routes.stats.iterations,

@@ -185,6 +185,7 @@ mod lookahead;
 mod netlist;
 mod place;
 mod placer;
+mod rotation;
 mod route_file;
 mod rr_graph;
 mod timing;
@@ -209,6 +210,9 @@ pub use placer::{
     ChannelDemand, PlaceDelayModel, PlaceMethod, PlaceProblem, PlaceResult, PlacerOptions,
     ProblemOptions, RefineOptions, build_place_problem, estimate_slack, place_design,
     refine_placement,
+};
+pub use rotation::{
+    LutRotation, RotatableLut, rotatable_luts, rotate_luts_for_timing, write_rotated_netlist,
 };
 pub use route_file::{RouteFileError, RouteHeader, RouteSummary, write_route};
 pub use rr_graph::{

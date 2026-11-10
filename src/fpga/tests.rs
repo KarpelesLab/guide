@@ -3129,3 +3129,116 @@ fn the_loop_places_again_until_the_design_routes() {
     assert_eq!(again.rounds, result.rounds);
     assert_eq!(again.placement, result.placement);
 }
+
+const K6_N10: &str = include_str!("../../testdata/vtr/k6_N10_40nm.xml");
+
+#[test]
+fn every_lut_of_a_k6_n10_cluster_can_be_rotated() {
+    let arch = read_architecture(K6_N10.as_bytes()).unwrap();
+    assert!(arch.is_complete("clb", "crossbar"));
+    assert!(!arch.is_complete("fle", "direct1"));
+    let netlist = read_netlist(NET.as_bytes()).unwrap();
+    let luts = netlist
+        .primitives()
+        .iter()
+        .filter(|p| p.pb_type == "lut")
+        .count();
+    let rotatable = rotatable_luts(NET.as_bytes(), &arch).unwrap();
+    assert_eq!(rotatable.len(), luts);
+    assert!(
+        rotatable
+            .values()
+            .all(|l| l.pb_type == "lut" && l.port == "in" && l.width == 6)
+    );
+    // Without the crossbar, nothing can.
+    assert!(
+        rotatable_luts(NET.as_bytes(), &Architecture::default())
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_netlist_written_without_rotation_reads_the_same() {
+    let arch = read_architecture(K6_N10.as_bytes()).unwrap();
+    let mut out = Vec::new();
+    let rotated =
+        write_rotated_netlist(NET.as_bytes(), &mut out, &arch, &LutRotation::default()).unwrap();
+    assert_eq!(rotated, 0);
+    assert_eq!(
+        read_netlist(out.as_slice()).unwrap(),
+        read_netlist(NET.as_bytes()).unwrap()
+    );
+}
+
+/// Gives the connections between blocks delays that differ, so that inputs arrive at
+/// different times.
+fn spread_net_delays(timing: &mut DesignTiming) {
+    for (k, arc) in timing.graph().net_arcs().to_vec().into_iter().enumerate() {
+        timing
+            .graph_mut()
+            .set_delay(arc, 100 + 37 * (k as u32 % 11))
+            .unwrap();
+    }
+}
+
+#[test]
+fn rotated_luts_time_as_the_rotation_said() {
+    let arch = read_architecture(K6_N10.as_bytes()).unwrap();
+    let netlist = read_netlist(NET.as_bytes()).unwrap();
+    let mut timing = build_timing(&netlist, arch.delays(), &TimingOptions::default()).unwrap();
+    let constraints = timing.vpr_constraints(0).unwrap();
+    spread_net_delays(&mut timing);
+    let mut analysis = crate::timing::TimingAnalysis::new(timing.graph());
+    analysis.run(timing.graph(), &constraints);
+    let before = analysis.worst_slack().unwrap();
+    let rotatable = rotatable_luts(NET.as_bytes(), &arch).unwrap();
+    let rotation = rotate_luts_for_timing(
+        &mut timing,
+        &netlist,
+        arch.delays(),
+        &constraints,
+        &rotatable,
+        8,
+    );
+    assert!(!rotation.is_empty());
+    analysis.run(timing.graph(), &constraints);
+    let after = analysis.worst_slack().unwrap();
+    assert!(after > before, "{after} against {before}");
+    for name in rotatable.keys() {
+        if let Some(permutation) = rotation.permutation(name) {
+            let mut sorted = permutation.to_vec();
+            sorted.sort_unstable();
+            assert_eq!(sorted, (0..6).collect::<Vec<_>>());
+        }
+    }
+
+    // The netlist with the rotation, timed from scratch with the same connections, agrees.
+    let mut out = Vec::new();
+    let written = write_rotated_netlist(NET.as_bytes(), &mut out, &arch, &rotation).unwrap();
+    assert_eq!(written, rotation.len());
+    let rotated = read_netlist(out.as_slice()).unwrap();
+    assert_eq!(rotated.nets(), netlist.nets());
+    assert_eq!(rotated.blocks(), netlist.blocks());
+    let mut retimed = build_timing(&rotated, arch.delays(), &TimingOptions::default()).unwrap();
+    spread_net_delays(&mut retimed);
+    let mut analysis = crate::timing::TimingAnalysis::new(retimed.graph());
+    analysis.run(retimed.graph(), &constraints);
+    assert_eq!(analysis.worst_slack(), Some(after));
+    // Each LUT's inputs moved as the rotation says.
+    for (old, new) in netlist.primitives().iter().zip(rotated.primitives()) {
+        assert_eq!(old.name, new.name);
+        let Some(permutation) = rotation.permutation(&old.name) else {
+            assert_eq!(old.inputs, new.inputs);
+            continue;
+        };
+        let mut moved: Vec<u32> = old
+            .inputs
+            .iter()
+            .map(|pin| permutation[pin.bit as usize])
+            .collect();
+        moved.sort_unstable();
+        let bits: Vec<u32> = new.inputs.iter().map(|pin| pin.bit).collect();
+        assert_eq!(moved, bits);
+    }
+}

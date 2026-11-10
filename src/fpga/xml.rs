@@ -101,7 +101,6 @@ impl<'a> Tag<'a> {
     }
 
     /// Returns every attribute as a name and value, in document order.
-    #[cfg(test)]
     pub fn attrs(&self) -> impl Iterator<Item = (&'a str, &'a str)> {
         let source = self.source;
         let this = *self;

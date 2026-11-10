@@ -924,14 +924,19 @@ pub struct PlacerOptions {
     /// wire, for each unit by which the channels of its bounding box are expected to be used
     /// above [`congestion_threshold`](PlacerOptions::congestion_threshold), on average, by
     /// [`PlaceProblem::channel_demand`] of the placement at the start of each temperature.
-    /// 0 leaves congestion out.
+    /// 0 leaves congestion out. The default is 1: on VTR's benchmarks, see
+    /// `docs/benchmarks.md`, it took channels 1.5% narrower on average over five seeds, with
+    /// as much wire and delay, where 0.5 and 3 did less.
     pub congestion_factor: f64,
     /// The use of a channel, as a fraction of its tracks, above which it counts as congested.
+    /// The default is 0.6, of a device whose channels are 1.3 times as wide as VPR needs, which
+    /// is 0.78 of that; 0.5 and 0.7 did less.
     pub congestion_threshold: f64,
     /// For [`PlaceMethod::Analytic`], the most room a block can take while it is spread, as a
     /// multiple of its own, where its channels are expected to be used above
-    /// [`congestion_threshold`](PlacerOptions::congestion_threshold): see [`Inflation`]. 1
-    /// leaves blocks their own room.
+    /// [`congestion_threshold`](PlacerOptions::congestion_threshold): see [`Inflation`]. The
+    /// default is 1, which leaves blocks their own room: 2 took channels as narrow as
+    /// `congestion_factor` does alone, but not on top of it.
     pub max_inflation: f64,
 }
 
@@ -945,8 +950,8 @@ impl Default for PlacerOptions {
             criticality_exponents: (1, 8),
             detailed_temperature: 0.05,
             detailed_range: 8,
-            congestion_factor: 0.0,
-            congestion_threshold: 0.5,
+            congestion_factor: 1.0,
+            congestion_threshold: 0.6,
             max_inflation: 1.0,
         }
     }
@@ -1213,6 +1218,18 @@ fn exponent(range: f64, max_range: f64, (first, last): (u32, u32)) -> u32 {
 /// the criticalities and weights are worked out again with an exponent that grows as the range
 /// limit shrinks, as VPR does. Without `timing`, or with a tradeoff of 0, the cost is the
 /// bounding boxes alone, still weighed again each temperature.
+///
+/// # Congestion
+///
+/// With a [`congestion_factor`](PlacerOptions::congestion_factor), each temperature also
+/// estimates the use of every channel by [`PlaceProblem::channel_demand`], and each net costs
+/// its share of the channels over the threshold: its horizontal wire, its crossing count times
+/// its columns, times the average excess of the horizontal channels in its box, and the same
+/// vertically, weighed as its bounding box is. This is the demand each net puts on the
+/// channels times how far they are over, so moves that take wire out of congested channels
+/// pay. VPR's newer placer has a congestion term of this kind; VPR 9.0.0's has none.
+/// [`max_inflation`](PlacerOptions::max_inflation) also grows blocks in congested channels
+/// during global placement.
 ///
 /// # Annealing
 ///

@@ -27,7 +27,15 @@
 //!   project, or from the board itself for KiCad 5 files and boards without a project.
 //!   KiCad's defaults apply where neither says. Custom rules, in a `.kicad_dru`, are not
 //!   read for the checks; [`length_rules`] reads what they ask of routing: lengths and
-//!   skews, track widths, and differential pairs' gaps and uncoupled lengths.
+//!   skews, track widths, and differential pairs' gaps and uncoupled lengths;
+//! - for placement, in [`KicadBoard::footprints`], each footprint's position, side, angle,
+//!   attributes and lock, the boxes of its courtyard, of its pads and of its silkscreen, and
+//!   its pads with their nets; and the board's own silkscreen.
+//!
+//! [`placement_design`] makes a [`PlacementDesign`](crate::pcb::place::PlacementDesign) of
+//! a board for [`place_components`](crate::pcb::place::place_components), deciding what is
+//! fixed by [`fixed_because`], and [`replace_placement`] writes the footprints where it put
+//! them back into the board's text, flipping those that change sides as KiCad does.
 //!
 //! [`replace_routing`] writes routes back: it takes a board's text, and replaces its
 //! tracks, vias and zone fills with others, such as [`pcb::route`](crate::pcb::route)'s,
@@ -81,6 +89,7 @@
 
 mod board;
 pub(crate) mod json;
+mod place;
 mod project;
 mod rules;
 mod sexpr;
@@ -93,6 +102,10 @@ use crate::geom::Rules;
 use crate::geom::drc::{self, Item};
 
 pub use board::read;
+pub use place::{
+    COURTYARD_FALLBACK, FixedBecause, fixed_because, footprint_outline, placement_design,
+    replace_placement,
+};
 pub use rules::{LengthRules, length_rules};
 pub use write::{replace_routing, replace_routing_and_fills};
 
@@ -132,6 +145,85 @@ pub struct KicadBoard {
     /// What routing the board needs beyond the checks: its edge, and the track width and
     /// via of each net.
     pub routing: Routing,
+    /// The footprints, in the order of the file, as placement needs them.
+    pub footprints: Vec<Footprint>,
+    /// Boxes around the board's own graphics and text on silkscreen, each with whether it is
+    /// on the back: of each stroke, or of the whole of a filled shape or a text.
+    pub silkscreen: Vec<(crate::geom::Rect, bool)>,
+    /// Whether the project makes silkscreen that overlaps silkscreen or pads an error,
+    /// `silk_overlap` or `silk_over_copper`, which by default are warnings.
+    pub silk_is_error: bool,
+}
+
+/// A footprint of a [`KicadBoard`]: where it is, what it is, and how much room it takes.
+///
+/// Every position is on the board, in `guide`'s coordinates, with Y up, as everything the
+/// reader returns.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Footprint {
+    /// Its reference, such as `U1`.
+    pub reference: String,
+    /// Its library name, such as `Capacitor_SMD:C_0603_1608Metric`.
+    pub library: String,
+    /// The UUID of the footprint itself, if the file has one.
+    pub uuid: Option<String>,
+    /// Where its origin is.
+    pub at: crate::geom::Point,
+    /// Its rotation, in millidegrees counterclockwise, as KiCad's.
+    pub angle: i32,
+    /// Whether it is on the back, `B.Cu`.
+    pub back: bool,
+    /// Whether it is locked in KiCad.
+    pub locked: bool,
+    /// Whether its attributes say surface mount, `(attr smd)`.
+    pub smd: bool,
+    /// Whether its attributes say through hole, `(attr through_hole)`.
+    pub through_hole: bool,
+    /// Whether it only exists on the board, `board_only`: a logo, a test pad.
+    pub board_only: bool,
+    /// Whether it is left out of the bill of materials.
+    pub exclude_from_bom: bool,
+    /// Whether it is left out of position files, those that an assembler places from.
+    pub exclude_from_pos_files: bool,
+    /// The bounding box of what it draws on its side's courtyard layer, `F.CrtYd` or
+    /// `B.CrtYd`, if it draws anything there.
+    pub courtyard: Option<crate::geom::Rect>,
+    /// The bounding box of its pads, copper graphics and silkscreen, if it has any.
+    pub extent: Option<crate::geom::Rect>,
+    /// Whether it has graphics on copper, beside its pads.
+    pub copper: bool,
+    /// Whether it draws on `Edge.Cuts`, so that it shapes the board.
+    pub edge: bool,
+    /// Boxes around what it draws on its silkscreen, but text: of each stroke, or of the
+    /// whole of a filled shape.
+    pub silkscreen: Vec<crate::geom::Rect>,
+    /// Boxes around its visible text on silkscreen, such as its reference, a little larger
+    /// than the text.
+    pub silk_texts: Vec<crate::geom::Rect>,
+    /// Its pads.
+    pub pads: Vec<FootprintPad>,
+    /// Where its pads are among the board's, [`drc::Board::pads`]: a custom pad of several
+    /// parts is several.
+    pub board_pads: core::ops::Range<usize>,
+    /// Where its graphics on copper are among the board's zones, [`drc::Board::zones`].
+    pub board_zones: core::ops::Range<usize>,
+}
+
+/// A pad of a [`Footprint`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct FootprintPad {
+    /// Its number, such as `1` or `A3`.
+    pub number: String,
+    /// Where it is, its centre before any offset of its drill.
+    pub at: crate::geom::Point,
+    /// Its net, if it has one.
+    pub net: Option<crate::id::NetId>,
+    /// Whether it has a plated hole.
+    pub plated: bool,
+    /// Whether it has a hole that isn't plated.
+    pub unplated: bool,
 }
 
 /// What a router needs from a KiCad board beyond what [`drc::check`] looks at.
@@ -252,6 +344,8 @@ impl std::error::Error for KicadError {}
 pub(crate) mod curated_tests;
 #[cfg(test)]
 mod freerouting_tests;
+#[cfg(test)]
+mod placement_tests;
 #[cfg(test)]
 mod routing_tests;
 #[cfg(test)]

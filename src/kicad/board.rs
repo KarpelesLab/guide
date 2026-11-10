@@ -11,7 +11,7 @@ use super::{KicadBoard, KicadError, NetRouting, Routing, Source};
 use crate::geom::drc::MaskOpening;
 use crate::geom::drc::{self, Pad, Track, Via, Zone};
 use crate::geom::{
-    LayerId, LayerSet, NetClass, Overrides, Point, RuleSpec, Rules, Shape, ShapeIndex,
+    LayerId, LayerSet, NetClass, Overrides, Point, Rect, RuleSpec, Rules, Shape, ShapeIndex,
 };
 
 /// The tolerance for arcs in graphics and custom pads, which are approximated as they are
@@ -83,10 +83,17 @@ pub fn read(pcb: &str, project: Option<&str>) -> Result<KicadBoard, KicadError> 
             Some("via") => r.via(item),
             Some("footprint" | "module") => r.footprint(item),
             Some("zone") => r.zone(item, None),
-            Some(name) if name.starts_with("gr_") => r.graphic(item, None),
+            Some(name) if name.starts_with("gr_") => {
+                r.board_silk(item);
+                r.graphic(item, None);
+            }
             _ => {}
         }
     }
+    let silk_is_error = rules
+        .errors
+        .iter()
+        .any(|c| c == "silk_overlap" || c == "silk_over_copper");
     let project = rules;
     let rules = r.rules(&project)?;
     r.propagate();
@@ -105,6 +112,8 @@ pub fn read(pcb: &str, project: Option<&str>) -> Result<KicadBoard, KicadError> 
         text,
         zone_specs,
         zone_lists,
+        footprints,
+        silkscreen,
         ..
     } = r;
     let mut routing = routing(&project, &names, outline);
@@ -122,6 +131,9 @@ pub fn read(pcb: &str, project: Option<&str>) -> Result<KicadBoard, KicadError> 
         zones,
         warnings: warnings.into_iter().collect(),
         routing,
+        footprints,
+        silkscreen,
+        silk_is_error,
     })
 }
 
@@ -129,7 +141,7 @@ pub fn read(pcb: &str, project: Option<&str>) -> Result<KicadBoard, KicadError> 
 /// stroke font is narrower than its size, so the box is wider than the text.
 fn text_box(node: &Sexp<'_>, place: Place) -> Option<Shape> {
     // `(gr_text "text" ...)`, or `(fp_text kind "text" ...)`.
-    let text = if node.is("fp_text") {
+    let text = if node.is("fp_text") || node.is("property") {
         node.arg(1)?
     } else {
         node.arg(0)?
@@ -333,6 +345,10 @@ struct Reader {
     zone_count: usize,
     /// By zone of `zone_specs`, its UUID, which breaks ties between priorities.
     zone_uuids: Vec<String>,
+    /// The footprints, as placement needs them.
+    footprints: Vec<super::Footprint>,
+    /// The board's own silkscreen, as boxes.
+    silkscreen: Vec<(Rect, bool)>,
 }
 
 /// The text of the UUID of an item: `uuid` from KiCad 7 on, `tstamp` before.
@@ -481,6 +497,8 @@ impl Reader {
             zone_lists: Vec::new(),
             zone_count: 0,
             zone_uuids: Vec::new(),
+            footprints: Vec::new(),
+            silkscreen: Vec::new(),
         };
         // Copper with no net is of the net with no name, so that it is never checked
         // against itself, as in KiCad.
@@ -659,6 +677,14 @@ impl Reader {
         }
     }
 
+    /// A graphic or text of the board's own, if it is on silkscreen.
+    fn board_silk(&mut self, node: &Sexp<'_>) {
+        let back = node.child("layer").and_then(|l| l.arg(0)) == Some("B.SilkS");
+        for b in silk_boxes(node, Place::BOARD) {
+            self.silkscreen.push((b, back));
+        }
+    }
+
     fn footprint(&mut self, node: &Sexp<'_>) {
         let at = node.child("at");
         let place = Place {
@@ -689,14 +715,103 @@ impl Reader {
             mask_margin: length(node, "solder_mask_margin"),
             zone: pad_connection(node, None),
         };
+        let (pads, zones, edges) = (
+            self.board.pads.len(),
+            self.board.zones.len(),
+            self.outline.len(),
+        );
+        let back = node.child("layer").and_then(|l| l.arg(0)) == Some("B.Cu");
+        let mut info = super::Footprint {
+            reference: fp.reference.clone(),
+            library: node.arg(0).unwrap_or("").to_string(),
+            uuid: uuid(node),
+            at: to_point(place.at),
+            angle: place.angle,
+            back,
+            locked: node.flag("locked"),
+            smd: false,
+            through_hole: false,
+            board_only: false,
+            exclude_from_bom: false,
+            exclude_from_pos_files: false,
+            courtyard: None,
+            extent: None,
+            copper: false,
+            edge: false,
+            silkscreen: Vec::new(),
+            silk_texts: Vec::new(),
+            pads: Vec::new(),
+            board_pads: 0..0,
+            board_zones: 0..0,
+        };
+        if let Some(attr) = node.child("attr") {
+            let has = |what: &str| attr.args().iter().any(|a| a.as_atom() == Some(what));
+            info.smd = has("smd");
+            info.through_hole = has("through_hole");
+            info.board_only = has("board_only");
+            info.exclude_from_bom = has("exclude_from_bom");
+            info.exclude_from_pos_files = has("exclude_from_pos_files");
+        }
+        let mut courtyard: Option<Rect> = None;
+        let mut silk: Option<Rect> = None;
+        let grow = |r: &mut Option<Rect>, b: Rect| *r = Some(r.map_or(b, |r| r.union(&b)));
         for item in node.args() {
             match item.name() {
-                Some("pad") => self.pad(&fp, item),
+                Some("pad") => {
+                    let net = Some(self.net(item)).filter(|&n| n != NetId(0));
+                    let drill = item.child("drill").is_some();
+                    let kind = item.arg(1).unwrap_or("");
+                    if let Some(local) = item.child("at").and_then(args_pair) {
+                        info.pads.push(super::FootprintPad {
+                            number: item.arg(0).unwrap_or("").to_string(),
+                            at: to_point(place.apply(local)),
+                            net,
+                            plated: drill && kind == "thru_hole",
+                            unplated: drill && kind == "np_thru_hole",
+                        });
+                    }
+                    self.pad(&fp, item);
+                }
                 Some("zone") => self.zone(item, Some(&fp)),
-                Some(name) if name.starts_with("fp_") => self.graphic(item, Some(&fp)),
+                Some("property") => info.silk_texts.extend(silk_boxes(item, place)),
+                Some(name) if name.starts_with("fp_") => {
+                    if name.ends_with("text") || name.ends_with("text_box") {
+                        info.silk_texts.extend(silk_boxes(item, place));
+                    } else {
+                        info.silkscreen.extend(silk_boxes(item, place));
+                    }
+                    let layer = item.child("layer").and_then(|l| l.arg(0)).unwrap_or("");
+                    let own = if back { "B." } else { "F." };
+                    let text = name.ends_with("text") || name.ends_with("text_box");
+                    if !text && layer.strip_prefix(own) == Some("CrtYd") {
+                        if let Some(b) = graphic_box(item, place) {
+                            grow(&mut courtyard, b);
+                        }
+                    } else if !text
+                        && layer.ends_with(".SilkS")
+                        && let Some(b) = graphic_box(item, place)
+                    {
+                        grow(&mut silk, b);
+                    }
+                    self.graphic(item, Some(&fp));
+                }
                 _ => {}
             }
         }
+        let mut extent = silk;
+        for pad in &self.board.pads[pads..] {
+            grow(&mut extent, pad.shape.bbox());
+        }
+        for zone in &self.board.zones[zones..] {
+            grow(&mut extent, zone.shape.bbox());
+        }
+        info.courtyard = courtyard;
+        info.extent = extent;
+        info.copper = self.board.zones.len() > zones;
+        info.edge = self.outline.len() > edges;
+        info.board_pads = pads..self.board.pads.len();
+        info.board_zones = zones..self.board.zones.len();
+        self.footprints.push(info);
     }
 
     fn pad(&mut self, fp: &Footprint, node: &Sexp<'_>) {
@@ -1680,6 +1795,112 @@ fn round_hypot(dx: i64, dy: i64) -> i64 {
     }
     // Up if the length is at least r + 1/2, that is, if 4 sq >= (2r + 1)^2.
     (r + i128::from(4 * sq >= (2 * r + 1) * (2 * r + 1))) as i64
+}
+
+/// Boxes around a graphic or a text on silkscreen, with `place` taking its points to the
+/// board, or nothing if it isn't on silkscreen or is hidden: a box for each stroke of an
+/// outline, and one for the whole of a filled shape, a circle or a text.
+/// The box around a footprint's text on silkscreen, for a footprint at `at`, in KiCad's
+/// coordinates, turned by `angle`; `None` if it isn't visible text on silkscreen.
+pub(super) fn silk_text_box(node: &Sexp<'_>, at: (i64, i64), angle: i32) -> Option<Rect> {
+    let name = node.name()?;
+    if !(name == "property" || name.ends_with("text") || name.ends_with("text_box")) {
+        return None;
+    }
+    silk_boxes(node, Place { at, angle }).into_iter().next()
+}
+
+fn silk_boxes(node: &Sexp<'_>, place: Place) -> Vec<Rect> {
+    let layer = node.child("layer").and_then(|l| l.arg(0)).unwrap_or("");
+    if !layer.ends_with(".SilkS") {
+        return Vec::new();
+    }
+    let kind = node.name().unwrap_or("");
+    let kind = kind
+        .strip_prefix("fp_")
+        .or_else(|| kind.strip_prefix("gr_"))
+        .unwrap_or(kind);
+    let half = stroke_width(node).unwrap_or(0) / 2;
+    let to = |v: Vec2| to_point(place.apply(v));
+    let edges = |ring: &[Vec2], closed: bool| -> Vec<Rect> {
+        let n = if closed {
+            ring.len()
+        } else {
+            ring.len().saturating_sub(1)
+        };
+        (0..n)
+            .map(|i| Rect::new(to(ring[i]), to(ring[(i + 1) % ring.len()])).expand(half))
+            .collect()
+    };
+    match kind {
+        "text" | "property" | "text_box" => {
+            let hidden = node.flag("hide") || node.child("effects").is_some_and(|e| e.flag("hide"));
+            if hidden {
+                return Vec::new();
+            }
+            text_box(node, place)
+                .map(|s| s.bbox())
+                .into_iter()
+                .collect()
+        }
+        "line" => match (pair(node, "start"), pair(node, "end")) {
+            (Some(a), Some(b)) => edges(&[a, b], false),
+            _ => Vec::new(),
+        },
+        "rect" | "poly" if !filled(node) => {
+            let ring = if kind == "rect" {
+                match (pair(node, "start"), pair(node, "end")) {
+                    (Some(a), Some(b)) => vec![a, (b.0, a.1), b, (a.0, b.1)],
+                    _ => return Vec::new(),
+                }
+            } else {
+                points(node).map(|(r, _)| r).unwrap_or_default()
+            };
+            edges(&ring, ring.len() > 2)
+        }
+        _ => graphic_box(node, place)
+            .map(|b| b.expand(half))
+            .into_iter()
+            .collect(),
+    }
+}
+
+/// The bounding box on the board of a footprint's graphic, from its points: the ends of a
+/// line, the corners of a rectangle or polygon, an arc's ends and middle, and a circle's
+/// extremes. Its stroke is left out.
+fn graphic_box(node: &Sexp<'_>, place: Place) -> Option<Rect> {
+    let kind = node.name().unwrap_or("");
+    let kind = kind
+        .strip_prefix("fp_")
+        .or_else(|| kind.strip_prefix("gr_"))
+        .unwrap_or(kind);
+    let local: Vec<Vec2> = match kind {
+        "line" => vec![pair(node, "start")?, pair(node, "end")?],
+        "rect" => {
+            let (a, b) = (pair(node, "start")?, pair(node, "end")?);
+            vec![a, (b.0, a.1), b, (a.0, b.1)]
+        }
+        "arc" => {
+            let (a, m, b) = arc_points(node)?;
+            vec![a, m, b]
+        }
+        "circle" => {
+            let c = pair(node, "center")?;
+            let e = pair(node, "end")?;
+            let r = round_hypot(e.0 - c.0, e.1 - c.1);
+            vec![
+                (c.0 - r, c.1 - r),
+                (c.0 + r, c.1 - r),
+                (c.0 + r, c.1 + r),
+                (c.0 - r, c.1 + r),
+            ]
+        }
+        "poly" => points(node)?.0,
+        _ => return None,
+    };
+    let mut points = local.into_iter().map(|v| to_point(place.apply(v)));
+    let first = points.next()?;
+    Some(points.fold(Rect::new(first, first), |r, p| r.union(&Rect::new(p, p))))
 }
 
 /// The start, middle and end of an arc graphic. KiCad 6 and later save those. KiCad 5

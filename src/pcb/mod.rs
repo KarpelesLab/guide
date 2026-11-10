@@ -91,6 +91,7 @@ mod geometry;
 mod global;
 mod measure;
 mod pairs;
+pub mod place;
 mod planes;
 mod router;
 mod tune;

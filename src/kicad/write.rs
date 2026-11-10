@@ -87,7 +87,7 @@ fn scan(text: &str) -> (Vec<Span>, Vec<ZoneList>) {
 }
 
 /// Millimetres with up to six decimals, from nanometres, exactly.
-fn mm(nm: i64) -> String {
+pub(super) fn mm(nm: i64) -> String {
     let sign = if nm < 0 { "-" } else { "" };
     let a = nm.unsigned_abs();
     let (whole, frac) = (a / 1_000_000, a % 1_000_000);
@@ -313,7 +313,12 @@ fn routing_text(
 /// The board's text with its routing and fills taken out, `fills`, by position of the zone
 /// list, written into their zones, teardrops taken out if `teardrops` says, and `added` at
 /// the end.
-fn rewrite(pcb: &str, added: &str, fills: &[(usize, String)], teardrops: bool) -> String {
+pub(super) fn rewrite(
+    pcb: &str,
+    added: &str,
+    fills: &[(usize, String)],
+    teardrops: bool,
+) -> String {
     let (mut drops, zones) = scan(pcb);
     if teardrops {
         drops.extend(zones.iter().filter(|z| z.teardrop).map(|z| z.span));

@@ -89,6 +89,22 @@ GUIDE_ROUTE=1 GUIDE_KICAD=1 cargo test --release --features kicad curated_boards
 [`docs/benchmarks.md`](../../docs/benchmarks.md#pcb-routing-of-the-curated-boards) has the
 results.
 
+## Placing them
+
+`src/kicad/placement_tests.rs` discards where each board's movable footprints are, places them
+again with `pcb::place::place_components`, writes them back with `kicad::replace_placement`,
+routes the placed board as the routing test does, zones kept, and checks it with our DRC, and
+with `GUIDE_KICAD=1`, with KiCad's, courtyards included. It routes the board as it was placed
+too, to compare:
+
+```text
+GUIDE_PLACE=1 cargo test --release --features kicad curated_boards_place -- --nocapture
+GUIDE_PLACE=1 GUIDE_KICAD=1 cargo test --release --features kicad curated_boards_place -- --nocapture
+```
+
+[`docs/benchmarks.md`](../../docs/benchmarks.md#pcb-placement-of-the-curated-boards) has the
+results.
+
 ## Routing them with Freerouting
 
 [`scripts/freerouting/compare.sh`](../../scripts/freerouting/compare.sh) strips each board with

@@ -45,6 +45,8 @@ pub(crate) struct ProjectRules {
     pub(crate) patterns: Vec<(String, String)>,
     /// Checks that the project turns off, by KiCad's name for them.
     pub(crate) ignored: Vec<String>,
+    /// Checks that the project makes errors, by KiCad's name for them.
+    pub(crate) errors: Vec<String>,
 }
 
 /// KiCad's own defaults, for a board with no project.
@@ -71,6 +73,7 @@ pub(crate) fn defaults() -> ProjectRules {
         assignments: Vec::new(),
         patterns: Vec::new(),
         ignored: Vec::new(),
+        errors: Vec::new(),
     }
 }
 
@@ -94,8 +97,10 @@ pub(crate) fn parse(text: &str) -> Result<ProjectRules, KicadError> {
     rules.min_via_annular = get("min_via_annular_width").unwrap_or(rules.min_via_annular);
     if let Some(severities) = root.at(&["board", "design_settings", "rule_severities"]) {
         for (check, severity) in severities.as_object() {
-            if severity.as_str() == Some("ignore") {
-                rules.ignored.push(check.clone());
+            match severity.as_str() {
+                Some("ignore") => rules.ignored.push(check.clone()),
+                Some("error") => rules.errors.push(check.clone()),
+                _ => {}
             }
         }
     }

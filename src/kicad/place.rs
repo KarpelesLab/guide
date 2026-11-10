@@ -751,6 +751,132 @@ pub fn replace_placement(pcb: &str, board: &KicadBoard, placed: &[Placed]) -> St
     rewrite(&out, "", &[], true)
 }
 
+/// Where a list is in the text it was parsed from: from its `(` to its `)`.
+fn list_span(text: &str, list: &Sexp<'_>) -> Option<(usize, usize)> {
+    let (first, _) = span(text, list.items().first()?)?;
+    let start = text[..first].rfind('(')?;
+    if !text[start + 1..first].trim().is_empty() {
+        return None;
+    }
+    let (_, last) = span(text, list.items().last()?)?;
+    let end = last + text[last..].find(')')? + 1;
+    Some((start, end))
+}
+
+/// Gives pads other nets, and returns the new text: for pin and gate swaps, as
+/// [`pcb::swap`](crate::pcb::swap) finds them, and for engineering changes.
+///
+/// Each entry of `nets` is a footprint, by position in [`KicadBoard::footprints`], one of its
+/// [pads](Footprint::pads), by position, and its new net, or `None` for no net. A pad's
+/// `(net ...)` is written as another pad of that net has it in the file, so in the file's own
+/// form, numbered or by name; a net that no pad has is written by name, as KiCad 10 writes
+/// it, after its number if the file declares one. Everything else is kept, byte for byte.
+///
+/// ```
+/// use guide::id::NetId;
+///
+/// let pcb = r#"(kicad_pcb (version 20240108) (generator "pcbnew")
+///   (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+///   (net 0 "") (net 1 "A") (net 2 "B")
+///   (footprint "R" (layer "F.Cu") (at 10 20)
+///     (pad "1" smd rect (at -1 0) (size 1 1) (layers "F.Cu") (net 1 "A"))
+///     (pad "2" smd rect (at 1 0) (size 1 1) (layers "F.Cu") (net 2 "B"))))"#;
+/// let read = guide::kicad::read(pcb, None)?;
+/// let (a, b) = (read.footprints[0].pads[0].net, read.footprints[0].pads[1].net);
+/// let text = guide::kicad::replace_pad_nets(pcb, &read, &[(0, 0, b), (0, 1, a)]);
+/// let again = guide::kicad::read(&text, None)?;
+/// assert_eq!(again.nets[again.footprints[0].pads[0].net.unwrap().index()], "B");
+/// assert_eq!(again.nets[again.footprints[0].pads[1].net.unwrap().index()], "A");
+/// # Ok::<(), guide::kicad::KicadError>(())
+/// ```
+pub fn replace_pad_nets(
+    pcb: &str,
+    board: &KicadBoard,
+    nets: &[(usize, usize, Option<crate::id::NetId>)],
+) -> String {
+    let Ok(root) = sexpr::parse(pcb) else {
+        return pcb.to_string();
+    };
+    let footprints: Vec<&Sexp<'_>> = root
+        .args()
+        .iter()
+        .filter(|n| matches!(n.name(), Some("footprint" | "module")))
+        .collect();
+    // By footprint, its pads as the reader takes them: those with a position.
+    let pads_of = |node: &Sexp<'_>| -> Vec<usize> {
+        node.args()
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.is("pad") && n.child("at").is_some())
+            .map(|(i, _)| i)
+            .collect()
+    };
+    // Each net's `(net ...)`, as a pad of it has it.
+    let mut written: std::collections::BTreeMap<crate::id::NetId, String> = Default::default();
+    for (node, fp) in footprints.iter().zip(&board.footprints) {
+        for (k, i) in pads_of(node).into_iter().enumerate() {
+            let (Some(pad), Some(Some(net))) = (node.args().get(i), fp.pads.get(k).map(|p| p.net))
+            else {
+                continue;
+            };
+            if let Some((a, b)) = pad.child("net").and_then(|n| list_span(pcb, n)) {
+                written.entry(net).or_insert_with(|| pcb[a..b].to_string());
+            }
+        }
+    }
+    let numbers: std::collections::BTreeMap<&str, &str> = root
+        .children("net")
+        .filter_map(|n| Some((n.arg(1)?, n.arg(0)?)))
+        .collect();
+    let text_of = |net: crate::id::NetId| -> String {
+        written.get(&net).cloned().unwrap_or_else(|| {
+            let name = board.nets.get(net.index()).map_or("", String::as_str);
+            let quoted = format!("\"{}\"", name.replace('\\', "\\\\").replace('"', "\\\""));
+            match numbers.get(name) {
+                Some(n) => format!("(net {n} {quoted})"),
+                None => format!("(net {quoted})"),
+            }
+        })
+    };
+    let mut edits: Vec<(usize, usize, String)> = Vec::new();
+    for &(f, k, net) in nets {
+        let Some(node) = footprints.get(f) else {
+            continue;
+        };
+        let Some(&i) = pads_of(node).get(k) else {
+            continue;
+        };
+        let pad = &node.args()[i];
+        match (pad.child("net").and_then(|n| list_span(pcb, n)), net) {
+            (Some((a, b)), Some(net)) => edits.push((a, b, text_of(net))),
+            (Some((a, b)), None) => {
+                // The space before it goes too.
+                let a = pcb[..a].trim_end().len();
+                edits.push((a, b, String::new()));
+            }
+            (None, Some(net)) => {
+                if let Some((_, end)) = list_span(pcb, pad) {
+                    edits.push((end - 1, end - 1, format!(" {}", text_of(net))));
+                }
+            }
+            (None, None) => {}
+        }
+    }
+    edits.sort_by_key(|e| (e.0, e.1));
+    let mut out = String::with_capacity(pcb.len());
+    let mut at = 0;
+    for (start, end, text) in edits {
+        if start < at {
+            continue;
+        }
+        out.push_str(&pcb[at..start]);
+        out.push_str(&text);
+        at = end;
+    }
+    out.push_str(&pcb[at..]);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

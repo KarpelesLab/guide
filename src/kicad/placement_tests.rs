@@ -16,7 +16,7 @@ use crate::geom::drc::{self, Item, Violation};
 use crate::pcb::place::{PlaceOptions, PlaceReport, outline_overlaps, place_components};
 use crate::pcb::{self, Design, Options, Routed};
 
-const BOARDS: [(&str, &str); 11] = [
+pub(super) const BOARDS: [(&str, &str); 11] = [
     ("gekkio", "GB-BRK-LINK-A"),
     ("dotbots", "TS4231-BOB"),
     ("tem-cell", "lisn"),
@@ -31,9 +31,9 @@ const BOARDS: [(&str, &str); 11] = [
 ];
 
 /// The UUIDs of routed items start with this.
-const OURS: &str = "67756964-";
+pub(super) const OURS: &str = "67756964-";
 
-fn load(dir: &str, board: &str) -> (String, String) {
+pub(super) fn load(dir: &str, board: &str) -> (String, String) {
     let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("testdata/kicad")
         .join(dir)
@@ -44,7 +44,7 @@ fn load(dir: &str, board: &str) -> (String, String) {
 }
 
 /// The board with no routing, zones' outlines kept, as in the routing tests.
-fn stripped(read: &KicadBoard) -> Design {
+pub(super) fn stripped(read: &KicadBoard) -> Design {
     let mut design = Design::from_kicad(read);
     design.board.tracks.clear();
     design.board.vias.clear();
@@ -60,15 +60,15 @@ fn stripped(read: &KicadBoard) -> Design {
 
 /// What routing a board did, and what our DRC found wrong with routed items or with pads of
 /// footprints in `moved`.
-struct Outcome {
-    routed: Routed,
-    seconds: f64,
-    violations: Vec<String>,
-    text: String,
+pub(super) struct Outcome {
+    pub(super) routed: Routed,
+    pub(super) seconds: f64,
+    pub(super) violations: Vec<String>,
+    pub(super) text: String,
 }
 
 /// What tells a violation apart: its kind and its items.
-fn key(v: &Violation) -> String {
+pub(super) fn key(v: &Violation) -> String {
     match *v {
         Violation::Short { a, b, .. } => format!("short {a:?} {b:?}"),
         Violation::Clearance { a, b, .. } => format!("clearance {a:?} {b:?}"),
@@ -82,7 +82,7 @@ fn key(v: &Violation) -> String {
 /// What our DRC finds on a board as it was, stripped of its routing: between its pads and
 /// mask openings, which footprints bring with them wherever they are, such as a footprint's
 /// own pads under one opening.
-fn baseline(pcb: &str, pro: &str) -> BTreeSet<String> {
+pub(super) fn baseline(pcb: &str, pro: &str) -> BTreeSet<String> {
     let read = super::read(pcb, Some(pro)).unwrap();
     let design = stripped(&read);
     drc::check(&design.board, &design.rules)
@@ -92,7 +92,12 @@ fn baseline(pcb: &str, pro: &str) -> BTreeSet<String> {
         .collect()
 }
 
-fn route(pcb: &str, pro: &str, moved: &BTreeSet<String>, baseline: &BTreeSet<String>) -> Outcome {
+pub(super) fn route(
+    pcb: &str,
+    pro: &str,
+    moved: &BTreeSet<String>,
+    baseline: &BTreeSet<String>,
+) -> Outcome {
     let read = super::read(pcb, Some(pro)).unwrap();
     let design = stripped(&read);
     let start = Instant::now();
@@ -319,7 +324,7 @@ fn kicad_drc(text: &str, project: &str, name: &str) -> (Vec<(String, Vec<String>
 /// KiCad's findings on a placed and routed board that involve a routed item, a footprint that
 /// moved or one of its pads, and that KiCad doesn't find on the board as it was placed,
 /// routed alike, where they are the footprints' own; and how many connections are missing.
-fn kicad_check(
+pub(super) fn kicad_check(
     text: &str,
     original: &str,
     project: &str,

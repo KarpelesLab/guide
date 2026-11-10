@@ -36,6 +36,9 @@
 //! a board for [`place_components`](crate::pcb::place::place_components), deciding what is
 //! fixed by [`fixed_because`], and [`replace_placement`] writes the footprints where it put
 //! them back into the board's text, flipping those that change sides as KiCad does.
+//! [`place_and_route`] places, swaps pins, routes, and places again where routing found
+//! trouble, rerouting only what moved, in a loop; [`replace_pad_nets`] writes pads' new nets
+//! after pin swaps or engineering changes.
 //!
 //! [`replace_routing`] writes routes back: it takes a board's text, and replaces its
 //! tracks, vias and zone fills with others, such as [`pcb::route`](crate::pcb::route)'s,
@@ -88,6 +91,7 @@
 //!   hole-to-hole clearance are then zero.
 
 mod board;
+mod flow;
 pub(crate) mod json;
 mod place;
 mod project;
@@ -102,9 +106,13 @@ use crate::geom::Rules;
 use crate::geom::drc::{self, Item};
 
 pub use board::read;
+pub use flow::{
+    FlowError, FlowOptions, FlowReport, PadNetChange, Round, Score, pad_changes, place_and_route,
+    swap_group, swap_groups,
+};
 pub use place::{
     COURTYARD_FALLBACK, FixedBecause, fixed_because, footprint_outline, placement_design,
-    replace_placement,
+    replace_pad_nets, replace_placement,
 };
 pub use rules::{LengthRules, length_rules};
 pub use write::{replace_routing, replace_routing_and_fills};
@@ -346,11 +354,17 @@ impl std::error::Error for KicadError {}
 #[cfg(test)]
 pub(crate) mod curated_tests;
 #[cfg(test)]
+mod eco_tests;
+#[cfg(test)]
+mod flow_tests;
+#[cfg(test)]
 mod freerouting_tests;
 #[cfg(test)]
 mod placement_tests;
 #[cfg(test)]
 mod routing_tests;
+#[cfg(test)]
+mod swap_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

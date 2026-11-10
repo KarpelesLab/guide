@@ -33,7 +33,9 @@ These start as modules in the single `guide` crate, with optional domains and
 interchange formats behind Cargo features. We can split into a workspace later if
 compile times or release cadence call for it. So far: `fpga` for VTR's formats, `pcb` for
 the geometry layer, `kicad`, which implies `pcb`, for reading KiCad boards into it, and `dsn`,
-which implies `pcb` too, for reading Specctra designs into it and writing sessions from it.
+which implies `pcb` too, for reading Specctra designs into it and writing sessions from it,
+and `mapf` for multi-agent path finding, a time-expanded space that the engine routes agents
+through unchanged, with a reader for the MovingAI benchmarks.
 
 ## Target consumers
 

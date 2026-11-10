@@ -16,7 +16,9 @@ problems and VTR's circuits, and [placement and routing in a
 loop](#pcb-placement-and-routing-in-a-loop) on the curated boards, with engineering changes and
 pin swaps there.
 [Placement](#placement-on-synthetic-problems) is also measured on synthetic problems whose
-optimum is known.
+optimum is known. Outside electronics, [multi-agent path
+finding](#multi-agent-path-finding-on-the-movingai-benchmarks) is measured on the MovingAI
+benchmarks against CBSH2-RTC, EECBS and LaCAM3.
 
 ## Running
 
@@ -4198,3 +4200,345 @@ mind might have it. Each routed with the default options.
 - **Pin swaps are judged by length**, not by routing, and only DQ bits and passives were
   tried: no connector pins, resistor networks or pin multiplexers, which the API takes but no
   curated board says.
+
+## Multi-agent path finding on the MovingAI benchmarks
+
+The first domain outside electronics (roadmap M10): `guide::mapf` hands the engine a
+time-expanded space, and nothing in the engine or the search changed for it. [The
+domain notes](domains.md#multi-agent-path-finding) say how the problem maps onto the core.
+
+Measured on 2026-11-11 with rustc 1.97.1, at `9c74967`, on an AMD Ryzen Threadripper PRO
+9995WX shared with other work.
+
+### How
+
+- **The benchmarks** are the MovingAI MAPF benchmarks of Stern et al. (*Multi-Agent
+  Pathfinding: Definitions, Variants, and Benchmarks*, SoCS 2019), from
+  <https://movingai.com/benchmarks/mapf.html>, under the Open Data Commons Attribution
+  License. They are not copied here: [`scripts/mapf/fetch.sh`](../scripts/mapf/fetch.sh)
+  downloads them. Six maps that most MAPF papers report on: `empty-32-32`,
+  `random-32-32-20`, `room-32-32-4`, `maze-32-32-2`, `warehouse-10-20-10-2-1` and `den520d`,
+  each with its 25 random scenarios, and ten agent counts per map, an instance being the first
+  so many agents of a scenario.
+- **The problem** is the classic one: 4-connected moves, vertex and swap conflicts, agents
+  staying on their goals, and the sum of costs, each agent's last arrival on its goal, as the
+  objective.
+- **The reference solvers** are built from source by
+  [`scripts/mapf/build-reference.sh`](../scripts/mapf/build-reference.sh) and not copied here:
+  CBSH2-RTC (Li et al.), an optimal solver, conflict-based search with its symmetry reasoning,
+  at `a834df1`; EECBS (Li, Ruml and Koenig, AAAI 2021), bounded-suboptimal, with a bound of
+  1.2, at `06ec705`, both under the University of Southern California's licence for research
+  and non-profit use; and LaCAM3 (Okumura, 2024), an anytime solver that finds a solution
+  fast and refines it for the rest of the time, at `1c3ecf8`, under the MIT licence, run on
+  one thread (`--no-multi-thread`), as `guide` is. Its time is that to its first solution, and
+  its sum of costs that of its last, when its time is up. It was also run with its own threads
+  on the first 5 scenarios of each map ("LaCAM3 threads"). LaCAM3 reports two costs: `soc`,
+  the sum of costs as everyone else has it, which is the one shown, and `sum_of_loss`, which it
+  minimizes, and which leaves out waits on the goal in the middle of a plan too.
+- **One minute per instance** for everyone, each on one thread but "LaCAM3 threads", with up
+  to 48 reference runs and 24 of `guide`'s at a time. `guide`'s limit sets the engine's cancel flag from a timer:
+  without it, its results do not depend on the machine.
+- **Sums of costs** are compared with the sum of the agents' shortest paths, each alone, which
+  is a lower bound on any solution and is known for every instance, and with CBSH2-RTC's
+  optimum where it found one. Every solution of `guide`'s is checked by `mapf::check`, which
+  knows nothing of the space or the engine. As a check of the checker, it accepted LaCAM3's
+  solutions on empty-32-32, random-32-32-20 and den520d, and found LaCAM3's own `soc` for
+  them.
+- **`guide`'s options** are `SolveOptions::default()`: `mapf::engine_options()`, which is the
+  engine's defaults with a history factor of 0.5, a first horizon 16 steps past the longest
+  shortest path, up to 4 rounds, and 10 passes of [shortening](#what-it-took).
+
+```text
+scripts/mapf/fetch.sh DATA                                  # about 18 MB
+scripts/mapf/build-reference.sh SOLVERS                     # needs cmake and Boost
+JOBS=24 scripts/mapf/guide.sh DATA OUT                      # a few minutes on many cores
+JOBS=48 python3 scripts/mapf/reference.py DATA OUT SOLVERS  # about 3 hours
+ONLY=lacam3-mt SCENS=5 JOBS=12 \
+  python3 scripts/mapf/reference.py DATA OUT SOLVERS        # LaCAM3 with its threads
+python3 scripts/mapf/tables.py OUT                          # the tables below
+```
+
+### Results
+
+- **Success.** `guide` solved 1498 of the 1500 instances within the minute, all but one
+  scenario each of warehouse with 300 and with 400 agents. LaCAM3 solved all 1500, EECBS 1237
+  and CBSH2-RTC 308.
+- **Sum of costs.** `guide`'s is the lowest of the suboptimal solvers at every map and agent
+  count, but where EECBS solved only a handful of the most crowded instances of maze and
+  random-32-32-20, and was as low or slightly lower on those.
+  Where CBSH2-RTC proved an optimum, `guide` is within 0% to 1.7% of it, LaCAM3 0.1% to 6.3%
+  and EECBS 0.1% to 4.0%. LaCAM3 with its threads does better than on one, and comes level with
+  `guide` or slightly ahead on room with 20 to 50 agents, on its 5 scenarios against `guide`'s
+  25, but not elsewhere.
+- **Time.** LaCAM3 is much faster to its first solution when the map is crowded: 0.37 s
+  against 2.1 s on empty-32-32 with 500 agents, 1.0 s against 9.8 s on warehouse, 7.7 s
+  against 11.0 s on den520d with 1000. On sparser instances the two are close, and `guide` is
+  faster on den520d up to 500 agents. `guide` stops there, where LaCAM3 spends the rest of its
+  minute refining. EECBS is slower than both above a few dozen agents on the small maps, and
+  CBSH2-RTC runs out of time from a few dozen to 200 agents.
+
+Times are medians over the instances each solved, in milliseconds. Sums of costs are
+aggregated over the instances each solved: summed, then divided by the sum of the lower
+bounds or optima of the same instances.
+
+#### empty-32-32
+
+Solved within the limit, of each count's scenarios:
+
+| Agents | guide | cbsh2-rtc | eecbs-1.2 | lacam3 | lacam3-mt |
+| --- | --- | --- | --- | --- | --- |
+| 50 | 25/25 | 25/25 | 25/25 | 25/25 | 5/5 |
+| 100 | 25/25 | 23/25 | 25/25 | 25/25 | 5/5 |
+| 150 | 25/25 | 1/25 | 25/25 | 25/25 | 5/5 |
+| 200 | 25/25 | 0/25 | 25/25 | 25/25 | 5/5 |
+| 250 | 25/25 | 0/25 | 25/25 | 25/25 | 5/5 |
+| 300 | 25/25 | 0/25 | 25/25 | 25/25 | 5/5 |
+| 350 | 25/25 | 0/25 | 14/25 | 25/25 | 5/5 |
+| 400 | 25/25 | 0/25 | 0/25 | 25/25 | 5/5 |
+| 450 | 25/25 | 0/25 | 0/25 | 25/25 | 5/5 |
+| 500 | 25/25 | 0/25 | 0/25 | 25/25 | 5/5 |
+
+Sum of costs over the lower bound, on the scenarios that each solved, then over CBSH2-RTC's optimum on those that CBSH2-RTC solved too, and median milliseconds to a solution, LaCAM3's first:
+
+| Agents | guide / LB | LaCAM3 / LB | LaCAM3 threads / LB | EECBS / LB | guide / opt | LaCAM3 / opt | EECBS / opt | guide ms | LaCAM3 first ms | EECBS ms | CBSH2 ms |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 50 | 1.002 | 1.007 | 1.002 | 1.004 | 1.000 | 1.005 | 1.003 | 2 | 6 | 4 | 5 |
+| 100 | 1.006 | 1.022 | 1.006 | 1.012 | 1.002 | 1.018 | 1.008 | 7 | 13 | 14 | 120 |
+| 150 | 1.013 | 1.040 | 1.013 | 1.031 | 1.003 | 1.031 | 1.019 | 18 | 24 | 30 | 7810 |
+| 200 | 1.025 | 1.069 | 1.030 | 1.061 | - | - | - | 38 | 38 | 60 | - |
+| 250 | 1.043 | 1.110 | 1.052 | 1.105 | - | - | - | 76 | 57 | 129 | - |
+| 300 | 1.073 | 1.192 | 1.107 | 1.170 | - | - | - | 185 | 96 | 309 | - |
+| 350 | 1.115 | 1.300 | 1.170 | 1.191 | - | - | - | 399 | 165 | 11188 | - |
+| 400 | 1.168 | 1.490 | 1.274 | - | - | - | - | 680 | 204 | - | - |
+| 450 | 1.244 | 1.677 | 1.383 | - | - | - | - | 1212 | 287 | - | - |
+| 500 | 1.328 | 1.852 | 1.551 | - | - | - | - | 2142 | 374 | - | - |
+
+#### random-32-32-20
+
+Solved within the limit, of each count's scenarios:
+
+| Agents | guide | cbsh2-rtc | eecbs-1.2 | lacam3 | lacam3-mt |
+| --- | --- | --- | --- | --- | --- |
+| 25 | 25/25 | 25/25 | 25/25 | 25/25 | 5/5 |
+| 50 | 25/25 | 24/25 | 25/25 | 25/25 | 5/5 |
+| 75 | 25/25 | 1/25 | 25/25 | 25/25 | 5/5 |
+| 100 | 25/25 | 0/25 | 25/25 | 25/25 | 5/5 |
+| 125 | 25/25 | 0/25 | 25/25 | 25/25 | 5/5 |
+| 150 | 25/25 | 0/25 | 25/25 | 25/25 | 5/5 |
+| 175 | 25/25 | 0/25 | 21/25 | 25/25 | 5/5 |
+| 200 | 25/25 | 0/25 | 3/25 | 25/25 | 5/5 |
+| 225 | 25/25 | 0/25 | 0/25 | 25/25 | 5/5 |
+| 250 | 25/25 | 0/25 | 0/25 | 25/25 | 5/5 |
+
+Sum of costs over the lower bound, on the scenarios that each solved, then over CBSH2-RTC's optimum on those that CBSH2-RTC solved too, and median milliseconds to a solution, LaCAM3's first:
+
+| Agents | guide / LB | LaCAM3 / LB | LaCAM3 threads / LB | EECBS / LB | guide / opt | LaCAM3 / opt | EECBS / opt | guide ms | LaCAM3 first ms | EECBS ms | CBSH2 ms |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 25 | 1.011 | 1.026 | 1.017 | 1.016 | 1.002 | 1.017 | 1.007 | 1 | 3 | 2 | 3 |
+| 50 | 1.028 | 1.056 | 1.037 | 1.041 | 1.006 | 1.033 | 1.018 | 5 | 7 | 7 | 436 |
+| 75 | 1.049 | 1.091 | 1.067 | 1.074 | 1.007 | 1.037 | 1.016 | 16 | 13 | 17 | 46730 |
+| 100 | 1.073 | 1.133 | 1.088 | 1.117 | - | - | - | 35 | 25 | 45 | - |
+| 125 | 1.096 | 1.176 | 1.116 | 1.153 | - | - | - | 66 | 32 | 101 | - |
+| 150 | 1.126 | 1.250 | 1.152 | 1.191 | - | - | - | 113 | 48 | 235 | - |
+| 175 | 1.164 | 1.325 | 1.194 | 1.212 | - | - | - | 173 | 71 | 4160 | - |
+| 200 | 1.205 | 1.427 | 1.252 | 1.204 | - | - | - | 285 | 90 | 12464 | - |
+| 225 | 1.250 | 1.564 | 1.311 | - | - | - | - | 422 | 146 | - | - |
+| 250 | 1.300 | 1.673 | 1.385 | - | - | - | - | 545 | 134 | - | - |
+
+#### room-32-32-4
+
+Solved within the limit, of each count's scenarios:
+
+| Agents | guide | cbsh2-rtc | eecbs-1.2 | lacam3 | lacam3-mt |
+| --- | --- | --- | --- | --- | --- |
+| 10 | 25/25 | 25/25 | 25/25 | 25/25 | 5/5 |
+| 20 | 25/25 | 25/25 | 25/25 | 25/25 | 5/5 |
+| 30 | 25/25 | 24/25 | 25/25 | 25/25 | 5/5 |
+| 40 | 25/25 | 10/25 | 25/25 | 25/25 | 5/5 |
+| 50 | 25/25 | 2/25 | 25/25 | 25/25 | 5/5 |
+| 60 | 25/25 | 0/25 | 25/25 | 25/25 | 5/5 |
+| 70 | 25/25 | 0/25 | 25/25 | 25/25 | 5/5 |
+| 80 | 25/25 | 0/25 | 25/25 | 25/25 | 5/5 |
+| 90 | 25/25 | 0/25 | 21/25 | 25/25 | 5/5 |
+| 100 | 25/25 | 0/25 | 15/25 | 25/25 | 5/5 |
+
+Sum of costs over the lower bound, on the scenarios that each solved, then over CBSH2-RTC's optimum on those that CBSH2-RTC solved too, and median milliseconds to a solution, LaCAM3's first:
+
+| Agents | guide / LB | LaCAM3 / LB | LaCAM3 threads / LB | EECBS / LB | guide / opt | LaCAM3 / opt | EECBS / opt | guide ms | LaCAM3 first ms | EECBS ms | CBSH2 ms |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 10 | 1.020 | 1.031 | 1.031 | 1.022 | 1.004 | 1.015 | 1.006 | 1 | 1 | 0 | 1 |
+| 20 | 1.033 | 1.055 | 1.026 | 1.043 | 1.005 | 1.027 | 1.015 | 2 | 2 | 2 | 7 |
+| 30 | 1.063 | 1.100 | 1.050 | 1.081 | 1.010 | 1.047 | 1.028 | 7 | 4 | 8 | 754 |
+| 40 | 1.091 | 1.147 | 1.089 | 1.114 | 1.015 | 1.063 | 1.040 | 15 | 6 | 19 | 7380 |
+| 50 | 1.116 | 1.193 | 1.110 | 1.152 | 1.017 | 1.056 | 1.034 | 30 | 9 | 39 | 46046 |
+| 60 | 1.144 | 1.233 | 1.155 | 1.179 | - | - | - | 46 | 13 | 64 | - |
+| 70 | 1.169 | 1.281 | 1.184 | 1.218 | - | - | - | 59 | 15 | 98 | - |
+| 80 | 1.195 | 1.323 | 1.208 | 1.234 | - | - | - | 77 | 20 | 174 | - |
+| 90 | 1.228 | 1.368 | 1.236 | 1.245 | - | - | - | 118 | 25 | 2631 | - |
+| 100 | 1.250 | 1.421 | 1.280 | 1.252 | - | - | - | 135 | 27 | 23720 | - |
+
+#### maze-32-32-2
+
+Solved within the limit, of each count's scenarios:
+
+| Agents | guide | cbsh2-rtc | eecbs-1.2 | lacam3 | lacam3-mt |
+| --- | --- | --- | --- | --- | --- |
+| 10 | 25/25 | 25/25 | 25/25 | 25/25 | 5/5 |
+| 20 | 25/25 | 23/25 | 25/25 | 25/25 | 5/5 |
+| 30 | 25/25 | 4/25 | 25/25 | 25/25 | 5/5 |
+| 40 | 25/25 | 0/25 | 25/25 | 25/25 | 5/5 |
+| 50 | 25/25 | 0/25 | 25/25 | 25/25 | 5/5 |
+| 60 | 25/25 | 0/25 | 21/25 | 25/25 | 5/5 |
+| 70 | 25/25 | 0/25 | 14/25 | 25/25 | 5/5 |
+| 80 | 25/25 | 0/25 | 6/25 | 25/25 | 5/5 |
+| 90 | 25/25 | 0/25 | 1/25 | 25/25 | 5/5 |
+| 100 | 25/25 | 0/25 | 1/25 | 25/25 | 5/5 |
+
+Sum of costs over the lower bound, on the scenarios that each solved, then over CBSH2-RTC's optimum on those that CBSH2-RTC solved too, and median milliseconds to a solution, LaCAM3's first:
+
+| Agents | guide / LB | LaCAM3 / LB | LaCAM3 threads / LB | EECBS / LB | guide / opt | LaCAM3 / opt | EECBS / opt | guide ms | LaCAM3 first ms | EECBS ms | CBSH2 ms |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 10 | 1.011 | 1.023 | 1.024 | 1.013 | 1.001 | 1.013 | 1.003 | 2 | 2 | 1 | 6 |
+| 20 | 1.035 | 1.055 | 1.040 | 1.046 | 1.006 | 1.023 | 1.017 | 6 | 4 | 8 | 578 |
+| 30 | 1.062 | 1.101 | 1.072 | 1.089 | 1.005 | 1.038 | 1.028 | 31 | 8 | 53 | 38384 |
+| 40 | 1.089 | 1.143 | 1.119 | 1.137 | - | - | - | 71 | 12 | 172 | - |
+| 50 | 1.130 | 1.205 | 1.141 | 1.187 | - | - | - | 132 | 17 | 325 | - |
+| 60 | 1.157 | 1.250 | 1.169 | 1.204 | - | - | - | 218 | 20 | 1213 | - |
+| 70 | 1.188 | 1.306 | 1.235 | 1.215 | - | - | - | 289 | 26 | 4253 | - |
+| 80 | 1.217 | 1.359 | 1.252 | 1.231 | - | - | - | 417 | 30 | 15493 | - |
+| 90 | 1.245 | 1.407 | 1.299 | 1.230 | - | - | - | 539 | 37 | 31594 | - |
+| 100 | 1.274 | 1.476 | 1.349 | 1.244 | - | - | - | 655 | 47 | 25871 | - |
+
+#### warehouse-10-20-10-2-1
+
+Solved within the limit, of each count's scenarios:
+
+| Agents | guide | cbsh2-rtc | eecbs-1.2 | lacam3 | lacam3-mt |
+| --- | --- | --- | --- | --- | --- |
+| 50 | 25/25 | 25/25 | 25/25 | 25/25 | 5/5 |
+| 100 | 25/25 | 22/25 | 25/25 | 25/25 | 5/5 |
+| 150 | 25/25 | 0/25 | 25/25 | 25/25 | 5/5 |
+| 200 | 25/25 | 0/25 | 25/25 | 25/25 | 5/5 |
+| 250 | 25/25 | 0/25 | 25/25 | 25/25 | 5/5 |
+| 300 | 24/25 | 0/25 | 25/25 | 25/25 | 5/5 |
+| 350 | 25/25 | 0/25 | 25/25 | 25/25 | 5/5 |
+| 400 | 24/25 | 0/25 | 25/25 | 25/25 | 5/5 |
+| 450 | 25/25 | 0/25 | 24/25 | 25/25 | 5/5 |
+| 500 | 25/25 | 0/25 | 24/25 | 25/25 | 5/5 |
+
+Sum of costs over the lower bound, on the scenarios that each solved, then over CBSH2-RTC's optimum on those that CBSH2-RTC solved too, and median milliseconds to a solution, LaCAM3's first:
+
+| Agents | guide / LB | LaCAM3 / LB | LaCAM3 threads / LB | EECBS / LB | guide / opt | LaCAM3 / opt | EECBS / opt | guide ms | LaCAM3 first ms | EECBS ms | CBSH2 ms |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 50 | 1.002 | 1.005 | 1.001 | 1.003 | 1.000 | 1.004 | 1.002 | 13 | 31 | 30 | 77 |
+| 100 | 1.005 | 1.012 | 1.006 | 1.009 | 1.001 | 1.008 | 1.006 | 58 | 79 | 125 | 2716 |
+| 150 | 1.012 | 1.030 | 1.021 | 1.019 | - | - | - | 184 | 152 | 300 | - |
+| 200 | 1.019 | 1.046 | 1.031 | 1.030 | - | - | - | 478 | 203 | 588 | - |
+| 250 | 1.026 | 1.074 | 1.049 | 1.043 | - | - | - | 864 | 320 | 1057 | - |
+| 300 | 1.034 | 1.100 | 1.056 | 1.059 | - | - | - | 1482 | 403 | 2027 | - |
+| 350 | 1.043 | 1.137 | 1.070 | 1.077 | - | - | - | 2565 | 560 | 3629 | - |
+| 400 | 1.054 | 1.173 | 1.084 | 1.102 | - | - | - | 4017 | 762 | 7387 | - |
+| 450 | 1.067 | 1.220 | 1.105 | 1.122 | - | - | - | 8305 | 863 | 11780 | - |
+| 500 | 1.078 | 1.251 | 1.123 | 1.142 | - | - | - | 9789 | 1034 | 22634 | - |
+
+#### den520d
+
+Solved within the limit, of each count's scenarios:
+
+| Agents | guide | cbsh2-rtc | eecbs-1.2 | lacam3 | lacam3-mt |
+| --- | --- | --- | --- | --- | --- |
+| 100 | 25/25 | 21/25 | 25/25 | 25/25 | 5/5 |
+| 200 | 25/25 | 3/25 | 25/25 | 25/25 | 5/5 |
+| 300 | 25/25 | 0/25 | 25/25 | 25/25 | 5/5 |
+| 400 | 25/25 | 0/25 | 25/25 | 25/25 | 5/5 |
+| 500 | 25/25 | 0/25 | 25/25 | 25/25 | 5/5 |
+| 600 | 25/25 | 0/25 | 25/25 | 25/25 | 5/5 |
+| 700 | 25/25 | 0/25 | 25/25 | 25/25 | 5/5 |
+| 800 | 25/25 | 0/25 | 25/25 | 25/25 | 5/5 |
+| 900 | 25/25 | 0/25 | 24/25 | 25/25 | 5/5 |
+| 1000 | 25/25 | 0/25 | 23/25 | 25/25 | 5/5 |
+
+Sum of costs over the lower bound, on the scenarios that each solved, then over CBSH2-RTC's optimum on those that CBSH2-RTC solved too, and median milliseconds to a solution, LaCAM3's first:
+
+| Agents | guide / LB | LaCAM3 / LB | LaCAM3 threads / LB | EECBS / LB | guide / opt | LaCAM3 / opt | EECBS / opt | guide ms | LaCAM3 first ms | EECBS ms | CBSH2 ms |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 100 | 1.001 | 1.001 | 1.001 | 1.001 | 1.000 | 1.001 | 1.001 | 83 | 279 | 189 | 834 |
+| 200 | 1.002 | 1.003 | 1.002 | 1.003 | 1.000 | 1.001 | 1.001 | 296 | 615 | 714 | 5817 |
+| 300 | 1.002 | 1.004 | 1.003 | 1.004 | - | - | - | 578 | 946 | 1588 | - |
+| 400 | 1.003 | 1.005 | 1.004 | 1.005 | - | - | - | 1107 | 1426 | 2682 | - |
+| 500 | 1.003 | 1.007 | 1.005 | 1.007 | - | - | - | 1729 | 1956 | 4081 | - |
+| 600 | 1.004 | 1.008 | 1.009 | 1.008 | - | - | - | 2678 | 2583 | 5843 | - |
+| 700 | 1.005 | 1.011 | 1.010 | 1.010 | - | - | - | 4460 | 3949 | 8019 | - |
+| 800 | 1.006 | 1.014 | 1.011 | 1.012 | - | - | - | 5635 | 4534 | 11222 | - |
+| 900 | 1.006 | 1.016 | 1.013 | 1.014 | - | - | - | 7965 | 5979 | 15460 | - |
+| 1000 | 1.007 | 1.022 | 1.016 | 1.016 | - | - | - | 10976 | 7711 | 20087 | - |
+
+### What it took
+
+Each step was measured on the first 5 scenarios of each map, with the same agent counts and a
+limit of 10 seconds, so 50 instances a map. The sum of costs over the lower bound is on the
+instances that every column solved, so the columns compare; "solved" counts all 50. Runs
+shared the machine with up to 150 others, and times on it are too noisy to quote, but for the
+first step, which was timed alone.
+
+| Map | First version | Chains of stays | History 0.5 | Shortening (default) | First present 1000 | Growth 1.3 | 200 neighbourhoods, no shortening |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| empty-32-32 | 1.225 | 1.175 | 1.164 | **1.153** | 1.346 | 1.160 | 1.155 |
+| random-32-32-20 | 1.240 | 1.206 | 1.195 | **1.178** | 1.313 | 1.199 | 1.176 |
+| room-32-32-4 | 1.222 | 1.213 | 1.202 | **1.179** | 1.270 | 1.206 | 1.175 |
+| maze-32-32-2 | 1.232 | 1.198 | 1.192 | **1.182** | 1.250 | 1.196 | 1.179 |
+| warehouse, solved | 1.057, 50 | 1.036, 46 | 1.035, 47 | **1.033, 48** | 1.211, 42 | 1.035, 40 | 1.032, 49 |
+| den520d, solved | 1.0022, 34 | 1.0019, 43 | 1.0018, 49 | **1.0017, 48** | 1.0438, 11 | 1.0018, 43 | 1.0016, 50 |
+
+- **Chains of stays.** The first version ended each route with one step from the goal into its
+  end, which held the goal at every time to the horizon. A search priced that step over all
+  of those times each time it reached the goal, at each time it did, and on den520d, with a
+  horizon of about 420, that was most of the time. A stay per time, shared by every arrival,
+  took 600 agents there from 10.4 s to 4.7 s and solved more of den520d within the limit.
+  The step costs had to change for it: moves and waits cost 2 and stays 1, so that a route
+  still costs its arrival time plus a constant, and every step has a base cost for the price
+  of overuse to multiply. It also gave lower sums of costs everywhere, as the engine's pricing
+  of a goal now rises a time at a time. On the small maps it is slower, as a search walks the
+  stays to the horizon: 400 agents on empty-32-32 went from 0.43 s to 0.60 s, run alone.
+- **History 0.5** (`mapf::engine_options`). A move costs 2, so the engine's default history
+  of 1 is half a move per unit of overuse; a quarter of one gave sums of costs up to 1%
+  lower and solved as many or more. An eighth was no better.
+- **Shortening** (`SolveOptions::improve_passes`, 10 by default): after a legal solution,
+  each agent is planned again by an exact search against the others as hard reservations,
+  and keeps what arrives sooner. It took the ratio down by up to 2.3 points, least on the
+  large maps, where it was already close to 1, for 15% to 30% more time.
+- **Tried and dropped:**
+  - **A first iteration close to prioritized planning**, with a first present factor of 1000
+    so that each agent keeps off what earlier ones took, as MAPF-LNS2's initial solution does
+    with soft conflicts. It was worse on every map, and solved 11 of 50 on den520d: the agents
+    planned first take what the others need, and history has to undo it.
+  - **A present factor growth of 1.3**, VPR's: ratios 0.2 to 1.6 points lower than with 1.8
+    at the time, for 1.2 to 1.7 times the time, and fewer solved on warehouse.
+  - **Neighbourhoods**: a late agent and the agents in the way of its shortest path, routed
+    again by negotiation with everyone else's resources at a capacity of 0, and kept if they
+    arrived sooner in total, as MAPF-LNS does with prioritized planning. 200 neighbourhoods of
+    up to 8 agents did about as well as shortening alone, as the table shows, and after
+    shortening gained up to 1% more, for 1.5 to 22 times the time. 1000 did no better than 200.
+  - **Incremental rerouting** changed nothing, as each agent is one connection, and **a slack
+    of 4** for the first horizon rather than 16 was faster by a few percent and slightly
+    worse.
+- **Nothing in the engine changed.** Every one of these is in `src/mapf`, through the
+  `RoutingSpace` it implements and the options the engine already had.
+
+### What this does not show
+
+- **Six maps, random scenarios only.** The benchmark set has 33 maps, with even scenarios as
+  well as random ones, and maps up to 1024 x 1024 cells. Larger maps, with more agents, are
+  where a time-expanded space costs most, and safe-interval path planning would likely be
+  needed there.
+- **Best known solutions.** The MAPF tracker (<http://tracker.pathfinding.ai>) has the best
+  known sums of costs and lower bounds for every instance, from many solvers, but offers no
+  download that this could be checked against, so the optimum here is CBSH2-RTC's, where it
+  found one in a minute, and the rest is against the sum of shortest paths, a weak bound on
+  crowded maps.
+- **One minute, one thread, one seed.** Results at other time limits differ, and LaCAM3 keeps
+  improving with time where `guide` stops at its first legal solution, shortened. LaCAM3 with
+  its own threads was run on 5 scenarios a map only.
+- **Sum of costs only.** `guide` reports the makespan but does not minimize it.
+- **Other variants** of the problem, such as agents that disappear at their goals, k-robust
+  plans, or lifelong MAPF, are not modelled.

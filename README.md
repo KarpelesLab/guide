@@ -16,7 +16,8 @@ contended resources*:
 
 > **Status: pre-alpha.** The API is not stable yet and changes between 0.0.x releases.
 > Routing and placement work for FPGAs and PCBs, measured against VPR, KiCad and
-> Freerouting in [docs/benchmarks.md](docs/benchmarks.md). See the
+> Freerouting in [docs/benchmarks.md](docs/benchmarks.md), and the same engine solves
+> multi-agent path finding, measured against CBSH2-RTC, EECBS and LaCAM3. See the
 > [roadmap](ROADMAP.md) for what is done and what is next.
 
 ## Features
@@ -29,6 +30,7 @@ All optional, so the default build has no dependencies:
 | `pcb` | The geometry layer, clearance checks, zone filling, PCB routing and placement |
 | `kicad` | Reading KiCad boards and rules, and writing routes, fills and placements back (implies `pcb`) |
 | `dsn` | Specctra DSN import and SES export (implies `pcb`) |
+| `mapf` | Multi-agent path finding on graphs and grids, and the MovingAI benchmarks |
 
 ## Why one engine?
 

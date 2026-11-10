@@ -14,7 +14,9 @@
 //! The `fpga` feature adds support for FPGA routing problems, and the `pcb` feature adds
 //! the geometry layer, `geom`, and PCB routing over it, `pcb`. The `kicad` feature, which
 //! implies `pcb`, reads KiCad boards into them, for clearance checks and routing, and the `dsn`
-//! feature, which implies `pcb` too, reads Specctra DSN designs and writes SES sessions.
+//! feature, which implies `pcb` too, reads Specctra DSN designs and writes SES sessions. The
+//! `mapf` feature adds multi-agent path finding, `mapf`, routed by the same
+//! engine through a time-expanded space.
 //!
 //! [roadmap]: https://github.com/KarpelesLab/guide/blob/master/ROADMAP.md
 //! [architecture notes]: https://github.com/KarpelesLab/guide/blob/master/docs/architecture.md

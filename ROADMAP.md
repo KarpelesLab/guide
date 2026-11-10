@@ -33,6 +33,7 @@ regressions fail review. The metrics:
 | PCB routing | Completion, DRC violations, via count, track length, runtime | Freerouting | Open-source KiCad boards (no standard suite exists, so we curate one: [testdata/kicad](testdata/kicad/README.md)) |
 | PCB placement | Routed completion and length on the result, courtyard legality | Hand-placed originals | Same curated boards |
 | ASIC global routing | Overflow, wirelength | Published contest results | ISPD 2007/2008 |
+| Multi-agent path finding | Success rate within a time limit, sum of costs against the optimum and a lower bound, runtime | CBSH2-RTC, EECBS, LaCAM3 | MovingAI MAPF benchmarks |
 
 Results come from a validator that does not share search code with the router.
 
@@ -437,8 +438,16 @@ the first routing on the small boards.
 
 ### M10: More domains and 1.0
 
-- At least one domain outside electronics (multi-agent path finding is the leading
-  candidate), as proof that the core is general.
+- At least one domain outside electronics, as proof that the core is general. **Done:**
+  multi-agent path finding, `mapf`, as a time-expanded `RoutingSpace` that the engine
+  negotiates unchanged, with an independent checker and a reader for the MovingAI benchmarks.
+  On six of their maps, 1500 instances, it solved 1498 within a minute on one thread, LaCAM3
+  1500, EECBS 1237 and CBSH2-RTC 308, with the lowest sums of costs of the suboptimal solvers
+  nearly everywhere and within 1.7% of the optimum where one is known
+  ([results](docs/benchmarks.md#multi-agent-path-finding-on-the-movingai-benchmarks)).
+  LaCAM3 is several times faster to a first solution on crowded maps. Left: larger maps,
+  where safe-interval path planning would likely be needed, the even scenarios, and the
+  tracker's best known solutions.
 - ASIC global routing against the ISPD benchmarks.
 - `nextpnr`/FPGA Interchange and IPC-2581 interop as demand dictates.
 - Command-line tool; API review and stabilization.

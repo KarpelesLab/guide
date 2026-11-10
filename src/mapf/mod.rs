@@ -48,7 +48,7 @@
 //! Routing small groups of agents again by negotiation after that, a late agent and those in
 //! the way of its shortest path, with everyone else's resources at a capacity of 0, as MAPF-LNS
 //! does with prioritized planning, was tried and dropped: 200 groups of up to 8 took the sum
-//! of costs a further 0.1% to 0.6% down, for 5 to 25 times the time, and 1000 no further.
+//! of costs up to 1% further down, for 1.5 to 22 times the time, and 1000 no further.
 //!
 //! # Checking
 //!
@@ -87,8 +87,8 @@ pub struct SolveOptions<'c> {
     /// against the others to arrive sooner, as [shortening](self#shortening) has it. The
     /// default is 10, and 0 turns it off.
     ///
-    /// On the MovingAI maps of `docs/benchmarks.md`, it took the sum of costs 0.3% to 2.3%
-    /// closer to the lower bound, for 15% to 30% more time.
+    /// On the MovingAI maps of `docs/benchmarks.md`, it took sums of costs up to 2% lower, least
+    /// on the large maps, for 15% to 30% more time.
     pub improve_passes: u32,
 }
 
@@ -108,12 +108,12 @@ impl Default for SolveOptions<'_> {
 /// factor of 0.5.
 ///
 /// A move costs 2 in a [`TimeSpace`], so the default history of 1 is half a move per unit of
-/// overuse. A quarter of one gave sums of costs 0.5% to 1% lower on the MovingAI maps of
+/// overuse. A quarter of one gave sums of costs up to 1% lower on the MovingAI maps of
 /// `docs/benchmarks.md`, and solved as many instances or more within the time limit; an eighth
 /// was no better. A first present factor of 1000, which makes the first iteration nearly
-/// prioritized planning, gave sums of costs 5% to 17% higher, and solved far fewer instances on
-/// den520d. A present factor growth of 1.3 gave sums of costs about 1% lower and took 1.2 to
-/// 1.7 times as long.
+/// prioritized planning, gave sums of costs 4% to 17% higher, and solved far fewer instances on
+/// den520d. A present factor growth of 1.3 gave sums of costs up to 1.5% lower and took 1.2
+/// to 1.7 times as long.
 pub fn engine_options() -> EngineOptions<'static> {
     EngineOptions {
         history_factor: Cost::new(0.5).unwrap_or(Cost::ONE),

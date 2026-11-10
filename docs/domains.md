@@ -1,7 +1,7 @@
 # Domains
 
 What each target domain needs, how it maps onto the core, and what stays
-domain-specific. **None of this is implemented yet**; see the
+domain-specific. PCB, FPGA and multi-agent path finding are implemented; see the
 [roadmap](../ROADMAP.md) for ordering.
 
 ## Summary
@@ -14,7 +14,7 @@ domain-specific. **None of this is implemented yet**; see the
 | Placement | Components | Logic to sites | Standard cells, macros | Task assignment | Initial qubit layout |
 | Fixed items | Connectors, holes | I/O, hard blocks | Macros, pads | Obstacles | Device topology |
 | Main objective | Completion, DRC-clean, signal integrity | Critical-path delay | Timing, DRC-clean, wirelength | Makespan, total cost | Gate count, fidelity |
-| Roadmap priority | Primary | Primary | Later | Later | Exploratory |
+| Roadmap priority | Primary | Primary | Later | Implemented (`mapf`) | Exploratory |
 
 ## PCB
 
@@ -147,6 +147,36 @@ nodes as the resource: a cell may hold only one agent per time step. A `RoutingS
 over (location, time) expresses that directly, and prioritized planning and
 conflict-based search are close relatives of rip-up and negotiation. Domain code is
 small, so this is the cheapest strong proof that the core is general (roadmap M10).
+
+**Implemented** in `guide::mapf`, behind the `mapf` feature, as the classic problem of Stern
+et al. (SoCS 2019): agents on a graph or a 4-connected grid, one move or wait per time step,
+no vertex or swap conflicts, agents staying on their goals, and the sum of costs as the
+objective, with the makespan reported.
+
+- **The space.** `TimeSpace` is a `RoutingSpace` over (vertex, time) states, keyed through
+  `InternedSlots`. Its resources are a vertex at a time and an undirected edge during a move,
+  each of capacity 1, so the engine's overuse is exactly the set of conflicts. Each agent is
+  a net of two terminals, its start at time 0 and its goal. After the goal, a route goes on
+  through a stay at each time to the horizon, which is what keeps others off a goal once an
+  agent is there for good. Searches are guided by the exact distance to the goal and never
+  offered a state from which the goal can't be reached in time.
+- **The engine does the rest**, unchanged: negotiated congestion, with soft conflicts as
+  MAPF-LNS2 has them, history, and only the agents in conflict routed again. The horizon
+  starts at the longest shortest path plus 16, and grows, seeded with the routes and history
+  so far, if negotiation doesn't settle. After a legal solution, each agent is planned again
+  against the others as hard reservations, and keeps what arrives sooner.
+- **Domain code** is about 1200 lines without tests or comments, error types included: the
+  graph, the space, the solve loop, the shortening pass, the checker, and a reader for the
+  MovingAI `.map` and `.scen` files. Nothing in the engine or the search changed for it.
+- **Checking** is `mapf::check`, which takes plans as vertices per time step and knows nothing
+  of the space or the engine.
+
+On six MovingAI maps, 25 scenarios each at ten agent counts, `guide` solved 1498 of 1500
+instances within a minute on one thread, against 1500 for LaCAM3, 1237 for EECBS and 308 for
+the optimal CBSH2-RTC, with the lowest sums of costs of the suboptimal solvers nearly
+everywhere, within 1.7% of the optimum wherever CBSH2-RTC found one. LaCAM3 finds its first
+solution several times faster on crowded maps. [The results](benchmarks.md#multi-agent-path-finding-on-the-movingai-benchmarks)
+have the tables and what this does not show.
 
 ## Other candidates
 

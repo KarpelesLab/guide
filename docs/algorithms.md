@@ -110,7 +110,8 @@ both tracks together, which add the same length to both.
 | Legalization (Tetris, Abacus, min-cost flow) | All discrete | Snaps a global solution to legal sites with minimum displacement. Tetris-like greedy legalization built as `place::legalize`, for sites and free space, with rows after Abacus in free space. |
 | Detailed placement | All | Local window swaps after legalization. Built as low-temperature annealing over a few steps. FastPlace-DP's global swap was tried and gained nothing on top of it. |
 | Timing-driven weighting | FPGA, ASIC | Re-weights critical connections between iterations. Built for FPGAs as VPR's timing cost, criticalities from a timing analysis each temperature. |
-| RUDY congestion estimate | All | Spreads each net's wire evenly over its bounding box. Built as `place::CongestionGrid::rudy`, priced by `place::CongestionCost`. |
+| RUDY congestion estimate | All | Spreads each net's wire evenly over its bounding box. Built as `place::CongestionGrid::rudy`, priced by `place::CongestionCost`, and for FPGAs as `fpga::PlaceProblem::channel_demand`, against the graph's tracks. |
+| Cell inflation | Analytic | Grows cells where routing is congested before spreading (Hou et al., 2001). Built as `place::Inflation`, which `place_analytic` asks after each spreading. |
 
 ### What `place` does
 
@@ -154,6 +155,10 @@ Generic placement (roadmap M7) is in `src/place`, measured in
   thousandths, for a rectangle. `CongestionGrid` implements it from RUDY (Spindler and Johannes,
   2007) or from demand and capacity a router fills in, and `CongestionCost` adds a net's
   wirelength times that overflow to its cost. Closing the loop with the global router is M9.
+  `place::Inflation` is the analytic side: after each spreading, it says how much room each item
+  should take, and an item's room grows to the most it was ever asked, cut back kind by kind to
+  what the sites hold, so that bisection gives inflated items more sites and spreads them
+  further.
 - **Known optima.** Generators build problems whose reference placement meets a per-net lower
   bound, after Peko (Chang, Cong and Xie, 2003): grids, chains, Peko netlists with pads and typed
   columns, and squares in free space.
@@ -179,6 +184,16 @@ against VPR in [`docs/benchmarks.md`](benchmarks.md#fpga-placement-against-vpr).
   from any `SOURCE` of a tile of the most common type, from five places, to any `SINK` at each
   offset, by Dijkstra on the graph's own step delays, leaving out carry chains' direct
   connections.
+- **Congestion.** `fpga::PlaceProblem::channel_demand` is RUDY with VPR's crossing counts:
+  each net needs its crossing count times its box's columns of horizontal wire and times its
+  rows of vertical wire, spread evenly over the box, added up per tile by corner sums, and
+  divided by the tracks of the tile's channels, counted from the graph's `CHANX` and `CHANY`
+  nodes. Each temperature, the cost adds per net the demand it puts on each channel times how
+  far the channel is above a threshold, 0.6 of its tracks by default, summed in constant time
+  from a summed-area table of the excess, and weighed as the bounding box is, times
+  `congestion_factor`, 1 by default. This is the style of VPR's newer congestion-aware
+  placement; VPR 9.0.0 has none. Inflating blocks in global placement by the same measure,
+  `max_inflation`, is there too, off by default: it helped as much alone and not on top.
 - **Flow.** Analytic global placement and legalization by plain wirelength, then annealing that
   starts cold, at a twentieth of the moves' standard deviation over 8 steps, which is how VPR 9
   starts too, from a placement that puts blocks near their neighbours' centroid at
@@ -264,6 +279,8 @@ PCB placement (roadmap M8) is in `src/pcb/place.rs`, on top of `src/place`, with
   Router for FPGAs", *FPGA*, 1995.
 - V. Betz, J. Rose, "VPR: A New Packing, Placement and Routing Tool for FPGA
   Research", *FPL*, 1997.
+- W. Hou, H. Yu, X. Hong, Y. Cai, W. Wu, J. Gu, W. Kao, "A New Congestion-Driven Placement
+  Algorithm Based on Cell Inflation", *ASP-DAC*, 2001.
 - D. Hill, "Method and System for High Speed Detailed Placement of Cells Within an
   Integrated Circuit Design", US patent 6,370,673, 2002. Tetris legalization.
 - J. Cong, M. Romesis, M. Xie, "Optimality and Scalability Study of Partitioning and Placement

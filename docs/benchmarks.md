@@ -1337,8 +1337,10 @@ after routing": `guide`'s placer against VPR's on the same packing, on both suit
 routing comparisons above, with both placements routed by both routers, and VPR checking every
 placement and route of `guide`'s.
 
-Measured on 2026-11-10 with rustc 1.97.1, on the same shared machine, at `24d4e8b`, the commit
-that adds the placer.
+Measured on 2026-11-10 with rustc 1.97.1, on the same shared machine, at `3a9562d`, which
+prices congestion in placement by default, with the router as `1ba0591` tuned it. The placer
+came with `24d4e8b`; [congestion](#congestion) below compares the two, with and without
+congestion, on the same router.
 
 ### How
 
@@ -1356,8 +1358,9 @@ that adds the placer.
   below, which is the device VPR sized for the circuit, and `fpga::place_design` with
   `PlacerOptions::default()`: analytic global placement and legalization, then annealing that
   starts cold with `inner_num` 1, with VPR's cost, criticalities from `guide`'s timing analysis
-  each temperature and delays from `fpga::PlaceDelayModel`. Constant and clock nets are left
-  out, as VPR leaves them out.
+  each temperature and delays from `fpga::PlaceDelayModel`, and a congestion term, the
+  expected use of each channel above 0.6 of its tracks, weighed as the bounding box is.
+  Constant and clock nets are left out, as VPR leaves them out.
 - **Legality** is VPR's: it loads `guide`'s placement with every block fixed
   (`--fix_clusters`), which goes through its placement consistency check, carry chains
   included, and it writes the placement back unchanged. It then routes it too.
@@ -1393,79 +1396,79 @@ Placement, as VPR measures both:
 
 | Circuit | Blocks | Grid | VPR BB | guide BB | / VPR | VPR est. CPD, ns | guide est. CPD, ns | / VPR | VPR, s | guide, s | / VPR | Chains | VPR accepts guide's |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| alu4 | 106 | 13 | 5320 | 5170 | 0.972 | 4.98964 | 5.13851 | 1.030 | 0.080 | 0.142 | 1.775 | 0 | yes |
-| apex2 | 126 | 14 | 8242 | 7969 | 0.967 | 5.81286 | 5.92692 | 1.020 | 0.110 | 0.236 | 2.145 | 0 | yes |
-| apex4 | 105 | 13 | 6734 | 6725 | 0.999 | 5.30224 | 5.74674 | 1.084 | 0.100 | 0.129 | 1.290 | 0 | yes |
-| bigkey | 92 | 16 | 4499 | 3259 | 0.724 | 3.19105 | 3.44405 | 1.079 | 0.270 | 0.294 | 1.089 | 0 | yes |
-| clma | 435 | 23 | 32117 | 31845 | 0.992 | 8.66055 | 8.61265 | 0.994 | 1.140 | 1.763 | 1.546 | 0 | yes |
-| des | 102 | 18 | 5227 | 4797 | 0.918 | 4.37046 | 4.75988 | 1.089 | 0.260 | 0.138 | 0.531 | 0 | yes |
-| diffeq | 102 | 13 | 3921 | 3830 | 0.977 | 6.43054 | 6.41491 | 0.998 | 0.120 | 0.146 | 1.217 | 0 | yes |
-| dsip | 93 | 16 | 4931 | 4095 | 0.830 | 3.18883 | 3.44405 | 1.080 | 0.310 | 0.301 | 0.971 | 0 | yes |
-| elliptic | 242 | 18 | 12132 | 11972 | 0.987 | 7.4606 | 7.91761 | 1.061 | 0.540 | 0.812 | 1.504 | 0 | yes |
-| ex1010 | 322 | 20 | 27552 | 27318 | 0.992 | 7.05556 | 7.38685 | 1.047 | 0.520 | 1.124 | 2.162 | 0 | yes |
-| ex5p | 98 | 12 | 4942 | 4777 | 0.967 | 4.47718 | 4.71557 | 1.053 | 0.080 | 0.170 | 2.125 | 0 | yes |
-| frisc | 251 | 18 | 15146 | 14976 | 0.989 | 10.0229 | 10.196 | 1.017 | 0.470 | 0.844 | 1.796 | 0 | yes |
-| misex3 | 100 | 12 | 5175 | 5101 | 0.986 | 4.84801 | 5.20847 | 1.074 | 0.070 | 0.153 | 2.186 | 0 | yes |
-| pdc | 332 | 21 | 25399 | 25607 | 1.008 | 6.92036 | 7.20019 | 1.040 | 0.720 | 1.417 | 1.968 | 0 | yes |
-| s298 | 84 | 12 | 4089 | 4027 | 0.985 | 7.44269 | 7.40466 | 0.995 | 0.050 | 0.080 | 1.600 | 0 | yes |
-| s38417 | 397 | 22 | 14984 | 13542 | 0.904 | 5.80932 | 5.96365 | 1.027 | 0.710 | 1.125 | 1.585 | 0 | yes |
-| s38584.1 | 360 | 21 | 14456 | 14427 | 0.998 | 5.23191 | 5.59858 | 1.070 | 0.960 | 1.363 | 1.420 | 0 | yes |
-| seq | 112 | 13 | 7217 | 7238 | 1.003 | 4.98507 | 5.34932 | 1.073 | 0.120 | 0.293 | 2.442 | 0 | yes |
-| spla | 265 | 19 | 17307 | 17005 | 0.983 | 6.63208 | 6.48149 | 0.977 | 0.430 | 0.993 | 2.309 | 0 | yes |
-| tseng | 112 | 13 | 3158 | 3054 | 0.967 | 6.15771 | 6.31173 | 1.025 | 0.130 | 0.193 | 1.485 | 0 | yes |
-| Geomean |  |  |  |  | 0.955 |  |  | 1.041 |  |  | 1.571 |  |  |
+| alu4 | 106 | 13 | 5320 | 5174 | 0.973 | 4.98964 | 5.28341 | 1.059 | 0.080 | 0.139 | 1.738 | 0 | yes |
+| apex2 | 126 | 14 | 8242 | 7946 | 0.964 | 5.81286 | 5.9124 | 1.017 | 0.110 | 0.246 | 2.236 | 0 | yes |
+| apex4 | 105 | 13 | 6734 | 6769 | 1.005 | 5.30224 | 5.46923 | 1.031 | 0.100 | 0.130 | 1.300 | 0 | yes |
+| bigkey | 92 | 16 | 4499 | 3259 | 0.724 | 3.19105 | 3.44405 | 1.079 | 0.270 | 0.276 | 1.022 | 0 | yes |
+| clma | 435 | 23 | 32117 | 31976 | 0.996 | 8.66055 | 8.99639 | 1.039 | 1.140 | 1.703 | 1.494 | 0 | yes |
+| des | 102 | 18 | 5227 | 4797 | 0.918 | 4.37046 | 4.75988 | 1.089 | 0.260 | 0.126 | 0.485 | 0 | yes |
+| diffeq | 102 | 13 | 3921 | 3785 | 0.965 | 6.43054 | 6.44803 | 1.003 | 0.120 | 0.143 | 1.192 | 0 | yes |
+| dsip | 93 | 16 | 4931 | 4065 | 0.824 | 3.18883 | 3.44405 | 1.080 | 0.310 | 0.286 | 0.923 | 0 | yes |
+| elliptic | 242 | 18 | 12132 | 11833 | 0.975 | 7.4606 | 8.03756 | 1.077 | 0.540 | 0.835 | 1.546 | 0 | yes |
+| ex1010 | 322 | 20 | 27552 | 27245 | 0.989 | 7.05556 | 6.97623 | 0.989 | 0.520 | 0.893 | 1.717 | 0 | yes |
+| ex5p | 98 | 12 | 4942 | 4811 | 0.973 | 4.47718 | 4.58361 | 1.024 | 0.080 | 0.173 | 2.162 | 0 | yes |
+| frisc | 251 | 18 | 15146 | 14847 | 0.980 | 10.0229 | 10.3463 | 1.032 | 0.470 | 0.902 | 1.919 | 0 | yes |
+| misex3 | 100 | 12 | 5175 | 5082 | 0.982 | 4.84801 | 5.16713 | 1.066 | 0.070 | 0.155 | 2.214 | 0 | yes |
+| pdc | 332 | 21 | 25399 | 25710 | 1.012 | 6.92036 | 7.46194 | 1.078 | 0.720 | 1.292 | 1.794 | 0 | yes |
+| s298 | 84 | 12 | 4089 | 4009 | 0.980 | 7.44269 | 7.18847 | 0.966 | 0.050 | 0.074 | 1.480 | 0 | yes |
+| s38417 | 397 | 22 | 14984 | 13645 | 0.911 | 5.80932 | 5.78534 | 0.996 | 0.710 | 1.204 | 1.696 | 0 | yes |
+| s38584.1 | 360 | 21 | 14456 | 14506 | 1.003 | 5.23191 | 5.61382 | 1.073 | 0.960 | 1.433 | 1.493 | 0 | yes |
+| seq | 112 | 13 | 7217 | 7181 | 0.995 | 4.98507 | 5.146 | 1.032 | 0.120 | 0.270 | 2.250 | 0 | yes |
+| spla | 265 | 19 | 17307 | 16924 | 0.978 | 6.63208 | 6.57809 | 0.992 | 0.430 | 0.878 | 2.042 | 0 | yes |
+| tseng | 112 | 13 | 3158 | 3021 | 0.957 | 6.15771 | 6.22049 | 1.010 | 0.130 | 0.188 | 1.446 | 0 | yes |
+| Geomean |  |  |  |  | 0.953 |  |  | 1.036 |  |  | 1.523 |  |  |
 
 Routed by VPR's router:
 
 | Circuit | Min W, VPR's placement | Min W, guide's | / VPR | W | CPD, VPR's placement, ns | CPD, guide's, ns | / VPR | Wire, VPR's placement | Wire, guide's | / VPR | Routes legal |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| alu4 | 40 | 40 | 1.000 | 52 | 5.31783 | 5.11503 | 0.962 | 7291 | 6935 | 0.951 | yes |
-| apex2 | 54 | 56 | 1.037 | 70 | 5.80687 | 5.58316 | 0.961 | 12151 | 11855 | 0.976 | yes |
-| apex4 | 56 | 56 | 1.000 | 72 | 5.38635 | 5.43986 | 1.010 | 10212 | 9726 | 0.952 | yes |
+| alu4 | 40 | 38 | 0.950 | 52 | 5.31783 | 4.99275 | 0.939 | 7291 | 6702 | 0.919 | yes |
+| apex2 | 54 | 54 | 1.000 | 70 | 5.80687 | 5.76134 | 0.992 | 12151 | 11661 | 0.960 | yes |
+| apex4 | 56 | 54 | 0.964 | 72 | 5.38635 | 5.34477 | 0.992 | 10212 | 9492 | 0.929 | yes |
 | bigkey | 34 | 34 | 1.000 | 44 | 3.30692 | 3.2681 | 0.988 | 6415 | 4968 | 0.774 | yes |
-| clma | 72 | 72 | 1.000 | 94 | 8.69463 | 8.38633 | 0.965 | 44365 | 44880 | 1.012 | yes |
+| clma | 72 | 72 | 1.000 | 94 | 8.69463 | 8.47252 | 0.974 | 44365 | 43891 | 0.989 | yes |
 | des | 34 | 34 | 1.000 | 44 | 4.46945 | 4.41387 | 0.988 | 6744 | 5989 | 0.888 | yes |
-| diffeq | 30 | 32 | 1.067 | 40 | 6.09481 | 6.09441 | 1.000 | 5218 | 5137 | 0.984 | yes |
-| dsip | 34 | 34 | 1.000 | 44 | 3.17889 | 3.43832 | 1.082 | 7198 | 6570 | 0.913 | yes |
-| elliptic | 52 | 48 | 0.923 | 68 | 7.58148 | 7.60222 | 1.003 | 16865 | 16256 | 0.964 | yes |
-| ex1010 | 86 | 86 | 1.000 | 112 | 6.89706 | 6.93223 | 1.005 | 40817 | 40109 | 0.983 | yes |
-| ex5p | 44 | 46 | 1.045 | 58 | 4.62135 | 4.71745 | 1.021 | 6964 | 6567 | 0.943 | yes |
-| frisc | 58 | 56 | 0.966 | 76 | 10.0072 | 9.76625 | 0.976 | 21617 | 21172 | 0.979 | yes |
-| misex3 | 46 | 44 | 0.957 | 60 | 4.82071 | 4.94848 | 1.027 | 6920 | 6864 | 0.992 | yes |
-| pdc | 72 | 72 | 1.000 | 94 | 7.06044 | 7.14236 | 1.012 | 36688 | 36866 | 1.005 | yes |
-| s298 | 40 | 40 | 1.000 | 52 | 7.26292 | 6.91572 | 0.952 | 5886 | 5717 | 0.971 | yes |
-| s38417 | 34 | 30 | 0.882 | 44 | 5.80047 | 5.74792 | 0.991 | 18574 | 16879 | 0.909 | yes |
-| s38584.1 | 40 | 38 | 0.950 | 52 | 5.05609 | 5.16437 | 1.021 | 19108 | 19033 | 0.996 | yes |
-| seq | 54 | 54 | 1.000 | 70 | 4.87201 | 5.12259 | 1.051 | 10428 | 10247 | 0.983 | yes |
-| spla | 60 | 60 | 1.000 | 78 | 6.52939 | 6.24003 | 0.956 | 25425 | 24652 | 0.970 | yes |
-| tseng | 26 | 24 | 0.923 | 34 | 5.71256 | 5.66566 | 0.992 | 4210 | 4117 | 0.978 | yes |
-| Geomean |  |  | 0.987 |  |  |  | 0.998 |  |  | 0.955 |  |
+| diffeq | 30 | 30 | 1.000 | 40 | 6.09481 | 6.12015 | 1.004 | 5218 | 4893 | 0.938 | yes |
+| dsip | 34 | 34 | 1.000 | 44 | 3.17889 | 3.43943 | 1.082 | 7198 | 6132 | 0.852 | yes |
+| elliptic | 52 | 48 | 0.923 | 68 | 7.58148 | 7.51865 | 0.992 | 16865 | 16178 | 0.959 | yes |
+| ex1010 | 86 | 88 | 1.023 | 112 | 6.89706 | 6.65474 | 0.965 | 40817 | 40064 | 0.982 | yes |
+| ex5p | 44 | 44 | 1.000 | 58 | 4.62135 | 4.56112 | 0.987 | 6964 | 6930 | 0.995 | yes |
+| frisc | 58 | 56 | 0.966 | 76 | 10.0072 | 9.74947 | 0.974 | 21617 | 20613 | 0.954 | yes |
+| misex3 | 46 | 44 | 0.957 | 60 | 4.82071 | 5.06325 | 1.050 | 6920 | 6821 | 0.986 | yes |
+| pdc | 72 | 72 | 1.000 | 94 | 7.06044 | 7.52518 | 1.066 | 36688 | 37224 | 1.015 | yes |
+| s298 | 40 | 40 | 1.000 | 52 | 7.26292 | 6.64124 | 0.914 | 5886 | 5695 | 0.968 | yes |
+| s38417 | 34 | 30 | 0.882 | 44 | 5.80047 | 5.49631 | 0.948 | 18574 | 16694 | 0.899 | yes |
+| s38584.1 | 40 | 38 | 0.950 | 52 | 5.05609 | 5.2779 | 1.044 | 19108 | 19186 | 1.004 | yes |
+| seq | 54 | 58 | 1.074 | 70 | 4.87201 | 5.00909 | 1.028 | 10428 | 10166 | 0.975 | yes |
+| spla | 60 | 62 | 1.033 | 78 | 6.52939 | 6.29578 | 0.964 | 25425 | 24433 | 0.961 | yes |
+| tseng | 26 | 24 | 0.923 | 34 | 5.71256 | 5.64603 | 0.988 | 4210 | 4101 | 0.974 | yes |
+| Geomean |  |  | 0.981 |  |  |  | 0.993 |  |  | 0.944 |  |
 
 Routed by guide's router:
 
 | Circuit | Min W, VPR's placement | Min W, guide's | / VPR | W | CPD, VPR's placement, ns | CPD, guide's, ns | / VPR | Wire, VPR's placement | Wire, guide's | / VPR | Routes legal |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| alu4 | 38 | 36 | 0.947 | 52 | 4.80677 | 5.05782 | 1.052 | 6840 | 6426 | 0.939 | yes |
-| apex2 | 52 | 58 | 1.115 | 70 | 5.77742 | 5.60368 | 0.970 | 12015 | 11403 | 0.949 | yes |
-| apex4 | 54 | 56 | 1.037 | 72 | 5.28066 | 5.44193 | 1.031 | 9338 | 9098 | 0.974 | yes |
-| bigkey | 34 | 34 | 1.000 | 44 | 3.26427 | 3.25733 | 0.998 | 6328 | 4797 | 0.758 | yes |
-| clma | 66 | 68 | 1.030 | 94 | 8.6618 | 8.20531 | 0.947 | 42623 | 42152 | 0.989 | yes |
-| des | 34 | 32 | 0.941 | 44 | 4.46045 | 4.43248 | 0.994 | 6580 | 5968 | 0.907 | yes |
-| diffeq | 30 | 30 | 1.000 | 40 | 6.19929 | 5.70597 | 0.920 | 4749 | 4667 | 0.983 | yes |
-| dsip | 34 | 34 | 1.000 | 44 | 3.17556 | 3.41152 | 1.074 | 6918 | 6098 | 0.881 | yes |
-| elliptic | 48 | 46 | 0.958 | 68 | 7.5485 | 7.58445 | 1.005 | 15349 | 15044 | 0.980 | yes |
-| ex1010 | 82 | 80 | 0.976 | 112 | 6.82256 | 6.74024 | 0.988 | 38710 | 38742 | 1.001 | yes |
-| ex5p | 44 | 42 | 0.955 | 58 | 4.55607 | 4.47229 | 0.982 | 6771 | 6492 | 0.959 | yes |
-| frisc | 54 | 52 | 0.963 | 76 | 9.81195 | 9.55312 | 0.974 | 19599 | 18948 | 0.967 | yes |
-| misex3 | 42 | 42 | 1.000 | 60 | 4.78566 | 4.92125 | 1.028 | 6791 | 6549 | 0.964 | yes |
-| pdc | 64 | 68 | 1.062 | 94 | 7.05184 | 7.05985 | 1.001 | 34460 | 34905 | 1.013 | yes |
-| s298 | 40 | 38 | 0.950 | 52 | 7.4939 | 6.77407 | 0.904 | 5210 | 5092 | 0.977 | yes |
-| s38417 | 32 | 28 | 0.875 | 44 | 5.51245 | 5.4824 | 0.995 | 17595 | 15840 | 0.900 | yes |
-| s38584.1 | 38 | 36 | 0.947 | 52 | 4.87876 | 5.10715 | 1.047 | 18080 | 18226 | 1.008 | yes |
-| seq | 52 | 50 | 0.962 | 70 | 4.82294 | 4.97785 | 1.032 | 9654 | 9844 | 1.020 | yes |
-| spla | 56 | 52 | 0.929 | 78 | 6.48223 | 6.2356 | 0.962 | 23896 | 23256 | 0.973 | yes |
-| tseng | 26 | 26 | 1.000 | 34 | 5.68422 | 5.66455 | 0.997 | 4077 | 3888 | 0.954 | yes |
-| Geomean |  |  | 0.981 |  |  |  | 0.994 |  |  | 0.953 |  |
+| alu4 | 36 | 36 | 1.000 | 52 | 4.8465 | 4.99054 | 1.030 | 6951 | 6473 | 0.931 | yes |
+| apex2 | 52 | 50 | 0.962 | 70 | 5.77742 | 5.59581 | 0.969 | 11739 | 11518 | 0.981 | yes |
+| apex4 | 52 | 50 | 0.962 | 72 | 5.27845 | 5.27103 | 0.999 | 9352 | 9312 | 0.996 | yes |
+| bigkey | 34 | 34 | 1.000 | 44 | 3.2653 | 3.25733 | 0.998 | 6263 | 4800 | 0.766 | yes |
+| clma | 68 | 64 | 0.941 | 94 | 8.66512 | 8.4878 | 0.980 | 42652 | 42064 | 0.986 | yes |
+| des | 34 | 32 | 0.941 | 44 | 4.46377 | 4.43359 | 0.993 | 6619 | 5934 | 0.897 | yes |
+| diffeq | 28 | 28 | 1.000 | 40 | 6.10312 | 5.79765 | 0.950 | 4809 | 4594 | 0.955 | yes |
+| dsip | 36 | 34 | 0.944 | 44 | 3.17582 | 3.4161 | 1.076 | 6917 | 5948 | 0.860 | yes |
+| elliptic | 46 | 46 | 1.000 | 68 | 7.54636 | 7.51422 | 0.996 | 15326 | 14769 | 0.964 | yes |
+| ex1010 | 76 | 80 | 1.053 | 112 | 6.82146 | 6.63487 | 0.973 | 38845 | 39077 | 1.006 | yes |
+| ex5p | 44 | 42 | 0.955 | 58 | 4.54943 | 4.34903 | 0.956 | 6671 | 6585 | 0.987 | yes |
+| frisc | 54 | 52 | 0.963 | 76 | 9.59249 | 9.66988 | 1.008 | 19669 | 19202 | 0.976 | yes |
+| misex3 | 42 | 40 | 0.952 | 60 | 4.78367 | 4.89592 | 1.023 | 6861 | 6590 | 0.961 | yes |
+| pdc | 64 | 66 | 1.031 | 94 | 7.05184 | 7.02664 | 0.996 | 34864 | 35500 | 1.018 | yes |
+| s298 | 34 | 36 | 1.059 | 52 | 7.35173 | 6.64345 | 0.904 | 5232 | 5190 | 0.992 | yes |
+| s38417 | 32 | 28 | 0.875 | 44 | 5.51245 | 5.30108 | 0.962 | 17667 | 16098 | 0.911 | yes |
+| s38584.1 | 36 | 36 | 1.000 | 52 | 4.87983 | 5.21921 | 1.070 | 18154 | 18504 | 1.019 | yes |
+| seq | 54 | 52 | 0.963 | 70 | 4.794 | 4.88102 | 1.018 | 9903 | 9956 | 1.005 | yes |
+| spla | 54 | 54 | 1.000 | 78 | 6.51736 | 6.21489 | 0.954 | 24047 | 23121 | 0.961 | yes |
+| tseng | 26 | 26 | 1.000 | 34 | 5.68422 | 5.61643 | 0.988 | 4050 | 3909 | 0.965 | yes |
+| Geomean |  |  | 0.979 |  |  |  | 0.991 |  |  | 0.955 |  |
 
 #### VTR's Verilog benchmarks
 
@@ -1476,111 +1479,233 @@ Placement, as VPR measures both:
 
 | Circuit | Blocks | Grid | VPR BB | guide BB | / VPR | VPR est. CPD, ns | guide est. CPD, ns | / VPR | VPR, s | guide, s | / VPR | Chains | VPR accepts guide's |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| LU32PEEng | 7600 / 32 / 167 | 103 | 1043923 | 1046901 | 1.003 | 76.166 | 75.8237 | 0.996 | 341.290 | 232.415 | 0.681 | 166 | yes |
-| LU8PEEng | 2232 / 8 / 44 | 57 | 238874 | 237688 | 0.995 | 75.9908 | 77.2229 | 1.016 | 33.930 | 16.561 | 0.488 | 70 | yes |
-| arm_core | 1023 / 0 / 24 | 39 | 141706 | 143610 | 1.013 | 18.1898 | 18.2613 | 1.004 | 8.490 | 9.332 | 1.099 | 10 | yes |
-| bgm | 2786 / 11 / 0 | 63 | 250115 | 233987 | 0.936 | 20.6448 | 19.8352 | 0.961 | 30.110 | 20.498 | 0.681 | 38 | yes |
-| blob_merge | 619 / 0 / 0 | 31 | 45944 | 47786 | 1.040 | 15.2449 | 15.479 | 1.015 | 2.520 | 2.853 | 1.132 | 0 | yes |
-| boundtop | 97 / 0 / 0 | 14 | 1935 | 1825 | 0.943 | 3.36481 | 3.42161 | 1.017 | 0.190 | 0.093 | 0.489 | 0 | yes |
-| ch_intrinsics | 68 / 0 / 1 | 12 | 825 | 795 | 0.964 | 2.18081 | 2.38504 | 1.094 | 0.060 | 0.028 | 0.467 | 0 | yes |
-| diffeq1 | 32 / 5 / 0 | 16 | 5160 | 5050 | 0.979 | 15.9904 | 15.9997 | 1.001 | 0.240 | 0.087 | 0.362 | 4 | yes |
-| diffeq2 | 21 / 7 / 0 | 18 | 5097 | 4733 | 0.929 | 12.3169 | 12.1981 | 0.990 | 0.160 | 0.073 | 0.456 | 4 | yes |
-| mcml | 7302 / 27 / 159 | 101 | 718639 | 693521 | 0.965 | 47.0709 | 48.0662 | 1.021 | 327.680 | 233.469 | 0.712 | 471 | yes |
-| mkDelayWorker32B | 473 / 0 / 45 | 50 | 15924 | 13599 | 0.854 | 8.181 | 6.7593 | 0.826 | 1.860 | 0.607 | 0.326 | 2 | yes |
-| mkPktMerge | 31 / 0 / 15 | 28 | 9125 | 8166 | 0.895 | 4.09928 | 4.24477 | 1.035 | 0.390 | 0.137 | 0.351 | 0 | yes |
-| mkSMAdapter4B | 189 / 0 / 5 | 20 | 11771 | 11844 | 1.006 | 4.67723 | 4.694 | 1.004 | 0.790 | 0.544 | 0.689 | 7 | yes |
-| or1200 | 258 / 1 / 2 | 27 | 31226 | 31997 | 1.025 | 8.49305 | 9.22165 | 1.086 | 2.590 | 1.350 | 0.521 | 13 | yes |
-| raygentop | 123 / 8 / 0 | 19 | 11237 | 10998 | 0.979 | 4.53 | 4.62372 | 1.021 | 0.570 | 0.397 | 0.696 | 1 | yes |
-| sha | 155 / 0 / 0 | 17 | 11670 | 11198 | 0.960 | 9.56668 | 9.57774 | 1.001 | 0.400 | 0.566 | 1.415 | 9 | yes |
-| spree | 64 / 1 / 3 | 14 | 7318 | 7106 | 0.971 | 10.858 | 11.0821 | 1.021 | 0.270 | 0.165 | 0.611 | 2 | yes |
-| stereovision0 | 725 / 0 / 0 | 34 | 40349 | 36812 | 0.912 | 3.44133 | 3.50522 | 1.019 | 3.630 | 2.192 | 0.604 | 0 | yes |
-| stereovision1 | 770 / 40 / 0 | 40 | 79581 | 75936 | 0.954 | 5.13017 | 5.12796 | 1.000 | 4.160 | 3.950 | 0.950 | 0 | yes |
-| stereovision2 | 1977 / 324 / 0 | 104 | 311596 | 319145 | 1.024 | 14.6044 | 13.2032 | 0.904 | 30.010 | 7.643 | 0.255 | 312 | yes |
-| stereovision3 | 14 / 0 / 0 | 7 | 456 | 450 | 0.987 | 2.65898 | 2.67608 | 1.006 | 0.010 | 0.011 | 1.100 | 0 | yes |
-| Geomean |  |  |  |  | 0.967 |  |  | 1.000 |  |  | 0.609 |  |  |
+| LU32PEEng | 7600 / 32 / 167 | 103 | 1043923 | 1049071 | 1.005 | 76.166 | 75.898 | 0.996 | 341.290 | 222.173 | 0.651 | 166 | yes |
+| LU8PEEng | 2232 / 8 / 44 | 57 | 238874 | 236192 | 0.989 | 75.9908 | 77.3803 | 1.018 | 33.930 | 16.875 | 0.497 | 70 | yes |
+| arm_core | 1023 / 0 / 24 | 39 | 141706 | 142991 | 1.009 | 18.1898 | 18.2025 | 1.001 | 8.490 | 9.989 | 1.177 | 10 | yes |
+| bgm | 2786 / 11 / 0 | 63 | 250115 | 233104 | 0.932 | 20.6448 | 19.2035 | 0.930 | 30.110 | 21.894 | 0.727 | 38 | yes |
+| blob_merge | 619 / 0 / 0 | 31 | 45944 | 46982 | 1.023 | 15.2449 | 15.6769 | 1.028 | 2.520 | 2.937 | 1.165 | 0 | yes |
+| boundtop | 97 / 0 / 0 | 14 | 1935 | 1787 | 0.924 | 3.36481 | 3.48744 | 1.036 | 0.190 | 0.099 | 0.521 | 0 | yes |
+| ch_intrinsics | 68 / 0 / 1 | 12 | 825 | 795 | 0.964 | 2.18081 | 2.38504 | 1.094 | 0.060 | 0.029 | 0.483 | 0 | yes |
+| diffeq1 | 32 / 5 / 0 | 16 | 5160 | 4990 | 0.967 | 15.9904 | 16.2014 | 1.013 | 0.240 | 0.098 | 0.408 | 4 | yes |
+| diffeq2 | 21 / 7 / 0 | 18 | 5097 | 4861 | 0.954 | 12.3169 | 12.2575 | 0.995 | 0.160 | 0.077 | 0.481 | 4 | yes |
+| mcml | 7302 / 27 / 159 | 101 | 718639 | 688920 | 0.959 | 47.0709 | 46.6894 | 0.992 | 327.680 | 212.368 | 0.648 | 471 | yes |
+| mkDelayWorker32B | 473 / 0 / 45 | 50 | 15924 | 13431 | 0.843 | 8.181 | 6.68033 | 0.817 | 1.860 | 0.591 | 0.318 | 2 | yes |
+| mkPktMerge | 31 / 0 / 15 | 28 | 9125 | 8058 | 0.883 | 4.09928 | 4.24256 | 1.035 | 0.390 | 0.145 | 0.372 | 0 | yes |
+| mkSMAdapter4B | 189 / 0 / 5 | 20 | 11771 | 11836 | 1.006 | 4.67723 | 4.72287 | 1.010 | 0.790 | 0.537 | 0.680 | 7 | yes |
+| or1200 | 258 / 1 / 2 | 27 | 31226 | 31835 | 1.020 | 8.49305 | 8.78375 | 1.034 | 2.590 | 1.433 | 0.553 | 13 | yes |
+| raygentop | 123 / 8 / 0 | 19 | 11237 | 10840 | 0.965 | 4.53 | 4.62372 | 1.021 | 0.570 | 0.424 | 0.744 | 1 | yes |
+| sha | 155 / 0 / 0 | 17 | 11670 | 11226 | 0.962 | 9.56668 | 9.73811 | 1.018 | 0.400 | 0.591 | 1.477 | 9 | yes |
+| spree | 64 / 1 / 3 | 14 | 7318 | 7295 | 0.997 | 10.858 | 11.1119 | 1.023 | 0.270 | 0.174 | 0.644 | 2 | yes |
+| stereovision0 | 725 / 0 / 0 | 34 | 40349 | 37371 | 0.926 | 3.44133 | 3.59736 | 1.045 | 3.630 | 2.381 | 0.656 | 0 | yes |
+| stereovision1 | 770 / 40 / 0 | 40 | 79581 | 77292 | 0.971 | 5.13017 | 5.48943 | 1.070 | 4.160 | 4.355 | 1.047 | 0 | yes |
+| stereovision2 | 1977 / 324 / 0 | 104 | 311596 | 324314 | 1.041 | 14.6044 | 13.5574 | 0.928 | 30.010 | 8.085 | 0.269 | 312 | yes |
+| stereovision3 | 14 / 0 / 0 | 7 | 456 | 446 | 0.978 | 2.65898 | 2.71335 | 1.020 | 0.010 | 0.012 | 1.200 | 0 | yes |
+| Geomean |  |  |  |  | 0.966 |  |  | 1.004 |  |  | 0.635 |  |  |
 
 Routed by VPR's router:
 
 | Circuit | Min W, VPR's placement | Min W, guide's | / VPR | W | CPD, VPR's placement, ns | CPD, guide's, ns | / VPR | Wire, VPR's placement | Wire, guide's | / VPR | Routes legal |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| LU32PEEng | 124 | 126 | 1.016 | 162 | 76.2861 | 75.6907 | 0.992 | 1310007 | 1310679 | 1.001 | yes |
-| LU8PEEng | 92 | 96 | 1.043 | 120 | 76.1097 | 77.0562 | 1.012 | 325298 | 323342 | 0.994 | yes |
-| arm_core | 104 | 110 | 1.058 | 136 | 18.6216 | 18.8139 | 1.010 | 184148 | 186675 | 1.014 | yes |
-| bgm | 70 | 68 | 0.971 | 92 | 20.4561 | 19.6491 | 0.961 | 366218 | 349890 | 0.955 | yes |
-| blob_merge | 58 | 66 | 1.138 | 76 | 15.2323 | 15.5895 | 1.023 | 66256 | 70073 | 1.058 | yes |
-| boundtop | 42 | 40 | 0.952 | 54 | 3.55486 | 3.4719 | 0.977 | 3124 | 2967 | 0.950 | yes |
+| LU32PEEng | 124 | 124 | 1.000 | 162 | 76.2861 | 75.8454 | 0.994 | 1310007 | 1312732 | 1.002 | yes |
+| LU8PEEng | 92 | 92 | 1.000 | 120 | 76.1097 | 75.8584 | 0.997 | 325298 | 321825 | 0.989 | yes |
+| arm_core | 104 | 114 | 1.096 | 136 | 18.6216 | 18.7268 | 1.006 | 184148 | 185223 | 1.006 | yes |
+| bgm | 70 | 68 | 0.971 | 92 | 20.4561 | 19.7437 | 0.965 | 366218 | 348820 | 0.952 | yes |
+| blob_merge | 58 | 62 | 1.069 | 76 | 15.2323 | 15.5491 | 1.021 | 66256 | 68345 | 1.032 | yes |
+| boundtop | 42 | 40 | 0.952 | 54 | 3.55486 | 3.47891 | 0.979 | 3124 | 2942 | 0.942 | yes |
 | ch_intrinsics | 42 | 38 | 0.905 | 54 | 2.49575 | 2.49995 | 1.002 | 1416 | 1310 | 0.925 | yes |
-| diffeq1 | 60 | 56 | 0.933 | 78 | 17.0822 | 17.2566 | 1.010 | 8635 | 8721 | 1.010 | yes |
-| diffeq2 | 46 | 46 | 1.000 | 60 | 12.9774 | 12.9064 | 0.995 | 9780 | 9245 | 0.945 | yes |
-| mcml | 124 | 138 | 1.113 | 162 | 46.3566 | 45.3936 | 0.979 | 921573 | 897314 | 0.974 | yes |
-| mkDelayWorker32B | 38 | 36 | 0.947 | 50 | 8.43017 | 6.86275 | 0.814 | 22576 | 20033 | 0.887 | yes |
-| mkPktMerge | 46 | 38 | 0.826 | 60 | 4.26319 | 4.40979 | 1.034 | 13566 | 12801 | 0.944 | yes |
-| mkSMAdapter4B | 50 | 58 | 1.160 | 64 | 4.82225 | 4.83662 | 1.003 | 17892 | 18040 | 1.008 | yes |
-| or1200 | 92 | 96 | 1.043 | 120 | 8.64458 | 8.73672 | 1.011 | 43336 | 44592 | 1.029 | yes |
-| raygentop | 58 | 58 | 1.000 | 76 | 4.74311 | 4.75768 | 1.003 | 18983 | 18459 | 0.972 | yes |
-| sha | 68 | 64 | 0.941 | 88 | 10.0346 | 9.74162 | 0.971 | 15449 | 15128 | 0.979 | yes |
-| spree | 62 | 62 | 1.000 | 80 | 11.2813 | 11.2002 | 0.993 | 12039 | 11903 | 0.989 | yes |
-| stereovision0 | 48 | 46 | 0.958 | 62 | 3.60577 | 3.69935 | 1.026 | 55531 | 51045 | 0.919 | yes |
-| stereovision1 | 80 | 76 | 0.950 | 104 | 5.57953 | 5.30515 | 0.951 | 114217 | 110512 | 0.968 | yes |
-| stereovision2 | 68 | 64 | 0.941 | 88 | 15.8253 | 13.8538 | 0.875 | 422434 | 429884 | 1.018 | yes |
-| stereovision3 | 30 | 36 | 1.200 | 40 | 2.65817 | 2.57512 | 0.969 | 783 | 714 | 0.912 | yes |
-| Geomean |  |  | 1.001 |  |  |  | 0.980 |  |  | 0.973 |  |
+| diffeq1 | 60 | 50 | 0.833 | 78 | 17.0822 | 17.2194 | 1.008 | 8635 | 8565 | 0.992 | yes |
+| diffeq2 | 46 | 40 | 0.870 | 60 | 12.9774 | 13.0262 | 1.004 | 9780 | 9579 | 0.979 | yes |
+| mcml | 124 | 136 | 1.097 | 162 | 46.3566 | 44.2597 | 0.955 | 921573 | 893405 | 0.969 | yes |
+| mkDelayWorker32B | 38 | 36 | 0.947 | 50 | 8.43017 | 6.84149 | 0.812 | 22576 | 19729 | 0.874 | yes |
+| mkPktMerge | 46 | 34 | 0.739 | 60 | 4.26319 | 4.12434 | 0.967 | 13566 | 12671 | 0.934 | yes |
+| mkSMAdapter4B | 50 | 58 | 1.160 | 64 | 4.82225 | 4.83551 | 1.003 | 17892 | 18578 | 1.038 | yes |
+| or1200 | 92 | 88 | 0.957 | 120 | 8.64458 | 8.76104 | 1.013 | 43336 | 44224 | 1.020 | yes |
+| raygentop | 58 | 62 | 1.069 | 76 | 4.74311 | 4.75893 | 1.003 | 18983 | 18438 | 0.971 | yes |
+| sha | 68 | 70 | 1.029 | 88 | 10.0346 | 9.86047 | 0.983 | 15449 | 15141 | 0.980 | yes |
+| spree | 62 | 64 | 1.032 | 80 | 11.2813 | 11.301 | 1.002 | 12039 | 11859 | 0.985 | yes |
+| stereovision0 | 48 | 48 | 1.000 | 62 | 3.60577 | 3.60688 | 1.000 | 55531 | 51878 | 0.934 | yes |
+| stereovision1 | 80 | 74 | 0.925 | 104 | 5.57953 | 5.56013 | 0.997 | 114217 | 111555 | 0.977 | yes |
+| stereovision2 | 68 | 66 | 0.971 | 88 | 15.8253 | 13.8848 | 0.877 | 422434 | 433455 | 1.026 | yes |
+| stereovision3 | 30 | 30 | 1.000 | 40 | 2.65817 | 2.70126 | 1.016 | 783 | 717 | 0.916 | yes |
+| Geomean |  |  | 0.977 |  |  |  | 0.980 |  |  | 0.973 |  |
 
 Routed by guide's router:
 
 | Circuit | Min W, VPR's placement | Min W, guide's | / VPR | W | CPD, VPR's placement, ns | CPD, guide's, ns | / VPR | Wire, VPR's placement | Wire, guide's | / VPR | Routes legal |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| LU32PEEng | 122 | 128 | 1.049 | 162 | 76.128 | 75.4897 | 0.992 | 1297548 | 1299899 | 1.002 | yes |
-| LU8PEEng | 88 | 100 | 1.136 | 120 | 75.6488 | 76.9099 | 1.017 | 322552 | 321797 | 0.998 | yes |
-| arm_core | 102 | 110 | 1.078 | 136 | 18.6017 | 18.8028 | 1.011 | 183390 | 185067 | 1.009 | yes |
-| bgm | 70 | 68 | 0.971 | 92 | 20.4705 | 19.6048 | 0.958 | 365252 | 348800 | 0.955 | yes |
-| blob_merge | 62 | 66 | 1.065 | 76 | 15.1616 | 15.4486 | 1.019 | 65834 | 69694 | 1.059 | yes |
-| boundtop | 42 | 40 | 0.952 | 54 | 3.55154 | 3.47301 | 0.978 | 3150 | 2951 | 0.937 | yes |
-| ch_intrinsics | 42 | 38 | 0.905 | 54 | 2.52005 | 2.50282 | 0.993 | 1485 | 1337 | 0.900 | yes |
-| diffeq1 | 60 | 52 | 0.867 | 78 | 17.6167 | 17.258 | 0.980 | 8726 | 8598 | 0.985 | yes |
-| diffeq2 | 50 | 46 | 0.920 | 60 | 13.3234 | 12.9674 | 0.973 | 9799 | 9211 | 0.940 | yes |
-| mcml | 126 | 140 | 1.111 | 162 | 46.4519 | 45.2693 | 0.975 | 918230 | 892479 | 0.972 | yes |
-| mkDelayWorker32B | 40 | 36 | 0.900 | 50 | 8.46292 | 6.85168 | 0.810 | 22086 | 19668 | 0.891 | yes |
-| mkPktMerge | 46 | 40 | 0.870 | 60 | 4.26762 | 4.41975 | 1.036 | 13395 | 12589 | 0.940 | yes |
-| mkSMAdapter4B | 50 | 56 | 1.120 | 64 | 4.80151 | 5.05617 | 1.053 | 17939 | 18629 | 1.038 | yes |
-| or1200 | 92 | 112 | 1.217 | 120 | 8.63351 | 8.72343 | 1.010 | 43678 | 44588 | 1.021 | yes |
-| raygentop | 56 | 58 | 1.036 | 76 | 4.86012 | 4.93969 | 1.016 | 18933 | 18335 | 0.968 | yes |
-| sha | 72 | 64 | 0.889 | 88 | 10.1613 | 10.3606 | 1.020 | 15463 | 15026 | 0.972 | yes |
-| spree | 62 | 64 | 1.032 | 80 | 11.2769 | 11.1869 | 0.992 | 11963 | 11991 | 1.002 | yes |
-| stereovision0 | 50 | 46 | 0.920 | 62 | 3.60245 | 3.69492 | 1.026 | 55592 | 51059 | 0.918 | yes |
-| stereovision1 | 82 | 72 | 0.878 | 104 | 5.4429 | 5.16188 | 0.948 | 114462 | 110730 | 0.967 | yes |
-| stereovision2 | 72 | 68 | 0.944 | 88 | 15.7821 | 13.8505 | 0.878 | 420551 | 428049 | 1.018 | yes |
-| stereovision3 | 30 | 36 | 1.200 | 40 | 2.65817 | 2.57512 | 0.969 | 777 | 700 | 0.901 | yes |
-| Geomean |  |  | 0.997 |  |  |  | 0.982 |  |  | 0.970 |  |
+| LU32PEEng | 116 | 120 | 1.034 | 162 | 76.099 | 75.6934 | 0.995 | 1304833 | 1311170 | 1.005 | yes |
+| LU8PEEng | 84 | 86 | 1.024 | 120 | 75.675 | 75.6256 | 0.999 | 324858 | 322272 | 0.992 | yes |
+| arm_core | 100 | 104 | 1.040 | 136 | 18.5984 | 18.7146 | 1.006 | 184526 | 184714 | 1.001 | yes |
+| bgm | 70 | 68 | 0.971 | 92 | 20.4639 | 19.6743 | 0.961 | 370151 | 352617 | 0.953 | yes |
+| blob_merge | 60 | 62 | 1.033 | 76 | 15.1614 | 15.5387 | 1.025 | 67081 | 69587 | 1.037 | yes |
+| boundtop | 42 | 40 | 0.952 | 54 | 3.55264 | 3.47781 | 0.979 | 3154 | 2929 | 0.929 | yes |
+| ch_intrinsics | 42 | 38 | 0.905 | 54 | 2.45235 | 2.50282 | 1.021 | 1449 | 1329 | 0.917 | yes |
+| diffeq1 | 54 | 46 | 0.852 | 78 | 17.0899 | 17.2624 | 1.010 | 8644 | 8607 | 0.996 | yes |
+| diffeq2 | 42 | 38 | 0.905 | 60 | 13.0064 | 13.0119 | 1.000 | 9882 | 9459 | 0.957 | yes |
+| mcml | 112 | 114 | 1.018 | 162 | 46.3666 | 44.2199 | 0.954 | 919519 | 889016 | 0.967 | yes |
+| mkDelayWorker32B | 40 | 36 | 0.900 | 50 | 8.45975 | 6.83042 | 0.807 | 22082 | 19355 | 0.877 | yes |
+| mkPktMerge | 46 | 38 | 0.826 | 60 | 4.29197 | 4.12545 | 0.961 | 13358 | 12523 | 0.937 | yes |
+| mkSMAdapter4B | 50 | 54 | 1.080 | 64 | 4.80594 | 4.7995 | 0.999 | 18076 | 18417 | 1.019 | yes |
+| or1200 | 76 | 76 | 1.000 | 120 | 8.63019 | 8.84103 | 1.024 | 43888 | 44607 | 1.016 | yes |
+| raygentop | 54 | 56 | 1.037 | 76 | 4.73979 | 4.90751 | 1.035 | 18799 | 18383 | 0.978 | yes |
+| sha | 56 | 58 | 1.036 | 88 | 10.0324 | 9.85715 | 0.983 | 15476 | 15134 | 0.978 | yes |
+| spree | 62 | 62 | 1.000 | 80 | 11.2802 | 11.3206 | 1.004 | 12076 | 11910 | 0.986 | yes |
+| stereovision0 | 48 | 46 | 0.958 | 62 | 3.60134 | 3.60356 | 1.001 | 55464 | 52052 | 0.938 | yes |
+| stereovision1 | 78 | 72 | 0.923 | 104 | 5.45065 | 5.54574 | 1.017 | 114442 | 111247 | 0.972 | yes |
+| stereovision2 | 60 | 62 | 1.033 | 88 | 15.7777 | 13.8782 | 0.880 | 419730 | 430911 | 1.027 | yes |
+| stereovision3 | 30 | 30 | 1.000 | 40 | 2.66237 | 2.70126 | 1.015 | 756 | 702 | 0.929 | yes |
+| Geomean |  |  | 0.975 |  |  |  | 0.983 |  |  | 0.971 |  |
 
 ### What the results say
 
-- **After routing, `guide`'s placements are as good as VPR's or better, which is M8's exit for
-  FPGAs.** With VPR's router, critical paths are 0.2% shorter on MCNC and 2.0% shorter on the
-  Verilog suite, with 4.5% and 2.7% less wire, and channels 1.3% narrower and as wide. With
-  `guide`'s router, 0.6% and 1.8% shorter, 4.7% and 3.0% less wire, and 1.9% and 0.3%
-  narrower.
-- **Before routing**, by VPR's own measures, `guide`'s placements need 4.5% less wire on MCNC
-  and 3.3% less on the Verilog suite, and VPR's delay model puts their critical paths 4.1%
-  longer on MCNC and the same on the Verilog suite. Routing undoes that MCNC difference: see
+- **After routing, `guide`'s placements are better than VPR's, which is M8's exit for FPGAs.**
+  With VPR's router, channels are 1.9% narrower on MCNC and 2.3% narrower on the Verilog suite,
+  critical paths 0.7% and 2.0% shorter, with 5.6% and 2.7% less wire. With `guide`'s router,
+  channels 2.1% and 2.5% narrower, critical paths 0.9% and 1.7% shorter, with 4.5% and 2.9%
+  less wire.
+- **Before routing**, by VPR's own measures, `guide`'s placements need 4.7% less wire on MCNC
+  and 3.4% less on the Verilog suite, and VPR's delay model puts their critical paths 3.6%
+  longer on MCNC and 0.4% longer on the Verilog suite. Routing undoes that MCNC difference: see
   [the delay model](#what-it-took-1) below.
-- **Channel width is where `guide` does worst.** It is the same on average, but the largest
-  Verilog circuits need wider channels on `guide`'s placements: mcml 11% (138 tracks against
-  124 with VPR's router), arm_core 6%, LU8PEEng 4% and LU32PEEng 2%, as do blob_merge (14%),
-  mkSMAdapter4B (16%) and the tiny stereovision3 (36 against 30). Nothing in the placer's cost
-  looks at congestion, as VPR's does not either; its placements are denser, with less wire and
-  more of it in some channels.
-- **The largest gains are on timing**: stereovision2's critical path is 12.5% shorter (13.85 ns
-  against 15.83 ns) and mkDelayWorker32B's 19% shorter, with less wire on both. The worst are
-  dsip, 8% longer, and seq, 5% longer, both with less wire.
-- **Time**: 0.61 times VPR's on the Verilog suite, 232 s against 341 s on LU32PEEng, and 1.57
+- **Channel width is still where single circuits do worst**, against VPR's placement with seed
+  1: mkSMAdapter4B needs 16% wider channels (58 tracks against 50 with VPR's router), mcml 10%,
+  arm_core 10%, blob_merge 7% and LU32PEEng the same; with `guide`'s router, 8%, 2%, 4%, 3% and
+  3%. Some of that is VPR's luck: with seeds 2 and 3, VPR's own placements of mcml need 134
+  and 138 tracks, and of arm_core 112 and 110, against 124 and 104 with seed 1. See
+  [congestion](#congestion).
+- **The largest gains are on timing**: stereovision2's critical path is 12% shorter (13.88 ns
+  against 15.83 ns) and mkDelayWorker32B's 19% shorter, with VPR's router and less wire on
+  mkDelayWorker32B. The worst are dsip, 8% longer, and seq, 3% longer, both with less wire.
+- **Time**: 0.64 times VPR's on the Verilog suite, 222 s against 341 s on LU32PEEng, and 1.52
   times on MCNC, where both take fractions of a second and the global placement's fixed cost
   counts.
 
+### Congestion
+
+The placer as `24d4e8b` added it had no congestion term, and needed channels as wide as VPR's
+placements on average, but up to 16% wider on single circuits. VPR 9.0.0's placer has none
+either; VPR's newer congestion-aware placement adds one of this kind. `guide` now estimates,
+each temperature, how much of each channel the placement will use, by RUDY with VPR's crossing
+counts against the tracks the graph has ([how](algorithms.md#fpga-placement)), and charges each
+net for the channels of its box that are above 0.6 of their tracks.
+
+**Before and after**, at `3a9562d` with `--congestion-factor 0` and with the default, on the
+same packing, router and harness as above, as geometric means of the ratios to VPR's
+placement:
+
+| Suite | Measure | Before | After |
+| --- | --- | --- | --- |
+| MCNC | BB / VPR, before routing | 0.955 | 0.953 |
+| MCNC | Est. CPD / VPR, before routing | 1.041 | 1.036 |
+| MCNC | Time / VPR | 1.58 | 1.52 |
+| MCNC | Min W / VPR, VPR's router | 0.987 | **0.981** |
+| MCNC | CPD / VPR, VPR's router | 0.998 | 0.993 |
+| MCNC | Wire / VPR, VPR's router | 0.955 | 0.944 |
+| MCNC | Min W / VPR, `guide`'s router | 0.981 | **0.979** |
+| MCNC | CPD / VPR, `guide`'s router | 0.998 | 0.991 |
+| MCNC | Wire / VPR, `guide`'s router | 0.957 | 0.955 |
+| Verilog | BB / VPR, before routing | 0.967 | 0.966 |
+| Verilog | Est. CPD / VPR, before routing | 1.000 | 1.004 |
+| Verilog | Time / VPR | 0.59 | 0.64 |
+| Verilog | Min W / VPR, VPR's router | 1.001 | **0.977** |
+| Verilog | CPD / VPR, VPR's router | 0.980 | 0.980 |
+| Verilog | Wire / VPR, VPR's router | 0.973 | 0.973 |
+| Verilog | Min W / VPR, `guide`'s router | 0.986 | **0.975** |
+| Verilog | CPD / VPR, `guide`'s router | 0.980 | 0.983 |
+| Verilog | Wire / VPR, `guide`'s router | 0.971 | 0.971 |
+
+The circuits that needed the widest channels, by minimum width with VPR's router and then with
+`guide`'s:
+
+| Circuit | VPR's placement | `guide`'s, before | After | VPR's placement, `guide`'s router | `guide`'s, before | After |
+| --- | --- | --- | --- | --- | --- | --- |
+| LU32PEEng | 124 | 126 | 124 | 116 | 122 | 120 |
+| LU8PEEng | 92 | 96 | 92 | 84 | 88 | 86 |
+| mcml | 124 | 138 | 136 | 112 | 112 | 114 |
+| arm_core | 104 | 110 | 114 | 100 | 104 | 104 |
+| blob_merge | 58 | 66 | 62 | 60 | 66 | 62 |
+| mkSMAdapter4B | 50 | 58 | 58 | 50 | 56 | 54 |
+| or1200 | 92 | 96 | 88 | 76 | 80 | 76 |
+| stereovision3 | 30 | 36 | 30 | 30 | 36 | 30 |
+
+**Seeds.** A single circuit's minimum width moves by up to 20% between seeds, of either placer,
+so single runs say little about it. On the 39 circuits but LU32PEEng and mcml, `guide` placed
+with five seeds, with and without congestion, and VPR with three, each placement routed by
+VPR's router to its minimum width. Against VPR's placement with seed 1, as the tables above
+have it, and against the geometric mean of VPR's three seeds for each circuit:
+
+| Placer | Seeds | Min W / VPR seed 1, each seed | Mean | Min W / mean of VPR's seeds | Mean |
+| --- | --- | --- | --- | --- | --- |
+| VPR | 1, 2, 3 | 1, 0.988, 0.991 | 0.993 | 1.007, 0.995, 0.998 | 1.000 |
+| `guide`, without congestion | 1 to 5 | 0.990, 0.995, 0.991, 1.011, 0.993 | 0.996 | 0.997, 1.002, 0.998, 1.018, 0.999 | 1.003 |
+| `guide`, with congestion | 1 to 5 | 0.976, 0.973, 0.977, 0.991, 0.986 | **0.981** | 0.983, 0.980, 0.983, 0.997, 0.993 | **0.987** |
+
+So congestion takes 1.5% off the channel width, on every seed, more than the means move between
+seeds, about 0.5%; and VPR's seed 1 happened to be its worst of three, by 0.7%. By circuit, with
+seeds 1 to 3 of VPR's and 1 to 5 of `guide`'s (1 and 2 on LU32PEEng, and 1 to 3 with
+congestion on mcml):
+
+| Circuit | VPR | `guide`, without | `guide`, with |
+| --- | --- | --- | --- |
+| LU32PEEng | 124, 124, 124 | 126, 124 | 124, 120 |
+| mcml | 124, 134, 138 | 138, 138 | 136, 136, 142 |
+| LU8PEEng | 92, 94, 92 | 96, 90, 88, 94, 92 | 92, 92, 94, 90, 88 |
+| arm_core | 104, 112, 110 | 110, 110, 110, 108, 114 | 114, 108, 110, 108, 112 |
+| blob_merge | 58, 60, 60 | 66, 64, 64, 64, 64 | 62, 62, 62, 62, 62 |
+| mkSMAdapter4B | 50, 50, 48 | 58, 56, 54, 56, 54 | 58, 56, 56, 56, 52 |
+| or1200 | 92, 98, 82 | 96, 114, 98, 106, 94 | 88, 90, 90, 108, 104 |
+
+LU32PEEng, mcml, LU8PEEng and arm_core are now within the spread of VPR's own seeds. blob_merge
+and mkSMAdapter4B are not: they need 2 to 10 tracks more than VPR's placements on every seed.
+Both have more wire before routing than VPR's, 2.3% and 0.6% more, and placed for wirelength
+alone, without timing, they needed 60 and 56 tracks, so timing costs them wire, more than
+`guide`'s estimate misses congestion: on blob_merge a factor of 3 takes the expected peak use
+from 0.90 to 0.79 of the tracks, below VPR's placement's 0.82, and the width stays at 64.
+
+**Weights**, on the 39 circuits, one seed but where said, as geometric means of the ratio to
+VPR's placement with seed 1, with VPR's router, and with BB and `guide`'s own estimate of the
+critical path before routing:
+
+| Setting | Min W / VPR | BB / VPR | Est. CPD / VPR, `guide`'s model |
+| --- | --- | --- | --- |
+| No congestion, 5 seeds | 0.996 | 0.957 | 0.978 |
+| **Factor 1, threshold 0.6** (the default), 5 seeds | **0.981** | 0.955 | 0.982 |
+| Factor 0.5, threshold 0.6 | 0.983 | 0.959 | 0.982 |
+| Factor 2, threshold 0.6 | 0.975 | 0.958 | 0.982 |
+| Factor 3, threshold 0.6 | 0.983 | 0.957 | 0.980 |
+| Factor 1, threshold 0.5 | 0.980 | 0.956 | 0.977 |
+| Factor 1, threshold 0.7 | 0.983 | 0.958 | 0.979 |
+| Inflation to 2, no factor, 3 seeds | 0.978 | 0.955 | 0.982 |
+| Factor 1 and inflation to 1.5 | 0.984 | 0.956 | 0.980 |
+| Factor 1 and inflation to 2, 3 seeds | 0.981 | 0.956 | 0.982 |
+| Factor 1 and inflation to 3 | 0.978 | 0.957 | 0.978 |
+| Factor 2 and inflation to 2 | 0.971 | 0.960 | 0.983 |
+| Factor 1, `timing_tradeoff` 0.4 | 0.983 | 0.943 | 0.989 |
+| Factor 1, first range limit 16 | 0.977 | 0.958 | 0.978 |
+| Factor 1, first temperature 0.1 | 0.984 | 0.957 | 0.979 |
+| Factor 1, `inner_num` 1.5 | 0.981 | 0.955 | 0.979 |
+
+- **The factor and the threshold** are flat from 0.5 to 2 and from 0.5 to 0.7: single seeds of
+  them differ by less than seeds of one setting do, as factor 1 and inflation to 2 shows, at
+  0.971, 0.992 and 0.980 on three seeds. A threshold of 0.6 of a device 1.3 times as wide as
+  VPR needs is 0.78 of the tracks at VPR's minimum.
+- **Inflating blocks in global placement** where channels are congested, `max_inflation`, does
+  as much alone as the annealing term does, and nothing on top of it, so it stays off.
+- **The term does more the further annealing can move blocks.** On mcml, annealing hot from a
+  random placement goes from 154 tracks to 126 with the term, and the default flow with a first
+  range limit of 32 and a temperature of 0.2 to 130, against 136; but both have 6% to 13% more
+  wire and 8% longer critical paths before routing, and on the 39 a range of 16 did no better
+  than 8.
+- **Time**: the estimate is made again each temperature, in time linear in nets and tiles, and a
+  net's term is four lookups in a summed-area table. Side by side, three times each, placement
+  took 0% to 15% longer on LU8PEEng, bgm, stereovision2 and clma, and no longer on mcml, within
+  the noise of a shared machine.
+
 ### How the default came about
 
-On the 39 circuits but LU32PEEng and mcml, which take hours of routing, two other settings went
-through the same comparison. Each row has the geometric means of the ratios to VPR's placement,
+Before congestion was priced, and with the router before `1ba0591` tuned it, on the 39
+circuits but LU32PEEng and mcml, which take hours of routing, two other settings went through
+the same comparison. Each row has the geometric means of the ratios to VPR's placement,
 with VPR's measures of the placement and VPR's router:
 
 | Placer | Suite | BB / VPR | Est. CPD / VPR | Time / VPR | Min W / VPR | CPD / VPR | Wire / VPR |
@@ -1632,8 +1757,8 @@ with VPR's measures of the placement and VPR's router:
 
 ### What this does not show
 
-- One seed per circuit for each placer, and one packing. Single circuits move by several
-  percent between settings, as the per-circuit tables show, which is more than the means do.
+- One packing. The tables have one seed per circuit for each placer; [congestion](#congestion)
+  has five of `guide`'s and three of VPR's on 39 circuits, with VPR's router only.
 - Placement times are of runs a few days apart on a shared machine, VPR's from the routing
   comparisons; on MCNC they are fractions of a second, where fixed costs count.
 - Clock regions: VTR's architectures have none, so nothing here needs them. Titan23 and the
@@ -2954,8 +3079,8 @@ families unless a family is named.
   [FPGA placement against VPR](#fpga-placement-against-vpr).
 - They are small: at most 1152 items. Neither placer has been tuned or profiled at the sizes of
   real FPGAs, and annealing, at `units^(4/3)` moves per temperature, grows quickly.
-- Congestion feedback is only tested for doing what it should on a tiny case; nothing here
-  measures what it does to routability.
+- Congestion feedback is only tested for doing what it should on a tiny case here; what it does
+  to routability is measured on FPGAs, in [congestion](#congestion).
 - Free-space problems are squares of one size. Mixed sizes, which PCBs have, are only tested for
   legality, and rows as tall as the tallest unit waste room when sizes differ much.
 

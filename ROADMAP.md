@@ -314,8 +314,9 @@ FPGA hookup, building a problem from a VTR netlist and architecture, came with M
   and blocks fixed by a `.place` file as with `--fix_clusters`; VPR's bounding-box and
   timing cost, with criticalities from a timing analysis each temperature and delays from a
   delta-delay table searched on the graph; analytic global placement, then annealing that
-  starts cold; and `fpga::write_placement` for VPR. VTR's architectures have no clock regions,
-  so nothing models them yet.
+  starts cold; a congestion term, the expected use of each channel against the graph's tracks
+  each temperature, and `place::Inflation` for analytic placement; and `fpga::write_placement`
+  for VPR. VTR's architectures have no clock regions, so nothing models them yet.
 - **PCB:** fixed connectors and mounting holes, courtyards, both board sides, 90°
   or free rotation, decoupling capacitors kept near their pins, thermal grouping. Done but for
   free rotation, in `pcb::place::place_components`, with `kicad::placement_design` and
@@ -335,11 +336,13 @@ routes to completion on the curated boards with the original placement discarded
 
 The FPGA half is met ([results](docs/benchmarks.md#fpga-placement-against-vpr)): on VTR's 20
 MCNC circuits and 21 Verilog benchmarks, from VPR's packing, VPR 9.0.0 accepts every placement
-of `guide`'s, and routed by VPR's router they give critical paths 0.2% and 2.0% shorter than
-VPR's own placements, with 4.5% and 2.7% less wire, in 1.6 and 0.6 times VPR's placement time;
-`guide`'s router finds the same. Channel width is the same on average, but the largest Verilog
-circuits need 2% to 11% wider channels on `guide`'s placements, as nothing in the cost looks at
-congestion yet.
+of `guide`'s, and routed by VPR's router they need channels 1.9% and 2.3% narrower than VPR's
+own placements, with critical paths 0.7% and 2.0% shorter and 5.6% and 2.7% less wire, in 1.5
+and 0.6 times VPR's placement time; `guide`'s router finds the same. Pricing congestion took
+channel width from 0.987 and 1.001 of VPR's to 0.981 and 0.977, 1.5% on every one of five
+seeds, with as much wire and delay. The large Verilog circuits are now within the spread of
+VPR's own seeds, but blob_merge and mkSMAdapter4B still need 7% and 16% wider channels than
+VPR's placement, where timing costs wire.
 
 The PCB half is met ([results](docs/benchmarks.md#pcb-placement-of-the-curated-boards)): on all
 eleven curated boards, with the placement of every movable footprint discarded, `guide` places

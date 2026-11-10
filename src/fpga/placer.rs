@@ -224,9 +224,9 @@ impl PlaceProblem {
     /// How much of the channels a placement is expected to use, tile by tile.
     ///
     /// This is RUDY (Spindler and Johannes, 2007) with VPR's measure of a net's wire: each
-    /// net needs [`crossing_count`] times the columns of its bounding box of horizontal wire,
-    /// and as many times its rows of vertical wire, which [`bb_estimate`] adds up, spread
-    /// evenly over the tiles of the box. Each tile's demand is then divided by the tracks of
+    /// net needs VPR's crossing count for its size times the columns of its bounding box of
+    /// horizontal wire, and as many times its rows of vertical wire, which [`bb_estimate`]
+    /// adds up, spread evenly over the tiles of the box. Each tile's demand is then divided by the tracks of
     /// its channels, [`channel_tracks`](PlaceProblem::channel_tracks).
     ///
     /// [`bb_estimate`]: PlaceProblem::bb_estimate

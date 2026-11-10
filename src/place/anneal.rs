@@ -399,6 +399,51 @@ impl<'a, C: CostTerm> Annealer<'a, C> {
         &self.reports
     }
 
+    /// The cost term.
+    pub fn cost_term(&self) -> &C {
+        &self.cost
+    }
+
+    /// The temperature the next [`step`](Annealer::step) runs at, 0 before the first, which
+    /// measures it. The last pass runs at 0 whatever this says.
+    pub fn temperature(&self) -> f64 {
+        self.temperature
+    }
+
+    /// The range limit the next [`step`](Annealer::step) runs with, in steps.
+    pub fn range(&self) -> f64 {
+        self.range
+    }
+
+    /// The largest the range limit can be, in steps: the whole layout.
+    pub fn max_range(&self) -> f64 {
+        self.max_range
+    }
+
+    /// Replaces the cost term between temperatures, and prices every net again with it.
+    ///
+    /// This is for cost terms that are weighed again as the run goes, as VPR's timing-driven
+    /// placer does each temperature with the criticalities of the placement so far, and the
+    /// weights that keep the cost of its two terms near 1. The temperature is not changed, so
+    /// a new term should price placements on the same scale as the old, which normalizing as
+    /// VPR does keeps it at.
+    ///
+    /// The best placement so far was priced with the old term, so it is forgotten: the
+    /// current placement becomes the best one. Calling this has no other effect on the run,
+    /// which goes on as it would have.
+    pub fn set_cost(&mut self, cost: C) {
+        self.cost = cost;
+        let mut total = 0u64;
+        for net in 0..self.problem.net_count() {
+            let c = self.compute_net(NetId(net as u32));
+            self.net_cost[net] = c;
+            total = total.saturating_add(c);
+        }
+        self.total = total;
+        self.best_cost = total;
+        self.best.clone_from(&self.placement);
+    }
+
     /// Runs one temperature and reports on it, or returns `None` once the run has stopped.
     pub fn step(&mut self) -> Option<TemperatureReport> {
         if self.stop.is_some() {

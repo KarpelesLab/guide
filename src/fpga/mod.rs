@@ -100,8 +100,10 @@
 //! Each format was pinned against the real thing where one could be found, and this says
 //! where it couldn't. See `testdata/vtr/README.md` for the samples. Since then, VPR 9.0.0 has
 //! checked and timed this crate's routes of the 20 MCNC circuits of VTR's regression tests,
-//! on graphs and placements that it wrote: see the FPGA routing section of
-//! `docs/benchmarks.md`, and `examples/vtr_route.rs` for the code that does it.
+//! and of VTR's Verilog benchmarks on its flagship architecture, with fracturable LUTs, carry
+//! chains, memories and multipliers over several tiles, on graphs and placements that it
+//! wrote: see the FPGA routing section of `docs/benchmarks.md`, and `examples/vtr_route.rs`
+//! for the code that does it.
 //!
 //! - **Routing resource graphs** were checked against the schema in VTR's source and a
 //!   genuine device graph, the 96 MB Zero ASIC z1000 graph shipped with VTR, and are read
@@ -116,14 +118,17 @@
 //! - **Delays** for timing-driven routing, from [`RrGraph::timed_graph`], are the Elmore delay
 //!   that VPR's route tree gives a step through a buffered switch, fixed per step. That is an
 //!   approximation behind unbuffered switches and where a tree branches: see
-//!   [`RrGraph::step_delay`]. On the benchmarks, the critical path that the engine works out
-//!   with these is 0% to 1.3% shorter than VPR's timing analysis of the same routes.
+//!   [`RrGraph::step_delay`]. On the benchmarks, the worst slack that the engine works out
+//!   with these is within 1.2% of VPR's timing analysis of the same routes, and mostly 0.1%.
 //! - **Timing graphs** from [`build_timing`] follow the structure that the packed netlist
 //!   records inside each block, which was checked against `mult_4x4`, `multiclock` and
 //!   `unconnected`. The delays inside blocks come from [`read_architecture`], which was
 //!   checked against `k6_N10_40nm.xml`, the architecture `mult_4x4` was packed for, and
-//!   against VPR's source for what it makes of LUT and memory classes. See [what VPR does
-//!   differently](build_timing#what-vpr-does-differently).
+//!   against VPR's source for what it makes of LUT and memory classes, and then against
+//!   VPR's timing of the Verilog benchmarks on `k6_frac_N10_frac_chain_mem32K_40nm.xml`. See
+//!   [what VPR does differently](build_timing#what-vpr-does-differently).
+//! - **Constant nets**, which VPR doesn't route, are found by [`constant_nets`] as VPR finds
+//!   them, and agreed with VPR's count on every Verilog benchmark.
 //!
 //! # Limitations
 //!

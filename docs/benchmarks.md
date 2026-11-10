@@ -4,7 +4,8 @@ This is the start of the benchmark report that the [roadmap](../ROADMAP.md) asks
 it covers the engine, on synthetic instances that this repository generates. Those are
 useful for tuning, for catching regressions and for checking what the docs say. They are **not
 evidence about real designs**. The comparisons on real designs so far are
-[FPGA routing against VPR](#fpga-routing-against-vpr), on VTR's MCNC circuits, the
+[FPGA routing against VPR](#fpga-routing-against-vpr), on VTR's MCNC circuits and
+[its Verilog benchmarks](#vtrs-verilog-benchmarks), the
 [clearance check against KiCad's](#pcb-clearance-checks-against-kicad), on real boards,
 [those boards read from DSN](#pcb-dsn-designs-against-kicad-boards) against the same boards read
 from KiCad's files, and [PCB routing of the same boards](#pcb-routing-of-the-curated-boards),
@@ -535,7 +536,8 @@ done so far are below. There are no results for the others yet.
 | Domain | Compared against | Benchmarks | Status |
 | --- | --- | --- | --- |
 | FPGA routing | VPR 9.0.0 | VTR's MCNC circuits | [Done](#fpga-routing-against-vpr) |
-| FPGA routing | VPR, nextpnr | VTR's Verilog suite, Titan23 | Not yet done |
+| FPGA routing | VPR 9.0.0 | VTR's Verilog suite (`vtr_reg_qor_chain`) | [Done](#vtrs-verilog-benchmarks) |
+| FPGA routing | VPR, nextpnr | Titan23 | Not yet done |
 | FPGA placement | VPR, nextpnr | VTR benchmarks, ISPD 2016/2017 contest sets | Not yet done |
 | PCB clearance checks | KiCad 10.0.3 | [Curated open-source KiCad boards](../testdata/kicad/README.md) | [Done](#pcb-clearance-checks-against-kicad) |
 | PCB DSN import, SES export | KiCad 10.0.3's reading of the same boards, and its session import | The same boards | [Done](#pcb-dsn-designs-against-kicad-boards) |
@@ -564,8 +566,8 @@ both, and so are VPR's results, but for its times.
   6-input LUTs (`vtr_flow/benchmarks/blif/wiremap6/*.pre-vpr.blif`), on
   `vtr_flow/arch/timing/k6_N10_40nm.xml`, clusters of ten 6-LUTs with unidirectional
   wires of length 4. They are not copied here, as VTR's licence excepts its benchmark
-  circuits. VTR's own Verilog suite, with memories and multipliers, needs synthesis (Yosys and
-  ABC) and an architecture with blocks over several tiles, and was not run, nor was Titan23.
+  circuits. VTR's own Verilog suite, with memories and multipliers, is
+  [below](#vtrs-verilog-benchmarks). Titan23 was not run.
 - **The placement** is VPR's, packed and placed once per circuit with seed 1, and both
   routers start from it.
 - **Minimum channel width.** VPR finds its own by its binary search. `guide` finds its own
@@ -732,6 +734,17 @@ What this shows:
 - **`guide`'s own timing analysis agrees with VPR's** to within 0.1% to 1.3%, always slightly
   optimistic: its delays are fixed per step, where VPR's Elmore delays depend on the tree.
 
+**Since then**, for [the Verilog benchmarks](#vtrs-verilog-benchmarks), `guide` leaves constant
+nets unrouted as VPR does (`fpga::constant_nets`), which it routed before. Three of these
+circuits have any: apex4 one, clma 15 and s38584.1 two. Rerun at `2bc0139`, apex4's minimum
+width went from 52 to 54, clma's from 68 to 66 and s38584.1's from 36 to 38, and the geomean
+from 0.956 to 0.959 of VPR's. Their relaxed routes kept their delays, and clma's wire went from
+42563 to 42623 tiles and s38584.1's from 18100 to 18080. Every other number above is
+unchanged but for times. The comparison of timing analyses above is of the latest arrival,
+which leaves out the setup time at the end of the path. With the worst slack instead, as VPR
+counts it, `guide`'s analysis comes to within 0.1% of VPR's on 17 circuits, 0.9% under it on
+s38584.1, and 1.2% over it, pessimistic, on bigkey and dsip.
+
 ### Closing the runtime gap
 
 Before, VPR pushed about 40 entries on its heap per connection on ex1010, and `guide` took
@@ -835,8 +848,8 @@ it only builds with some standard headers forced in.
 ### What this does not show
 
 - The MCNC circuits are small by today's standards, the largest 435 clusters on a 23 by 23
-  grid, and of LUTs and flip-flops only. VTR's own Verilog suite and Titan23 are larger and
-  have memories, multipliers and carry chains.
+  grid, and of LUTs and flip-flops only. VTR's own Verilog suite, [below](#vtrs-verilog-benchmarks),
+  is larger and has memories, multipliers and carry chains. Titan23 is larger still.
 - One placement per circuit, from one seed. VPR's results move with the placement, and so
   may the comparison.
 - One architecture. VPR's defaults were tuned for architectures like it, and so, now, is
@@ -848,6 +861,250 @@ it only builds with some standard headers forced in.
 - The map lookahead was only measured on this one architecture, with one type of wire. A
   device with several wire types or very irregular edges may see more of its entries above
   the true cost.
+
+### VTR's Verilog benchmarks
+
+The same comparison on VTR's own benchmark suite, on its flagship architecture: the circuits
+of VTR's `vtr_reg_qor_chain` test. They are larger than the MCNC circuits, up to LU32PEEng's
+7600 clusters, 32 multipliers and 167 memories on a 103 by 103 grid, and have multipliers,
+memories and carry chains.
+
+Measured on 2026-11-10 with rustc 1.97.1, on the same shared machine, at `2bc0139`, the commit
+that made these routes acceptable to VPR, as [what it took](#what-the-verilog-benchmarks-took)
+says. Titan23 was not run: see [what this does not show](#what-the-verilog-benchmarks-do-not-show).
+
+#### How
+
+As [for MCNC](#how), with these differences:
+
+- **The circuits** are the 21 of `vtr_reg_qor_chain` (in `vtr_reg_nightly_test3_odin`), from
+  `vtr_flow/benchmarks/verilog`, synthesized by VTR's own flow, `run_vtr_flow.py` from Odin II
+  to ABC, as that test does, with Odin II and ABC built from the same VTR commit. The
+  synthesized circuits are not copied here either.
+- **The architecture** is `vtr_flow/arch/timing/k6_frac_N10_frac_chain_mem32K_40nm.xml`:
+  clusters of ten fracturable 6-LUTs with carry chains between clusters, 36-bit multipliers four
+  tiles tall, 32 Kb memories six tiles tall in several modes, and unidirectional wires of length
+  4, so widths are even here too.
+- **`guide`'s own timing analysis** is given as its worst slack against a period of 0, which
+  counts the setup time at the end of the path as VPR does, where the MCNC tables have the
+  latest arrival. Delays compared with VPR's are VPR's analysis of both tools' routes, as for
+  MCNC.
+
+```text
+SYNTH=1 scripts/vtr/build-vpr.sh DIR             # VPR, Odin II and ABC
+scripts/vtr/synth.sh DIR BLIF                    # the 21 circuits, 40 minutes for mcml
+SUITE=verilog BLIF=BLIF scripts/vtr/compare.sh DIR WORK  # 1.5 hours, mostly
+python3 scripts/vtr/tables.py WORK                       # LU32PEEng's two searches
+```
+
+`synth.sh` runs VTR's flow scripts, which need Python's `prettytable`.
+
+#### Results
+
+**Every route is legal**, by the validator and by VPR itself: all 21 circuits at `guide`'s
+minimum width and at the relaxed width, single-threaded and threaded, 63 routes in all, and
+VPR's count of constant nets agrees with `guide`'s on every circuit. Ratios are `guide`'s over
+VPR's, so below 1 is better for `guide`, and the last row is their geometric mean.
+
+Minimum channel width, with the hard blocks each circuit uses:
+
+| Circuit | CLBs | Multipliers | Memories | Grid, tiles a side | VPR | guide | guide / VPR | VPR accepts guide's route |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| LU32PEEng | 7600 | 32 | 167 | 103 | 124 | 122 | 0.984 | yes |
+| LU8PEEng | 2232 | 8 | 44 | 57 | 92 | 88 | 0.957 | yes |
+| arm_core | 1023 | 0 | 24 | 39 | 104 | 102 | 0.981 | yes |
+| bgm | 2786 | 11 | 0 | 63 | 70 | 70 | 1.000 | yes |
+| blob_merge | 619 | 0 | 0 | 31 | 58 | 62 | 1.069 | yes |
+| boundtop | 97 | 0 | 0 | 14 | 42 | 42 | 1.000 | yes |
+| ch_intrinsics | 68 | 0 | 1 | 12 | 42 | 42 | 1.000 | yes |
+| diffeq1 | 32 | 5 | 0 | 16 | 60 | 60 | 1.000 | yes |
+| diffeq2 | 21 | 7 | 0 | 18 | 46 | 50 | 1.087 | yes |
+| mcml | 7302 | 27 | 159 | 101 | 124 | 126 | 1.016 | yes |
+| mkDelayWorker32B | 473 | 0 | 45 | 50 | 38 | 40 | 1.053 | yes |
+| mkPktMerge | 31 | 0 | 15 | 28 | 46 | 46 | 1.000 | yes |
+| mkSMAdapter4B | 189 | 0 | 5 | 20 | 50 | 50 | 1.000 | yes |
+| or1200 | 258 | 1 | 2 | 27 | 92 | 92 | 1.000 | yes |
+| raygentop | 123 | 8 | 0 | 19 | 58 | 56 | 0.966 | yes |
+| sha | 155 | 0 | 0 | 17 | 68 | 72 | 1.059 | yes |
+| spree | 64 | 1 | 3 | 14 | 62 | 62 | 1.000 | yes |
+| stereovision0 | 725 | 0 | 0 | 34 | 48 | 50 | 1.042 | yes |
+| stereovision1 | 770 | 40 | 0 | 40 | 80 | 82 | 1.025 | yes |
+| stereovision2 | 1977 | 324 | 0 | 104 | 68 | 72 | 1.059 | yes |
+| stereovision3 | 14 | 0 | 0 | 7 | 30 | 30 | 1.000 | yes |
+| Geomean |  |  |  |  |  |  | 1.014 |  |
+
+At the relaxed width, the critical-path delay, by VPR's analysis of each tool's routes, and
+by `guide`'s own analysis of its routes:
+
+| Circuit | W | VPR, ns | guide, ns | guide / VPR | guide's own STA, ns | own / VPR's STA | VPR accepts guide's route |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| LU32PEEng | 162 | 76.286 | 76.128 | 0.998 | 76.065 | 0.999 | yes |
+| LU8PEEng | 120 | 76.110 | 75.649 | 0.994 | 75.594 | 0.999 | yes |
+| arm_core | 136 | 18.622 | 18.602 | 0.999 | 18.595 | 1.000 | yes |
+| bgm | 92 | 20.456 | 20.471 | 1.001 | 20.456 | 0.999 | yes |
+| blob_merge | 76 | 15.232 | 15.162 | 0.995 | 15.153 | 0.999 | yes |
+| boundtop | 54 | 3.555 | 3.552 | 0.999 | 3.549 | 0.999 | yes |
+| ch_intrinsics | 54 | 2.496 | 2.520 | 1.010 | 2.519 | 1.000 | yes |
+| diffeq1 | 78 | 17.082 | 17.617 | 1.031 | 17.653 | 1.002 | yes |
+| diffeq2 | 60 | 12.977 | 13.323 | 1.027 | 13.319 | 1.000 | yes |
+| mcml | 162 | 46.357 | 46.452 | 1.002 | 46.425 | 0.999 | yes |
+| mkDelayWorker32B | 50 | 8.430 | 8.463 | 1.004 | 8.417 | 0.995 | yes |
+| mkPktMerge | 60 | 4.263 | 4.268 | 1.001 | 4.268 | 1.000 | yes |
+| mkSMAdapter4B | 64 | 4.822 | 4.802 | 0.996 | 4.797 | 0.999 | yes |
+| or1200 | 120 | 8.645 | 8.634 | 0.999 | 8.631 | 1.000 | yes |
+| raygentop | 76 | 4.743 | 4.860 | 1.025 | 4.857 | 0.999 | yes |
+| sha | 88 | 10.035 | 10.161 | 1.013 | 10.156 | 0.999 | yes |
+| spree | 80 | 11.281 | 11.277 | 1.000 | 11.270 | 0.999 | yes |
+| stereovision0 | 62 | 3.606 | 3.602 | 0.999 | 3.600 | 0.999 | yes |
+| stereovision1 | 104 | 5.580 | 5.443 | 0.976 | 5.440 | 0.999 | yes |
+| stereovision2 | 88 | 15.825 | 15.782 | 0.997 | 15.776 | 1.000 | yes |
+| stereovision3 | 40 | 2.658 | 2.658 | 1.000 | 2.656 | 0.999 | yes |
+| Geomean |  |  |  | 1.003 |  | 0.999 |  |
+
+Wirelength at the relaxed width, in tiles of wire:
+
+| Circuit | VPR | guide | guide / VPR |
+| --- | --- | --- | --- |
+| LU32PEEng | 1310007 | 1297548 | 0.990 |
+| LU8PEEng | 325298 | 322552 | 0.992 |
+| arm_core | 184148 | 183390 | 0.996 |
+| bgm | 366218 | 365252 | 0.997 |
+| blob_merge | 66256 | 65834 | 0.994 |
+| boundtop | 3124 | 3150 | 1.008 |
+| ch_intrinsics | 1416 | 1485 | 1.049 |
+| diffeq1 | 8635 | 8726 | 1.011 |
+| diffeq2 | 9780 | 9799 | 1.002 |
+| mcml | 921573 | 918230 | 0.996 |
+| mkDelayWorker32B | 22576 | 22086 | 0.978 |
+| mkPktMerge | 13566 | 13395 | 0.987 |
+| mkSMAdapter4B | 17892 | 17939 | 1.003 |
+| or1200 | 43336 | 43678 | 1.008 |
+| raygentop | 18983 | 18933 | 0.997 |
+| sha | 15449 | 15463 | 1.001 |
+| spree | 12039 | 11963 | 0.994 |
+| stereovision0 | 55531 | 55592 | 1.001 |
+| stereovision1 | 114217 | 114462 | 1.002 |
+| stereovision2 | 422434 | 420551 | 0.996 |
+| stereovision3 | 783 | 777 | 0.992 |
+| Geomean |  |  | 1.000 |
+
+Runtime at the relaxed width, each ratio to VPR's time in the same run:
+
+| Circuit | VPR, s | VPR's lookahead, s | VPR iterations | guide, 1 thread, s | guide's lookahead, s | guide iterations | / VPR | guide, threads, s | / VPR | Its delay, ns | VPR accepts it |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| LU32PEEng | 22.40 | 4.09 | 22 | 10.67 | 4.91 | 11 | 0.48 | 9.48 | 0.42 | 76.130 | yes |
+| LU8PEEng | 6.72 | 0.92 | 22 | 2.17 | 1.12 | 12 | 0.32 | 2.07 | 0.31 | 75.655 | yes |
+| arm_core | 2.17 | 0.46 | 14 | 1.10 | 0.58 | 9 | 0.51 | 0.91 | 0.42 | 18.602 | yes |
+| bgm | 7.30 | 0.99 | 20 | 2.37 | 1.12 | 12 | 0.32 | 2.61 | 0.36 | 20.456 | yes |
+| blob_merge | 1.17 | 0.14 | 18 | 0.34 | 0.20 | 10 | 0.29 | 0.42 | 0.36 | 15.160 | yes |
+| boundtop | 0.04 | 0.01 | 11 | 0.01 | 0.02 | 11 | 0.22 | 0.03 | 0.65 | 3.552 | yes |
+| ch_intrinsics | 0.02 | 0.01 | 8 | 0.00 | 0.01 | 8 | 0.20 | 0.01 | 0.50 | 2.520 | yes |
+| diffeq1 | 0.12 | 0.03 | 20 | 0.06 | 0.04 | 12 | 0.51 | 0.08 | 0.64 | 17.451 | yes |
+| diffeq2 | 0.20 | 0.03 | 21 | 0.09 | 0.04 | 12 | 0.46 | 0.11 | 0.54 | 13.176 | yes |
+| mcml | 17.44 | 4.46 | 21 | 6.95 | 5.17 | 12 | 0.40 | 8.36 | 0.48 | 46.381 | yes |
+| mkDelayWorker32B | 0.45 | 0.32 | 15 | 0.15 | 0.46 | 13 | 0.33 | 0.18 | 0.40 | 8.463 | yes |
+| mkPktMerge | 0.12 | 0.07 | 15 | 0.07 | 0.14 | 10 | 0.62 | 0.07 | 0.58 | 4.262 | yes |
+| mkSMAdapter4B | 0.18 | 0.04 | 17 | 0.07 | 0.06 | 10 | 0.36 | 0.10 | 0.58 | 4.798 | yes |
+| or1200 | 0.58 | 0.12 | 19 | 0.25 | 0.22 | 10 | 0.43 | 0.26 | 0.45 | 8.634 | yes |
+| raygentop | 0.32 | 0.04 | 16 | 0.12 | 0.06 | 10 | 0.39 | 0.15 | 0.48 | 4.787 | yes |
+| sha | 0.24 | 0.03 | 21 | 0.05 | 0.05 | 11 | 0.21 | 0.10 | 0.40 | 10.214 | yes |
+| spree | 0.12 | 0.02 | 14 | 0.05 | 0.03 | 9 | 0.39 | 0.07 | 0.58 | 11.279 | yes |
+| stereovision0 | 0.97 | 0.17 | 14 | 0.20 | 0.21 | 9 | 0.20 | 0.35 | 0.36 | 3.601 | yes |
+| stereovision1 | 1.38 | 0.34 | 13 | 0.82 | 0.44 | 11 | 0.59 | 0.92 | 0.67 | 5.443 | yes |
+| stereovision2 | 4.83 | 2.36 | 19 | 2.15 | 3.03 | 11 | 0.45 | 3.04 | 0.63 | 15.775 | yes |
+| stereovision3 | 0.02 | 0.00 | 19 | 0.00 | 0.00 | 11 | 0.15 | 0.01 | 0.40 | 2.658 | yes |
+| Geomean |  |  |  |  |  |  | 0.35 |  | 0.47 |  |  |
+
+What this shows:
+
+- **Channel width: `guide` needs 1.4% more tracks than VPR**, where it needs 4.1% fewer on
+  MCNC. It needs fewer on 4 circuits, by up to 4.3% (LU8PEEng, 88 against 92), as many on 9,
+  and more on 8, by up to 8.7% (diffeq2, 50 against 46). The largest circuits do best:
+  LU32PEEng needs 122 against 124, and mcml 126 against 124. Where `guide` fails, it is out
+  of its 50 iterations, not stuck: on blob_merge at VPR's 58 it is left with 12 overused nodes
+  after 50, and routes in 79 iterations given 200. See [the present factor](#the-present-factor-on-both-suites)
+  below.
+- **Delay: 0.3% longer critical paths than VPR**, where they are 1.3% shorter on MCNC. 14 of
+  21 are within 0.5% of VPR's either way. The worst are diffeq1, 3.1% slower, diffeq2, 2.7%,
+  and raygentop, 2.5%, all three with multipliers, and the best stereovision1, 2.4%
+  faster. As on MCNC, single circuits move by a few percent between
+  configurations: diffeq1 comes out anywhere from 17.12 ns to 17.62 ns with other options.
+- **Wirelength: the same as VPR's**, a geomean of 1.000 against 5.5% less on MCNC. From 2.2%
+  less on mkDelayWorker32B to 4.9% more on ch_intrinsics.
+- **Runtime: `guide` takes 0.35 times VPR's time**, from 0.15 times on stereovision3 to 0.62
+  on mkPktMerge, and 0.48 times on the largest, LU32PEEng, 10.7 s against 22.4 s. With each
+  tool's lookahead counted in, 0.56 times: `guide`'s lookahead is 1.1 to 2.2 times as slow as
+  VPR's, and on the smallest circuits takes longer than the routing.
+- **Threads help a little on some larger circuits only**: 16 threads with batches of 32 took
+  0.89 times as long as one thread on LU32PEEng and 0.83 on arm_core, but 1.36 times as long
+  over all 21.
+- **`guide`'s own timing analysis agrees with VPR's** to within 0.5%, and to 0.1% on 19 of 21.
+
+#### The present factor on both suites
+
+VPR's default present factor growth (`--pres_fac_mult`) is 1.3, and `guide`'s
+(`EngineOptions::present_growth`) is 1.8. Run with 1.3, on the 20 MCNC circuits and on the
+first 19 of these (LU32PEEng and mcml left out for time):
+
+| Suite | Present growth | Min W / VPR | Delay / VPR | Wire / VPR | Time / VPR | Iterations at the relaxed width |
+| --- | --- | --- | --- | --- | --- | --- |
+| MCNC | 1.8, the default | 0.959 | 0.987 | 0.945 | 0.28 | 9.0 |
+| MCNC | 1.3 | 0.945 | 0.986 | 0.934 | 0.35 | 14.6 |
+| Verilog | 1.8, the default | 1.015 | 1.003 | 1.000 | 0.34 | 10.5 |
+| Verilog | 1.3 | 0.993 | 0.999 | 0.991 | 0.44 | 16.6 |
+
+All four are geomeans of ratios, and iterations a geomean of counts. 1.3 needs fewer tracks on
+both suites, enough to come under VPR's on these circuits too, with slightly less wire and no
+loss of delay, for about 1.3 times the time. The default was left as it is: this is one run of
+each, at a different point of the trade between quality and time, and the engine's defaults
+were tuned for other problems.
+
+#### What the Verilog benchmarks took
+
+The MCNC circuits had none of what this architecture adds, and `guide` could not route the
+first of these circuits, ch_intrinsics, at all. Four things needed fixing, in `2bc0139`:
+
+- **Blocks over several tiles.** VPR 9 puts the `SOURCE` or `SINK` of a pin class on the tile
+  of its pins, not on the block's root tile, so a memory's address pins have their `SINK`s on
+  six different tiles. `resolve_nets` looked only at the root, and found no node for most
+  pins of a memory or multiplier. It now looks at every tile of the block.
+- **Constant nets.** VPR does not route nets that carry a constant (`--constant_net_method
+  global`), which it finds by inference through LUTs and registers (`--const_gen_inference
+  comb_seq`). `guide` routed them, 1770 of them on mkDelayWorker32B, and VPR accepted the
+  routes but counted less wire than `guide` did. `fpga::constant_nets` follows VPR's
+  inference, `NetOptions::constant_nets` leaves them unrouted, and the count agrees with VPR's
+  on every circuit, as does the wirelength.
+- **The primitives VPR makes up for a `class`.** Every `class="lut"` becomes a primitive
+  called `lut` and every `class="memory"` one called `memory_slice`, whatever its parent, and
+  `read_architecture` kept the last of each. So every LUT took `lut6`'s delay, 261 ps, where
+  `lut5` has 235 ps and `lut4` 195 ps, and every memory the model of the last memory mode, a
+  dual-port one, whose port names don't match a single-port memory's, so its setup checks
+  disappeared. On ch_intrinsics, `guide`'s analysis made the critical path 2.18 ns, which VPR
+  timed at 2.88 ns. `read_architecture` now keeps these under `lut5.lut` and so on as well,
+  and `build_timing` looks them up with `PackedNetlist::primitive_parent`: the two analyses
+  now agree to within 0.2% on every circuit but one, mkDelayWorker32B, at 0.5%. The names of
+  a memory's interconnect, `direct{n}` and `direct{n}_{slice}`, were also wrong, which only
+  cost a warning, since VPR gives them no delay.
+
+No rule like MCNC's one output pin per block showed up: this architecture's cluster outputs,
+memories and multipliers are not equivalent, so each output pin has its own `SOURCE`, and VPR
+accepted every route of `guide`'s, carry chains included, which take the graph's direct
+connections from one cluster's `cout` to the next one's `cin` like any other edge.
+
+#### What the Verilog benchmarks do not show
+
+- **Titan23 was not run.** Most of its circuits are larger than any here, several times so at
+  the top, they need a large download from outside VTR, and their Stratix IV architecture has
+  two wire lengths, many more switch types and blocks with equivalent pins that this
+  comparison has not met. VPR's own flow routes them at a fixed width of 300 rather than
+  searching for a minimum, so the methodology here would have to change too. The largest
+  circuit here, LU32PEEng, is still short of most of them.
+- Synthesis is Odin II and ABC, as the `_odin` variant of VTR's test has it, where VTR's
+  default flow now uses Yosys and Parmys, which was not built. Synthesized differently, the
+  circuits would place and route differently, for both routers.
+- One placement per circuit, from one seed, and one architecture, as for MCNC.
+- The tuning of `RrGraph::engine_options` was done on MCNC, and these results were not
+  used to change it.
 
 ## PCB clearance checks against KiCad
 

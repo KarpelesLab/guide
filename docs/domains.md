@@ -120,7 +120,14 @@ timing-driven routing in general.
 **Against VPR.** On the 20 MCNC circuits of VTR's regression tests, on VPR 9.0.0's own
 graphs and placements, every route is legal by the validator and by VPR itself, which loads
 it back and times it. The [results](benchmarks.md#fpga-routing-against-vpr) have the channel
-widths, delays, wirelengths and runtimes, and what it took to get there.
+widths, delays, wirelengths and runtimes, and what it took to get there. The same holds on
+[VTR's Verilog suite](benchmarks.md#vtrs-verilog-benchmarks), the 21 circuits of
+`vtr_reg_qor_chain` on VTR's flagship architecture, with carry chains, memories and
+multipliers over several tiles. There `guide` needs 1.4% more tracks than VPR, gives critical
+paths 0.3% longer and the same wire, and takes 0.35 times as long, where on MCNC it is ahead
+on all four. Constant nets are left unrouted as VPR leaves them (`fpga::constant_nets`), and
+the primitives VPR makes up for a LUT or memory class keep their own delays
+(`fpga::LogicDelays::primitive_name`). Titan23 has not been run.
 
 ## ASIC
 

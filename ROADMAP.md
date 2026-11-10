@@ -101,10 +101,20 @@ against VPR for channel width, delay and runtime.
 Met on the 20 MCNC circuits that VTR's regression tests route on `k6_N10_40nm`, the set VPR's
 papers use, against VPR 9.0.0 on its own placements and graphs
 ([results](docs/benchmarks.md#fpga-routing-against-vpr)). Every route is legal by the validator
-and by VPR, which loads and times each one. Against VPR, `guide` needs 4.4% fewer tracks, gives
+and by VPR, which loads and times each one. Against VPR, `guide` needs 4.1% fewer tracks
+(4.4% before constant nets were left unrouted, as VPR leaves them), gives
 critical paths 1.3% shorter and 5.5% less wire, and takes 0.28 times as long, since a map
-lookahead and incremental rerouting; it first took 3.2 times as long. VTR's Verilog suite,
-with memories and multipliers, and Titan23 are still to be run.
+lookahead and incremental rerouting; it first took 3.2 times as long.
+
+Since then also on VTR's Verilog suite, the 21 circuits of `vtr_reg_qor_chain` on
+`k6_frac_N10_frac_chain_mem32K_40nm`, with fracturable LUTs, carry chains, memories and
+multipliers over several tiles, up to 7600 clusters on a 103 by 103 grid
+([results](docs/benchmarks.md#vtrs-verilog-benchmarks)). That took reading blocks over
+several tiles, leaving constant nets unrouted as VPR does, and telling apart the primitives
+VPR makes up for each LUT and memory class. Every route is legal by VPR. Here `guide` needs
+1.4% more tracks than VPR, gives critical paths 0.3% longer and the same wire, and takes 0.35
+times as long, so it no longer wins on quality. With VPR's present factor growth of 1.3 it
+needs 0.7% fewer, on 19 of the 21, for 1.3 times its time. Titan23 is still to be run.
 
 ### M4: Geometry layer (done)
 

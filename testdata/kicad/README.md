@@ -14,16 +14,25 @@ holds the boards of one project, unmodified, with that project's licence.
 | `nitrokey` | `nk3-nrf-mini` | [Nitrokey/nitrokey-3a-mini-nrf52-hardware](https://github.com/Nitrokey/nitrokey-3a-mini-nrf52-hardware) | `7f36ec7eec0d1cccd23da7a3dccc96c6083c08a0` | CERN-OHL-S-2.0, by Nitrokey |
 | `udb-s` | `udb-s` | [Unified-Daughterboard/UDB-S](https://github.com/Unified-Daughterboard/UDB-S) | `278cd5cab1120cc2634130fda4c8c02b82570c73` | MIT, © 2023 Unified Daughterboard Project |
 | `starshipraider` | `isi-channel` | [azonenberg/starshipraider](https://github.com/azonenberg/starshipraider), `boards/phy-fixtures/isi-channel/` | `93b2d0d19ce35fa745e3cf6889a3ea70b23e41a1` | BSD-3-Clause, © 2016-2021 Andrew Zonenberg |
+| `lpddr4-testbed` | `lpddr4-testbed` | [antmicro/lpddr4-testbed](https://github.com/antmicro/lpddr4-testbed) | `93e67cfc3f267443d9b637073688457e8f5c1f91` | Apache-2.0, © 2020-2025 Antmicro |
+| `ddr5-testbed` | `ddr5-testbed` | [antmicro/ddr5-testbed](https://github.com/antmicro/ddr5-testbed) | `5db9286b45b5ad9b44f2d82230609038476f95b9` | Apache-2.0, © 2022-2025 Antmicro |
 
 Each board is its `.kicad_pcb` and its `.kicad_pro`, as in the source. The footprints in them
 come partly from KiCad's own libraries, whose licence, CC-BY-SA-4.0 with an exception for
 designs made with them, puts no terms of its own on the boards.
 
-They were chosen to vary: two to four layers; through-hole, fine-pitch and wafer-level parts;
+They were chosen to vary: two to six layers; through-hole, fine-pitch and wafer-level parts;
 custom, trapezoid, oval and rounded pads, and pads with clearances of their own; arc tracks,
 from 72 on `udb-s` to 544 on `isi-channel`; zones, teardrops, differential pairs,
 net classes, and pads and footprints turned by other than right angles. They span file formats
-from an early KiCad 6 (`20210925`) to KiCad 8 (`20240108`).
+from an early KiCad 6 (`20210925`) to KiCad 9 (`20241229`).
+
+The last two are the dense ones, for M6: each is a single DRAM chip in a BGA, broken out to
+the 260 contacts of a SO-DIMM edge, on six layers with 0.1 mm tracks and clearances and vias
+of 0.15 mm drills. `lpddr4-testbed` has a 200-ball LPDDR4 at 0.8 by 0.65 mm pitch, one channel
+of which is wired, and `ddr5-testbed` an x8 DDR5 of 82 balls at 0.8 mm. They are the largest
+files here, about 5 MB each, mostly the fabrication drawings of their footprints, and are kept
+unmodified too.
 
 ## What KiCad found
 

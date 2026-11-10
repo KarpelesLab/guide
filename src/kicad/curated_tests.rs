@@ -34,6 +34,8 @@ pub(crate) const BOARDS: &[(&str, &str, &[i64])] = &[
     ("nitrokey", "nk3-nrf-mini", &[0, 50_000]),
     ("udb-s", "udb-s", &[0, 100_000, 300_000]),
     ("starshipraider", "isi-channel", &[0, 500_000]),
+    ("lpddr4-testbed", "lpddr4-testbed", &[0, 20_000, 50_000]),
+    ("ddr5-testbed", "ddr5-testbed", &[0, 10_000]),
 ];
 
 /// KiCad stops reporting a kind of violation once it has this many: 499 for clearances,

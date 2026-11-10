@@ -385,7 +385,8 @@ impl Readings {
         if (custom(&dsn_a) || custom(&dsn_b)) && dsn_gap.floor() <= kicad_gap.ceil() {
             return Some("custom pads as hulls");
         }
-        // An arc's chord is at most its sagitta from it.
+        // An arc's chord is at most its sagitta from it, and the gap between two arcs moves
+        // by both.
         let sagitta = |i: Item| match i {
             Item::Track(t) => k.board.tracks[t].mid.map_or(0, |mid| {
                 let t = &k.board.tracks[t];
@@ -403,7 +404,7 @@ impl Readings {
         } else {
             ROUNDING
         };
-        let arcs = sagitta(kicad_pair.0).max(sagitta(kicad_pair.1));
+        let arcs = sagitta(kicad_pair.0) + sagitta(kicad_pair.1);
         if arcs > 0 && hi - lo <= arcs + rounding {
             return Some("arcs as chords");
         }

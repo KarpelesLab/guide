@@ -8,11 +8,11 @@ use super::units::{
     degrees_to_millidegrees, mm_to_nm, ratio_to_millionths, rotate, times_ratio, to_point,
 };
 use super::{KicadBoard, KicadError, NetRouting, Routing, Source};
+use crate::geom::drc::MaskOpening;
 use crate::geom::drc::{self, Pad, Track, Via, Zone};
 use crate::geom::{
     LayerId, LayerSet, NetClass, Overrides, Point, RuleSpec, Rules, Shape, ShapeIndex,
 };
-use crate::pcb::MaskOpening;
 
 /// The tolerance for arcs in graphics and custom pads, which are approximated as they are
 /// read: 10 nm, far inside KiCad's slack of 500 nm. Arc tracks are approximated by
@@ -93,7 +93,7 @@ pub fn read(pcb: &str, project: Option<&str>) -> Result<KicadBoard, KicadError> 
     r.mask_nets();
     r.rank_zones();
     let Reader {
-        board,
+        mut board,
         names,
         tracks,
         vias,
@@ -108,7 +108,7 @@ pub fn read(pcb: &str, project: Option<&str>) -> Result<KicadBoard, KicadError> 
         ..
     } = r;
     let mut routing = routing(&project, &names, outline);
-    routing.masks = masks;
+    board.masks = masks;
     routing.text = text;
     routing.zones = zone_specs;
     routing.zone_lists = zone_lists;
@@ -256,7 +256,6 @@ fn routing(project: &ProjectRules, names: &[String], outline: Vec<Shape>) -> Rou
         outline,
         edge_clearance: project.edge_clearance,
         nets,
-        masks: Vec::new(),
         text: Vec::new(),
         pairs,
         zones: crate::pcb::Zones::default(),
@@ -1182,7 +1181,9 @@ impl Reader {
 
     /// Gives each opening from a graphic the net of the pads in it, if they have one net.
     /// An opening with pads of several nets bridges them already, and KiCad reports any
-    /// other copper in it too, so it keeps the net `None`, which every net keeps out of.
+    /// other copper in it too, so it keeps the net `None`, which every net keeps out of. So
+    /// does one with a pad's hole that has no copper, such as a mounting hole's, which
+    /// KiCad takes for copper of no net.
     fn mask_nets(&mut self) {
         let pads = ShapeIndex::bulk_load(self.board.pads.iter().map(|p| p.shape.clone()));
         let mut near = Vec::new();
@@ -1193,7 +1194,8 @@ impl Reader {
             let mut nets: Vec<Option<NetId>> = near
                 .iter()
                 .map(|id| &self.board.pads[id.slot() as usize])
-                .filter(|p| p.layers.contains(m.layer))
+                // A hole with no copper is bare in it too, of no net.
+                .filter(|p| p.layers.contains(m.layer) || p.hole.is_some())
                 .map(|p| p.net)
                 .collect();
             nets.sort_unstable();

@@ -21,12 +21,16 @@
 //!
 //! The coupled run and the fan-outs are checked exactly, net by net, against everything
 //! else and each other. If anything fails, the pair keeps the routes it had.
+//!
+//! A pair routed first that a net left for the finer lattice takes the place of is routed
+//! again in rip-up: its search may cross other nets' routes at a price, as a net's does,
+//! and those its copper runs into are taken out, to be routed again after it.
 
 use core::cell::RefCell;
 
 use super::Design;
 use super::cleanup::{VIA_COST_FACTOR, pull_tight};
-use super::detail::{self, DIRS, NM, NetCtx, Params, StepCache, TermPad, octile};
+use super::detail::{self, DIRS, NM, NetCtx, Params, RipUp, StepCache, TermPad, octile};
 use super::geometry::NetCopper;
 use super::router::{Job, LATTICE_REACH};
 use super::world::{Placed, Verdict, World};
@@ -123,6 +127,17 @@ pub(crate) fn offset(points: &[Point], h: f64) -> Vec<Point> {
         .collect()
 }
 
+/// The worst of some verdicts: blocked if any is, or else in the way of routes if any is.
+fn worst(verdicts: &[Verdict]) -> Verdict {
+    if verdicts.contains(&Verdict::Blocked) {
+        Verdict::Blocked
+    } else if verdicts.contains(&Verdict::Routed) {
+        Verdict::Routed
+    } else {
+        Verdict::Free
+    }
+}
+
 /// Drops the points of a polyline where it goes straight on.
 fn straighten(points: &[Point]) -> Vec<Point> {
     let mut out: Vec<Point> = Vec::with_capacity(points.len());
@@ -188,13 +203,33 @@ struct PairSpace<'a> {
     /// The second end's centre and the layers it may be reached on.
     target: (Point, LayerSet),
     /// Verdicts on steps, by node and direction, and on vias, by point and direction.
-    steps: RefCell<FastMap<(i64, i64, u8, u8), bool>>,
-    vias: RefCell<FastMap<(i64, i64, u8), bool>>,
+    steps: RefCell<FastMap<(i64, i64, u8, u8), Verdict>>,
+    vias: RefCell<FastMap<(i64, i64, u8), Verdict>>,
+    /// With a penalty, other nets' routes may be crossed at that price, to be ripped up.
+    rip: Option<RipUp<'a>>,
 }
 
 impl PairSpace<'_> {
     fn unchecked(&self, p: Point) -> bool {
         self.ends.iter().any(|d| d.contains(p))
+    }
+
+    /// What a step or a via with this verdict costs on top of its length, ending at `at`,
+    /// or `None` if it may not be taken.
+    fn extra(&self, verdict: Verdict, at: Point) -> Option<f64> {
+        match (verdict, self.rip.and_then(|r| r.penalty)) {
+            (Verdict::Free, _) => Some(0.0),
+            (Verdict::Routed, Some(penalty)) => {
+                let history = self.rip.map_or(0.0, |r| {
+                    r.history
+                        .grid
+                        .tile_of(at)
+                        .map_or(0.0, |t| r.history.cost[t])
+                });
+                Some(penalty * (1.0 + history))
+            }
+            _ => None,
+        }
     }
 
     /// The two vias of a layer change at `p`, reached in direction `d`: to the left of the
@@ -205,49 +240,62 @@ impl PairSpace<'_> {
         (shift(p, (-uy * h, ux * h)), shift(p, (uy * h, -ux * h)))
     }
 
-    fn step_ok(&self, from: PNode, to: Point, d: usize) -> bool {
+    fn step_verdict(&self, from: PNode, to: Point, d: usize) -> Verdict {
         let key = (from.x, from.y, from.l, d as u8);
-        if let Some(&ok) = self.steps.borrow().get(&key) {
-            return ok;
+        if let Some(&v) = self.steps.borrow().get(&key) {
+            return v;
         }
-        let ok = Shape::track(from.point(), to, self.geo.footprint)
-            .is_ok_and(|s| self.world.track_pair(self.geo.nets, LayerId(from.l), &s));
+        let v = Shape::track(from.point(), to, self.geo.footprint).map_or(Verdict::Blocked, |s| {
+            self.world
+                .track_pair(self.geo.nets, LayerId(from.l), &s, None)
+        });
         let mut steps = self.steps.borrow_mut();
-        steps.insert(key, ok);
-        steps.insert((to.x, to.y, from.l, ((d + 4) % 8) as u8), ok);
-        ok
+        steps.insert(key, v);
+        steps.insert((to.x, to.y, from.l, ((d + 4) % 8) as u8), v);
+        v
     }
 
-    fn via_ok(&self, p: Point, d: usize) -> bool {
+    fn via_verdict(&self, p: Point, d: usize) -> Verdict {
         let Some(((da, ra), (db, rb))) = self.geo.vias else {
-            return false;
+            return Verdict::Blocked;
         };
         let key = (p.x, p.y, d as u8);
-        if let Some(&ok) = self.vias.borrow().get(&key) {
-            return ok;
+        if let Some(&v) = self.vias.borrow().get(&key) {
+            return v;
         }
         let (a, b) = self.via_points(p, d);
         let (pos, neg) = self.geo.nets;
         // Either net's via may end up on either side.
-        let vias = [a, b].into_iter().all(|q| {
-            self.world.via(pos, q, da, ra, None) == Verdict::Free
-                && self.world.via(neg, q, db, rb, None) == Verdict::Free
-        });
+        let mut verdicts = Vec::new();
+        for q in [a, b] {
+            verdicts.push(self.world.via(pos, q, da, ra, None));
+            verdicts.push(self.world.via(neg, q, db, rb, None));
+        }
         // And the tracks jog out to them on every layer.
         let (ux, uy) = unit(d);
         let jog = (self.geo.via_half - self.geo.half) as f64;
         let wide = 2 * self.geo.via_half + self.geo.widths.iter().copied().max().unwrap_or(0);
-        let ok = vias
-            && Shape::track(
-                shift(p, (-ux * jog, -uy * jog)),
-                shift(p, (ux * jog, uy * jog)),
-                wide,
-            )
-            .is_ok_and(|s| {
-                (0..self.layers).all(|l| self.world.track_pair(self.geo.nets, LayerId(l as u8), &s))
-            });
-        self.vias.borrow_mut().insert(key, ok);
-        ok
+        match Shape::track(
+            shift(p, (-ux * jog, -uy * jog)),
+            shift(p, (ux * jog, uy * jog)),
+            wide,
+        ) {
+            Ok(s) => {
+                for l in 0..self.layers {
+                    let v = self
+                        .world
+                        .track_pair(self.geo.nets, LayerId(l as u8), &s, None);
+                    verdicts.push(v);
+                    if v == Verdict::Blocked {
+                        break;
+                    }
+                }
+            }
+            Err(_) => verdicts.push(Verdict::Blocked),
+        }
+        let v = worst(&verdicts);
+        self.vias.borrow_mut().insert(key, v);
+        v
     }
 }
 
@@ -305,10 +353,13 @@ impl RoutingSpace for PairSpace<'_> {
             if to.x < b.min().x || to.y < b.min().y || to.x > b.max().x || to.y > b.max().y {
                 continue;
             }
-            if !(here || self.unchecked(to) || self.step_ok(from, to, d)) {
-                continue;
-            }
-            if let Some(cost) = Cost::new(octile(p, to) * NM) {
+            let extra = if here || self.unchecked(to) {
+                Some(0.0)
+            } else {
+                self.extra(self.step_verdict(from, to, d), to)
+            };
+            let Some(extra) = extra else { continue };
+            if let Some(cost) = Cost::new(octile(p, to) * NM + extra) {
                 out.push(Step {
                     to: PNode {
                         x: to.x,
@@ -330,8 +381,8 @@ impl RoutingSpace for PairSpace<'_> {
             && from.run >= self.straight
             && !here
             && self.layers > 1
-            && self.via_ok(p, usize::from(from.d))
-            && let Some(cost) = Cost::new(2.0 * self.via_cost)
+            && let Some(extra) = self.extra(self.via_verdict(p, usize::from(from.d)), p)
+            && let Some(cost) = Cost::new(2.0 * self.via_cost + extra)
         {
             for l in (0..self.layers as u8).filter(|&l| l != from.l) {
                 out.push(Step {
@@ -459,9 +510,35 @@ impl Undo {
             c.unplace(world);
         }
     }
+
+    /// Puts a pair's tracks and vias into the world as routes of their nets.
+    pub(crate) fn place(world: &mut World<'_>, tracks: &[Track], vias: &[Via]) -> Undo {
+        let mut undo = Undo::default();
+        for t in tracks {
+            if let (Some(net), Ok(s)) = (t.net, Shape::track(t.start, t.end, t.width)) {
+                undo.placed.push(world.add_track(net, t.layer, s));
+            }
+        }
+        for v in vias {
+            if let Some(net) = v.net {
+                undo.placed
+                    .push(world.add_via(net, v.at, v.diameter, v.drill));
+            }
+        }
+        undo
+    }
+}
+
+/// How a pair routed among others' routes may move them: crossing them at a price, as a net
+/// in rip-up does, and taking them out of the world with `take`, which the caller routes
+/// again.
+pub(crate) struct PairRip<'h, 'f> {
+    pub(crate) rip: RipUp<'h>,
+    pub(crate) take: &'f mut dyn FnMut(&mut World<'_>, &[NetId]),
 }
 
 /// Routes one pair side by side into `world`, from the jobs of its two nets, if it can.
+/// With `rip`, other nets' routes in its way are taken out.
 pub(crate) fn route_pair(
     design: &Design,
     world: &mut World<'_>,
@@ -469,6 +546,29 @@ pub(crate) fn route_pair(
     pj: &Job,
     nj: &Job,
     params: Params,
+    mut rip: Option<PairRip<'_, '_>>,
+) -> Option<PairRoute> {
+    // The pair's own copper is never in its way to be moved.
+    let nets = [pj.ctx.net, nj.ctx.net];
+    let was = nets.map(|n| world.locked(n));
+    for n in nets {
+        world.set_locked(n, true);
+    }
+    let route = route_pair_locked(design, world, pair, pj, nj, params, &mut rip);
+    for (n, w) in nets.into_iter().zip(was) {
+        world.set_locked(n, w);
+    }
+    route
+}
+
+fn route_pair_locked(
+    design: &Design,
+    world: &mut World<'_>,
+    pair: &super::DiffPair,
+    pj: &Job,
+    nj: &Job,
+    params: Params,
+    rip: &mut Option<PairRip<'_, '_>>,
 ) -> Option<PairRoute> {
     let rules = &design.rules;
     let (pc, nc) = (&pj.ctx, &nj.ctx);
@@ -557,7 +657,7 @@ pub(crate) fn route_pair(
         {
             return None;
         }
-        if let Some(route) = attempt(design, world, &geo, (pc, nc), ends_at, disks, params) {
+        if let Some(route) = attempt(design, world, &geo, (pc, nc), ends_at, disks, params, rip) {
             return Some(route);
         }
     }
@@ -565,6 +665,7 @@ pub(crate) fn route_pair(
 }
 
 /// One attempt at routing a pair, with the search unchecked in `disks` around its ends.
+#[allow(clippy::too_many_arguments)]
 fn attempt(
     design: &Design,
     world: &mut World<'_>,
@@ -573,6 +674,7 @@ fn attempt(
     [(pa, na), (pb, nb)]: [(usize, usize); 2],
     ends: [Disk; 2],
     params: Params,
+    rip: &mut Option<PairRip<'_, '_>>,
 ) -> Option<PairRoute> {
     let layers = design.rules.layer_count();
     let nets = geo.nets;
@@ -601,6 +703,7 @@ fn attempt(
         target: (ends[1].center, on(pb, nb)),
         steps: RefCell::new(FastMap::default()),
         vias: RefCell::new(FastMap::default()),
+        rip: rip.as_ref().map(|r| r.rip),
     };
     let mut search = Search::new(&space);
     let sources: Vec<PNode> = on(pa, na)
@@ -757,17 +860,27 @@ fn attempt(
     }
 
     // Checked exactly, the positive net's copper first, then the negative's against it.
+    // With rip-up, the routes in the way are taken out first.
     let mut undo = Undo::default();
+    let allowed = |v: Verdict, rip: &Option<PairRip<'_, '_>>| {
+        v == Verdict::Free || (v == Verdict::Routed && rip.is_some())
+    };
     for (tracks, vias) in &copper {
+        let mut victims = Vec::new();
         for t in tracks {
             let ok = t.net.is_some_and(|net| {
                 Shape::track(t.start, t.end, t.width)
-                    .is_ok_and(|s| world.track(net, t.layer, &s, None) == Verdict::Free)
+                    .is_ok_and(|s| allowed(world.track(net, t.layer, &s, Some(&mut victims)), rip))
             });
             if !ok {
                 undo.undo(world);
                 return None;
             }
+        }
+        if let Some(r) = rip.as_mut()
+            && !victims.is_empty()
+        {
+            (r.take)(world, &victims);
         }
         for t in tracks {
             if let (Some(net), Ok(s)) = (t.net, Shape::track(t.start, t.end, t.width)) {
@@ -775,13 +888,21 @@ fn attempt(
             }
         }
         for v in vias {
-            let Some(net) = v
-                .net
-                .filter(|&net| world.via(net, v.at, v.diameter, v.drill, None) == Verdict::Free)
-            else {
+            let mut victims = Vec::new();
+            let Some(net) = v.net.filter(|&net| {
+                allowed(
+                    world.via(net, v.at, v.diameter, v.drill, Some(&mut victims)),
+                    rip,
+                )
+            }) else {
                 undo.undo(world);
                 return None;
             };
+            if let Some(r) = rip.as_mut()
+                && !victims.is_empty()
+            {
+                (r.take)(world, &victims);
+            }
             undo.placed
                 .push(world.add_via(net, v.at, v.diameter, v.drill));
         }
@@ -817,10 +938,23 @@ fn attempt(
                 LATTICE_REACH * params.pitch,
             );
             let steps = StepCache::default();
-            let Ok(tree) = detail::route_net(world, &fan, &steps, params, None, None) else {
+            let Ok(tree) = detail::route_net(
+                world,
+                &fan,
+                &steps,
+                params,
+                None,
+                rip.as_ref().map(|r| r.rip),
+            ) else {
                 undo.undo(world);
                 return None;
             };
+            if let Some(r) = rip.as_mut() {
+                let (victims, _) = detail::victims(world, &fan, &tree);
+                if !victims.is_empty() {
+                    (r.take)(world, &victims);
+                }
+            }
             let mut c = NetCopper::from_tree(&fan, &tree);
             pull_tight(world, &fan, &mut c);
             c.place(world, &fan);

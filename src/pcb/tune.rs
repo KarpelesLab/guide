@@ -389,7 +389,6 @@ impl<'a> Tuner<'a> {
             &d.rules,
             &d.outline,
             d.edge_clearance,
-            &d.masks,
             &d.obstacles,
         )?;
         self.placed = vec![None; self.tracks.len()];
@@ -710,7 +709,6 @@ pub(crate) fn run(
         rules,
         &design.outline,
         design.edge_clearance,
-        &design.masks,
         &design.obstacles,
     )?;
     let mut placed = Vec::with_capacity(routed.tracks.len());

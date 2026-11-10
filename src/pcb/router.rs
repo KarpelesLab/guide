@@ -32,6 +32,13 @@ const RIP_PENALTY: f64 = 10.0;
 
 const HISTORY_STEP: f64 = 0.5;
 
+/// How many times a pair routed first may be moved out of a net's way, and routed again.
+const PAIR_RIP_UPS: u32 = 4;
+
+/// How many times its budget a net's search that may cross others' routes has on the finer
+/// lattice.
+const FINE_RIP_BUDGET: u64 = 4;
+
 /// How many nodes a search from a terminal may expand to find it shut in, before a search
 /// over the whole board for it.
 const PRECHECK: u64 = 50_000;
@@ -376,7 +383,8 @@ fn couple_in_place(
     for c in &mut old {
         c.unplace(world);
     }
-    let Some(route) = pairs::route_pair(design, world, pair, &jobs[jp], &jobs[jn], params) else {
+    let Some(route) = pairs::route_pair(design, world, pair, &jobs[jp], &jobs[jn], params, None)
+    else {
         restore(world, copper, old);
         return None;
     };
@@ -473,7 +481,6 @@ pub(crate) fn run(design: &Design, options: &Options) -> Result<Routed, RouteErr
                     &design.rules,
                     &design.outline,
                     design.edge_clearance,
-                    &design.masks,
                     &design.obstacles,
                 )
                 .map_err(RouteError::Geometry)?;
@@ -689,7 +696,6 @@ fn route_all(design: &Design, options: &Options) -> Result<Routed, RouteError> {
             rules,
             &design.outline,
             design.edge_clearance,
-            &design.masks,
             &design.obstacles,
         )
         .map_err(RouteError::Geometry)
@@ -714,9 +720,11 @@ fn route_all(design: &Design, options: &Options) -> Result<Routed, RouteError> {
         &with_escapes
     };
     // Pairs first, if asked, side by side on the board as it is before anything else is
-    // routed, as fixed copper of their nets, which the rest completes.
+    // routed, as copper of their nets that the rest completes, and that only the passes on
+    // the finer lattice may move.
     let mut pairs_first = PairsFirst::default();
     let with_pairs;
+    let before_pairs = design;
     let design = if options.couple_pairs && options.pairs_first && !design.pairs.is_empty() {
         let mut world = world_of(design)?;
         pairs_first.jobs = jobs(design, &world, pitch, &[]);
@@ -790,7 +798,24 @@ fn route_all(design: &Design, options: &Options) -> Result<Routed, RouteError> {
         stubs: false,
     };
 
-    let mut world = world_of(design)?;
+    // Pairs routed first are routes of their nets in the world, locked until the passes on
+    // the finer lattice, where the nets left may move them, and they are routed again.
+    let mut world = world_of(before_pairs)?;
+    let mut pair_copper: Vec<Option<pairs::Undo>> = Vec::new();
+    let mut pair_of: BTreeMap<NetId, usize> = BTreeMap::new();
+    for (i, r) in pairs_first.routes.iter().enumerate() {
+        pair_copper.push(
+            r.as_ref()
+                .map(|r| pairs::Undo::place(&mut world, &r.tracks, &r.vias)),
+        );
+        if r.is_some() {
+            for net in [design.pairs[i].positive, design.pairs[i].negative] {
+                world.set_locked(net, true);
+                pair_of.insert(net, i);
+            }
+        }
+    }
+    let mut pair_rips = vec![0u32; pair_copper.len()];
     let pair_nets = pairs_first.nets(design);
     let mut jobs = jobs(terminal_design, &world, pitch, &plane_pieces);
     jobs.sort_by_key(|j| (j.span, j.ctx.net));
@@ -911,6 +936,11 @@ fn route_all(design: &Design, options: &Options) -> Result<Routed, RouteError> {
                 ripped[j] = 0;
                 world.set_locked(job.ctx.net, false);
             }
+            // Pairs routed first may be moved, but those that found no way after being
+            // moved before.
+            for (&net, &i) in &pair_of {
+                world.set_locked(net, pair_rips[i] >= PAIR_RIP_UPS);
+            }
             Params {
                 pitch: (pitch / FINE).max(1000),
                 under_pads: true,
@@ -987,6 +1017,7 @@ fn route_all(design: &Design, options: &Options) -> Result<Routed, RouteError> {
                     ..params
                 });
             }
+            let mut displaced: Vec<usize> = Vec::new();
             for &partial in &attempts {
                 if tree.is_some() || options.rip_ups == 0 {
                     break;
@@ -994,6 +1025,16 @@ fn route_all(design: &Design, options: &Options) -> Result<Routed, RouteError> {
                 let rip = RipUp {
                     penalty: Some(RIP_PENALTY),
                     history: &history,
+                };
+                // On the finer lattice, a search that may cross others' routes has more
+                // nodes to go through, among them the pairs', which it may move.
+                let partial = Params {
+                    max_expansions: if pass > 0 {
+                        partial.max_expansions.saturating_mul(FINE_RIP_BUDGET)
+                    } else {
+                        partial.max_expansions
+                    },
+                    ..partial
                 };
                 match detail::route_net(&world, ctx, &steps, partial, None, Some(rip)) {
                     Ok(t) => {
@@ -1005,6 +1046,15 @@ fn route_all(design: &Design, options: &Options) -> Result<Routed, RouteError> {
                             }
                         }
                         for v in victims {
+                            // A pair in the way is taken out whole, and routed again after.
+                            if let Some(&i) = pair_of.get(&v)
+                                && let Some(u) = pair_copper[i].take()
+                            {
+                                u.undo(&mut world);
+                                pair_rips[i] += 1;
+                                stats.rip_ups += 1;
+                                displaced.push(i);
+                            }
                             let Some(&k) = by_net.get(&v) else { continue };
                             if let Some(mut c) = copper[k].take() {
                                 c.unplace(&mut world);
@@ -1062,6 +1112,85 @@ fn route_all(design: &Design, options: &Options) -> Result<Routed, RouteError> {
                 }
                 c.place(&mut world, &job.ctx);
                 copper[j] = Some(c);
+            }
+            // The pairs this net moved are routed again side by side around it, moving
+            // other nets in their way in turn, but not pairs, nor this net. A pair that finds
+            // no way goes back where it was, and this net is routed again around it.
+            for i in displaced {
+                let pair = &design.pairs[i];
+                let net = job.ctx.net;
+                let was = world.locked(net);
+                world.set_locked(net, true);
+                let open: Vec<NetId> = pair_of
+                    .keys()
+                    .copied()
+                    .filter(|&n| !world.locked(n))
+                    .collect();
+                for &n in &open {
+                    world.set_locked(n, true);
+                }
+                let mut moved: Vec<NetId> = Vec::new();
+                let mut take = |w: &mut World<'_>, nets: &[NetId]| {
+                    for &v in nets {
+                        let Some(&k) = by_net.get(&v) else { continue };
+                        if let Some(mut c) = copper[k].take() {
+                            c.unplace(w);
+                            moved.push(v);
+                        }
+                    }
+                };
+                let route = pairs_first.params.and_then(|p| {
+                    let job = |n: NetId| pairs_first.jobs.iter().find(|j| j.ctx.net == n);
+                    let rip = pairs::PairRip {
+                        rip: RipUp {
+                            penalty: Some(RIP_PENALTY),
+                            history: &history,
+                        },
+                        take: &mut take,
+                    };
+                    pairs::route_pair(
+                        design,
+                        &mut world,
+                        pair,
+                        job(pair.positive)?,
+                        job(pair.negative)?,
+                        p,
+                        Some(rip),
+                    )
+                });
+                for &n in &open {
+                    world.set_locked(n, false);
+                }
+                world.set_locked(net, was);
+                for v in moved {
+                    let Some(&k) = by_net.get(&v) else { continue };
+                    completing[k] = None;
+                    ripped[k] += 1;
+                    stats.rip_ups += 1;
+                    if ripped[k] >= options.rip_ups {
+                        world.set_locked(v, true);
+                    }
+                    queue.push_back(k);
+                }
+                match route {
+                    Some(mut route) => {
+                        pair_copper[i] = Some(core::mem::take(&mut route.undo));
+                        pairs_first.routes[i] = Some(route);
+                    }
+                    None => {
+                        if let Some(mut c) = copper[j].take() {
+                            c.unplace(&mut world);
+                            queue.push_back(j);
+                        }
+                        if let Some(r) = &pairs_first.routes[i] {
+                            pair_copper[i] =
+                                Some(pairs::Undo::place(&mut world, &r.tracks, &r.vias));
+                        }
+                        pair_rips[i] = PAIR_RIP_UPS;
+                        world.set_locked(pair.positive, true);
+                        world.set_locked(pair.negative, true);
+                    }
+                }
             }
         }
     }
@@ -1280,7 +1409,7 @@ impl PairsFirst {
     ) -> Option<pairs::PairRoute> {
         let job = |net: NetId| self.jobs.iter().find(|j| j.ctx.net == net);
         let (p, n) = (job(pair.positive)?, job(pair.negative)?);
-        pairs::route_pair(design, world, pair, p, n, self.params?)
+        pairs::route_pair(design, world, pair, p, n, self.params?, None)
     }
 
     /// The nets of the pairs routed.

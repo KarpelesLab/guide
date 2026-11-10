@@ -46,7 +46,8 @@
 //!    keeps what it reaches rather than failing whole. Nets left unrouted at the end, or routed in part, get a second pass,
 //!    on a lattice of half the pitch, in which a route may also go to a pad's centre on a
 //!    layer the pad isn't on, for a via in it; a net routed in part is completed there from
-//!    the copper it has.
+//!    the copper it has, and a search that crosses others' routes has four times the
+//!    budget.
 //! 4. **Cleanup**: nets with vias are rerouted with dearer vias, kept only if they lose
 //!    vias; then each run of tracks between pads, vias and branches is pulled tight, by
 //!    replacing runs with straight or 45° shortcuts where those are legal.
@@ -56,9 +57,13 @@
 //!    vias side by side and each net's own fan-out near its pads. It is kept if it connects
 //!    all that the two routes did, so it can't cost another net its route. Pairs whose
 //!    two nets' pads are far apart are left as they are. With [`Options::pairs_first`],
-//!    pairs are routed this way before anything else instead, as fixed copper, with a
-//!    place for a via kept free of them beside each pad of a net with zones next to their
-//!    pads, such as a ground pin beside a pair's pins.
+//!    pairs are routed this way before anything else instead, with a place for a via kept
+//!    free of them beside each pad of a net with zones next to their pads, such as a ground
+//!    pin beside a pair's pins. They stay where they are in the first pass, as fixed
+//!    copper. In the passes on the finer lattice, a net may cross them in rip-up like any
+//!    route: the pair is taken out whole, and once the net is placed, routed again side by
+//!    side, ripping up other nets in its way but not pairs or that net. A pair that finds
+//!    no way goes back where it was, for good, and the net is routed again around it.
 //! 6. **Meanders**, for [`Design::lengths`]: nets shorter than they must be get trombone
 //!    meanders on their straight tracks, in free space, each checked exactly as routing
 //!    is, and pairs side by side get meanders of both tracks together, which keep their
@@ -99,6 +104,7 @@ use crate::geom::drc::{Board, Track, Via};
 use crate::geom::{GeomError, LayerId, Rules, Shape};
 use crate::id::NetId;
 
+pub use crate::geom::drc::MaskOpening;
 pub use measure::{coupling, net_length};
 pub use verify::unconnected;
 pub use zones::{CopperZone, Fill, Islands, PadConnection, ZoneConnection, Zones, fill_zones};
@@ -110,21 +116,6 @@ pub struct ViaSize {
     pub diameter: i64,
     /// The diameter of the hole.
     pub drill: i64,
-}
-
-/// An opening in the solder mask over an outer layer, which copper of another net must not
-/// reach into: KiCad reports an opening with two nets' copper in it as a solder mask
-/// bridge.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MaskOpening {
-    /// The shape, before [`margin`](MaskOpening::margin).
-    pub shape: Shape,
-    /// The outer copper layer it is over.
-    pub layer: LayerId,
-    /// How far the opening reaches beyond the shape, as a pad's mask expansion does.
-    pub margin: i64,
-    /// The net of the copper in it, or `None` if there is none or it has several.
-    pub net: Option<NetId>,
 }
 
 /// How one net is to be routed.
@@ -177,7 +168,8 @@ pub struct LengthConstraint {
 #[derive(Clone, Debug)]
 pub struct Design {
     /// The fixed items: pads, keepouts, and any tracks, vias and zones already there, which
-    /// routes keep clear of, or join if they are of the same net.
+    /// routes keep clear of, or join if they are of the same net, and the openings in the
+    /// solder mask, which other nets' copper keeps out of.
     pub board: Board,
     /// The rules.
     pub rules: Rules,
@@ -188,8 +180,6 @@ pub struct Design {
     pub edge_clearance: i64,
     /// By [`NetId`], how to route each net. Nets past the end are not routed.
     pub nets: Vec<NetSpec>,
-    /// Openings in the solder mask, which other nets' copper keeps out of.
-    pub masks: Vec<MaskOpening>,
     /// Copper with no net that the board doesn't hold, such as text, which routes keep
     /// clear of as of any copper. The check doesn't see it.
     pub obstacles: Vec<(Shape, LayerId)>,
@@ -261,7 +251,6 @@ impl Design {
             outline: board.routing.outline.clone(),
             edge_clearance: board.routing.edge_clearance,
             nets,
-            masks: board.routing.masks.clone(),
             obstacles: board.routing.text.clone(),
             pairs,
             lengths: Vec::new(),
@@ -306,7 +295,9 @@ pub struct Options {
     /// true. Without, their nets are routed as any others.
     pub couple_pairs: bool,
     /// Whether to route [differential pairs](Design::pairs) side by side first, before
-    /// anything else, as fixed copper, rather than last, in place of their nets' routes.
+    /// anything else, rather than last, in place of their nets' routes; only nets left for
+    /// the passes on the finer lattice may move them, and they are routed again side by
+    /// side.
     /// The default is false: first, pairs take room that other nets need, and last, a
     /// pair that finds no room through what is routed stays as two nets. Boards whose pairs
     /// matter most, such as DRAM's clocks and strobes, route them first: see
@@ -460,7 +451,6 @@ impl std::error::Error for RouteError {}
 ///     rules,
 ///     outline: Vec::new(),
 ///     edge_clearance: 0,
-///     masks: Vec::new(),
 ///     obstacles: Vec::new(),
 ///     pairs: Vec::new(),
 ///     lengths: Vec::new(),

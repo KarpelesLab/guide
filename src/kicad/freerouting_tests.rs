@@ -184,7 +184,9 @@ fn measure(stripped: &Design, routed: &Path, project: &str, seconds: f64) -> Mea
             | Violation::Clearance { a, b, .. }
             | Violation::HoleToHole { a, b, .. } => routed_item(a) || routed_item(b),
             Violation::HoleClearance { hole, item, .. } => routed_item(hole) || routed_item(item),
-            Violation::Keepout { item, .. } => routed_item(item),
+            Violation::Keepout { item, .. } | Violation::MaskBridge { item, .. } => {
+                routed_item(item)
+            }
             _ => true,
         })
         .count();

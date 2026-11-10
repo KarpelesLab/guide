@@ -1088,6 +1088,97 @@ fn drc_keepouts_by_kind_and_boundary() {
 }
 
 #[test]
+fn drc_mask_bridges_of_a_pads_opening() {
+    let rules = two_layer_rules();
+    let mut board = Board::default();
+    board.pads = vec![Pad {
+        shape: rect(0, 0, 1000, 1000),
+        layers: LayerSet::first(1),
+        hole: None,
+        net: Some(NetId(1)),
+        clearance: None,
+    }];
+    // The pad's opening reaches 500 past it on top.
+    board.masks = vec![drc::MaskOpening {
+        shape: rect(0, 0, 1000, 1000),
+        layer: LayerId(0),
+        margin: 500,
+        net: Some(NetId(1)),
+    }];
+    board.tracks = vec![
+        // Its own net's track, in the opening.
+        t((500, 500), (500, 3000), 100, 0, Some(1)),
+        // Another net's, 400 off the pad, in the opening, and one 600 off, out of it.
+        t((-450, -2000), (-450, 3000), 100, 0, Some(2)),
+        t((1650, -2000), (1650, 3000), 100, 0, Some(3)),
+        // Another net's under the opening, on the bottom.
+        t((500, -2000), (500, 3000), 100, 1, Some(4)),
+    ];
+    let found: Vec<Violation> = drc::check(&board, &rules)
+        .unwrap()
+        .into_iter()
+        .filter(|v| matches!(v, Violation::MaskBridge { .. }))
+        .collect();
+    assert_eq!(
+        found,
+        [Violation::MaskBridge {
+            opening: 0,
+            item: Item::Track(1),
+            layer: LayerId(0)
+        }]
+    );
+}
+
+#[test]
+fn drc_mask_bridges_of_an_opening_of_no_net() {
+    let rules = two_layer_rules();
+    let mut board = Board::default();
+    board.masks = vec![drc::MaskOpening {
+        shape: rect(0, 0, 10_000, 10_000),
+        layer: LayerId(0),
+        margin: 0,
+        net: None,
+    }];
+    let pad = |x: i64, net: Option<u32>| Pad {
+        shape: rect(x, 1000, x + 1000, 2000),
+        layers: LayerSet::first(1),
+        hole: None,
+        net: net.map(NetId),
+        clearance: None,
+    };
+    // One net, and copper of none, bridge nothing alone.
+    board.pads = vec![pad(1000, Some(1)), pad(3000, Some(1))];
+    let bridges = |board: &Board| -> Vec<Item> {
+        drc::check(board, &rules)
+            .unwrap()
+            .into_iter()
+            .filter_map(|v| match v {
+                Violation::MaskBridge { item, .. } => Some(item),
+                _ => None,
+            })
+            .collect()
+    };
+    assert!(bridges(&board).is_empty());
+    board.pads = vec![pad(1000, None), pad(3000, None)];
+    assert!(bridges(&board).is_empty());
+    // A second net bridges every item with a net.
+    board.pads = vec![pad(1000, Some(1)), pad(3000, Some(2)), pad(5000, None)];
+    assert_eq!(bridges(&board), [Item::Pad(0), Item::Pad(1)]);
+    // And so does a hole of no copper, of no net, with one net.
+    board.pads = vec![
+        pad(1000, Some(1)),
+        Pad {
+            shape: circle(6000, 6000, 500),
+            layers: LayerSet::EMPTY,
+            hole: Some(circle(6000, 6000, 500)),
+            net: None,
+            clearance: None,
+        },
+    ];
+    assert_eq!(bridges(&board), [Item::Pad(0)]);
+}
+
+#[test]
 fn drc_pad_holes_and_arcs() {
     let rules = two_layer_rules();
     let mut board = Board::default();

@@ -153,6 +153,8 @@ fn route_board_with(
             | Violation::HoleToHole { a, b, .. } => ours(a) || ours(b),
             Violation::HoleClearance { hole, item, .. } => ours(hole) || ours(item),
             Violation::Keepout { item, .. } => ours(item),
+            // Zones' fills are the router's too.
+            Violation::MaskBridge { item, .. } => ours(item) || matches!(item, Item::Zone(_)),
             _ => true,
         })
         .collect();
@@ -437,15 +439,20 @@ fn curated_pairs() {
             route_board_with(dir, name, options, |read, d| {
                 super::length_rules(dru, read).unwrap().apply(d);
             });
-        let apart = pcb::route(
-            &design,
-            &Options {
-                couple_pairs: false,
-                tune_lengths: false,
-                ..Options::default()
-            },
-        )
-        .unwrap();
+        // `GUIDE_APART=0` leaves out routing the nets apart, which takes as long again.
+        let apart = if std::env::var("GUIDE_APART").is_ok_and(|v| v == "0") {
+            routed.clone()
+        } else {
+            pcb::route(
+                &design,
+                &Options {
+                    couple_pairs: false,
+                    tune_lengths: false,
+                    ..Options::default()
+                },
+            )
+            .unwrap()
+        };
         for pair in &design.pairs {
             let ours = pair_measures(&routed.tracks, &routed.vias, &design, pair);
             let plain = pair_measures(&apart.tracks, &apart.vias, &design, pair);

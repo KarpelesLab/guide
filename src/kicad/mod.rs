@@ -150,10 +150,6 @@ pub struct Routing {
     pub edge_clearance: i64,
     /// By [`NetId`](crate::id::NetId), what new routes of the net take, from its class.
     pub nets: Vec<NetRouting>,
-    /// The openings in the solder mask over the outer layers: pads', with their mask
-    /// expansion, and graphics on `F.Mask` and `B.Mask`, which take the net of the pads in
-    /// them if those have one. KiCad reports an opening with copper of two nets in it.
-    pub masks: Vec<crate::pcb::MaskOpening>,
     /// Boxes around text on copper, which the reader doesn't take as copper, a little
     /// larger than the text, with their layers.
     pub text: Vec<(crate::geom::Shape, crate::geom::LayerId)>,

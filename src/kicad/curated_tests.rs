@@ -955,3 +955,77 @@ fn curated_boards_read_the_same_in_kicad_10_format() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The UUIDs of the items of each solder mask bridge in a KiCad DRC report.
+pub(crate) fn kicad_mask_bridges(report: &str) -> Vec<BTreeSet<String>> {
+    let root = json::parse(report).unwrap();
+    root.get("violations")
+        .map_or(&[][..], Json::as_array)
+        .iter()
+        .filter(|v| v.get("type").and_then(Json::as_str) == Some("solder_mask_bridge"))
+        .map(|v| {
+            v.get("items")
+                .map_or(&[][..], Json::as_array)
+                .iter()
+                .filter_map(|i| i.get("uuid").and_then(Json::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .collect()
+}
+
+/// Our solder mask bridges of tracks and vias, a router's items, on the curated boards as
+/// they come, against KiCad's: the same tracks and vias bare in another net's opening. Runs
+/// only with `GUIDE_KICAD=1`.
+///
+/// Bridges of pads alone differ, and are left out: KiCad also takes two pads whose openings
+/// come within the mask's minimum web of each other as a bridge, and pads of no net as each
+/// of a net of its own, as two pads already on a board, which no router changes.
+#[test]
+fn curated_mask_bridges_agree_with_kicad() {
+    if std::env::var_os("GUIDE_KICAD").is_none() {
+        eprintln!("skipped: set GUIDE_KICAD=1 to compare with kicad-cli");
+        return;
+    }
+    let mut problems = Vec::new();
+    for &(dir, board, _) in BOARDS {
+        let (pcb, pro) = load(dir, board);
+        let read = read(&pcb, Some(&pro)).unwrap();
+        let routed: BTreeSet<String> = (0..read.board.tracks.len())
+            .map(Item::Track)
+            .chain((0..read.board.vias.len()).map(Item::Via))
+            .filter_map(|i| read.source(i)?.uuid.clone())
+            .collect();
+        let all = kicad_mask_bridges(&run_kicad(&pcb, &pro, board));
+        let theirs: BTreeSet<String> = all
+            .iter()
+            .flatten()
+            .filter(|u| routed.contains(*u))
+            .cloned()
+            .collect();
+        let ours: BTreeSet<String> = drc::check(&read.board, &read.rules)
+            .unwrap()
+            .into_iter()
+            .filter_map(|v| match v {
+                Violation::MaskBridge { item, .. } => read.source(item)?.uuid.clone(),
+                _ => None,
+            })
+            .filter(|u| routed.contains(u))
+            .collect();
+        let missed: Vec<&String> = theirs.difference(&ours).collect();
+        let extra: Vec<&String> = ours.difference(&theirs).collect();
+        eprintln!(
+            "| {board} | {} | {} | {} | {} |",
+            all.len(),
+            theirs.len(),
+            ours.len(),
+            ours.intersection(&theirs).count(),
+        );
+        if !missed.is_empty() || !extra.is_empty() {
+            problems.push(format!(
+                "{board}: KiCad's only {missed:?}, ours only {extra:?}"
+            ));
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}

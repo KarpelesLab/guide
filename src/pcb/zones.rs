@@ -380,7 +380,7 @@ impl Ctx<'_> {
                 others.push(grow(shape, 0)?);
             }
         }
-        for m in &design.masks {
+        for m in &design.board.masks {
             if m.layer == layer
                 && !same_net(zone.net, m.net)
                 && m.shape.bbox().intersects(&near_box)

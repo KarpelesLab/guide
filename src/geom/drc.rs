@@ -92,6 +92,23 @@ pub struct Keepout {
     pub pads: bool,
 }
 
+/// An opening in the solder mask over an outer copper layer, which leaves the copper in it
+/// bare. Copper of two nets bare in one opening is a solder mask bridge, as KiCad reports it:
+/// solder could join them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MaskOpening {
+    /// The shape, before [`margin`](MaskOpening::margin).
+    pub shape: Shape,
+    /// The outer copper layer it is over.
+    pub layer: LayerId,
+    /// How far the opening reaches beyond the shape, as a pad's mask expansion does. A
+    /// negative margin is taken as zero.
+    pub margin: i64,
+    /// The net of the copper it is for, such as its pad's, or `None` if it is for none, or
+    /// already has copper of several nets in it.
+    pub net: Option<NetId>,
+}
+
 /// Everything a check looks at.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Board {
@@ -105,6 +122,8 @@ pub struct Board {
     pub zones: Vec<Zone>,
     /// The keepouts.
     pub keepouts: Vec<Keepout>,
+    /// The openings in the solder mask.
+    pub masks: Vec<MaskOpening>,
     /// The tolerance for approximating arc tracks: see [`Shape::arc_track`].
     pub arc_tolerance: i64,
     /// How far a gap may fall short of a clearance, copper's or hole-to-hole, and still
@@ -129,6 +148,7 @@ impl Default for Board {
             pads: Vec::new(),
             zones: Vec::new(),
             keepouts: Vec::new(),
+            masks: Vec::new(),
             arc_tolerance: DEFAULT_ARC_TOLERANCE,
             clearance_slack: 0,
         }
@@ -240,6 +260,20 @@ pub enum Violation {
         /// Where.
         layer: LayerId,
     },
+    /// Copper of a net other than an opening's in the solder mask is bare in it: it touches
+    /// the opening, grown by its margin, on its layer. Copper of no net is of another net
+    /// than an opening's. An opening with no net, such as one drawn on the mask, bridges
+    /// what is in it if that is copper of a net and copper of another net or of none, and
+    /// then each item with a net in it is reported, as KiCad does. A pad's hole where the
+    /// pad has no copper, as a plain mounting hole's, counts as copper of the pad's net.
+    MaskBridge {
+        /// The opening's position in `Board::masks`.
+        opening: usize,
+        /// The copper.
+        item: Item,
+        /// Where.
+        layer: LayerId,
+    },
 }
 
 impl Violation {
@@ -254,6 +288,7 @@ impl Violation {
             Violation::HoleToHole { a, b, .. } => (5, a, Some(b)),
             Violation::HoleClearance { hole, item, .. } => (6, hole, Some(item)),
             Violation::Keepout { keepout, item, .. } => (7, Item::Keepout(keepout), Some(item)),
+            Violation::MaskBridge { opening, item, .. } => (8, Item::Keepout(opening), Some(item)),
         }
     }
 }
@@ -412,6 +447,7 @@ pub fn check(board: &Board, rules: &Rules) -> Result<Vec<Violation>, DrcError> {
     hole_to_hole(&holes, rules, slack, &mut out)?;
     hole_clearances(&holes, &copper, &by_layer, rules, slack, &close, &mut out)?;
     keepouts(board, &copper, &by_layer, stack, &mut out);
+    mask_bridges(board, &copper, &by_layer, &mut out)?;
     // Stable, so that equal keys keep the order they were found in, which is fixed too.
     out.sort_by_key(Violation::key);
     Ok(out)
@@ -754,6 +790,88 @@ fn hole_clearances(
             }
         }
         out.extend(found.into_values());
+    }
+    Ok(())
+}
+
+/// Whether copper is bare in an opening of the solder mask: it touches the opening, grown
+/// by its margin.
+fn bare_in(shape: &Shape, item: Item, opening: &Shape, margin: i64) -> Result<bool, DrcError> {
+    Ok(shape.touches(opening)
+        || (margin > 0
+            && shape
+                .violates(opening, margin)
+                .map_err(geometry_error(item))?))
+}
+
+/// Copper bare in openings of the solder mask that are another net's.
+fn mask_bridges(
+    board: &Board,
+    copper: &[Copper],
+    by_layer: &[(Vec<usize>, SpatialIndex)],
+    out: &mut Vec<Violation>,
+) -> Result<(), DrcError> {
+    // Pads' holes, which are bare in an opening where their pad has no copper, as a plain
+    // hole of a mounting pad's is, as KiCad has it.
+    let holed: Vec<(usize, &Shape)> = board
+        .pads
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| Some((i, p.hole.as_ref()?)))
+        .collect();
+    let holes = SpatialIndex::bulk_load(holed.iter().map(|(_, h)| h.bbox()));
+    let mut near = Vec::new();
+    for (k, m) in board.masks.iter().enumerate() {
+        let Some((on, index)) = by_layer.get(usize::from(m.layer.0)) else {
+            continue;
+        };
+        let margin = m.margin.clamp(0, MAX_COORD);
+        let reach = m.shape.bbox().expand(margin);
+        index.query(&reach, &mut near);
+        let mut bare: Vec<usize> = near.iter().map(|id| on[id.slot() as usize]).collect();
+        // In item order, as `copper` is.
+        bare.sort_unstable();
+        // What is bare in it, by item and net.
+        let mut inside: Vec<(Item, Option<NetId>)> = Vec::new();
+        for i in bare {
+            let c = &copper[i];
+            if bare_in(&c.shape, c.item, &m.shape, margin)? {
+                inside.push((c.item, c.net));
+            }
+        }
+        holes.query(&reach, &mut near);
+        let mut found: Vec<usize> = near.iter().map(|id| id.slot() as usize).collect();
+        found.sort_unstable();
+        for h in found {
+            let (i, hole) = holed[h];
+            let pad = &board.pads[i];
+            if !pad.layers.contains(m.layer) && bare_in(hole, Item::Pad(i), &m.shape, margin)? {
+                inside.push((Item::Pad(i), pad.net));
+            }
+        }
+        let bridged: Vec<Item> = match m.net {
+            Some(net) => inside
+                .iter()
+                .filter(|c| c.1 != Some(net))
+                .map(|c| c.0)
+                .collect(),
+            // An opening of no net bridges what is in it, if it has copper of a net and of
+            // another, or of none.
+            None => {
+                let with_net = inside.iter().filter(|c| c.1.is_some());
+                let first = with_net.clone().next().and_then(|c| c.1);
+                if first.is_some() && inside.iter().any(|c| c.1 != first) {
+                    with_net.map(|c| c.0).collect()
+                } else {
+                    Vec::new()
+                }
+            }
+        };
+        out.extend(bridged.into_iter().map(|item| Violation::MaskBridge {
+            opening: k,
+            item,
+            layer: m.layer,
+        }));
     }
     Ok(())
 }

@@ -58,7 +58,6 @@ pub(super) fn design(layers: usize, pads: Vec<Pad>, nets: usize) -> Design {
         outline: Vec::new(),
         edge_clearance: 0,
         nets: vec![spec; nets],
-        masks: Vec::new(),
         obstacles: Vec::new(),
         pairs: Vec::new(),
         lengths: Vec::new(),
@@ -295,7 +294,7 @@ fn routes_stay_out_of_other_nets_mask_openings() {
     );
     d.nets[2].route = false;
     // Net 2's pad has a wide mask opening, reaching across the straight line.
-    d.masks.push(MaskOpening {
+    d.board.masks.push(MaskOpening {
         shape: d.board.pads[2].shape.clone(),
         layer: LayerId(0),
         margin: 3 * MM,

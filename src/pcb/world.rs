@@ -4,12 +4,12 @@
 //!
 //! The answers follow [`drc::check`] rule for rule, so that what is legal here passes the
 //! check: clearances between nets, with those of pairs of nets and of items of their own,
-//! hole clearances and hole-to-hole clearances, keepouts, and, which the check doesn't
-//! have, the clearance to the board's edge.
+//! hole clearances and hole-to-hole clearances, keepouts, the openings in the solder mask,
+//! and, which the check doesn't have, the clearance to the board's edge. An opening with no
+//! net keeps out every net's copper, stricter than the check.
 
 use core::cell::RefCell;
 
-use super::MaskOpening;
 use crate::geom::drc::{self, Board};
 use crate::geom::{EntryId, GeomError, LayerId, LayerSet, Point, Rules, Shape, ShapeIndex};
 use crate::id::NetId;
@@ -100,9 +100,9 @@ impl<'r> World<'r> {
         rules: &'r Rules,
         outline: &[Shape],
         edge_clearance: i64,
-        masks: &[MaskOpening],
         obstacles: &[(Shape, LayerId)],
     ) -> Result<World<'r>, GeomError> {
+        let masks = &board.masks;
         let n = rules.layer_count();
         let own_max = board
             .pads
@@ -400,12 +400,20 @@ impl<'r> World<'r> {
     /// Whether a track that stands for both tracks of a pair may be `shape` on `layer`.
     /// Everything is in its way, the two nets' own copper too, as either track may be the
     /// one beside it: other nets' copper keeps the larger of the two nets' clearances from
-    /// it, and copper of the pair's own nets the clearance between the two.
-    pub(crate) fn track_pair(&self, nets: (NetId, NetId), layer: LayerId, shape: &Shape) -> bool {
+    /// it, and copper of the pair's own nets the clearance between the two. As
+    /// [`track`](World::track) says, with the nets of routes in the way added to `routed`.
+    pub(crate) fn track_pair(
+        &self,
+        nets: (NetId, NetId),
+        layer: LayerId,
+        shape: &Shape,
+        mut routed: Option<&mut Vec<NetId>>,
+    ) -> Verdict {
         let l = usize::from(layer.0);
         let Some(index) = self.layers.get(l) else {
-            return false;
+            return Verdict::Blocked;
         };
+        let mut verdict = Verdict::Free;
         let mut near = self.scratch.borrow_mut();
         index.query(&shape.bbox().expand(self.reach), &mut near);
         let (a, b) = (
@@ -431,11 +439,17 @@ impl<'r> World<'r> {
                 Kind::Edge => self.edge_hit(shape, other),
                 Kind::Mask { margin } => violates(shape, other, margin + MASK_GUARD),
             };
-            if hit {
-                return false;
+            // The pair's own copper is never moved out of its way.
+            if hit && (ours(&meta) || !self.note(meta, &mut verdict, &mut routed)) {
+                return Verdict::Blocked;
             }
         }
-        true
+        verdict
+    }
+
+    /// Whether a net's routes are locked, as [`set_locked`](World::set_locked) makes them.
+    pub(crate) fn locked(&self, net: NetId) -> bool {
+        self.locked.get(net.index()).copied().unwrap_or(false)
     }
 
     /// Whether `net`'s through via may be at `at`, as [`track`](World::track) says.

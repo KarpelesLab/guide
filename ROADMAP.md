@@ -127,7 +127,7 @@ clearances: of KiCad 10.0.3's 3450 findings we make 3448, and all 23 differences
 and 21 of ours, are explained, mostly by limits of KiCad's own check
 ([results](docs/benchmarks.md#pcb-clearance-checks-against-kicad)).
 
-### M5: PCB routing MVP
+### M5: PCB routing MVP (done)
 
 - Specctra DSN import and SES export, giving KiCad interoperability through its
   existing Freerouting workflow. Done, behind the `dsn` feature: `dsn::read` gives the same
@@ -167,7 +167,8 @@ complete, `guide`'s track is 6% shorter, and its vias about as many, 168 to 172,
 three boards. On one thread it was faster on seven boards, and slower on `flea` and
 `nk3-nrf-mini`, before speedups that cut those two to a quarter and a third. Left for the exit:
 `nk3-nrf-mini`'s `/LED_R`, which the board itself makes impossible without a violation, so M5 is
-done but for a fault in that board's design.
+done but for a fault in that board's design. To revisit: a route for `/LED_R` that KiCad accepts,
+if one can be found, or a better way to treat a board whose own design breaks its rules.
 
 ### M6: PCB routing, advanced
 

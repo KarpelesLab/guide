@@ -8,7 +8,9 @@
 //! the result as on any board. With the `kicad` feature, [`Design::from_kicad`] takes a
 //! board that [`kicad::read`](crate::kicad::read) has read. [`fill_zones`] fills a design's
 //! copper zones on their own, as KiCad's zone filler does. [`place`] places a board's
-//! components before it is routed.
+//! components before it is routed, and places some again where routing found trouble.
+//! [`eco`] routes a routed board again after a change, keeping the copper the change leaves
+//! alone. [`swap`] exchanges the nets of equivalent pins where that shortens them.
 //!
 //! # How it routes
 //!
@@ -87,6 +89,7 @@
 
 mod cleanup;
 mod detail;
+pub mod eco;
 mod escape;
 mod geometry;
 mod global;
@@ -95,6 +98,7 @@ mod pairs;
 pub mod place;
 mod planes;
 mod router;
+pub mod swap;
 mod tune;
 mod verify;
 mod world;
@@ -108,7 +112,10 @@ use crate::id::NetId;
 
 pub use crate::geom::drc::MaskOpening;
 pub use measure::{coupling, net_length};
+#[cfg(feature = "kicad")]
+pub(crate) use router::connectivity;
 pub use verify::unconnected;
+pub(crate) use zones::starved_reliefs;
 pub use zones::{CopperZone, Fill, Islands, PadConnection, ZoneConnection, Zones, fill_zones};
 
 /// The size of a net's through vias.

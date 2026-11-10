@@ -113,7 +113,7 @@ type Group = (Vec<usize>, Vec<(Point, LayerSet)>);
 
 /// The pads of each net, grouped into terminals: pads that fixed copper of the net already
 /// connects are one terminal.
-fn terminals(design: &Design, net: NetId) -> Vec<Group> {
+pub(crate) fn terminals(design: &Design, net: NetId) -> Vec<Group> {
     let pads: Vec<usize> = (0..design.board.pads.len())
         .filter(|&i| design.board.pads[i].net == Some(net))
         .collect();
@@ -511,7 +511,7 @@ pub(crate) fn run(design: &Design, options: &Options) -> Result<Routed, RouteErr
 
 /// The lattice's pitch: half the tightest pitch of the tracks routed, unless the options
 /// set one.
-fn pitch(design: &Design, options: &Options) -> i64 {
+pub(crate) fn pitch(design: &Design, options: &Options) -> i64 {
     let rules = &design.rules;
     options.pitch.unwrap_or_else(|| {
         (0..design.nets.len())
@@ -558,7 +558,20 @@ fn with_routes(design: &Design, tracks: &[Track], vias: &[Via]) -> Board {
 /// piece fewer that its copper, routes and fills leave it in.
 fn count_connections(design: &Design, routed: &mut Routed) {
     let board = routed.board(design);
+    let (nets, done, needed, made, _) = connectivity(design, &board);
+    let s = &mut routed.stats;
+    (s.nets, s.routed, s.connections, s.connected) = (nets, done, needed, made);
+}
+
+/// What [`count_connections`] counts, on a board with everything routed and filled: the nets
+/// that need connecting, of those the nets connected, the connections needed and made, and the
+/// nets left in pieces, in order.
+pub(crate) fn connectivity(
+    design: &Design,
+    board: &Board,
+) -> (usize, usize, usize, usize, Vec<NetId>) {
     let (mut nets, mut done, mut needed, mut made) = (0, 0, 0, 0);
+    let mut broken = Vec::new();
     for (i, spec) in design.nets.iter().enumerate() {
         let net = NetId(i as u32);
         if !spec.route {
@@ -574,7 +587,7 @@ fn count_connections(design: &Design, routed: &mut Routed) {
         if groups < 2 {
             continue;
         }
-        let left = planes::pieces(&board, design, net, &[])
+        let left = planes::pieces(board, design, net, &[])
             .pads
             .len()
             .clamp(1, groups);
@@ -583,10 +596,11 @@ fn count_connections(design: &Design, routed: &mut Routed) {
         made += groups - left;
         if left == 1 {
             done += 1;
+        } else {
+            broken.push(net);
         }
     }
-    let s = &mut routed.stats;
-    (s.nets, s.routed, s.connections, s.connected) = (nets, done, needed, made);
+    (nets, done, needed, made, broken)
 }
 
 /// What [`join_planes`] adds to.

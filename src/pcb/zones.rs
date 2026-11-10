@@ -179,9 +179,30 @@ fn same_net(a: Option<NetId>, b: Option<NetId>) -> bool {
 /// Zones are filled from the highest priority down, and each on each of its layers, so the
 /// result is in that order: by priority, then position, then layer, then piece.
 pub fn fill_zones(board: &Board, design: &Design) -> Result<Vec<Fill>, GeomError> {
+    Ok(fill_all(board, design)?.0)
+}
+
+/// The thermal reliefs that the zones' fills, filled as [`fill_zones`] fills them, join to
+/// their pads by a single spoke: each as the pad, by position in [`Board::pads`], and the
+/// layer. KiCad's DRC reports them as `starved_thermal`, with its default of two spokes at
+/// least. Reliefs with no spoke at all are left out: their pads reach the fill some other
+/// way, or not at all.
+pub(crate) fn starved_reliefs(
+    board: &Board,
+    design: &Design,
+) -> Result<Vec<(usize, LayerId)>, GeomError> {
+    Ok(fill_all(board, design)?.1)
+}
+
+/// The fills, and the reliefs of a single spoke.
+#[allow(clippy::type_complexity)]
+fn fill_all(
+    board: &Board,
+    design: &Design,
+) -> Result<(Vec<Fill>, Vec<(usize, LayerId)>), GeomError> {
     let zones = &design.zones.zones;
     if zones.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
     let rules = &design.rules;
     let stack = rules.layers();
@@ -270,6 +291,7 @@ pub fn fill_zones(board: &Board, design: &Design) -> Result<Vec<Fill>, GeomError
         holes: &holes,
         by_layer: &by_layer,
         hole_index: &hole_index,
+        starved: core::cell::RefCell::new(Vec::new()),
     };
     for z in order {
         let zone = &zones[z];
@@ -289,7 +311,7 @@ pub fn fill_zones(board: &Board, design: &Design) -> Result<Vec<Fill>, GeomError
             done.push((z, layer, fill));
         }
     }
-    Ok(out)
+    Ok((out, ctx.starved.into_inner()))
 }
 
 /// A zone's outline less its holes.
@@ -309,6 +331,8 @@ struct Ctx<'a> {
     holes: &'a [Hole],
     by_layer: &'a [(Vec<usize>, SpatialIndex)],
     hole_index: &'a SpatialIndex,
+    /// Reliefs with a single spoke, as each layer of each zone is filled.
+    starved: core::cell::RefCell<Vec<(usize, LayerId)>>,
 }
 
 /// A thermal relief to build: the pad, its gap and its spokes' width.
@@ -451,9 +475,13 @@ impl Ctx<'_> {
         // nets.
         if !reliefs.is_empty() && !fill.is_empty() {
             let mut all = Vec::new();
-            for r in &reliefs {
-                all.extend(self.spokes(r, zone.min_width)?);
+            let mut owner = Vec::new();
+            for (k, r) in reliefs.iter().enumerate() {
+                let made = self.spokes(r, zone.min_width)?;
+                owner.extend(core::iter::repeat_n(k, made.len()));
+                all.extend(made);
             }
+            let mut count = vec![0usize; reliefs.len()];
             let mut spokes = Vec::new();
             for (i, (spoke, end)) in all.iter().enumerate() {
                 let reaches = fill.contains_point(*end)
@@ -465,7 +493,14 @@ impl Ctx<'_> {
                     let spoke = spoke.and(&allowed)?;
                     if !spoke.is_empty() {
                         spokes.push(spoke);
+                        count[owner[i]] += 1;
                     }
+                }
+            }
+            let mut starved = self.starved.borrow_mut();
+            for (r, &n) in reliefs.iter().zip(&count) {
+                if n == 1 {
+                    starved.push((r.pad, layer));
                 }
             }
             if !spokes.is_empty() {

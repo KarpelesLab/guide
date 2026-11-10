@@ -100,6 +100,25 @@ fn center_of(shape: &Shape) -> Point {
 
 /// Plans the escapes of a design, against the fixed copper of `world`, into which it puts
 /// them as routes of their nets as it goes. `pitch` is detailed routing's lattice.
+/// Whether fixed copper of a pad's net already touches it, as routing kept from before does:
+/// then it is out already.
+fn joined(design: &Design, pad: usize) -> bool {
+    let b = &design.board;
+    let p = &b.pads[pad];
+    let Some(net) = p.net else { return false };
+    let bbox = p.shape.bbox();
+    let tracks = b.tracks.iter().filter(|t| t.net == Some(net)).any(|t| {
+        p.layers.contains(t.layer)
+            && Rect::new(t.start, t.end).expand(t.width).intersects(&bbox)
+            && Shape::track(t.start, t.end, t.width).is_ok_and(|s| s.touches(&p.shape))
+    });
+    tracks
+        || b.vias.iter().filter(|v| v.net == Some(net)).any(|v| {
+            Rect::new(v.at, v.at).expand(v.diameter).intersects(&bbox)
+                && Shape::circle(v.at, v.diameter).is_ok_and(|s| s.touches(&p.shape))
+        })
+}
+
 pub(crate) fn plan(design: &Design, world: &mut World<'_>, pitch: i64) -> Vec<Escape> {
     let rules = &design.rules;
     let layers = rules.layer_count();
@@ -196,7 +215,7 @@ pub(crate) fn plan(design: &Design, world: &mut World<'_>, pitch: i64) -> Vec<Es
             };
             let Some(via) = spec.via else { continue };
             let on = LayerSet(pad.layers.0 & all.0);
-            if on == all || region_of.contains_key(&i) {
+            if on == all || region_of.contains_key(&i) || joined(design, i) {
                 continue;
             }
             let near_way = flood(world, net, i, design, on, pitch, &out, true, &width_of);

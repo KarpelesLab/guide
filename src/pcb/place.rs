@@ -35,6 +35,18 @@
 //! Each pass is [`place_analytic`], or legalization from the
 //! last, then annealing at a low temperature with the routing term below.
 //!
+//! Where a side is fuller than [`PlaceOptions::fill`], surface-mount parts go to the other
+//! side, parts of two pins first, then those whose connections hold them least to their side:
+//! by their nets of a few pins, the pins of other parts on that side alone, which a via would
+//! have to reach, less those on the other side alone; then the smallest.
+//!
+//! # Placing again
+//!
+//! [`refine_components`] places a window of parts again, from where they are, among the
+//! others, which stay: with some nets weighed more, congestion priced from a map of what
+//! routing used, and some parts put on the other side. It is the placement step of the loop
+//! of `kicad::place_and_route`, which chooses the window from what routing found.
+//!
 //! # Costs
 //!
 //! Each net is weighted by what it is: nets that a copper zone connects cost nothing, as they
@@ -318,6 +330,8 @@ struct Frame {
 struct NetDef {
     weight: u32,
     role: Role,
+    /// The board's net it is, for a signal net.
+    net: Option<NetId>,
     pins: Vec<(usize, PPoint)>,
     /// Fixed points of the net, on the board.
     fixed: Vec<PPoint>,
@@ -639,6 +653,8 @@ enum Presence {
     Real,
     Ghost,
     Anchor,
+    /// Fixed where it is, taking its room: a part that stays while others move around it.
+    Wall,
 }
 
 /// What [`Model::problem`] made: the problem, and each component's item.
@@ -670,6 +686,18 @@ impl<'d> Model<'d> {
         scale: (i64, i64),
         flip: Option<f64>,
     ) -> Model<'d> {
+        Model::with_sides(design, options, scale, flip, None)
+    }
+
+    /// [`new`](Model::new), with movable parts that don't go through the board on the sides
+    /// `sides` gives, if it does, rather than balanced.
+    fn with_sides(
+        design: &'d PlacementDesign,
+        options: &'d PlaceOptions,
+        scale: (i64, i64),
+        flip: Option<f64>,
+        chosen: Option<&[Side]>,
+    ) -> Model<'d> {
         let sides: Vec<Side> = design.components.iter().map(|c| c.side).collect();
         let frames = (0..design.components.len())
             .map(|c| frame(design, options, c, false))
@@ -691,7 +719,15 @@ impl<'d> Model<'d> {
             },
         };
         model.raster = model.rasterize(scale);
-        if let Some(fill) = flip.filter(|_| options.flip) {
+        if let Some(chosen) = chosen {
+            for (c, comp) in design.components.iter().enumerate() {
+                let side = chosen.get(c).copied().unwrap_or(comp.side);
+                if !comp.fixed && model.frames[c].takes != Takes::Both && side != comp.side {
+                    model.sides[c] = side;
+                    model.frames[c] = frame(design, options, c, true);
+                }
+            }
+        } else if let Some(fill) = flip.filter(|_| options.flip) {
             model.balance(scale, fill);
         }
         model.build_nets();
@@ -729,23 +765,34 @@ impl<'d> Model<'d> {
                 _ => need[index(comp.side)] += area(c),
             }
         }
-        let mut order: Vec<usize> = (0..comps.len())
+        let order: Vec<usize> = (0..comps.len())
             .filter(|&c| !comps[c].fixed && self.frames[c].takes != Takes::Both)
             .collect();
-        order.sort_by(|&a, &b| {
-            let key = |c: usize| (comps[c].pins.len() > 2, area(c));
-            let (ka, kb) = (key(a), key(b));
-            ka.0.cmp(&kb.0).then(ka.1.total_cmp(&kb.1)).then(a.cmp(&b))
-        });
+        let neighbours = self.neighbours();
         for from in [Side::Front, Side::Back] {
             let (f, t) = (index(from), 1 - index(from));
-            for &c in &order {
-                if need[f] <= room[f] {
-                    break;
-                }
-                if self.sides[c] != from || need[t] + area(c) > room[t] {
-                    continue;
-                }
+            while need[f] > room[f] {
+                // Parts of two pins first, then those that nothing holds to this side, whose
+                // connections are as many on the other side or through the board, so that no
+                // via is needed to join them to it, then the smallest.
+                let pick = order
+                    .iter()
+                    .copied()
+                    .filter(|&c| self.sides[c] == from && need[t] + area(c) <= room[t])
+                    .min_by(|&a, &b| {
+                        let key = |c: usize| {
+                            (
+                                comps[c].pins.len() > 2,
+                                self.affinity(&neighbours[c], from) > 0,
+                            )
+                        };
+                        let (ka, kb) = (key(a), key(b));
+                        ka.0.cmp(&kb.0)
+                            .then(ka.1.cmp(&kb.1))
+                            .then(area(a).total_cmp(&area(b)))
+                            .then(a.cmp(&b))
+                    });
+                let Some(c) = pick else { break };
                 need[f] -= area(c);
                 need[t] += area(c);
                 self.sides[c] = if from == Side::Front {
@@ -756,6 +803,48 @@ impl<'d> Model<'d> {
                 self.frames[c] = frame(self.design, self.options, c, true);
             }
         }
+    }
+
+    /// By component, the other components its nets reach, once for each of their pins: nets
+    /// of a few pins only, and none that a zone connects, which a via reaches from anywhere.
+    fn neighbours(&self) -> Vec<Vec<usize>> {
+        let design = self.design;
+        let planes: BTreeMap<NetId, ()> = design.planes.iter().map(|&(n, _)| (n, ())).collect();
+        let mut by_net: BTreeMap<NetId, Vec<usize>> = BTreeMap::new();
+        for (c, comp) in design.components.iter().enumerate() {
+            for pin in &comp.pins {
+                if !planes.contains_key(&pin.net) {
+                    by_net.entry(pin.net).or_default().push(c);
+                }
+            }
+        }
+        let mut out = vec![Vec::new(); design.components.len()];
+        for pins in by_net.values().filter(|p| p.len() <= 12) {
+            let mut parts = pins.clone();
+            parts.dedup();
+            for &c in &parts {
+                out[c].extend(pins.iter().copied().filter(|&d| d != c));
+            }
+        }
+        out
+    }
+
+    /// How much a part's connections hold it on `side`: its neighbours' pins on that side
+    /// alone, which a via would have to reach if it went to the other, less those on the other
+    /// side alone. Pins through the board are on both.
+    fn affinity(&self, neighbours: &[usize], side: Side) -> i64 {
+        neighbours
+            .iter()
+            .map(|&d| {
+                if self.frames[d].takes == Takes::Both {
+                    0
+                } else if self.sides[d] == side {
+                    1
+                } else {
+                    -1
+                }
+            })
+            .sum()
     }
 
     fn build_nets(&mut self) {
@@ -793,6 +882,7 @@ impl<'d> Model<'d> {
                         self.nets.push(NetDef {
                             weight: 4,
                             role: Role::Signal,
+                            net: Some(*net),
                             pins: vec![(c, o)],
                             fixed: vec![to_p(region.min()), to_p(region.max())],
                         });
@@ -815,6 +905,7 @@ impl<'d> Model<'d> {
             self.nets.push(NetDef {
                 weight,
                 role: Role::Signal,
+                net: Some(*net),
                 pins: pins.clone(),
                 fixed: Vec::new(),
             });
@@ -867,6 +958,7 @@ impl<'d> Model<'d> {
                 self.nets.push(NetDef {
                     weight: self.options.decoupling_weight,
                     role: Role::Decoupling,
+                    net: None,
                     pins: vec![cap, target],
                     fixed: Vec::new(),
                 });
@@ -887,6 +979,7 @@ impl<'d> Model<'d> {
                 self.nets.push(NetDef {
                     weight: self.options.thermal_weight,
                     role: Role::Thermal,
+                    net: None,
                     pins,
                     fixed: Vec::new(),
                 });
@@ -1047,11 +1140,24 @@ impl<'d> Model<'d> {
         at: &[Option<(PPoint, i32)>],
         scale: (i64, i64),
     ) -> Built {
+        self.problem_in(blocked, role, at, scale, None)
+    }
+
+    /// [`problem`](Model::problem), with the movable items kept in `window` if given.
+    fn problem_in(
+        &self,
+        blocked: &[bool],
+        role: &dyn Fn(usize) -> Presence,
+        at: &[Option<(PPoint, i32)>],
+        scale: (i64, i64),
+        window: Option<PRect>,
+    ) -> Built {
         let area = self.raster.area();
         let mut problem = PlacementProblem::new(Layout::FreeSpace {
             area,
             pitch: self.options.pitch.max(1),
         });
+        let region = window.map(|w| problem.add_region(w));
         for r in self.raster.rects(blocked) {
             problem.add_item(
                 place::Item::new()
@@ -1067,13 +1173,25 @@ impl<'d> Model<'d> {
                 place::Item::new().fixed_at(to_p(comp.at), f.turns * QUARTER)
             } else {
                 match role(c) {
-                    Presence::Real => place::Item::new()
-                        .outline(self.grown(c, scale))
-                        .rotations(&rotations),
+                    Presence::Real => {
+                        let item = place::Item::new()
+                            .outline(self.grown(c, scale))
+                            .rotations(&rotations);
+                        match region {
+                            Some(r) => item.region(r),
+                            None => item,
+                        }
+                    }
                     Presence::Ghost => place::Item::new().rotations(&rotations),
                     Presence::Anchor => {
                         let (p, r) = at[c].unwrap_or((to_p(comp.at), f.turns * QUARTER));
                         place::Item::new().fixed_at(p, r)
+                    }
+                    Presence::Wall => {
+                        let (p, r) = at[c].unwrap_or((to_p(comp.at), f.turns * QUARTER));
+                        place::Item::new()
+                            .outline(self.grown(c, scale))
+                            .fixed_at(p, r)
                     }
                 }
             };
@@ -1156,6 +1274,18 @@ impl<'d> Model<'d> {
         start: Placement,
         at: &[(PPoint, i32)],
     ) -> Result<Placement, PlaceError> {
+        self.refine_with(built, start, at, None)
+    }
+
+    /// [`refine`](Model::refine), with congestion priced from `estimate` if given, rather
+    /// than from a RUDY map of `at`.
+    fn refine_with(
+        &self,
+        built: &Built,
+        start: Placement,
+        at: &[(PPoint, i32)],
+        estimate: Option<&CongestionGrid>,
+    ) -> Result<Placement, PlaceError> {
         let options = AnnealOptions {
             seed: self.options.seed,
             inner_num: self.options.effort,
@@ -1166,7 +1296,7 @@ impl<'d> Model<'d> {
             let both = (
                 cost,
                 CongestionCost {
-                    estimate: self.congestion(at),
+                    estimate: estimate.cloned().unwrap_or_else(|| self.congestion(at)),
                     factor_permille: self.options.congestion_permille,
                 },
             );
@@ -1400,10 +1530,200 @@ pub fn place_components(
     })
 }
 
+/// What routing a placement taught, for placing it again where routing found trouble: see
+/// [`refine_components`].
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
+pub struct Feedback {
+    /// The components that may move, by index; the others stay where they are. Movable
+    /// components only, and none that goes through the board.
+    pub window: Vec<usize>,
+    /// Nets to weigh more, each with its weight in percent of what it was, such as 300 for a
+    /// net that took many vias or a long detour.
+    pub weights: Vec<(NetId, u32)>,
+    /// Where routing was congested: by default, a RUDY map of the placement.
+    pub congestion: Option<CongestionGrid>,
+    /// Components of the window to put on the other side.
+    pub flips: Vec<usize>,
+    /// How far around the window's parts and their nets' pins the window's parts may go. The
+    /// default, zero, is anywhere on the board.
+    pub reach: i64,
+}
+
+/// Places some components of a placement again, around the others: the second step of the
+/// placement–routing loop of `kicad::place_and_route`.
+///
+/// `placed` is a placement of `design`, as [`place_components`] returns it, at the spacing it
+/// found room with, `spacing`. The components of [`Feedback::window`] are put on the sides
+/// given, legalized from where they are among the others, which stay where they are, and
+/// annealed at a low temperature, with the nets of [`Feedback::weights`] weighed more and
+/// congestion priced from [`Feedback::congestion`]. Each side is a pass, as in
+/// [`place_components`].
+///
+/// # Errors
+///
+/// [`PlaceError::NoRoom`] if the window's parts don't fit where they may go, as when parts
+/// put on the other side don't fit there.
+pub fn refine_components(
+    design: &PlacementDesign,
+    placed: &[Placed],
+    spacing: i64,
+    feedback: &Feedback,
+    options: &PlaceOptions,
+) -> Result<PlaceReport, PlaceError> {
+    let scale = if options.spacing > 0 {
+        (spacing.clamp(0, options.spacing), options.spacing)
+    } else {
+        (0, 1)
+    };
+    let comps = &design.components;
+    let mut sides: Vec<Side> = comps
+        .iter()
+        .enumerate()
+        .map(|(c, comp)| placed.get(c).map_or(comp.side, |p| p.side))
+        .collect();
+    let in_window: Vec<bool> = (0..comps.len())
+        .map(|c| feedback.window.contains(&c) && !comps[c].fixed && !comps[c].through)
+        .collect();
+    for &c in &feedback.flips {
+        if c < comps.len() && in_window[c] {
+            sides[c] = match sides[c] {
+                Side::Front => Side::Back,
+                Side::Back => Side::Front,
+            };
+        }
+    }
+    let mut model = Model::with_sides(design, options, scale, None, Some(&sides));
+    for net in &mut model.nets {
+        if let Some(&(_, percent)) = net
+            .net
+            .and_then(|n| feedback.weights.iter().find(|(m, _)| *m == n))
+        {
+            net.weight =
+                (u64::from(net.weight) * u64::from(percent) / 100).clamp(1, 1 << 20) as u32;
+        }
+    }
+    let model = model;
+    // Where everything is, in the frames of the sides it is on now.
+    let mut at: Vec<(PPoint, i32)> = (0..comps.len())
+        .map(|c| {
+            let f = &model.frames[c];
+            match placed.get(c) {
+                Some(p) if !comps[c].fixed && p.side == model.sides[c] => {
+                    let r = (p.rotation - f.base).rem_euclid(360_000);
+                    (to_p(p.at), r - r % QUARTER)
+                }
+                Some(p) if !comps[c].fixed => (to_p(p.at), f.turns * QUARTER),
+                _ => (to_p(comps[c].at), f.turns * QUARTER),
+            }
+        })
+        .collect();
+    let original = at.clone();
+    let takes = |c: usize| model.frames[c].takes;
+    // Parts through the board stay, and take room on both sides.
+    let mut front = model.raster.front.clone();
+    let mut back = model.raster.back.clone();
+    for (c, comp) in comps.iter().enumerate() {
+        if !comp.fixed && takes(c) == Takes::Both {
+            let g = model.grown(c, (0, 1));
+            let r = PRect::new(place::rotate(g.min, at[c].1), place::rotate(g.max, at[c].1))
+                .translate(at[c].0);
+            model.raster.block_in(&mut front, &r);
+            model.raster.block_in(&mut back, &r);
+        }
+    }
+    for (side, blocked) in [(Side::Front, &front), (Side::Back, &back)] {
+        let here = |c: usize| {
+            !comps[c].fixed
+                && takes(c) != Takes::Both
+                && (takes(c) == Takes::Front) == (side == Side::Front)
+        };
+        if !(0..comps.len()).any(|c| here(c) && in_window[c]) {
+            continue;
+        }
+        let role = |c: usize| {
+            if here(c) && in_window[c] {
+                Presence::Real
+            } else if here(c) {
+                Presence::Wall
+            } else {
+                Presence::Anchor
+            }
+        };
+        let window = (feedback.reach > 0).then(|| {
+            let mut w: Option<PRect> = None;
+            let mut grow = |p: PPoint| {
+                w = Some(w.map_or(PRect::point(p), |b| b.including(p)));
+            };
+            for net in &model.nets {
+                if net.pins.iter().any(|&(c, _)| in_window[c] && here(c)) {
+                    for &(c, o) in &net.pins {
+                        grow(at[c].0.offset(place::rotate(o, at[c].1)));
+                    }
+                }
+            }
+            let area = model.raster.area();
+            let w = w.unwrap_or(area);
+            PRect::new(
+                area.clamp(PPoint::new(
+                    w.min.x - feedback.reach,
+                    w.min.y - feedback.reach,
+                )),
+                area.clamp(PPoint::new(
+                    w.max.x + feedback.reach,
+                    w.max.y + feedback.reach,
+                )),
+            )
+        });
+        let anchors: Vec<Option<(PPoint, i32)>> = at.iter().map(|&a| Some(a)).collect();
+        let built = model.problem_in(blocked, &role, &anchors, scale, window);
+        let mut targets = vec![PPoint::default(); built.problem.items().len()];
+        let mut rotations = vec![0; built.problem.items().len()];
+        for (c, &item) in built.items.iter().enumerate() {
+            targets[item.index()] = at[c].0;
+            rotations[item.index()] = at[c].1;
+        }
+        let start = place::legalize(&built.problem, &targets, &rotations)?;
+        let mut now = at.clone();
+        model.take(&built, &start, &mut now, &|c| here(c) && in_window[c]);
+        let placement = model.refine_with(&built, start, &now, feedback.congestion.as_ref())?;
+        model.take(&built, &placement, &mut at, &|c| here(c) && in_window[c]);
+    }
+    let placed = comps
+        .iter()
+        .zip(&model.frames)
+        .zip(&at)
+        .zip(&model.sides)
+        .map(|(((c, f), &(p, r)), &side)| {
+            if c.fixed {
+                Placed {
+                    at: c.at,
+                    rotation: c.rotation,
+                    side: c.side,
+                }
+            } else {
+                Placed {
+                    at: to_g(p),
+                    rotation: normalized(f.base + r),
+                    side,
+                }
+            }
+        })
+        .collect();
+    Ok(PlaceReport {
+        placed,
+        movable: comps.iter().filter(|c| !c.fixed).count(),
+        decoupling: model.decoupling.clone(),
+        spacing: options.spacing * scale.0 / scale.1,
+        wirelength: (model.wirelength(&original), model.wirelength(&at)),
+        peak_congestion: model.congestion(&at).peak_utilization(),
+    })
+}
+
 /// Where a point of a component, on the board as it is now, is with the component where
 /// `placed` puts it: mirrored top to bottom about its origin if it changed sides, turned, and
 /// moved. `None` if the turn isn't a whole number of quarter turns.
-fn placed_point(comp: &Component, placed: &Placed, q: Point) -> Option<Point> {
+pub(crate) fn placed_point(comp: &Component, placed: &Placed, q: Point) -> Option<Point> {
     let flipped = placed.side != comp.side;
     let was = if flipped {
         -comp.rotation
@@ -1591,6 +1911,59 @@ mod tests {
         }
         let again = place_components(&d, &options).unwrap();
         assert_eq!(report, again);
+    }
+
+    #[test]
+    fn refinement_moves_only_its_window() {
+        let d = design();
+        let options = PlaceOptions::default();
+        let first = place_components(&d, &options).unwrap();
+        // The three capacitors, two of them sent to the other side.
+        let feedback = Feedback {
+            window: vec![2, 3, 4],
+            weights: vec![(NetId(3), 300)],
+            flips: vec![2, 3],
+            reach: 5_000_000,
+            ..Feedback::default()
+        };
+        let again =
+            refine_components(&d, &first.placed, first.spacing, &feedback, &options).unwrap();
+        for c in [0, 1, 5] {
+            assert_eq!(again.placed[c], first.placed[c], "{}", d.components[c].name);
+        }
+        assert_ne!(again.placed[2].side, first.placed[2].side);
+        assert_ne!(again.placed[3].side, first.placed[3].side);
+        assert_eq!(again.placed[4].side, first.placed[4].side);
+        assert!(outline_overlaps(&d, &again.placed).is_empty());
+        let same = refine_components(&d, &first.placed, first.spacing, &feedback, &options);
+        assert_eq!(same.unwrap(), again);
+        // With no window, nothing moves.
+        let none = refine_components(
+            &d,
+            &first.placed,
+            first.spacing,
+            &Feedback::default(),
+            &options,
+        )
+        .unwrap();
+        assert_eq!(none.placed, first.placed);
+    }
+
+    #[test]
+    fn sides_follow_connections() {
+        // Everything on the front: U1's connections hold it there, and R1, through the
+        // board, counts on neither side.
+        let mut d = design();
+        for c in &mut d.components {
+            c.side = Side::Front;
+        }
+        let options = PlaceOptions::default();
+        let model = Model::new(&d, &options, (1, 1), None);
+        let neighbours = model.neighbours();
+        assert!(model.affinity(&neighbours[1], Side::Front) > 0);
+        assert!(model.affinity(&neighbours[1], Side::Back) < 0);
+        let through: Vec<usize> = vec![5; 3];
+        assert_eq!(model.affinity(&through, Side::Front), 0);
     }
 
     #[test]

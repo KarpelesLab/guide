@@ -11,8 +11,8 @@
 # stay in VTR's tree, and what this makes of them is never copied into this repository.
 #
 # VTR's flow scripts import prettytable, which has to be installed for python3 or on its
-# PYTHONPATH. Circuits run in parallel, $JOBS at a time (default 21). The largest, mcml and
-# LU32PEEng, take about an hour each in Odin II.
+# PYTHONPATH. Circuits run in parallel, $JOBS at a time (default 21). Most take seconds to a
+# few minutes. LU32PEEng took 10 minutes and mcml 40, the longest.
 
 set -u
 

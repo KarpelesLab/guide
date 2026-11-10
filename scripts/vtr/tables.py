@@ -103,23 +103,32 @@ def main():
     def earlier_mean(column):
         return ["", column.mean()] if before else []
 
-    # Minimum channel width.
+    # Minimum channel width, with the hard blocks of architectures that have them.
+    hard = [
+        (key, name)
+        for key, name in (("mult_36", "Multipliers"), ("memory", "Memories"))
+        if any(key in r for r in results)
+    ]
     rows = []
     now, old = Column("guide_min_w", "vpr_min_w", 0), Column("guide_min_w", "vpr_min_w", 0)
     for r in results:
         c = r["circuit"]
         rows.append(
-            [c, r.get("clbs", "-"), r.get("grid", "-"), show(number(r, "vpr_min_w"), 0)]
+            [c, r.get("clbs", "-")]
+            + [r.get(key, "-") for key, _ in hard]
+            + [r.get("grid", "-"), show(number(r, "vpr_min_w"), 0)]
             + earlier(old, c)
             + now.cells(after, c)
             + [r.get("guide_min_w_vpr_legal", "-")]
         )
     table(
-        ["Circuit", "CLBs", "Grid, tiles a side", "VPR"]
+        ["Circuit", "CLBs"]
+        + [name for _, name in hard]
+        + ["Grid, tiles a side", "VPR"]
         + then
         + ["guide", "guide / VPR", "VPR accepts guide's route"],
         rows,
-        ["Geomean", "", "", ""] + earlier_mean(old) + ["", now.mean(), ""],
+        ["Geomean", ""] + ["" for _ in hard] + ["", ""] + earlier_mean(old) + ["", now.mean(), ""],
     )
 
     # At the relaxed width: delay, as VPR's analysis times both.
@@ -129,7 +138,10 @@ def main():
     for r in results:
         c = r["circuit"]
         guide = number(r, "guide_one_vpr_cpd_ns")
-        estimate = number(r, "guide_one_critical_path_ps")
+        # The worst slack against a period of 0 counts setup times, as VPR's critical path
+        # does. Runs before it was recorded only have the latest arrival.
+        slack = number(r, "guide_one_worst_slack_ps")
+        estimate = -slack if slack is not None else number(r, "guide_one_critical_path_ps")
         estimate = estimate / 1000 if estimate is not None else None
         own.append(ratio(estimate, guide))
         rows.append(

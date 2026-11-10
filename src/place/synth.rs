@@ -369,19 +369,32 @@ pub fn peko(options: PekoOptions) -> Generated {
 }
 
 /// [`grid`] in free space: square items `size` wide, an even number, that can turn by quarter
-/// turns, with their pins at their centres, in an area that holds them exactly, placed on a
-/// lattice of `pitch`. Two squares that don't overlap have centres at least `size` apart, so
-/// the optimum is `size` per net.
+/// turns, with their pins at their centres, placed on a lattice of `pitch`. The area holds them
+/// with `spare` more on each side, so with `spare` at 0 it holds them exactly. Two squares that
+/// don't overlap have centres at least `size` apart, so the optimum is `size` per net, however
+/// much room there is.
 ///
 /// # Panics
 ///
-/// If `size` is odd or below 2, or `pitch` below 1.
-pub fn free_grid(width: u32, height: u32, size: i64, pitch: i64, seed: u64) -> Generated {
+/// If `size` is odd or below 2, `pitch` below 1 or `spare` below 0.
+pub fn free_grid(
+    width: u32,
+    height: u32,
+    size: i64,
+    pitch: i64,
+    spare: i64,
+    seed: u64,
+) -> Generated {
     assert!(
-        size >= 2 && size % 2 == 0 && pitch >= 1,
+        size >= 2 && size % 2 == 0 && pitch >= 1 && spare >= 0,
         "bad size or pitch"
     );
-    let area = Rect::with_size(0, 0, i64::from(width) * size, i64::from(height) * size);
+    let area = Rect::with_size(
+        0,
+        0,
+        i64::from(width) * size + spare,
+        i64::from(height) * size + spare,
+    );
     let mut centred = PlacementProblem::new(Layout::FreeSpace { area, pitch });
     let mut rng = Rng::new(seed);
     let mut order: Vec<u32> = (0..width * height).collect();

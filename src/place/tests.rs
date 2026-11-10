@@ -33,7 +33,7 @@ fn generated() -> Vec<(&'static str, Generated)> {
                 ..PekoOptions::new(8, 8, 6)
             }),
         ),
-        ("free grid", synth::free_grid(4, 4, 10, 5, 7)),
+        ("free grid", synth::free_grid(4, 4, 10, 5, 0, 7)),
     ]
 }
 

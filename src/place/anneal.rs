@@ -28,8 +28,10 @@ const MIN_MOVES: f64 = 100.0;
 pub struct AnnealOptions<'c> {
     /// The seed of every random choice. The default is 1.
     pub seed: u64,
-    /// Moves per temperature, as a multiple of `units^(4/3)`. The default is 1, as VPR's
-    /// `--inner_num`. More gives better results more slowly.
+    /// Moves per temperature, as a multiple of `units^(4/3)`, which is VPR's `--inner_num`.
+    /// The default is 1. More gives better results more slowly: on the synthetic problems of
+    /// `docs/benchmarks.md`, 10 instead of 1 took results from 1.33 to 2.1 times the optimum
+    /// down to 1.06 to 1.5.
     pub inner_num: f64,
     /// The first temperature, as a multiple of the standard deviation of random moves' cost
     /// changes. The default is 20, as in VPR, which accepts nearly everything at first.
@@ -149,8 +151,9 @@ struct Old {
 /// the range limit of where it is: a site of its kind at most that many columns and rows away,
 /// counted among the columns and rows that have sites of the kind, or a point at most that many
 /// pitches away in free space. If another single item is there, the two swap. On sites, a macro
-/// that lands on single items sends each of them to the site a member left, following the
-/// chain of a shift that overlaps itself, as VPR does. In free space, a macro only moves to
+/// may go as much further as it is long, and one that lands on single items sends each of them
+/// to the site a member left, following the chain of a shift that overlaps itself, as VPR
+/// does, or trades places with a macro of the same shape that it lands on exactly. In free space, a macro only moves to
 /// where nothing is. An item allowed several rotations is sometimes turned in place instead.
 /// A move that would break legality, by leaving a region, overlapping or swapping with a
 /// macro member or a fixed item, is abandoned and counts as rejected, so every placement the
@@ -676,13 +679,18 @@ impl<'a, C: CostTerm> Annealer<'a, C> {
 
     /// A random site of the kind of the site `from`, within the range limit of it and within
     /// `region`'s columns and rows, other than `from`.
-    fn random_site_near(&mut self, from: SiteId, region: Option<Rect>) -> Option<SiteId> {
+    fn random_site_near(
+        &mut self,
+        from: SiteId,
+        region: Option<Rect>,
+        extra: i64,
+    ) -> Option<SiteId> {
         let sites = self.problem.sites();
         let kind = sites[from.index()].kind;
         let g = self.netlist.grid_of(kind)?;
         let grid = &self.netlist.grids[g];
         let (cx, cy, _) = self.netlist.site_cell[from.index()];
-        let r = self.range_steps();
+        let r = self.range_steps() + extra;
         let (mut lo_x, mut hi_x) = (cx as i64 - r, cx as i64 + r);
         let (mut lo_y, mut hi_y) = (cy as i64 - r, cy as i64 + r);
         lo_x = lo_x.max(0);
@@ -731,7 +739,7 @@ impl<'a, C: CostTerm> Annealer<'a, C> {
                 .item(item)
                 .region
                 .map(|r| self.problem.regions()[r.index()]);
-            let Some(to) = self.random_site_near(from, region) else {
+            let Some(to) = self.random_site_near(from, region, 0) else {
                 return false;
             };
             let sites = self.problem.sites();
@@ -759,7 +767,19 @@ impl<'a, C: CostTerm> Annealer<'a, C> {
         let Some(from) = self.placement.sites[first.index()] else {
             return false;
         };
-        let Some(to) = self.random_site_near(from, None) else {
+        // A macro can always reach as far as it is long, or it could never trade places with
+        // its neighbours once the range limit is small.
+        let (ax, ay, _) = self.netlist.site_cell[from.index()];
+        let mut span = 0i64;
+        for &(item, _) in &self.netlist.units[unit].members {
+            if let Some(site) = self.placement.sites[item.index()] {
+                let (x, y, _) = self.netlist.site_cell[site.index()];
+                span = span
+                    .max(i64::from(x).abs_diff(i64::from(ax)) as i64)
+                    .max(i64::from(y).abs_diff(i64::from(ay)) as i64);
+            }
+        }
+        let Some(to) = self.random_site_near(from, None, span) else {
             return false;
         };
         let sites = self.problem.sites();

@@ -24,10 +24,10 @@ pub struct AnalyticOptions<'c> {
     /// The most iterations of solving and spreading. The default is 50.
     pub max_iterations: u32,
     /// Stop when the upper bound's wirelength is within this fraction of the lower bound's.
-    /// The default is 0.1, as in SimPL.
+    /// The default is 0.1.
     pub stop_gap: f64,
     /// The weight of the pseudo-nets to the upper bound, in the first iteration, against 1 for
-    /// a net. The default is 0.01, as in SimPL.
+    /// a net. The default is 0.01.
     pub anchor_weight: f64,
     /// What that weight is multiplied by after each iteration. The default is 1.5.
     pub anchor_growth: f64,
@@ -590,7 +590,34 @@ fn bisect_sites(bodies: &mut [Body], sites: &mut [[f64; 2]], out: &mut [[f64; 2]
         return;
     };
     sort_bodies(bodies, axis);
-    let k = split_point(bodies, middle as f64 / sites.len() as f64);
+    let (mut middle, mut k) = (
+        middle,
+        split_point(bodies, middle as f64 / sites.len() as f64),
+    );
+    // Where there is room to spare, halve the bodies instead and cut where they part, as long
+    // as each side keeps sites enough, so that bodies spread only as far as they must.
+    let total: f64 = bodies.iter().fold(0.0, |s, b| s + b.size);
+    if total < sites.len() as f64 {
+        let half = split_point(bodies, 0.5).clamp(1, bodies.len() - 1);
+        let below: f64 = bodies[..half].iter().fold(0.0, |s, b| s + b.size);
+        let parting = (bodies[half - 1].at[axis] + bodies[half].at[axis]) / 2.0;
+        let mut best: Option<(f64, usize)> = None;
+        for j in 1..sites.len() {
+            if sites[j - 1][axis] < sites[j][axis]
+                && j as f64 >= below
+                && (sites.len() - j) as f64 >= total - below
+            {
+                let distance = ((sites[j - 1][axis] + sites[j][axis]) / 2.0 - parting).abs();
+                if best.is_none_or(|(d, _)| distance < d) {
+                    best = Some((distance, j));
+                }
+            }
+        }
+        if let Some((_, j)) = best {
+            middle = j;
+            k = half;
+        }
+    }
     let (left_sites, right_sites) = sites.split_at_mut(middle);
     let (left, right) = bodies.split_at_mut(k);
     bisect_sites(left, left_sites, out);
@@ -638,20 +665,49 @@ fn bisect_area(
         }
         return;
     }
+    // Halve the bodies by area, in order across the longer side, and cut the region where the
+    // room on each side is in proportion to what goes there, so that density is even. Cutting
+    // where the bodies part, to spread them only as far as they must, gave shorter upper bounds
+    // with room to spare but worse legal results, as the greedy legalizer then has less room
+    // between items.
     let axis = usize::from(height > width);
-    let cut = (region[0][axis] + region[1][axis]) / 2.0;
-    let mut left = region;
-    left[1][axis] = cut;
+    sort_bodies(bodies, axis);
+    let k = split_point(bodies, 0.5).clamp(1, bodies.len() - 1);
+    let total: f64 = bodies.iter().fold(0.0, |s, b| s + b.size);
+    let below: f64 = bodies[..k].iter().fold(0.0, |s, b| s + b.size);
+    let share = if total > 0.0 {
+        below / total
+    } else {
+        k as f64 / bodies.len() as f64
+    };
+    let whole = room(region, obstacles);
+    let side = |cut: f64| {
+        let mut part = region;
+        part[1][axis] = cut;
+        part
+    };
+    // The cut that leaves `want` of room on the low side, by bisection, as room there grows
+    // with the cut.
+    let cut_for = |want: f64| {
+        let (mut low, mut high) = (region[0][axis], region[1][axis]);
+        for _ in 0..60 {
+            let middle = (low + high) / 2.0;
+            if room(side(middle), obstacles) < want {
+                low = middle;
+            } else {
+                high = middle;
+            }
+        }
+        low
+    };
+    let cut = if whole <= 0.0 {
+        region[0][axis] + share * (region[1][axis] - region[0][axis])
+    } else {
+        cut_for(share * whole)
+    };
+    let left = side(cut);
     let mut right = region;
     right[0][axis] = cut;
-    let (room_left, room_right) = (room(left, obstacles), room(right, obstacles));
-    let share = if room_left + room_right > 0.0 {
-        room_left / (room_left + room_right)
-    } else {
-        0.5
-    };
-    sort_bodies(bodies, axis);
-    let k = split_point(bodies, share);
     let (l, r) = bodies.split_at_mut(k);
     bisect_area(l, left, obstacles, boxes, out);
     bisect_area(r, right, obstacles, boxes, out);
@@ -670,11 +726,14 @@ fn bisect_area(
 /// fixed order.
 ///
 /// The solution, the **lower bound**, has items piled on each other. **Spreading** makes the
-/// upper bound from it: recursive bisection, cutting the sites (of each kind separately) or
-/// the free area in two, alternately across its longer side, and dividing the items, in order
-/// of position, in proportion to the room on each side, until each part holds one. On sites
-/// the item then takes the part's site nearest to it, so the upper bound is nearly legal; in
-/// free space it stays where it was, pulled inside its part.
+/// upper bound from it: recursive bisection, across the longer side of each part, until each
+/// part holds one item. On sites, of each kind separately, the sites are cut in two between
+/// columns or rows as near their middle as can be, and the items, in order of position,
+/// divided in proportion; the item then takes its part's site nearest to it, so the upper bound
+/// is nearly legal, and where there are more sites than items, the cut goes where the items
+/// part, if each side keeps sites enough, so that items spread only as far as they must. In
+/// free space the items are halved by area, and the area cut where the room on each side, less
+/// fixed items, is in that proportion; the item stays where it was, pulled inside its part.
 ///
 /// Each further solve adds a pseudo-net from every item to its place in the upper bound,
 /// with a weight that grows each iteration, so that the two bounds converge. The loop stops

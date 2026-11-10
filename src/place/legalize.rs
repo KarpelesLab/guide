@@ -86,24 +86,34 @@ pub fn legalize(
 ///
 /// Greedy placement near targets can leave room only in gaps too small for what comes next:
 /// columns cut too short for the macros still to come, or space between outlines. If any unit
-/// finds no room, this tries again packing, largest first: on sites, macros to the lowest room
-/// near their column, and in free space, every unit to the lowest and then leftmost spot on its
-/// lattice, which is bottom-left packing.
+/// finds no room, this tries again packing. On sites, macros go largest first, each to the
+/// lowest room near its column. In free space, units go from left to right, each to the
+/// leftmost spot with room in the row where that is nearest its target, as in the Tetris
+/// legalizer, and if that fails too, largest first to the lowest and then leftmost spot, which
+/// is bottom-left packing.
 pub(crate) fn legalize_units(
     problem: &PlacementProblem,
     netlist: &Netlist,
     anchors: &[Point],
     rotations: &[i32],
 ) -> Result<Placement, PlaceError> {
-    match legalize_once(problem, netlist, anchors, rotations, false) {
-        Err(PlaceError::NoRoom(_))
-            if matches!(problem.layout(), Layout::FreeSpace { .. })
-                || !problem.macros().is_empty() =>
-        {
-            legalize_once(problem, netlist, anchors, rotations, true)
-        }
-        result => result,
+    let free = matches!(problem.layout(), Layout::FreeSpace { .. });
+    let mut result = legalize_once(problem, netlist, anchors, rotations, Mode::Nearest);
+    if matches!(result, Err(PlaceError::NoRoom(_))) && (free || !problem.macros().is_empty()) {
+        result = legalize_once(problem, netlist, anchors, rotations, Mode::Tetris);
     }
+    if matches!(result, Err(PlaceError::NoRoom(_))) && free {
+        result = legalize_once(problem, netlist, anchors, rotations, Mode::BottomLeft);
+    }
+    result
+}
+
+/// How [`legalize_once`] chooses spots.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+    Nearest,
+    Tetris,
+    BottomLeft,
 }
 
 fn legalize_once(
@@ -111,7 +121,7 @@ fn legalize_once(
     netlist: &Netlist,
     anchors: &[Point],
     rotations: &[i32],
-    packed: bool,
+    mode: Mode,
 ) -> Result<Placement, PlaceError> {
     let bottom = problem.extent().min.y;
     let mut placement = Placement::new(problem);
@@ -132,7 +142,7 @@ fn legalize_once(
                 } else {
                     (anchors[u].x, anchors[u].y)
                 };
-                let size = if packed {
+                let size = if mode != Mode::Nearest {
                     usize::MAX - unit.members.len()
                 } else {
                     0
@@ -149,7 +159,7 @@ fn legalize_once(
             });
             for u in order {
                 let unit = &netlist.units[u];
-                let target = if packed && unit.is_macro {
+                let target = if mode != Mode::Nearest && unit.is_macro {
                     Point::new(anchors[u].x, bottom)
                 } else {
                     anchors[u]
@@ -172,10 +182,9 @@ fn legalize_once(
             for (i, item) in problem.items().iter().enumerate() {
                 if item.fixed.is_some() {
                     let id = ItemId(i as u32);
-                    index.insert(
-                        i as u32,
-                        problem.outline_at(id, placement.origins[i], placement.rotations[i]),
-                    );
+                    let outline =
+                        problem.outline_at(id, placement.origins[i], placement.rotations[i]);
+                    index.insert(i as u32, outline);
                 }
             }
             let mut order: Vec<usize> = (0..netlist.units.len()).collect();
@@ -194,19 +203,22 @@ fn legalize_once(
                         .unwrap_or(u64::MAX)
                 })
                 .collect();
-            if packed {
-                order.sort_by_key(|&u| {
-                    (rooms[u], u64::MAX - areas[u], anchors[u].y, anchors[u].x, u)
-                });
-            } else {
-                order.sort_by_key(|&u| {
+            match mode {
+                Mode::Nearest => order.sort_by_key(|&u| {
                     (rooms[u], u64::MAX - areas[u], anchors[u].x, anchors[u].y, u)
-                });
+                }),
+                Mode::Tetris => {
+                    order.sort_by_key(|&u| (rooms[u], anchors[u].x, anchors[u].y, u));
+                }
+                Mode::BottomLeft => order.sort_by_key(|&u| {
+                    (rooms[u], u64::MAX - areas[u], anchors[u].x, anchors[u].y, u)
+                }),
             }
             for u in order {
                 let unit = &netlist.units[u];
-                let spot = if packed {
-                    lowest_free_spot(problem, unit, rotations[u], *area, *pitch, &index)
+                let spot = if mode != Mode::Nearest {
+                    let target = (mode == Mode::Tetris).then_some(anchors[u]);
+                    packed_spot(problem, unit, rotations[u], target, *area, *pitch, &index)
                 } else {
                     nearest_free_spot(
                         problem,
@@ -227,7 +239,8 @@ fn legalize_once(
                     };
                     let origin = anchor.offset(offset);
                     placement.set_origin(item, origin, rotation);
-                    index.insert(item.0, problem.outline_at(item, origin, rotation));
+                    let outline = problem.outline_at(item, origin, rotation);
+                    index.insert(item.0, outline);
                 }
             }
         }
@@ -423,11 +436,17 @@ pub(crate) fn site_unit_fits(
     true
 }
 
-/// The lowest and then leftmost free spot for a unit's anchor on its lattice, or `None`.
-fn lowest_free_spot(
+/// A packed spot for a unit's anchor on its lattice, or `None`.
+///
+/// With a target, each row of the lattice offers its leftmost spot with room, and the row whose
+/// spot is nearest the target wins, as in the Tetris legalizer for standard cells: taken in
+/// order from left to right, units pack against each other and leave no gaps. Without, the
+/// lowest row with room wins, and its leftmost spot, which is bottom-left packing.
+fn packed_spot(
     problem: &PlacementProblem,
     unit: &Unit,
     rotation: i32,
+    target: Option<Point>,
     area: Rect,
     pitch: i64,
     index: &SpatialIndex,
@@ -435,19 +454,27 @@ fn lowest_free_spot(
     let bounds = unit_box(problem, unit, rotation);
     let lowest = Point::new(area.min.x - bounds.min.x, area.min.y - bounds.min.y);
     let highest = Point::new(area.max.x - bounds.max.x, area.max.y - bounds.max.y);
+    let mut best: Option<(u64, Point)> = None;
     let mut y = lowest.y;
     while y <= highest.y {
         let mut x = lowest.x;
         while x <= highest.x {
-            let anchor = Point::new(x, y);
-            if unit_fits(problem, unit, rotation, anchor, &area, index) {
-                return Some(anchor);
+            let spot = Point::new(x, y);
+            if unit_fits(problem, unit, rotation, spot, &area, index) {
+                let Some(target) = target else {
+                    return Some(spot);
+                };
+                let distance = spot.manhattan(target);
+                if best.is_none_or(|(d, _)| distance < d) {
+                    best = Some((distance, spot));
+                }
+                break;
             }
             x += pitch;
         }
         y += pitch;
     }
-    None
+    best.map(|(_, spot)| spot)
 }
 
 /// The free spot for a unit's anchor nearest to `target`, on its lattice, or `None`.

@@ -132,8 +132,9 @@ pub fn fixed_because(board: &KicadBoard, footprint: usize) -> Option<FixedBecaus
 /// Each takes the room of [`footprint_outline`], on its side, or on both if any of its pads
 /// has a hole, and is fixed if [`fixed_because`] says. Its pins are its pads that have a net.
 /// The board's edge, copper and zones are as [`read`](super::read) read them: copper
-/// graphics, text on copper and rule areas that keep pads or tracks out are kept out of on
-/// the outer layers they are on, and the nets of copper zones are planes. If the project
+/// graphics, text on copper, openings drawn in the solder mask and rule areas that keep pads
+/// or tracks out are kept out of on the outer layers they are on, and the nets of copper zones
+/// are planes. If the project
 /// makes silkscreen overlaps errors, [`KicadBoard::silk_is_error`], the room a movable
 /// footprint takes includes its silkscreen, and fixed footprints' silkscreen and the board's
 /// own are kept out of.
@@ -236,6 +237,11 @@ pub fn placement_design(board: &KicadBoard) -> PlacementDesign {
         if let Some(side) = side_of(*layer) {
             design.keepouts.push((shape.bbox(), side));
         }
+    }
+    // The board's own openings in the mask would bridge pads put under them.
+    for &(b, back) in &board.mask_graphics {
+        let side = if back { Side::Back } else { Side::Front };
+        design.keepouts.push((b, Some(side)));
     }
     if board.silk_is_error {
         for &(b, back) in &board.silkscreen {

@@ -114,6 +114,7 @@ pub fn read(pcb: &str, project: Option<&str>) -> Result<KicadBoard, KicadError> 
         zone_lists,
         footprints,
         silkscreen,
+        mask_graphics,
         ..
     } = r;
     let mut routing = routing(&project, &names, outline);
@@ -134,6 +135,7 @@ pub fn read(pcb: &str, project: Option<&str>) -> Result<KicadBoard, KicadError> 
         footprints,
         silkscreen,
         silk_is_error,
+        mask_graphics,
     })
 }
 
@@ -349,6 +351,8 @@ struct Reader {
     footprints: Vec<super::Footprint>,
     /// The board's own silkscreen, as boxes.
     silkscreen: Vec<(Rect, bool)>,
+    /// The board's own openings in the solder mask, as boxes.
+    mask_graphics: Vec<(Rect, bool)>,
 }
 
 /// The text of the UUID of an item: `uuid` from KiCad 7 on, `tstamp` before.
@@ -499,6 +503,7 @@ impl Reader {
             zone_uuids: Vec::new(),
             footprints: Vec::new(),
             silkscreen: Vec::new(),
+            mask_graphics: Vec::new(),
         };
         // Copper with no net is of the net with no name, so that it is never checked
         // against itself, as in KiCad.
@@ -1284,6 +1289,9 @@ impl Reader {
         let place = fp.map_or(Place::BOARD, |f| f.place);
         if let Some(shapes) = self.graphic_shapes(node, &|v| to_point(place.apply(v)), "mask") {
             for shape in shapes {
+                if fp.is_none() {
+                    self.mask_graphics.push((shape.bbox(), layer != LayerId(0)));
+                }
                 self.masks.push(MaskOpening {
                     shape,
                     layer,

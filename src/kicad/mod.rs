@@ -153,6 +153,9 @@ pub struct KicadBoard {
     /// Whether the project makes silkscreen that overlaps silkscreen or pads an error,
     /// `silk_overlap` or `silk_over_copper`, which by default are warnings.
     pub silk_is_error: bool,
+    /// Boxes around the board's own openings in the solder mask, graphics on `F.Mask` or
+    /// `B.Mask`, each with whether it is on the back.
+    pub mask_graphics: Vec<(crate::geom::Rect, bool)>,
 }
 
 /// A footprint of a [`KicadBoard`]: where it is, what it is, and how much room it takes.

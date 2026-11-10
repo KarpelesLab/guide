@@ -162,8 +162,9 @@ fn route(pcb: &str, pro: &str, moved: &BTreeSet<String>, baseline: &BTreeSet<Str
 }
 
 /// Places a board's movable footprints, and returns the report, the placed board's text, the
-/// references of what moved, and the seconds placement took.
-fn place(pcb: &str, pro: &str, name: &str) -> (PlaceReport, String, BTreeSet<String>, f64) {
+/// references of what moved, the seconds placement took, and how many changed sides.
+#[allow(clippy::type_complexity)]
+fn place(pcb: &str, pro: &str, name: &str) -> (PlaceReport, String, BTreeSet<String>, f64, usize) {
     let mut read = super::read(pcb, Some(pro)).unwrap();
     if std::env::var_os("GUIDE_NO_SILK").is_some() {
         read.silk_is_error = false;
@@ -210,6 +211,12 @@ fn place(pcb: &str, pro: &str, name: &str) -> (PlaceReport, String, BTreeSet<Str
     {
         options.spacing = spacing;
     }
+    if let Some(grid) = std::env::var("GUIDE_GRID")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        options.grid = grid;
+    }
     let report = place_components(&design, &options).unwrap();
     let seconds = start.elapsed().as_secs_f64();
     let overlaps = outline_overlaps(&design, &report.placed);
@@ -249,7 +256,13 @@ fn place(pcb: &str, pro: &str, name: &str) -> (PlaceReport, String, BTreeSet<Str
             fp.reference
         );
     }
-    (report, text, moved, seconds)
+    let flipped = design
+        .components
+        .iter()
+        .zip(&report.placed)
+        .filter(|(c, p)| c.side != p.side)
+        .count();
+    (report, text, moved, seconds, flipped)
 }
 
 /// KiCad's findings on a board, at error severity: each violation's type, description and the
@@ -355,7 +368,7 @@ fn summary(o: &Outcome) -> String {
 fn small_curated_boards_place_and_route() {
     for &(dir, name) in &BOARDS[1..2] {
         let (pcb, pro) = load(dir, name);
-        let (report, text, moved, _) = place(&pcb, &pro, name);
+        let (report, text, moved, _, _) = place(&pcb, &pro, name);
         assert!(report.movable > 0);
         let outcome = route(&text, &pro, &moved, &baseline(&pcb, &pro));
         assert!(outcome.routed.unrouted.is_empty(), "{name}");
@@ -381,7 +394,7 @@ fn curated_boards_place() {
     let kicad = std::env::var_os("GUIDE_KICAD").is_some();
     let only = std::env::var("GUIDE_BOARDS").ok();
     println!(
-        "| Board | Movable | Placing, s | HPWL, mm: was → placed | Connections: original, placed | Vias | Track, mm | Routing, s | DRC | KiCad |"
+        "| Board | Movable (flipped) | Placing, s | HPWL, mm: was → placed | Connections: original, placed | Vias | Track, mm | Routing, s | DRC | KiCad |"
     );
     println!("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
     let mut failures = Vec::new();
@@ -395,7 +408,7 @@ fn curated_boards_place() {
         let (pcb, pro) = load(dir, name);
         let base = baseline(&pcb, &pro);
         let original = route(&pcb, &pro, &BTreeSet::new(), &base);
-        let (report, text, moved, place_seconds) = place(&pcb, &pro, name);
+        let (report, text, moved, place_seconds, flipped) = place(&pcb, &pro, name);
         let placed = route(&text, &pro, &moved, &base);
         if let Some(out) = std::env::var_os("GUIDE_WRITE") {
             let base = std::path::Path::new(&out).join(name);
@@ -404,7 +417,7 @@ fn curated_boards_place() {
         }
         let (o, p) = (&original.routed.stats, &placed.routed.stats);
         print!(
-            "| `{name}` | {}/{} | {place_seconds:.2} | {:.0} → {:.0} | {}/{}, {}/{} | {} → {} | {:.0} → {:.0} | {:.1} → {:.1} | {} |",
+            "| `{name}` | {}/{} ({flipped}) | {place_seconds:.2} | {:.0} → {:.0} | {}/{}, {}/{} | {} → {} | {:.0} → {:.0} | {:.1} → {:.1} | {} |",
             report.movable,
             report.placed.len(),
             report.wirelength.0 as f64 / 1e6,

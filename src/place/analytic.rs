@@ -1,6 +1,7 @@
 //! Analytic placement after SimPL: a quadratic lower bound and a spread upper bound that pull
 //! towards each other, then legalization and detailed placement.
 
+use core::fmt;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use super::anneal::{AnnealOptions, Annealer, PlaceOutcome, PlaceStop};
@@ -8,7 +9,7 @@ use super::cost::CostTerm;
 use super::legalize::{legalize_units, unit_box};
 use super::netlist::{NO_UNIT, Netlist};
 use super::problem::rotate;
-use super::{Fixed, Layout, PlaceError, PlacementProblem, Point, Rect};
+use super::{Fixed, Layout, PlaceError, Placement, PlacementProblem, Point, Rect};
 use crate::id::NetId;
 use crate::rng::Rng;
 
@@ -42,6 +43,31 @@ pub struct AnalyticOptions<'c> {
     /// A flag that stops the run once set. Global placement stops at the next iteration and
     /// the rest goes on from there, so the result is still legal. The default is none.
     pub cancel: Option<&'c AtomicBool>,
+    /// What says where items should take more room as they are spread, so that they leave
+    /// more room for routing where it is short. The default is none: items take the room they
+    /// need.
+    pub inflation: Option<&'c dyn Inflation>,
+}
+
+/// Where items should take more room than they need, for routability.
+///
+/// Analytic placers grow cells where routing is congested before spreading, so that fewer of
+/// them end up there (Hou et al., 2001, after which RePlAce and others). After each spreading,
+/// [`place_analytic`] asks for each item's factor on the spread placement, and an item's
+/// room for the next spreading grows to the largest factor any spreading asked of it, over
+/// all of them. On sites, where an item takes one site whatever its room, the growth is cut
+/// back in proportion, kind by kind, so that the items of a kind take no more room than there
+/// are sites; then inflated items take more sites' worth of room in the bisection, which
+/// spreads them over more of the device.
+///
+/// Implement it with any measure of congestion, such as
+/// [`CongestionGrid::rudy`](super::CongestionGrid::rudy) of the placement.
+pub trait Inflation: fmt::Debug {
+    /// Writes into `factors`, by item, how much room each should take, as a multiple of its
+    /// own: 1 for no more, and more where its routing is congested. `placement` has every
+    /// item at a place of the spread placement, which is not legal, and on no site. `factors`
+    /// starts at 1.
+    fn inflate(&self, problem: &PlacementProblem, placement: &Placement, factors: &mut [f64]);
 }
 
 impl Default for AnalyticOptions<'_> {
@@ -57,6 +83,7 @@ impl Default for AnalyticOptions<'_> {
             cg_tolerance: 1e-6,
             detailed: Some(AnnealOptions::detailed()),
             cancel: None,
+            inflation: None,
         }
     }
 }
@@ -400,8 +427,8 @@ impl<'p> Model<'p> {
         self.solve(1, anchors, targets, options);
     }
 
-    /// The upper bound: `anchors` spread out.
-    fn spread(&self, anchors: &[[f64; 2]]) -> Vec<[f64; 2]> {
+    /// The upper bound: `anchors` spread out, each unit taking `room` times its own.
+    fn spread(&self, anchors: &[[f64; 2]], room: &[f64]) -> Vec<[f64; 2]> {
         let mut out = anchors.to_vec();
         let problem = self.problem;
         match problem.layout() {
@@ -434,6 +461,7 @@ impl<'p> Model<'p> {
                         .filter(|&(s, site)| site.kind == kind && !fixed[s])
                         .map(|(_, site)| [site.at.x as f64, site.at.y as f64])
                         .collect();
+                    inflate_sites(&mut units, room, free.len() as f64);
                     bisect_sites(&mut units, &mut free, &mut out);
                     for body in &units {
                         let offset = self.netlist.units[body.unit as usize].members[0].1;
@@ -467,7 +495,7 @@ impl<'p> Model<'p> {
                     units.push(Body {
                         unit: u as u32,
                         at: centre,
-                        size: bounds.width() as f64 * bounds.height() as f64,
+                        size: bounds.width() as f64 * bounds.height() as f64 * room[u],
                     });
                     boxes.push(bounds);
                 }
@@ -489,6 +517,32 @@ impl<'p> Model<'p> {
     }
 }
 
+impl Model<'_> {
+    /// Asks `inflation` about the units at `anchors`, and grows `room` to what it says.
+    fn inflate(&self, inflation: &dyn Inflation, anchors: &[[f64; 2]], room: &mut [f64]) {
+        let problem = self.problem;
+        let mut placement = Placement::new(problem);
+        for (u, unit) in self.netlist.units.iter().enumerate() {
+            let anchor = Point::new(anchors[u][0].round() as i64, anchors[u][1].round() as i64);
+            for &(item, offset) in &unit.members {
+                placement.set_origin(item, anchor.offset(offset), self.rotations[u]);
+            }
+        }
+        let mut factors = vec![1.0; problem.items().len()];
+        inflation.inflate(problem, &placement, &mut factors);
+        for (u, unit) in self.netlist.units.iter().enumerate() {
+            let mut factor = 1.0f64;
+            for &(item, _) in &unit.members {
+                let f = factors[item.index()];
+                if f.is_finite() {
+                    factor = factor.max(f);
+                }
+            }
+            room[u] = room[u].max(factor);
+        }
+    }
+}
+
 /// A unit being spread: its position, of its first member on sites or its centre in free
 /// space, and how much room it takes.
 #[derive(Clone, Copy, Debug)]
@@ -496,6 +550,24 @@ struct Body {
     unit: u32,
     at: [f64; 2],
     size: f64,
+}
+
+/// Grows bodies on sites by their room, cut back in proportion so that they take no more
+/// than `sites`, or than they take uninflated if that is more already.
+fn inflate_sites(bodies: &mut [Body], room: &[f64], sites: f64) {
+    let mut base = 0.0;
+    let mut extra = 0.0;
+    for body in bodies.iter() {
+        base += body.size;
+        extra += body.size * (room[body.unit as usize] - 1.0);
+    }
+    if extra <= 0.0 {
+        return;
+    }
+    let scale = ((sites - base).max(0.0) / extra).min(1.0);
+    for body in bodies.iter_mut() {
+        body.size *= 1.0 + (room[body.unit as usize] - 1.0) * scale;
+    }
 }
 
 fn sort_bodies(bodies: &mut [Body], axis: usize) {
@@ -803,7 +875,8 @@ pub fn place_analytic<C: CostTerm>(
         }
         model.solve_both(&mut anchors, None, &options);
     }
-    let mut upper = model.spread(&anchors);
+    let mut room = vec![1.0; units];
+    let mut upper = model.spread(&anchors, &room);
     let mut iterations = 0;
     let mut alpha = options.anchor_weight;
     let mut lower_wl = model.wirelength(&anchors);
@@ -813,8 +886,11 @@ pub fn place_analytic<C: CostTerm>(
             break;
         }
         iterations += 1;
+        if let Some(inflation) = options.inflation {
+            model.inflate(inflation, &upper, &mut room);
+        }
         model.solve_both(&mut anchors, Some((&upper, alpha)), &options);
-        upper = model.spread(&anchors);
+        upper = model.spread(&anchors, &room);
         lower_wl = model.wirelength(&anchors);
         upper_wl = model.wirelength(&upper);
         alpha *= options.anchor_growth;

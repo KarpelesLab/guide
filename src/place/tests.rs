@@ -538,6 +538,77 @@ fn congestion_moves_nets_away_from_a_hot_spot() {
     assert_eq!(aware.cost, 3);
 }
 
+/// Asks every item to take `factor` times its room, and counts how often it is asked.
+#[derive(Debug)]
+struct Everywhere {
+    factor: f64,
+    asked: core::cell::Cell<u32>,
+}
+
+impl Inflation for Everywhere {
+    fn inflate(&self, problem: &PlacementProblem, placement: &Placement, factors: &mut [f64]) {
+        assert_eq!(factors.len(), problem.items().len());
+        assert_eq!(placement.len(), problem.items().len());
+        assert!(factors.iter().all(|&f| f == 1.0));
+        self.asked.set(self.asked.get() + 1);
+        factors.fill(self.factor);
+    }
+}
+
+/// The area of the box of every item's origin.
+fn spread_of(placement: &Placement) -> u64 {
+    let mut bounds = Rect::point(placement.origin(ItemId(0)));
+    for item in 1..placement.len() {
+        bounds = bounds.including(placement.origin(ItemId(item as u32)));
+    }
+    (bounds.width() + 1) * (bounds.height() + 1)
+}
+
+#[test]
+fn inflated_items_spread_further() {
+    // A chain of 12 on 64 sites: by wirelength alone it bunches up, and taking three sites'
+    // room each, it spreads over more of the grid.
+    let generated = synth::chain(12, 8, 8, 3);
+    let problem = &generated.problem;
+    let options = AnalyticOptions {
+        detailed: None,
+        ..AnalyticOptions::default()
+    };
+    let (plain, _) = place_analytic(problem, Wirelength, options).expect("placement");
+    let everywhere = Everywhere {
+        factor: 3.0,
+        asked: core::cell::Cell::new(0),
+    };
+    let options = AnalyticOptions {
+        inflation: Some(&everywhere),
+        ..options
+    };
+    let (inflated, report) = place_analytic(problem, Wirelength, options).expect("placement");
+    assert_legal(problem, &inflated.placement);
+    assert_eq!(everywhere.asked.get(), report.iterations);
+    assert!(report.iterations > 0);
+    assert!(
+        spread_of(&inflated.placement) > spread_of(&plain.placement),
+        "{} against {}",
+        spread_of(&inflated.placement),
+        spread_of(&plain.placement)
+    );
+    let (again, _) = place_analytic(problem, Wirelength, options).expect("placement");
+    assert_eq!(again, inflated);
+
+    // More than the sites can hold is cut back to what they can, and stays legal.
+    let full = Everywhere {
+        factor: 100.0,
+        asked: core::cell::Cell::new(0),
+    };
+    let options = AnalyticOptions {
+        inflation: Some(&full),
+        ..options
+    };
+    let (crowded, _) = place_analytic(problem, Wirelength, options).expect("placement");
+    assert_legal(problem, &crowded.placement);
+}
+
 /// A random problem on sites: kinds by column, some items fixed, some vertical macros.
 fn sites_problem(
     width: u32,

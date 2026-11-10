@@ -55,7 +55,7 @@ mod tests;
 
 use core::fmt;
 
-pub use analytic::{AnalyticOptions, AnalyticReport, place_analytic};
+pub use analytic::{AnalyticOptions, AnalyticReport, Inflation, place_analytic};
 pub use anneal::{AnnealOptions, Annealer, PlaceOutcome, PlaceStop, TemperatureReport, anneal};
 pub use check::{Violation, check};
 pub use congestion::{CongestionCost, CongestionEstimate, CongestionGrid};

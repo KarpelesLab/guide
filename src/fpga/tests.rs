@@ -2626,7 +2626,7 @@ fn placement_problems_refuse_what_cannot_be_placed() {
 
 /// Logic blocks in a line, each driving the next through its one input, from a pad in the
 /// first block to a pad in the last, as the root names them.
-fn line_netlist(blocks: u32) -> PackedNetlist {
+pub(super) fn line_netlist(blocks: u32) -> PackedNetlist {
     let mut text = "<block name=\"t\" instance=\"FPGA_packed_netlist[0]\">\
          <inputs>n0</inputs><outputs>out:z</outputs><clocks></clocks>"
         .to_owned();
@@ -2667,7 +2667,7 @@ fn line_netlist(blocks: u32) -> PackedNetlist {
 
 /// A square of logic blocks, each with `tracks` wires of one tile that join the same track on
 /// the tiles beside it, both ways, and that its output pin drives and its input pin listens to.
-fn mesh_graph(size: u32, tracks: u32) -> String {
+pub(super) fn mesh_graph(size: u32, tracks: u32) -> String {
     let mut nodes = String::new();
     let mut edges = String::new();
     let mut next = 0u32;

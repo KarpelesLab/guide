@@ -63,3 +63,7 @@ required-features = ["fpga"]
 [[example]]
 name = "vtr_place"
 required-features = ["fpga"]
+
+[[example]]
+name = "vtr_eco"
+required-features = ["fpga"]

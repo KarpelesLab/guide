@@ -60,6 +60,11 @@ LOADED="--net_file ../$NAME.net --place_file ../$NAME.place -j 1"
 }
 record circuit "$NAME"
 record clbs "$(grep -m1 -E '^ *clb +[0-9]+' pack_place.log | awk '{print $2}')"
+# Hard blocks, on architectures that have them.
+for block in mult_36 memory; do
+    count=$(grep -m1 -E "^ *$block +[0-9]+" pack_place.log | awk '{print $2}')
+    [ -n "$count" ] && record "$block" "$count"
+done
 record grid "$(grep -m1 'FPGA sized to' pack_place.log | sed -e 's/.*sized to //' -e 's/ .*//')"
 
 # 1. VPR's own minimum channel width.
@@ -199,7 +204,8 @@ for run in "one 1 1" "many $THREADS 32"; do
     label=$1
     guide_at "$W_RELAXED" "$label" --threads "$2" --batch "$3"
     TXT=w$W_RELAXED/$label.txt
-    for key in legal iterations wirelength critical_path_ps route_s read_s lookahead_s expansions; do
+    for key in legal iterations wirelength critical_path_ps worst_slack_ps constant_nets route_s read_s \
+        lookahead_s expansions; do
         record "guide_${label}_$key" "$(tr ' ' '\n' < "$TXT" | grep "^$key=" | cut -d= -f2)"
     done
     if vpr_check "$W_RELAXED" "$label"; then

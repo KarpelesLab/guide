@@ -18,7 +18,11 @@
 # Results go to OUT/result.txt, one key=value per line: vpr_* for VPR's placement and guide_*
 # for guide's, then which router, as in vpr_route_* and guide_route_*.
 #
-# Environment: PLACE_ARGS, options for vtr_place; KEEP_GRAPHS=1 to keep the graphs.
+# Environment: PLACE_ARGS, options for vtr_place; KEEP_GRAPHS=1 to keep the graphs;
+# PLACE_FILE=FILE to take guide's placement from FILE instead of placing, which vtr_place then
+# only measures, with every block fixed; ONLY_GUIDE=1, with FROM, to route guide's placement
+# alone, taking VPR's minimum channel width on its own placement, and the relaxed width, from
+# $FROM/CIRCUIT/result.txt.
 
 set -u
 
@@ -57,8 +61,12 @@ last_field() {
 
 # 0. Pack and place.
 if [ -n "${FROM:-}" ] && [ -f "$FROM/$NAME/$NAME.net" ] && [ -f "$FROM/$NAME/pack_place.log" ]; then
+    # A run of scripts/vtr/circuit.sh keeps VPR's placement as CIRCUIT.place, and one of this
+    # script as vpr.orig.place.
+    from_place=$FROM/$NAME/$NAME.place
+    [ -f "$from_place" ] || from_place=$FROM/$NAME/vpr.orig.place
     cp "$FROM/$NAME/$NAME.net" "$FROM/$NAME/pack_place.log" . &&
-        cp "$FROM/$NAME/$NAME.place" vpr.place || exit 1
+        cp "$from_place" vpr.place || exit 1
 else
     "$VPR" arch.xml "$NAME.blif" --pack --place --seed 1 -j 1 > pack_place.log 2>&1 || {
         record error pack_place
@@ -94,9 +102,13 @@ vpr_route() {
 }
 
 # 1. VPR's minimum channel width on its placement, and the relaxed width.
-vpr_route vpr vpr.vpr_min
-W_VPR=$(field vpr.vpr_min/route.log "Best routing used a channel width factor of")
-W_VPR=${W_VPR%.}
+if [ "${ONLY_GUIDE:-0}" = 1 ] && [ -f "$FROM/$NAME/result.txt" ]; then
+    W_VPR=$(grep '^vpr_route_vpr_min_w=' "$FROM/$NAME/result.txt" | cut -d= -f2)
+else
+    vpr_route vpr vpr.vpr_min
+    W_VPR=$(field vpr.vpr_min/route.log "Best routing used a channel width factor of")
+    W_VPR=${W_VPR%.}
+fi
 if [ -z "$W_VPR" ]; then
     record error vpr_min_w
     exit 1
@@ -125,6 +137,10 @@ graph_at "$W_RELAXED" || {
 }
 
 # 2. guide's placement.
+if [ -n "${PLACE_FILE:-}" ]; then
+    cp "$PLACE_FILE" given.place || exit 1
+    PLACE_ARGS="$PLACE_ARGS --fix given.place"
+fi
 "$PLACE" --arch arch.xml --rr-graph "w$W_RELAXED/rr.xml" --net "$NAME.net" --out guide.place \
     --netlist-file "../$NAME.net" --netlist-id "$NETID" --evaluate vpr.orig.place $PLACE_ARGS \
     > place.txt 2> place.err
@@ -188,7 +204,9 @@ vpr_check() {
         grep -q 'Circuit successfully routed' "w$w/$label.check.log"
 }
 
-for placement in vpr guide; do
+PLACEMENTS="vpr guide"
+[ "${ONLY_GUIDE:-0}" = 1 ] && PLACEMENTS=guide
+for placement in $PLACEMENTS; do
     # VPR's router.
     if [ "$placement" = guide ]; then
         vpr_route guide guide.vpr_min

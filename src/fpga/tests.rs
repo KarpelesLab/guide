@@ -2907,3 +2907,225 @@ fn congestion_aware_placements_are_legal_and_repeatable() {
         assert!(crate::place::check(problem.problem(), &placed.placement).is_empty());
     }
 }
+
+/// A placement of `line_netlist` that puts neighbours in the chain far apart: block `k` on the
+/// site `(k * 7) % sites`.
+fn scrambled(problem: &PlaceProblem) -> crate::place::Placement {
+    let places = problem.problem();
+    let sites = places.sites().len() as u32;
+    let mut placement = crate::place::Placement::new(places);
+    for item in 0..places.items().len() as u32 {
+        placement.set_site(
+            places,
+            crate::place::ItemId(item),
+            crate::place::SiteId((item * 7) % sites),
+        );
+    }
+    assert!(crate::place::check(places, &placement).is_empty());
+    placement
+}
+
+#[test]
+fn refining_in_windows_moves_only_what_is_inside() {
+    let device = read_rr_graph(mesh_graph(5, 1).as_bytes()).unwrap();
+    let netlist = line_netlist(25);
+    let problem = build_place_problem(
+        &device,
+        &netlist,
+        &Architecture::default(),
+        &ProblemOptions::default(),
+    )
+    .unwrap();
+    let delays = PlaceDelayModel::from_rr_graph(&device);
+    let start = scrambled(&problem);
+    let window = crate::place::Rect::new(
+        crate::place::Point::new(1, 1),
+        crate::place::Point::new(3, 3),
+    );
+    let refined = refine_placement(
+        &problem,
+        &delays,
+        None,
+        &start,
+        &[window],
+        None,
+        &RefineOptions::default(),
+    )
+    .unwrap();
+    assert!(crate::place::check(problem.problem(), &refined.placement).is_empty());
+    assert_eq!(refined.start_bb_estimate, problem.bb_estimate(&start));
+    assert!(refined.bb_estimate < refined.start_bb_estimate);
+    for item in 0..25 {
+        let item = crate::place::ItemId(item);
+        let (from, to) = (start.origin(item), refined.placement.origin(item));
+        if window.contains(from) {
+            assert!(window.contains(to), "{item:?} left the window");
+        } else {
+            assert_eq!(from, to, "{item:?} moved from outside the window");
+        }
+    }
+    // With no windows, anything may move, and the same seed gives the same placement.
+    let whole = refine_placement(
+        &problem,
+        &delays,
+        None,
+        &start,
+        &[],
+        None,
+        &RefineOptions::default(),
+    )
+    .unwrap();
+    assert!(whole.bb_estimate < refined.bb_estimate);
+    assert_eq!(
+        refine_placement(
+            &problem,
+            &delays,
+            None,
+            &start,
+            &[],
+            None,
+            &RefineOptions::default()
+        )
+        .unwrap(),
+        whole
+    );
+}
+
+#[test]
+fn router_congestion_marks_what_was_used_and_overused() {
+    let device = read_rr_graph(mesh_graph(4, 1).as_bytes()).unwrap();
+    let netlist = line_netlist(16);
+    let problem = build_place_problem(
+        &device,
+        &netlist,
+        &Architecture::default(),
+        &ProblemOptions::default(),
+    )
+    .unwrap();
+    let start = scrambled(&problem);
+    let placement = problem.to_placement(&netlist, &start, "t.net", "SHA256:0");
+    let design = resolve_nets(&device, &netlist, &placement, &NetOptions::default()).unwrap();
+    let mut options = device.engine_options();
+    options.max_iterations = 3;
+    let mut engine = crate::engine::Engine::new(device.graph(), design.nets(), options).unwrap();
+    let mut congestion = RouterCongestion::new(&problem);
+    let mut overuse = 0.0;
+    while engine.step().is_some() {
+        let overused = engine.overused();
+        congestion.add_overuse(&device, &overused);
+        overuse += overused
+            .iter()
+            .filter(|o| device.node_kind(o.resource) == Some(NodeKind::ChanX))
+            .map(|o| f64::from(o.occupancy - o.capacity))
+            .sum::<f64>();
+    }
+    let outcome = engine.outcome();
+    assert!(!outcome.is_success(), "one track can't take this placement");
+    congestion.add_routes(&device, &outcome.routes);
+    // Each wire is one tile long, so history and use add up tile by tile.
+    let mut history = 0.0;
+    let mut used = 0.0;
+    for y in 0..6 {
+        for x in 0..6 {
+            history += congestion.history(x, y).unwrap()[0];
+            used += congestion.used(x, y).unwrap()[0];
+            assert_eq!(congestion.history(x, y).unwrap()[1], 0.0);
+        }
+    }
+    assert_eq!(history, overuse);
+    let wires: usize = outcome
+        .routes
+        .routes()
+        .map(|(_, route)| {
+            route
+                .nodes()
+                .filter(|&n| device.node_kind(n) == Some(NodeKind::ChanX))
+                .count()
+        })
+        .sum();
+    assert_eq!(used, wires as f64);
+    congestion.update_correction(&problem, &start, 1.0, 1.0);
+    assert!(congestion.correction().iter().any(|c| c[0] > 0.0));
+    assert!(congestion.correction().iter().all(|c| c[1] == 0.0));
+    let grid = congestion.to_grid();
+    assert_eq!(grid.size(), (6, 6));
+    // Windows cover every overused tile, and don't touch.
+    let windows = congestion.windows(&device, &outcome.overused, 0);
+    assert!(!windows.is_empty());
+    for o in &outcome.overused {
+        let at = device.node_location(o.resource).unwrap();
+        let p = crate::place::Point::new(i64::from(at.xlow), i64::from(at.ylow));
+        assert!(windows.iter().any(|w| w.contains(p)));
+    }
+    for (i, a) in windows.iter().enumerate() {
+        for b in &windows[i + 1..] {
+            assert!(
+                a.max.x + 1 < b.min.x
+                    || b.max.x + 1 < a.min.x
+                    || a.max.y + 1 < b.min.y
+                    || b.max.y + 1 < a.min.y
+            );
+        }
+    }
+    let wide = congestion.windows(&device, &outcome.overused, 10);
+    assert_eq!(wide.len(), 1);
+    assert_eq!(
+        wide[0],
+        crate::place::Rect::new(
+            crate::place::Point::new(0, 0),
+            crate::place::Point::new(5, 5)
+        )
+    );
+}
+
+#[test]
+fn the_loop_places_again_until_the_design_routes() {
+    let device = read_rr_graph(mesh_graph(4, 3).as_bytes()).unwrap();
+    let netlist = line_netlist(16);
+    let problem = build_place_problem(
+        &device,
+        &netlist,
+        &Architecture::default(),
+        &ProblemOptions::default(),
+    )
+    .unwrap();
+    let delays = PlaceDelayModel::from_rr_graph(&device);
+    let mut timing =
+        build_timing(&netlist, &LogicDelays::new(), &TimingOptions::default()).unwrap();
+    let constraints = timing.vpr_constraints(0).unwrap();
+    let mut engine_options = device.engine_options();
+    engine_options.max_iterations = 50;
+    let options = LoopOptions {
+        rounds: 4,
+        margin: 2,
+        ..LoopOptions::default()
+    };
+    let run = |timing: &mut DesignTiming| {
+        place_route_loop(
+            &device,
+            &netlist,
+            &problem,
+            &delays,
+            Some((timing, &constraints)),
+            &NetOptions::default(),
+            engine_options,
+            scrambled(&problem),
+            &options,
+        )
+        .unwrap()
+    };
+    let result = run(&mut timing);
+    assert!(!result.rounds[0].legal);
+    assert!(result.rounds[0].windows > 0 && result.rounds[0].moved > 0);
+    assert!(result.outcome.is_success(), "{:?}", result.rounds);
+    assert!(result.rounds.last().unwrap().legal);
+    assert!(crate::place::check(problem.problem(), &result.placement).is_empty());
+    let report =
+        crate::validate::check(device.graph(), result.design.nets(), &result.outcome.routes);
+    assert!(report.is_complete() && report.faults().is_empty());
+    assert!(result.rounds.last().unwrap().bb_estimate < result.rounds[0].bb_estimate);
+    // The same inputs give the same loop.
+    let again = run(&mut timing);
+    assert_eq!(again.rounds, result.rounds);
+    assert_eq!(again.placement, result.placement);
+}

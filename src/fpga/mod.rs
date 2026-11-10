@@ -180,6 +180,7 @@ use std::io;
 mod arch;
 mod design;
 mod eco;
+mod feedback;
 mod lookahead;
 mod netlist;
 mod place;
@@ -195,6 +196,9 @@ mod tests;
 pub use arch::{ArchDirect, ArchPrimitive, Architecture, PrimitiveKind, read_architecture};
 pub use design::{Design, GlobalPort, NetInfo, NetOptions, NetPin, NetStatus, resolve_nets};
 pub use eco::{placement_priors, route_seeds};
+pub use feedback::{
+    LoopError, LoopOptions, LoopResult, LoopRound, RouterCongestion, place_route_loop,
+};
 pub use lookahead::{LookaheadOptions, MapLookahead};
 pub use netlist::{
     HopEnds, Interconnect, InternalPath, InternalPin, PackedBlock, PackedNet, PackedNetlist,
@@ -203,7 +207,8 @@ pub use netlist::{
 pub use place::{PlacedBlock, Placement, read_placement, write_placement};
 pub use placer::{
     ChannelDemand, PlaceDelayModel, PlaceMethod, PlaceProblem, PlaceResult, PlacerOptions,
-    ProblemOptions, build_place_problem, estimate_slack, place_design,
+    ProblemOptions, RefineOptions, build_place_problem, estimate_slack, place_design,
+    refine_placement,
 };
 pub use route_file::{RouteFileError, RouteHeader, RouteSummary, write_route};
 pub use rr_graph::{

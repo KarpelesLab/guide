@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use super::ImportError;
 use super::arch::Architecture;
+use super::feedback::RouterCongestion;
 use super::lookahead::{Dijkstra, edge_delays};
 use super::netlist::PackedNetlist;
 use super::place::{PlacedBlock, Placement};
@@ -21,8 +22,9 @@ use super::rr_graph::{NodeKind, PinClassKind, RrGraph};
 use super::timing::DesignTiming;
 use crate::id::{NetId, NodeId};
 use crate::place::{
-    AnalyticOptions, AnnealOptions, Annealer, CostTerm, Inflation, Item, ItemId, Layout, NetView,
-    Pin, PlaceError, PlacementProblem, Point, Site, SiteId, Wirelength, legalize, place_analytic,
+    AnalyticOptions, AnnealOptions, Annealer, CostTerm, Fixed, Inflation, Item, ItemId, Layout,
+    NetView, Pin, PlaceError, PlacementProblem, Point, Rect, Site, SiteId, Wirelength, legalize,
+    place_analytic,
 };
 use crate::rng::Rng;
 use crate::space::{RoutingSpace, Step};
@@ -346,6 +348,14 @@ impl ChannelDemand {
         all.sort_by(f64::total_cmp);
         let k = (fraction.clamp(0.0, 1.0) * (all.len() - 1) as f64).round() as usize;
         all[k]
+    }
+
+    /// Adds to each channel's use, tile by tile, as [`RouterCongestion::correction`] gives it.
+    fn add(&mut self, extra: &[[f64; 2]]) {
+        for (u, e) in self.utilization.iter_mut().zip(extra) {
+            u[0] += e[0];
+            u[1] += e[1];
+        }
     }
 
     /// The sum over channels of how far their use is above `threshold`.
@@ -1036,6 +1046,8 @@ struct Weigher<'p, 't> {
     tradeoff: f64,
     /// The congestion factor and threshold, if congestion counts.
     congestion: Option<(f64, f64)>,
+    /// What the router found of the channels' use beyond the estimate, by tile.
+    correction: Option<&'p [[f64; 2]]>,
 }
 
 struct TimingState<'t> {
@@ -1080,6 +1092,7 @@ impl<'p, 't> Weigher<'p, 't> {
                 0.0
             },
             congestion: None,
+            correction: None,
         }
     }
 
@@ -1110,7 +1123,11 @@ impl<'p, 't> Weigher<'p, 't> {
     fn cost(&mut self, placement: &crate::place::Placement, exponent: u32) -> VprCost<'p> {
         let mut cost = self.timing_cost(placement, exponent);
         if let Some((factor, threshold)) = self.congestion {
-            let excess = self.problem.channel_demand(placement).excess(threshold);
+            let mut demand = self.problem.channel_demand(placement);
+            if let Some(extra) = self.correction {
+                demand.add(extra);
+            }
+            let excess = demand.excess(threshold);
             cost.congestion = Some((excess, factor * cost.bb_weight));
         }
         cost
@@ -1308,6 +1325,167 @@ pub fn place_design(
     Ok(PlaceResult {
         bb_estimate: problem.bb_estimate(&outcome.placement),
         start_bb_estimate,
+        placement: outcome.placement,
+        worst_slack,
+        temperatures: outcome.temperatures,
+        moves: outcome.moves,
+    })
+}
+
+/// How [`refine_placement`] re-places part of a placement.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct RefineOptions {
+    /// The seed of every random choice. The default is 1.
+    pub seed: u64,
+    /// Moves per temperature, as a multiple of `blocks^(4/3)` of the blocks that may move. The
+    /// default is 1.
+    pub inner_num: f64,
+    /// The first temperature, as a multiple of the standard deviation of moves' cost changes.
+    /// The default is 0.05, as [`PlacerOptions::detailed_temperature`] has it.
+    pub temperature: f64,
+    /// The first range limit, in steps of the columns and rows that have sites of a block's
+    /// type. The default is 4.
+    pub range: u32,
+    /// As [`PlacerOptions::timing_tradeoff`]. The default is 0.5.
+    pub timing_tradeoff: f64,
+    /// As [`PlacerOptions::criticality_exponents`]. The default is 1 and 8.
+    pub criticality_exponents: (u32, u32),
+    /// As [`PlacerOptions::congestion_factor`], applied to the estimate with the router's
+    /// correction added. The default is 1.
+    pub congestion_factor: f64,
+    /// As [`PlacerOptions::congestion_threshold`]. The default is 0.6.
+    pub congestion_threshold: f64,
+}
+
+impl Default for RefineOptions {
+    fn default() -> Self {
+        RefineOptions {
+            seed: 1,
+            inner_num: 1.0,
+            temperature: 0.05,
+            range: 4,
+            timing_tradeoff: 0.5,
+            criticality_exponents: (1, 8),
+            congestion_factor: 1.0,
+            congestion_threshold: 0.6,
+        }
+    }
+}
+
+impl PlaceProblem {
+    /// The problem with every block that `start` puts outside `windows` fixed where it is,
+    /// and every other movable block kept to the first window it is in. A carry chain moves
+    /// only if all of it is in one window, and is otherwise fixed block by block. With no
+    /// windows, nothing changes.
+    fn windowed(&self, start: &crate::place::Placement, windows: &[Rect]) -> PlacementProblem {
+        let places = &self.problem;
+        if windows.is_empty() {
+            return places.clone();
+        }
+        let mut out = PlacementProblem::new(places.layout().clone());
+        let regions: Vec<_> = windows.iter().map(|&w| out.add_region(w)).collect();
+        let items = places.items();
+        let mut window: Vec<Option<usize>> = (0..items.len())
+            .map(|i| {
+                let item = ItemId(i as u32);
+                if !items[i].is_movable() {
+                    return None;
+                }
+                let at = start.origin(item);
+                windows.iter().position(|w| w.contains(at))
+            })
+            .collect();
+        let mut kept_macros = Vec::new();
+        for members in places.macros() {
+            let first = window[members[0].0.index()];
+            if first.is_some() && members.iter().all(|&(m, _)| window[m.index()] == first) {
+                kept_macros.push(members);
+            } else {
+                for &(m, _) in members {
+                    window[m.index()] = None;
+                }
+            }
+        }
+        for (i, item) in items.iter().enumerate() {
+            let base = Item::new().kind(item.site_kind());
+            let id = ItemId(i as u32);
+            out.add_item(match (item.fixed(), window[i], start.site(id)) {
+                (Some(Fixed::Site(site)), _, _) => base.fixed_at_site(site),
+                (None, Some(w), _) => base.region(regions[w]),
+                (_, _, Some(site)) => base.fixed_at_site(site),
+                _ => base,
+            });
+        }
+        for net in 0..places.net_count() {
+            let net = NetId(net as u32);
+            out.add_net(places.net_weight(net), places.net_pins(net));
+        }
+        for members in kept_macros {
+            out.add_macro(members);
+        }
+        out
+    }
+}
+
+/// Places again the blocks of a placement that are in some windows, at a low temperature,
+/// with the router's view of congestion added to the estimate: the local re-placement of a
+/// loop of placement and routing, [`place_route_loop`](super::place_route_loop).
+///
+/// The cost is [`place_design`]'s, with timing if `timing` is given, and with congestion
+/// estimated by [`PlaceProblem::channel_demand`] plus, if `congestion` is given, its
+/// [`correction`](RouterCongestion::correction): what the router used of each channel
+/// beyond the estimate, and its history of overuse. Blocks outside the windows stay where
+/// `start` has them; those inside move only within their window. With no windows, every
+/// block may move.
+///
+/// The result's `start_bb_estimate` is that of `start`.
+///
+/// # Errors
+///
+/// [`PlaceError`] if `start` is not a legal placement of the problem.
+pub fn refine_placement(
+    problem: &PlaceProblem,
+    delays: &PlaceDelayModel,
+    timing: Option<(&mut DesignTiming, &Constraints)>,
+    start: &crate::place::Placement,
+    windows: &[Rect],
+    congestion: Option<&RouterCongestion>,
+    options: &RefineOptions,
+) -> Result<PlaceResult, PlaceError> {
+    let places = problem.windowed(start, windows);
+    let anneal_options = AnnealOptions {
+        seed: options.seed,
+        inner_num: options.inner_num,
+        initial_temperature_factor: options.temperature,
+        initial_range: Some(options.range.max(1)),
+        ..AnnealOptions::default()
+    };
+    let mut weigher = Weigher::new(problem, delays, timing, options.timing_tradeoff);
+    if options.congestion_factor > 0.0 {
+        weigher.congestion = Some((options.congestion_factor, options.congestion_threshold));
+        weigher.correction = congestion.map(RouterCongestion::correction);
+    }
+    let (first, last) = options.criticality_exponents;
+    let mut annealer = Annealer::new(
+        &places,
+        weigher.cost(start, first),
+        start.clone(),
+        anneal_options,
+    )?;
+    while annealer.step().is_some() {
+        if annealer.stop_reason().is_some() {
+            break;
+        }
+        let exponent = exponent(annealer.range(), annealer.max_range(), (first, last));
+        let cost = weigher.cost(annealer.placement(), exponent);
+        annealer.set_cost(cost);
+    }
+    let outcome = annealer.outcome();
+    let worst_slack = weigher.analyse(&outcome.placement);
+    Ok(PlaceResult {
+        bb_estimate: problem.bb_estimate(&outcome.placement),
+        start_bb_estimate: problem.bb_estimate(start),
         placement: outcome.placement,
         worst_slack,
         temperatures: outcome.temperatures,

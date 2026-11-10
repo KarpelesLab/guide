@@ -68,6 +68,10 @@ required-features = ["fpga"]
 name = "vtr_eco"
 required-features = ["fpga"]
 
+[[example]]
+name = "vtr_loop"
+required-features = ["fpga"]
+
 # Routing and placement tests run whole boards and circuits, and take minutes unoptimised.
 [profile.test]
 opt-level = 1

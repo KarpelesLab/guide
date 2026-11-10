@@ -12,6 +12,8 @@
 //! | Architecture (`arch.xml`), for the delays inside blocks | [`read_architecture`] | [`Architecture`], holding [`LogicDelays`] |
 //! | The packed netlist again, and delays inside blocks | [`build_timing`] | [`DesignTiming`], holding a [`TimingGraph`] and the engine's [`Connection`]s |
 //! | Routes (`.route`) | [`write_route`] | VPR's text format |
+//! | A placement, routed again and again on a graph | [`place_route_loop`] | A placement that routes, after placing again where the router found congestion |
+//! | The packed netlist and a timing analysis of its routes | [`rotate_luts_for_timing`], [`write_rotated_netlist`] | The `.net` with each LUT's latest inputs on its fastest pins |
 //!
 //! Everything reads from a [`BufRead`] or writes to a [`Write`] passed in by the caller, and
 //! nothing here opens a file.

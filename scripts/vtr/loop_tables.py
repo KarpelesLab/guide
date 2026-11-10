@@ -112,7 +112,7 @@ def by_circuit(rows):
 
 def summary(pairs):
     print('| Pair | Circuits | Min W / one pass, guide | Min W / one pass, VPR | '
-          'Min W / VPR\'s placement, VPR, one pass | Loop | CPD / one pass, VPR | '
+          'One pass / VPR\'s placement, VPR | Loop / VPR\'s placement, VPR | CPD / one pass, VPR | '
           'Wire / one pass, VPR | Time, one pass + loop / one pass | All legal |')
     print('| --- ' * 10 + '|')
     for label, rows in pairs:

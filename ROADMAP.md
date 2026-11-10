@@ -362,7 +362,11 @@ Placement and routing as a single loop rather than two sequential passes.
   weighed more, congestion from a map of what routing used, and parts sent to the side where
   most of their connections are; reroute only what moved; and keep the round if it routes
   better, by connections, starved thermal reliefs, vias and track. The first placement's sides
-  now go first to parts that nothing holds to theirs.
+  now go first to parts that nothing holds to theirs. Done on FPGAs in `fpga::place_route_loop`:
+  where a routing fails, `fpga::RouterCongestion` takes the router's history of overuse,
+  iteration by iteration, and the wire it used, into the placer's estimate of congestion, and
+  `fpga::refine_placement` anneals again at a low temperature, timing-driven, the blocks within a
+  window around what was overused; then the design is routed again.
 - Incremental re-route after engineering changes, preserving existing work. On PCBs,
   `pcb::eco::reroute` keeps a routed board's copper that a change leaves alone as fixed copper
   and routes only what is left apart, and `pcb::eco::relieve` gives starved thermal reliefs a
@@ -380,10 +384,27 @@ Placement and routing as a single loop rather than two sequential passes.
   muxing, memory byte lanes). On PCBs, `pcb::swap`: groups of equivalent pins from the caller,
   such as a byte lane's DQ bits or a microcontroller's GPIOs, and the two pins of passives from
   `kicad::swap_groups`, swapped where that shortens their nets, and written back by
-  `kicad::replace_pad_nets` with a list of the pads changed for the schematic.
+  `kicad::replace_pad_nets` with a list of the pads changed for the schematic. On FPGAs, the
+  router already takes any pin of a cluster's equivalent input and output classes, as VPR does,
+  and `fpga::rotate_luts_for_timing` moves each LUT's latest inputs to its fastest pins after
+  routing, which VPR does not do, with `fpga::write_rotated_netlist` writing the `.net` for VPR.
 
 **Exit:** measurable completion or quality gains over the one-pass flow on the
 hardest benchmarks; small netlist changes cause small layout changes.
+
+On FPGAs the first half is met ([results](docs/benchmarks.md#fpga-placement-and-routing-in-a-loop)).
+On VTR's 20 MCNC circuits and 19 Verilog benchmarks, each with three seeds, placing again where
+the router found congestion took the narrowest channel that `guide`'s router needs 4.2% to 5.5%
+below the one-pass flow's on MCNC, and 5.7% to 8.3% on the Verilog suite, depending on the seed;
+with VPR's router, 0.6% to 2.1% and 4.8% to 6.6%, which puts the Verilog suite 7.5% to 9.4% below
+VPR's own placement, from 1.6% to 3.0%, with critical paths within 0.4% and as much wire or less.
+mkSMAdapter4B, 16% wider than VPR's placement before, is now as narrow. Every placement and route
+passed VPR's checks. On MCNC, rotating LUT inputs after routing took critical paths 24% shorter by
+VPR's analysis of the same routes, on `guide`'s placements and on VPR's alike; the Verilog
+architecture's LUT inputs are all as fast. Left for later: blob_merge, which still needs 62
+tracks against VPR's 58 with VPR's router; VPR's measures of the loop on LU32PEEng and mcml, which
+`guide`'s router routes at least 2 tracks narrower; a loop that runs as fast as one pass; and
+permuting fracturable LEs to free outputs, and memories' address bits.
 
 The second half is met ([results](docs/benchmarks.md#engineering-changes)). On ten of VTR's
 circuits, with 1% and 5% of the nets changed, incremental routing kept 99% and 94% of the routes,

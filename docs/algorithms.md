@@ -199,6 +199,41 @@ against VPR in [`docs/benchmarks.md`](benchmarks.md#fpga-placement-against-vpr).
   starts too, from a placement that puts blocks near their neighbours' centroid at
   `std_dev / 64`. Annealing from a random placement, hot, as VPR did before, is the other method.
 
+### Placement and routing in a loop
+
+The loop of roadmap M9 for FPGAs is in `src/fpga/feedback.rs` and `src/fpga/rotation.rs`, and
+measured against the one-pass flow in
+[`docs/benchmarks.md`](benchmarks.md#fpga-placement-and-routing-in-a-loop).
+
+- **What the router found.** `fpga::RouterCongestion` keeps, per tile and direction, the wire a
+  routing used, and the overuse of every iteration of negotiation added up, as the router's own
+  history adds up, read from `Engine::overused` after each `Engine::step_parallel`, so the engine
+  needs nothing new. Both are against the tracks of the device the placement was built on.
+- **Feeding it back.** Its correction for a channel is the history over the tracks, plus how
+  much more of the channel the routes used than RUDY expects of the placement they routed,
+  which is added to RUDY's estimate in the placer's congestion term. History alone did nearly
+  all of it: without history, fewer circuits routed narrower.
+- **Placing again.** `fpga::refine_placement` anneals at a twentieth of the moves' standard
+  deviation over 4 steps, timing-driven as `place_design` is, on a copy of the problem where
+  every block outside the windows is fixed and every block inside is kept to its window by a
+  region; a carry chain moves only if all of it is in one window. Windows are the tiles of what
+  the best iteration overused, grown by 6 tiles and merged until none touch.
+- **The loop.** `fpga::place_route_loop` routes at one channel width; if that fails, it places
+  again and routes again, up to 3 times. `scripts/vtr/loop.sh` starts it 2 tracks below the
+  narrowest channel the one-pass placement routed in, and goes 2 narrower each time it
+  succeeds, from the placement that did.
+- **Pin permutation.** The inputs of a VTR cluster are one class, `equivalent="full"`, and so
+  are its outputs on `k6_N10_40nm.xml`, `equivalent="instance"`: a class is one `SINK` or
+  `SOURCE` node, so the router already picks among their pins, and VPR writes the netlist to
+  match (`.net.post_routing`). Inside the cluster, a LUT's inputs come from a `complete`
+  crossbar, so which input of the LUT a signal takes changes nothing outside it, but
+  `k6_N10_40nm.xml` gives the six inputs delays from 82 ps to 398 ps. After routing,
+  `fpga::rotate_luts_for_timing` moves each LUT's latest-arriving signals to its fastest inputs,
+  which minimizes each LUT's output arrival given its inputs', repeated with a new timing
+  analysis until nothing changes, so that arrivals downstream are as early as they can be;
+  `fpga::write_rotated_netlist` moves the signals and the `port_rotation_map` in the `.net`
+  file, which VPR reads as the same packing.
+
 ### PCB placement
 
 PCB placement (roadmap M8) is in `src/pcb/place.rs`, on top of `src/place`, with KiCad's side in

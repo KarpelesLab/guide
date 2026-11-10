@@ -545,6 +545,7 @@ done so far are below. There are no results for the others yet.
 | FPGA routing | VPR 9.0.0 | VTR's Verilog suite (`vtr_reg_qor_chain`) | [Done](#vtrs-verilog-benchmarks) |
 | FPGA routing | VPR, nextpnr | Titan23 | Not yet done |
 | FPGA placement | VPR 9.0.0 | VTR's MCNC circuits and Verilog suite | [Done](#fpga-placement-against-vpr) |
+| FPGA placement and routing in a loop, LUT rotation | The one-pass flow, checked by VPR 9.0.0 | VTR's MCNC circuits and Verilog suite | [Done](#fpga-placement-and-routing-in-a-loop) |
 | FPGA placement | nextpnr | VTR benchmarks, ISPD 2016/2017 contest sets | Not yet done |
 | PCB clearance checks | KiCad 10.0.3 | [Curated open-source KiCad boards](../testdata/kicad/README.md) | [Done](#pcb-clearance-checks-against-kicad) |
 | PCB DSN import, SES export | KiCad 10.0.3's reading of the same boards, and its session import | The same boards | [Done](#pcb-dsn-designs-against-kicad-boards) |
@@ -1770,6 +1771,358 @@ with VPR's measures of the placement and VPR's router:
 - `guide` reads the device from VPR's graph rather than from the architecture's layout, and
   follows only blocks whose type has the name of a tile type, which is how VTR's architectures
   have it.
+
+## FPGA placement and routing in a loop
+
+This is M9 on FPGAs, "measurable completion or quality gains over the one-pass flow on the
+hardest benchmarks": placement and routing as one loop, where what the router finds congested
+goes back into the placer, and pin permutation, where the netlist permits it. Both are measured
+against the one-pass flow of [FPGA placement against VPR](#fpga-placement-against-vpr), which
+places once and routes once, on the same circuits, packings, architectures and harness, with
+VPR 9.0.0 checking every placement and every route.
+
+Measured on 2026-11-11 with rustc 1.97.1, on the same shared machine, with the loop as `e167386`
+added it; `ca9e117` added an option that is off by default. The one-pass placements with seed 1
+are those of the tables above.
+
+### How
+
+- **The loop** is `fpga::place_route_loop` at one channel width
+  ([how](algorithms.md#placement-and-routing-in-a-loop)): `guide`'s router routes the
+  placement, timing-driven, with at most 50 iterations, as the search for the narrowest channel
+  does; if that is not legal, the router's history of overuse, added up over every iteration and
+  every round, and how much more of each channel it used than RUDY expected, go into the
+  placer's estimate of congestion; the blocks within 6 tiles of what the best iteration overused
+  are placed again by `fpga::refine_placement`, annealing from where they are at a twentieth of
+  the moves' standard deviation over 4 steps, timing-driven, the rest fixed; and the router routes
+  again, up to 3 times.
+- **Narrowing** is `scripts/vtr/loop.sh`: from the one-pass placement and its narrowest channel
+  with `guide`'s router, W, the loop runs at W - 2; if it ends with a legal routing, it runs again
+  at W - 4 from the placement that routed, and so on, until it fails. The placement it ends with
+  is the last that routed, or the one-pass placement if none did.
+- **Measures** are those of the one-pass flow, by `place-circuit.sh` on the loop's placement:
+  VPR loads it with every block fixed, both routers find their narrowest channel on it, by VPR's
+  binary search and by `guide`'s from VPR's width, VPR checks `guide`'s routes at that width, and
+  both route it at the one-pass flow's relaxed width, 1.3 times VPR's narrowest on its own
+  placement, for the critical path, by VPR's analysis, and the wire. Ratios are of the loop over
+  the one-pass flow on the same seed, so below 1 is better for the loop.
+- **Seeds**: the one-pass placement with seeds 1, 2 and 3, each followed by the loop, on every
+  circuit of both suites but LU32PEEng and mcml, whose searches for the narrowest channel take
+  hours, and which are below the tables.
+- **Time** is the loop's own, routing and placing again in `vtr_loop`, against the one-pass
+  placement's; it leaves out reading files and VPR writing graphs of each width.
+
+```text
+scripts/vtr/place.sh DIR BASE                         # the one-pass flow, as above
+scripts/vtr/loop.sh DIR BASE LOOP                     # the loop, from it
+SUITE=verilog BLIF=BLIF scripts/vtr/loop.sh DIR BASE2 LOOP2
+python3 scripts/vtr/loop_tables.py BASE LOOP [BASE LOOP...]
+scripts/vtr/rotate.sh DIR BASE                        # LUT rotation, below
+python3 scripts/vtr/rotate_tables.py BASE
+```
+
+### Results
+
+**Every placement is legal and every route checks**: VPR loaded every placement the loop ended
+with, every block fixed, and VPR passed every route of `guide`'s of it, at the narrowest channel
+and at the relaxed width. Below, "guide" and "VPR" say whose router found the narrowest channel,
+on the placement of the one-pass flow with seed 1 and on the loop's from it; the first column is
+VPR's router on VPR's own placement, for reference, and critical path and wire are VPR's router's
+at the relaxed width.
+
+#### MCNC
+
+| Circuit | VPR's placement, VPR | One pass, guide | Loop, guide | / one pass | One pass, VPR | Loop, VPR | / one pass | CPD / one pass, VPR | Wire / one pass, VPR | Place, s | Loop, s | Legal |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| alu4 | 40 | 36 | 34 | 0.944 | 38 | 40 | 1.053 | 1.005 | 1.007 | 0.1 | 2.1 | yes |
+| apex2 | 54 | 50 | 50 | 1.000 | 54 | 54 | 1.000 | 1.000 | 1.000 | 0.2 | 1.8 | yes |
+| apex4 | 56 | 50 | 48 | 0.960 | 54 | 54 | 1.000 | 1.008 | 0.994 | 0.1 | 3.1 | yes |
+| bigkey | 34 | 34 | 34 | 1.000 | 34 | 34 | 1.000 | 1.000 | 1.000 | 0.3 | 2.0 | yes |
+| clma | 72 | 64 | 62 | 0.969 | 72 | 70 | 0.972 | 0.994 | 0.989 | 1.7 | 22.9 | yes |
+| des | 34 | 32 | 32 | 1.000 | 34 | 34 | 1.000 | 1.000 | 1.000 | 0.1 | 6.4 | yes |
+| diffeq | 30 | 28 | 26 | 0.929 | 30 | 28 | 0.933 | 1.012 | 0.987 | 0.1 | 1.5 | yes |
+| dsip | 34 | 34 | 34 | 1.000 | 34 | 34 | 1.000 | 1.000 | 1.000 | 0.3 | 2.2 | yes |
+| elliptic | 52 | 46 | 42 | 0.913 | 48 | 46 | 0.958 | 0.989 | 0.972 | 0.8 | 13.6 | yes |
+| ex1010 | 86 | 80 | 72 | 0.900 | 88 | 84 | 0.955 | 1.045 | 0.992 | 0.9 | 28.0 | yes |
+| ex5p | 44 | 42 | 40 | 0.952 | 44 | 44 | 1.000 | 0.967 | 0.966 | 0.2 | 2.0 | yes |
+| frisc | 58 | 52 | 48 | 0.923 | 56 | 54 | 0.964 | 1.020 | 0.988 | 0.9 | 9.9 | yes |
+| misex3 | 46 | 40 | 38 | 0.950 | 44 | 44 | 1.000 | 0.949 | 0.975 | 0.2 | 2.3 | yes |
+| pdc | 72 | 66 | 62 | 0.939 | 72 | 72 | 1.000 | 0.953 | 0.982 | 1.3 | 26.2 | yes |
+| s298 | 40 | 36 | 32 | 0.889 | 40 | 36 | 0.900 | 1.093 | 0.971 | 0.1 | 2.6 | yes |
+| s38417 | 34 | 28 | 26 | 0.929 | 30 | 30 | 1.000 | 0.996 | 0.990 | 1.2 | 6.0 | yes |
+| s38584.1 | 40 | 36 | 34 | 0.944 | 38 | 38 | 1.000 | 1.008 | 0.978 | 1.4 | 8.5 | yes |
+| seq | 54 | 52 | 48 | 0.923 | 58 | 54 | 0.931 | 1.000 | 0.972 | 0.3 | 3.5 | yes |
+| spla | 60 | 54 | 50 | 0.926 | 62 | 58 | 0.935 | 1.044 | 0.987 | 0.9 | 20.6 | yes |
+| tseng | 26 | 26 | 24 | 0.923 | 24 | 24 | 1.000 | 0.994 | 1.027 | 0.2 | 1.4 | yes |
+| Geomean |  |  |  | 0.945 |  |  | 0.979 | 1.004 | 0.989 |  |  |  |
+
+#### VTR's Verilog benchmarks
+
+| Circuit | VPR's placement, VPR | One pass, guide | Loop, guide | / one pass | One pass, VPR | Loop, VPR | / one pass | CPD / one pass, VPR | Wire / one pass, VPR | Place, s | Loop, s | Legal |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| LU8PEEng | 92 | 86 | 84 | 0.977 | 92 | 88 | 0.957 | 0.997 | 0.998 | 16.9 | 829.2 | yes |
+| arm_core | 104 | 104 | 102 | 0.981 | 114 | 104 | 0.912 | 0.999 | 0.991 | 10.0 | 266.5 | yes |
+| bgm | 70 | 68 | 66 | 0.971 | 68 | 66 | 0.971 | 1.000 | 1.002 | 21.9 | 123.5 | yes |
+| blob_merge | 58 | 62 | 60 | 0.968 | 62 | 62 | 1.000 | 0.987 | 0.978 | 2.9 | 38.7 | yes |
+| boundtop | 42 | 40 | 36 | 0.900 | 40 | 36 | 0.900 | 0.980 | 1.043 | 0.1 | 0.7 | yes |
+| ch_intrinsics | 42 | 38 | 36 | 0.947 | 38 | 36 | 0.947 | 1.001 | 1.086 | 0.0 | 0.2 | yes |
+| diffeq1 | 60 | 46 | 44 | 0.957 | 50 | 50 | 1.000 | 1.000 | 0.970 | 0.1 | 3.5 | yes |
+| diffeq2 | 46 | 38 | 38 | 1.000 | 40 | 40 | 1.000 | 1.000 | 1.000 | 0.1 | 4.1 | yes |
+| mkDelayWorker32B | 38 | 36 | 36 | 1.000 | 36 | 36 | 1.000 | 1.000 | 1.000 | 0.6 | 1.5 | yes |
+| mkPktMerge | 46 | 38 | 34 | 0.895 | 34 | 34 | 1.000 | 1.000 | 1.003 | 0.1 | 12.4 | yes |
+| mkSMAdapter4B | 50 | 54 | 46 | 0.852 | 58 | 48 | 0.828 | 1.020 | 0.936 | 0.5 | 24.1 | yes |
+| or1200 | 92 | 76 | 72 | 0.947 | 88 | 84 | 0.955 | 0.997 | 0.989 | 1.4 | 185.8 | yes |
+| raygentop | 58 | 56 | 52 | 0.929 | 62 | 52 | 0.839 | 1.023 | 0.988 | 0.4 | 12.5 | yes |
+| sha | 68 | 58 | 54 | 0.931 | 70 | 64 | 0.914 | 1.015 | 0.970 | 0.6 | 7.3 | yes |
+| spree | 62 | 62 | 58 | 0.935 | 64 | 58 | 0.906 | 0.965 | 0.974 | 0.2 | 3.0 | yes |
+| stereovision0 | 48 | 46 | 44 | 0.957 | 48 | 44 | 0.917 | 1.000 | 0.999 | 2.4 | 72.3 | yes |
+| stereovision1 | 80 | 72 | 70 | 0.972 | 74 | 76 | 1.027 | 1.021 | 0.997 | 4.4 | 76.3 | yes |
+| stereovision2 | 68 | 62 | 52 | 0.839 | 66 | 56 | 0.848 | 1.052 | 0.943 | 8.1 | 2798.9 | yes |
+| stereovision3 | 30 | 30 | 26 | 0.867 | 30 | 26 | 0.867 | 0.971 | 0.994 | 0.0 | 0.2 | yes |
+| Geomean |  |  |  | 0.937 |  |  | 0.934 | 1.001 | 0.992 |  |  |  |
+
+stereovision2 took the loop 8 steps, from 62 tracks with `guide`'s router down to 48, in 47
+minutes; the search for the narrowest channel then found 52, as a routing that succeeds within
+50 iterations at one width can fail at the next one up. Its critical path is 5% longer, with 6%
+less wire.
+
+The two largest have seed 1 only. On mcml, at 112 tracks, 2 below the one pass's
+114 with `guide`'s router, the best of the four routings left one node overused, after 25 minutes,
+so its placement is the one pass's. Placing the whole device again instead, `--whole`, routed
+at 112 tracks after a single re-placement, in 13 minutes, the bounding boxes 1.2% smaller and
+the critical path by the delay model 1.3% longer; that placement was not measured by VPR, whose search for its
+narrowest channel takes hours. On LU32PEEng, the loop routed at 118 tracks, 2 below the one
+pass's 120 with `guide`'s router, after two re-placements, in 80 minutes, and went on to 116;
+it too was measured by `guide`'s router alone, and is left out of the tables.
+
+#### Seeds
+
+Each pair is the one-pass flow with a seed and the loop from it, as geometric means of the loop
+over the one-pass flow, and of each over VPR's placement with seed 1, with VPR's router:
+
+| Suite, seed | Circuits | Min W / one pass, guide | Min W / one pass, VPR | One pass / VPR's placement, VPR | Loop / VPR's placement, VPR | CPD / one pass, VPR | Wire / one pass, VPR | Time, one pass + loop / one pass | All legal |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| MCNC, seed 1 | 20 | 0.945 | 0.979 | 0.981 | 0.961 | 1.004 | 0.989 | 14.81 | yes |
+| MCNC, seed 2 | 20 | 0.954 | 0.994 | 0.975 | 0.970 | 1.000 | 0.982 | 12.33 | yes |
+| MCNC, seed 3 | 20 | 0.958 | 0.990 | 0.970 | 0.960 | 1.004 | 1.000 | 10.86 | yes |
+| Verilog, seed 1 | 19 | 0.937 | 0.934 | 0.970 | 0.906 | 1.001 | 0.992 | 25.84 | yes |
+| Verilog, seed 2 | 19 | 0.943 | 0.952 | 0.971 | 0.925 | 0.999 | 0.995 | 19.31 | yes |
+| Verilog, seed 3 | 19 | 0.917 | 0.938 | 0.984 | 0.923 | 0.997 | 0.988 | 21.10 | yes |
+
+With the whole device placed again, `--whole`, instead of windows, seed 1:
+
+| Suite, seed | Circuits | Min W / one pass, guide | Min W / one pass, VPR | One pass / VPR's placement, VPR | Loop / VPR's placement, VPR | CPD / one pass, VPR | Wire / one pass, VPR | Time, one pass + loop / one pass | All legal |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| MCNC, seed 1, whole | 20 | 0.953 | 0.982 | 0.981 | 0.964 | 1.003 | 0.985 | 14.51 | yes |
+| Verilog, seed 1, whole | 19 | 0.921 | 0.931 | 0.970 | 0.903 | 1.007 | 0.984 | 30.13 | yes |
+
+By circuit on the Verilog suite, the narrowest channel with seeds 1, 2 and 3:
+
+| Circuit | VPR's placement, VPR | One pass, VPR | Loop, VPR | One pass, guide | Loop, guide |
+| --- | --- | --- | --- | --- | --- |
+| LU8PEEng | 92 | 92, 92, 94 | 88, 88, 86 | 86, 88, 84 | 84, 84, 82 |
+| arm_core | 104 | 114, 108, 110 | 104, 108, 102 | 104, 108, 108 | 102, 104, 100 |
+| bgm | 70 | 68, 70, 66 | 66, 68, 66 | 68, 68, 66 | 66, 66, 64 |
+| blob_merge | 58 | 62, 62, 62 | 62, 62, 62 | 62, 60, 62 | 60, 60, 60 |
+| boundtop | 42 | 40, 44, 42 | 36, 34, 36 | 40, 44, 42 | 36, 34, 36 |
+| ch_intrinsics | 42 | 38, 36, 42 | 36, 36, 34 | 38, 36, 42 | 36, 36, 34 |
+| diffeq1 | 60 | 50, 52, 56 | 50, 50, 46 | 46, 48, 50 | 44, 40, 44 |
+| diffeq2 | 46 | 40, 44, 48 | 40, 42, 42 | 38, 40, 46 | 38, 42, 38 |
+| mkDelayWorker32B | 38 | 36, 36, 38 | 36, 36, 38 | 36, 36, 38 | 36, 36, 38 |
+| mkPktMerge | 46 | 34, 40, 42 | 34, 36, 36 | 38, 40, 40 | 34, 36, 36 |
+| mkSMAdapter4B | 50 | 58, 56, 56 | 48, 48, 50 | 54, 54, 54 | 46, 46, 48 |
+| or1200 | 92 | 88, 90, 90 | 84, 80, 98 | 76, 76, 76 | 72, 70, 70 |
+| raygentop | 58 | 62, 52, 52 | 52, 52, 52 | 56, 54, 54 | 52, 52, 52 |
+| sha | 68 | 70, 60, 60 | 64, 60, 60 | 58, 56, 56 | 54, 56, 54 |
+| spree | 62 | 64, 64, 64 | 58, 60, 58 | 62, 62, 62 | 58, 58, 58 |
+| stereovision0 | 48 | 48, 46, 50 | 44, 44, 46 | 46, 44, 50 | 44, 42, 42 |
+| stereovision1 | 80 | 74, 74, 72 | 76, 70, 72 | 72, 68, 68 | 70, 66, 68 |
+| stereovision2 | 68 | 66, 64, 66 | 56, 66, 66 | 62, 54, 60 | 52, 50, 50 |
+| stereovision3 | 30 | 30, 34, 28 | 26, 34, 28 | 30, 34, 28 | 26, 34, 28 |
+
+### What the results say
+
+- **The loop needs narrower channels than the one pass, on average on every seed.** With
+  `guide`'s router, which the loop works with, 4.2% to 5.5% narrower on MCNC and 5.7% to 8.3% on
+  the Verilog suite. With VPR's router, which never saw the loop, 0.6% to 2.1% narrower on MCNC,
+  where seeds move the means by about as much, and 4.8% to 6.6% on the Verilog suite, well
+  beyond that.
+- **Against VPR's own placement**, with VPR's router, the one-pass flow needed channels 1.9% to
+  3.0% narrower on MCNC and 1.6% to 3.0% on the Verilog suite; the loop, 3.0% to 4.0% and 7.5%
+  to 9.4%.
+- **The circuits that were worst against VPR are no worse than it now, but for one.**
+  mkSMAdapter4B, 16% wider than VPR's placement before, now needs 48, 48 and 50 tracks on the
+  three seeds, against VPR's 50, from 58, 56 and 56. With seed 1, arm_core went from 114 to 104,
+  VPR's own width; raygentop from 62 to 52, against VPR's 58; stereovision2 from 66 to 56,
+  against 68; sha from 70 to 64, against 68. blob_merge stays at 62 tracks with VPR's router,
+  against VPR's 58, on all three seeds, though `guide`'s router went to 60 on each.
+- **At no cost in delay or wire**: critical paths within 0.4% of the one pass's on average, and
+  up to 1.8% less wire, with VPR's router at the relaxed width. Single circuits move more:
+  s298's critical path is 9% longer and stereovision2's 5%, misex3's 5% shorter.
+- **Time.** The loop routes again at every width it tries, so it takes much longer than placing:
+  1.4 s to 28 s on MCNC, against 0.1 s to 1.7 s of placement; up to 4.4 min on the Verilog
+  suite but for the largest, 14 min on LU8PEEng and 28 to 47 min on stereovision2. Most of it is
+  routing at widths that fail, 50 iterations each.
+
+### What the feedback does
+
+Before the runs above, the loop ran once on twelve of the circuits where `guide`'s placement
+needed the widest channels against VPR's, arm_core, blob_merge, mkSMAdapter4B, or1200, raygentop,
+sha, spree, ex1010, pdc, s298, seq and spla, from the one-pass placement with seed 1, at 2 and at
+4 tracks below its narrowest channel with `guide`'s router, with up to 3 placements again unless
+said. Counted are the circuits whose loop ended with a legal routing:
+
+| Setting | 2 tracks narrower | 4 tracks narrower | Time, s, 2 narrower |
+| --- | --- | --- | --- |
+| **Windows of 6 tiles, history and use** (the default) | **12** | **9** | **110** |
+| Windows of 4 tiles | 10 | 8 | 222 |
+| Windows of 8 tiles | 12 | 11 | 154 |
+| The whole device | 12 | 12 | 122 |
+| The whole device, 6 times | 12 | 12 | 124 |
+| Windows of 6 tiles, routing from the routes before (`--seed-routes`) | 12 | 10 | 118 |
+| Windows of 4 tiles, congestion factor 2 | 11 |  | 194 |
+| Windows of 4 tiles, without feedback | 8 |  | 235 |
+| The whole device, without feedback | 9 |  | 171 |
+| The whole device, without feedback, 6 times |  | 5 |  |
+| The whole device, history only | 12 |  | 147 |
+| The whole device, use beyond the estimate only | 8 |  | 194 |
+
+- **The router's feedback is what does it.** Placing again at the same low temperature with
+  only the placer's own estimate of congestion, the loop narrowed 8 and 9 of the 12 circuits by 2
+  tracks and 5 by 4, against 12 and 9 to 12 with it. Placing again is not just more annealing.
+- **History does nearly all of it.** With the router's history of overuse alone, all 12 went 2
+  narrower; with only how much more of each channel the routes used than RUDY expected, 8.
+- **Windows or the whole device.** Windows of 6 tiles around what was overused cover 91% of an
+  MCNC device on average and 68% of a Verilog one, and did as well as the whole device 2 tracks
+  narrower, and less well 4 narrower, which the loop never asks for at once. The default keeps
+  the re-placement local, as the roadmap asks; `--whole` is there.
+- **Routing again from the routes before**, through the engine's `Engine::seed_routes`, routed as
+  many circuits in about as long, so it stays off. The router's history goes into the placement,
+  and each routing starts afresh from it.
+
+### Pin permutation
+
+What the netlist lets a router permute on these architectures, and what each flow does with it:
+
+| Where | `k6_N10_40nm.xml` (MCNC) | `k6_frac_N10_frac_chain_mem32K_40nm.xml` (Verilog) | VPR 9.0.0 | `guide` |
+| --- | --- | --- | --- | --- |
+| A cluster's inputs | 40, `equivalent="full"` | 40, `equivalent="full"` | One `SINK` for the class, any pin; the netlist is rewritten to match after routing (`.net.post_routing`) | The same `SINK`, any pin, already before this |
+| A cluster's outputs | 10, `equivalent="instance"` | 20, `equivalent="none"` | One `SOURCE`, one pin per net | The same, already: `fpga::Design` roots a net on one of the `OPIN`s |
+| A LUT's inputs, inside the cluster | 6, from a `complete` crossbar, 82 ps to 398 ps | 6 or 5, from a `complete` crossbar, all 261 ps or all 235 ps | As the packer left them, for routability inside the cluster | **Rotated for timing after routing**, below |
+| Memories' address and data bits, multipliers' operands | Not in MCNC | `none` | Not permuted | Not permuted |
+
+So between clusters both routers already exploit all the equivalence the architectures declare.
+Inside a cluster, a LUT's inputs come from a crossbar that reaches every one of them, so which
+input a signal takes changes nothing that either router sees, and `.net` files record the
+choice in a `port_rotation_map`, which VPR's timing analysis reads. On `k6_N10_40nm.xml` the
+choice matters: the six inputs take 82, 173, 261, 263, 398 and 397 ps. VPR's packer chooses
+inputs for routability inside the cluster, and nothing in VPR's flow changes them for timing.
+
+`vtr_route --rotate-luts` does, after a legal routing: with every connection's routed delay in
+the timing graph, each LUT's latest-arriving signals go to its fastest inputs, until no LUT
+changes (`fpga::rotate_luts_for_timing`), and `fpga::write_rotated_netlist` writes the `.net`
+with the signals and rotation maps moved. VPR then reads the rotated netlist, with the same
+placement and routes, and checks and times them with `--analysis`; and its router routes the
+placement again with the rotated netlist, at the same relaxed width. Applied to VPR's own
+placement too, to show that it is independent of the placer:
+
+| Circuit | Placement | LUTs rotated | guide's routes, ns | Rotated, ns | / not | VPR's routes, ns | Rotated, ns | / not | Wire / not, VPR | Legal |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| alu4 | vpr | 905 of 912 | 4.8465 | 3.894 | 0.803 | 5.31783 | 4.04005 | 0.760 | 0.974 | yes |
+| alu4 | guide | 904 of 912 | 4.99054 | 3.85597 | 0.773 | 4.99275 | 4.08568 | 0.818 | 1.034 | yes |
+| apex2 | vpr | 1065 of 1075 | 5.77742 | 4.30064 | 0.744 | 5.80687 | 4.50526 | 0.776 | 1.014 | yes |
+| apex2 | guide | 1067 of 1075 | 5.59581 | 4.21745 | 0.754 | 5.76134 | 4.65385 | 0.808 | 1.029 | yes |
+| apex4 | vpr | 881 of 887 | 5.27845 | 4.18199 | 0.792 | 5.38635 | 4.31389 | 0.801 | 0.969 | yes |
+| apex4 | guide | 882 of 887 | 5.27103 | 4.17239 | 0.792 | 5.34477 | 4.31704 | 0.808 | 1.034 | yes |
+| bigkey | vpr | 894 of 911 | 3.2653 | 2.51122 | 0.769 | 3.30692 | 2.6085 | 0.789 | 1.039 | yes |
+| bigkey | guide | 893 of 911 | 3.25733 | 2.55301 | 0.784 | 3.2681 | 2.57789 | 0.789 | 1.002 | yes |
+| clma | vpr | 3554 of 3576 | 8.66512 | 6.49691 | 0.750 | 8.69463 | 6.61225 | 0.760 | 1.020 | yes |
+| clma | guide | 3556 of 3576 | 8.4878 | 6.31266 | 0.744 | 8.47252 | 6.56294 | 0.775 | 1.020 | yes |
+| des | vpr | 633 of 698 | 4.46377 | 3.37855 | 0.757 | 4.46945 | 3.37981 | 0.756 | 0.996 | yes |
+| des | guide | 633 of 698 | 4.43359 | 3.2217 | 0.727 | 4.41387 | 3.3353 | 0.756 | 1.009 | yes |
+| diffeq | vpr | 845 of 930 | 6.10312 | 4.43269 | 0.726 | 6.09481 | 4.55041 | 0.747 | 0.991 | yes |
+| diffeq | guide | 846 of 930 | 5.79765 | 4.29822 | 0.741 | 6.12015 | 4.69225 | 0.767 | 1.010 | yes |
+| dsip | vpr | 873 of 909 | 3.17582 | 2.52701 | 0.796 | 3.17889 | 2.55214 | 0.803 | 0.985 | yes |
+| dsip | guide | 873 of 909 | 3.4161 | 2.58475 | 0.757 | 3.43943 | 2.57915 | 0.750 | 1.047 | yes |
+| elliptic | vpr | 2063 of 2168 | 7.54636 | 5.49148 | 0.728 | 7.58148 | 5.72609 | 0.755 | 1.021 | yes |
+| elliptic | guide | 2062 of 2168 | 7.51422 | 5.93823 | 0.790 | 7.51865 | 6.21948 | 0.827 | 1.028 | yes |
+| ex1010 | vpr | 2631 of 2649 | 6.82146 | 5.82022 | 0.853 | 6.89706 | 5.99618 | 0.869 | 1.022 | yes |
+| ex1010 | guide | 2640 of 2649 | 6.63487 | 5.55452 | 0.837 | 6.65474 | 5.72121 | 0.860 | 1.027 | yes |
+| ex5p | vpr | 741 of 753 | 4.54943 | 3.64246 | 0.801 | 4.62135 | 3.80697 | 0.824 | 1.046 | yes |
+| ex5p | guide | 741 of 753 | 4.34903 | 3.41984 | 0.786 | 4.56112 | 3.77477 | 0.828 | 0.997 | yes |
+| frisc | vpr | 2075 of 2269 | 9.59249 | 7.12923 | 0.743 | 10.0072 | 7.38275 | 0.738 | 1.015 | yes |
+| frisc | guide | 2078 of 2269 | 9.66988 | 7.24628 | 0.749 | 9.74947 | 7.24233 | 0.743 | 0.998 | yes |
+| misex3 | vpr | 803 of 814 | 4.78367 | 3.71028 | 0.776 | 4.82071 | 3.85063 | 0.799 | 1.034 | yes |
+| misex3 | guide | 806 of 814 | 4.89592 | 3.64127 | 0.744 | 5.06325 | 3.7956 | 0.750 | 1.006 | yes |
+| pdc | vpr | 2804 of 2823 | 7.05184 | 5.49903 | 0.780 | 7.06044 | 6.02164 | 0.853 | 1.029 | yes |
+| pdc | guide | 2807 of 2823 | 7.02664 | 5.46673 | 0.778 | 7.52518 | 6.46751 | 0.859 | 1.043 | yes |
+| s298 | vpr | 709 of 714 | 7.35173 | 5.11921 | 0.696 | 7.26292 | 5.47105 | 0.753 | 1.041 | yes |
+| s298 | guide | 709 of 714 | 6.64345 | 4.83847 | 0.728 | 6.64124 | 5.23877 | 0.789 | 0.996 | yes |
+| s38417 | vpr | 2992 of 3290 | 5.51245 | 4.15302 | 0.753 | 5.80047 | 4.34468 | 0.749 | 1.013 | yes |
+| s38417 | guide | 2994 of 3290 | 5.30108 | 3.90559 | 0.737 | 5.49631 | 4.05331 | 0.737 | 0.999 | yes |
+| s38584.1 | vpr | 2843 of 3123 | 4.87983 | 4.02034 | 0.824 | 5.05609 | 4.61144 | 0.912 | 0.984 | yes |
+| s38584.1 | guide | 2845 of 3123 | 5.21921 | 4.17104 | 0.799 | 5.2779 | 4.62522 | 0.876 | 1.004 | yes |
+| seq | vpr | 952 of 965 | 4.794 | 3.7739 | 0.787 | 4.87201 | 3.89722 | 0.800 | 1.006 | yes |
+| seq | guide | 949 of 965 | 4.88102 | 3.85624 | 0.790 | 5.00909 | 3.9622 | 0.791 | 1.022 | yes |
+| spla | vpr | 2192 of 2216 | 6.51736 | 5.13829 | 0.788 | 6.52939 | 5.56467 | 0.852 | 1.036 | yes |
+| spla | guide | 2182 of 2216 | 6.21489 | 4.88286 | 0.786 | 6.29578 | 5.40838 | 0.859 | 1.045 | yes |
+| tseng | vpr | 896 of 1027 | 5.68422 | 3.93343 | 0.692 | 5.71256 | 4.17108 | 0.730 | 1.025 | yes |
+| tseng | guide | 896 of 1027 | 5.61643 | 3.90923 | 0.696 | 5.64603 | 4.02116 | 0.712 | 0.995 | yes |
+| Geomean | vpr |  |  |  | 0.767 |  |  | 0.790 | 1.013 |  |
+| Geomean | guide |  |  |  | 0.764 |  |  | 0.794 | 1.017 |  |
+
+- **Critical paths are 24% shorter** by VPR's analysis of `guide`'s routes, 0.764 of what they
+  were on `guide`'s placements and 0.767 on VPR's, and 21% shorter with VPR's router, every
+  route legal. `guide`'s estimate before writing the netlist was within 4 ps of VPR's analysis
+  after it on `tseng` (3.905 ns against 3.909 ns). The wire VPR's router uses is 1.3% to
+  1.7% more, as its timing-driven router weighs nets differently with the new criticalities.
+- It composes with the loop: on the loop's seed-1 placements, rotation takes `guide`'s routes to
+  0.762 of their critical path, and VPR's to 0.782.
+- On the Verilog architecture every input of a LUT is as fast, so there is nothing to gain:
+  on or1200, all 681 LUTs can be rotated and none is, and VPR times the netlist as written at
+  8.841 ns, as before.
+- Rotation takes 0.03 s to 0.16 s a circuit.
+- **Not done**: permuting which fracturable LE of a cluster implements which function, which
+  would let a net leave by another output pin of a Verilog cluster, whose outputs are
+  `equivalent="none"`; it would mean rewriting the cluster's internal routing, around its carry
+  chains. Nor are memories' address bits, which a memory without initial contents allows if
+  every port is permuted alike, nor multipliers' operands.
+
+### What it took
+
+- **The router's history, more than its last iteration.** Feeding back only how much more of
+  each channel the routes used than RUDY expected, the use at the end, narrowed 8 of the 12
+  circuits of the table above; the history of overuse, added up over every iteration and kept
+  over rounds, as the router's own history is, narrowed all 12.
+- **Placing again at a low temperature.** Annealing from where blocks are, at a twentieth of
+  the moves' standard deviation over 4 steps, with timing, keeps what the one pass found: VPR's
+  estimate of the wire before routing came to 0.989 and 0.997 of the one pass's on the two
+  suites with seed 1, between 0.95 and 1.04 on single circuits, and critical paths stayed within
+  0.4%.
+- **Nothing new in the engine.** The history comes from `Engine::overused` after each step, and
+  the windows from where the best iteration's overused nodes are, so the loop is all in
+  `src/fpga`. Routing again from the routes before, through the engine's `seed_routes`, which
+  came in parallel, is an option.
+- **A packed netlist written back.** For the rotated `.net` to be the same packing, every level
+  between the crossbar and the LUT has to move a signal together, and the `port_rotation_map`
+  with them; `fpga::rotatable_luts` checks that each level takes its pins straight from its
+  parent, which nothing else in the parent uses, from a `complete` crossbar of the architecture.
+  VPR rewrites a placement file whose header names its netlist otherwise than as given on its
+  command line, which changes the digest a route file names, so `rotate-circuit.sh` writes the
+  header as VPR would.
+
+### What this does not show
+
+- LU32PEEng and mcml: their loops were measured by `guide`'s router alone, as VPR's search for
+  their narrowest channel takes hours.
+- One packing per circuit, VPR's with seed 1, and the loop works at the widths of `guide`'s
+  router. A loop that targets VPR's router would route with it, as it is the router's own
+  history that the placement takes.
+- Times are of a shared machine, busy with other runs, and are only good to an order of
+  magnitude.
+- LUT rotation is measured on MCNC alone, as the Verilog architecture's LUT inputs are all as
+  fast. Architectures whose clusters have sparse crossbars would make rotation a matter of
+  routing inside the cluster too, which neither flow here does.
 
 ## PCB clearance checks against KiCad
 

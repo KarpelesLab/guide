@@ -15,7 +15,9 @@
 //! search goes unchecked, and that part of the centreline is dropped: each net's track
 //! there, its *fan-out*, is routed on its own, from its pad to its end of the coupled run.
 //! Vias cost ten times as much as in routing, as in cleanup, since the pair replaces routes
-//! that cleanup has had.
+//! that cleanup has had; so where the two ends are on different layers, as a BGA's balls on
+//! top and an edge connector's fingers below, the search's lower bound counts the layer
+//! change it can't do without, or it would search most of the board first.
 //!
 //! The coupled run and the fan-outs are checked exactly, net by net, against everything
 //! else and each other. If anything fails, the pair keeps the routes it had.
@@ -346,7 +348,14 @@ impl RoutingSpace for PairSpace<'_> {
     }
 
     fn lower_bound(&self, _net: NetId, from: PNode, _to: PNode) -> Cost {
-        Cost::new(octile(from.point(), self.target.0) * NM * (1.0 - 1e-9)).unwrap_or(Cost::ZERO)
+        // On a layer the second end isn't reached on, a layer change at least is to come.
+        let change = if self.target.1.contains(LayerId(from.l)) {
+            0.0
+        } else {
+            2.0 * self.via_cost
+        };
+        Cost::new((octile(from.point(), self.target.0) * NM + change) * (1.0 - 1e-9))
+            .unwrap_or(Cost::ZERO)
     }
 
     fn resources(&self, _net: NetId, _from: PNode, _to: PNode, _out: &mut Vec<NodeId>) {}

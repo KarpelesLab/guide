@@ -547,6 +547,11 @@ pub(crate) enum Failure {
 /// pads doesn't run out where a net of two wouldn't.
 pub(crate) const BUDGET_TERMINALS: usize = 64;
 
+/// How many terminals a net has at most to fail whole: a net of more, such as a supply or
+/// ground routed as tracks, that rip-up can't route whole is searched for a terminal at a
+/// time, and keeps what it reaches.
+pub(crate) const STUB_TERMINALS: usize = 16;
+
 /// What share of [`Params::max_expansions`] a partial route's search from one terminal
 /// may expand.
 const PARTIAL_SHARE: u64 = 8;

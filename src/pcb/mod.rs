@@ -40,9 +40,13 @@
 //! 3. **Rip-up.** A net that finds no path, in its corridor or then anywhere, searches
 //!    again with other nets' routes passable at a price that grows with the history of
 //!    conflicts where it crosses them. The nets it crosses are ripped up, it takes its
-//!    path, and they route again. A net ripped up too often stays where it is. Nets left
-//!    unrouted at the end get a second pass, on a lattice of half the pitch, in which a
-//!    route may also go to a pad's centre on a layer the pad isn't on, for a via in it.
+//!    path, and they route again. A net ripped up too often stays where it is. A net of
+//!    more than 16 terminals, such as a supply or ground routed as tracks, that rip-up
+//!    can't route whole is searched for a terminal at a time, nearest its first first, and
+//!    keeps what it reaches rather than failing whole. Nets left unrouted at the end, or routed in part, get a second pass,
+//!    on a lattice of half the pitch, in which a route may also go to a pad's centre on a
+//!    layer the pad isn't on, for a via in it; a net routed in part is completed there from
+//!    the copper it has.
 //! 4. **Cleanup**: nets with vias are rerouted with dearer vias, kept only if they lose
 //!    vias; then each run of tracks between pads, vias and branches is pulled tight, by
 //!    replacing runs with straight or 45° shortcuts where those are legal.
@@ -51,11 +55,15 @@
 //!    for its centreline, wide enough for both tracks, offset into the two tracks, with
 //!    vias side by side and each net's own fan-out near its pads. It is kept if it connects
 //!    all that the two routes did, so it can't cost another net its route. Pairs whose
-//!    two nets' pads are far apart are left as they are.
+//!    two nets' pads are far apart are left as they are. With [`Options::pairs_first`],
+//!    pairs are routed this way before anything else instead, as fixed copper, with a
+//!    place for a via kept free of them beside each pad of a net with zones next to their
+//!    pads, such as a ground pin between two pairs' pins.
 //! 6. **Meanders**, for [`Design::lengths`]: nets shorter than they must be get trombone
 //!    meanders on their straight tracks, in free space, each checked exactly as routing
 //!    is, and pairs side by side get meanders of both tracks together, which keep their
-//!    gap.
+//!    gap. A net left short where its neighbours' meanders took the room gets it back:
+//!    theirs are taken out, it is meandered first, and they again after it.
 //! 7. **Zones** are filled again around everything routed, before meanders, and once more
 //!    after them if any were added. Before meanders, a net with zones that its
 //!    copper and fills leave in pieces, as routes of other nets cut its fills, has each

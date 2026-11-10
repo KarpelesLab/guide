@@ -226,3 +226,21 @@ fn a_net_already_too_long_is_left_as_it_is() {
     assert_eq!(r.stats.lengths, (1, 0));
     assert_eq!(r.stats.meanders, 0.0);
 }
+
+#[test]
+fn a_pair_first_from_one_layer_to_another_runs_side_by_side() {
+    let mut d = pair_design(2, 20 * MM, 15 * MM);
+    for k in [2, 3] {
+        d.board.pads[k].layers = LayerSet::EMPTY.with(LayerId(1));
+    }
+    let options = Options {
+        pairs_first: true,
+        ..Options::default()
+    };
+    let r = route_checked(&d, &options);
+    assert!(r.unrouted.is_empty());
+    assert_eq!(r.stats.pairs, (1, 1));
+    assert_eq!(r.vias.len(), 2);
+    let f = coupled(&r);
+    assert!(f > 0.7, "coupled {f}");
+}

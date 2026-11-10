@@ -306,6 +306,21 @@ impl<'r> World<'r> {
         self.add(LayerSet::EMPTY.with(layer), shape, meta)
     }
 
+    /// Adds a keepout of tracks and vias, as the design's are, for a while.
+    pub(crate) fn add_keepout(&mut self, layers: LayerSet, shape: Shape) -> Placed {
+        let meta = Meta {
+            kind: Kind::Keepout {
+                tracks: true,
+                vias: true,
+            },
+            net: None,
+            own: None,
+            owner: Owner::Fixed,
+            clearance: 0,
+        };
+        self.add(layers, shape, meta)
+    }
+
     /// Adds a routed through via.
     pub(crate) fn add_via(&mut self, net: NetId, at: Point, diameter: i64, drill: i64) -> Placed {
         let all = self.rules.layers();

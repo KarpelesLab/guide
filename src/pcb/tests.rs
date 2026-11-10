@@ -438,3 +438,33 @@ fn a_pad_whose_centre_is_blocked_is_reached_where_it_has_room() {
         assert!(!shape.violates(&text, 200_000).unwrap());
     }
 }
+
+#[test]
+fn a_net_of_many_pads_keeps_what_it_reaches() {
+    // Twenty pads of one net in a row on one layer, the last walled in.
+    let pads: Vec<Pad> = (0..20).map(|k| smd(k * 2 * MM, 0, 1)).collect();
+    let mut d = design(1, pads, 2);
+    let x = 38 * MM;
+    let wall = |a: Point, b: Point| Keepout {
+        shape: Shape::rect(Rect::new(a, b)).unwrap(),
+        layers: LayerSet::first(1),
+        tracks: true,
+        vias: true,
+        pads: false,
+    };
+    d.board.keepouts.extend([
+        wall(Point::new(x - MM, -MM), Point::new(x + MM, -MM / 2)),
+        wall(Point::new(x - MM, MM / 2), Point::new(x + MM, MM)),
+        wall(Point::new(x - MM, -MM), Point::new(x - MM / 2, MM)),
+        wall(Point::new(x + MM / 2, -MM), Point::new(x + MM, MM)),
+    ]);
+    d.outline = outline(Rect::new(
+        Point::new(-2 * MM, -3 * MM),
+        Point::new(41 * MM, 3 * MM),
+    ));
+    let routed = route_checked(&d, &Options::default());
+    assert_eq!(routed.unrouted, [NetId(1)]);
+    assert_eq!(routed.stats.connections, 19);
+    assert_eq!(routed.stats.connected, 18);
+    assert!(!routed.tracks.is_empty());
+}

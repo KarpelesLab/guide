@@ -1,10 +1,11 @@
-//! Length and skew constraints from a board's custom rules, in its `.kicad_dru` file.
+//! Constraints for routing from a board's custom rules, in its `.kicad_dru` file: lengths and
+//! skews, track widths, and differential pairs' gaps and uncoupled lengths.
 
 use super::KicadBoard;
 use super::KicadError;
 use super::project::{pair_partner, wildcard};
 use crate::id::NetId;
-use crate::pcb::LengthConstraint;
+use crate::pcb::{Design, LengthConstraint};
 use crate::units::scaled;
 
 /// What [`length_rules`] read.
@@ -14,9 +15,44 @@ pub struct LengthRules {
     /// The constraints, in the order of the rules they come from: a rule's length, and
     /// then its skew, which are each a constraint of their own.
     pub constraints: Vec<LengthConstraint>,
+    /// By net, the width of its tracks that a `track_width` constraint gives it: its `opt`,
+    /// or failing that its `min`. In the order of the nets.
+    pub widths: Vec<(NetId, i64)>,
+    /// By differential pair, positive net first, the gap that a `diff_pair_gap` constraint
+    /// gives it: its `opt`, or failing that its `min`. In the order of the board's pairs.
+    pub pair_gaps: Vec<(NetId, NetId, i64)>,
+    /// By differential pair, the longest that its nets may run apart, from a
+    /// `diff_pair_uncoupled` constraint's `max`. In the order of the board's pairs.
+    pub uncoupled: Vec<(NetId, NetId, i64)>,
     /// What was skipped, with why: rules whose conditions this doesn't understand, and
-    /// constraints other than lengths and skews.
+    /// constraints other than these.
     pub warnings: Vec<String>,
+}
+
+impl LengthRules {
+    /// Gives a design what these rules ask of its routing: their lengths in
+    /// [`lengths`](Design::lengths), their widths to nets' tracks and to the pairs they
+    /// are in, and their gaps to pairs. Uncoupled lengths are only measured, not routed for.
+    pub fn apply(&self, design: &mut Design) {
+        design.lengths.extend(self.constraints.iter().cloned());
+        for &(net, width) in &self.widths {
+            if let Some(spec) = design.nets.get_mut(net.index()) {
+                spec.track_width = width;
+            }
+            for pair in &mut design.pairs {
+                if pair.positive == net || pair.negative == net {
+                    pair.width = width;
+                }
+            }
+        }
+        for &(positive, negative, gap) in &self.pair_gaps {
+            for pair in &mut design.pairs {
+                if (pair.positive, pair.negative) == (positive, negative) {
+                    pair.gap = gap;
+                }
+            }
+        }
+    }
 }
 
 /// A length in a rule, such as `1.5mm`, `20mil`, `0.1in` or `150um`, in nanometres. A
@@ -95,20 +131,24 @@ fn pair_base(name: &str) -> Option<String> {
     Some(chars[..i].iter().collect())
 }
 
-/// Reads the length and skew constraints of a board's custom rules, the text of its
-/// `.kicad_dru` file, for [`Design::lengths`](crate::pcb::Design::lengths).
+/// Reads the constraints for routing of a board's custom rules, the text of its `.kicad_dru`
+/// file, which [`LengthRules::apply`] gives to a [`Design`].
 ///
 /// A rule's `length` constraint, with its `min`, `opt` and `max`, applies to each net its
 /// condition matches; its `skew` constraint, with its `max`, to all of them together, or
-/// with `within_diff_pairs`, to the two nets of each differential pair among them. Where
-/// several rules give a net a length, or a skew, the last in the file wins, as in KiCad.
+/// with `within_diff_pairs`, to the two nets of each differential pair among them. A
+/// `track_width` constraint gives each net its `opt`, or its `min`, as the width of its
+/// tracks; `diff_pair_gap` and `diff_pair_uncoupled` give each differential pair among
+/// the nets a gap, its `opt` or `min`, and the longest it may run apart, its `max`. Where
+/// several rules give a net one kind of constraint, the last in the file wins, as in KiCad.
 ///
 /// Conditions are understood if they join, with `||` and `&&`, terms of these kinds, with
 /// KiCad's wildcards and whatever the case: `A.NetName == '…'`, `A.NetClass == '…'`,
 /// `A.hasNetclass('…')` and `A.inDiffPair('…')`, which matches the base name of a pair, as
 /// `/USB_D` for `/USB_DP` and `/USB_DN`. A rule with any other condition is skipped, and
 /// so are other constraints, each with a warning. The rules' own layers and severities
-/// aren't read.
+/// aren't read, nor are a `track_width`'s `max` and a `diff_pair_gap`'s `max`, which
+/// KiCad's DRC checks.
 ///
 /// ```
 /// # let pcb = r#"(kicad_pcb (version 20240108) (generator test)
@@ -154,7 +194,9 @@ pub fn length_rules(text: &str, board: &KicadBoard) -> Result<LengthRules, Kicad
     };
     let pairs = &board.routing.pairs;
     let mut out = LengthRules::default();
-    // Each rule's constraints, by kind: 0 for lengths and 1 for skews.
+    // Each rule's constraints, by kind: 0 for lengths, 1 for skews, 2 for widths, 3 for
+    // pairs' gaps and 4 for their uncoupled lengths, these last three as a length's
+    // `target`, `min` and `max`.
     let mut found: Vec<Vec<(usize, LengthConstraint, bool)>> = Vec::new();
     for rule in root.items().iter().filter(|r| r.is("rule")) {
         let name = rule.arg(0).unwrap_or("").to_string();
@@ -207,6 +249,32 @@ pub fn length_rules(text: &str, board: &KicadBoard) -> Result<LengthRules, Kicad
                     },
                     c.items().iter().any(|i| i.is("within_diff_pairs")),
                 )),
+                Some(kind @ ("track_width" | "diff_pair_gap")) => {
+                    if let Some(v) = value("opt").or_else(|| value("min")) {
+                        mine.push((
+                            if kind == "track_width" { 2 } else { 3 },
+                            LengthConstraint {
+                                nets: matched.clone(),
+                                target: Some(v),
+                                ..LengthConstraint::default()
+                            },
+                            false,
+                        ));
+                    }
+                }
+                Some("diff_pair_uncoupled") => {
+                    if let Some(v) = value("max") {
+                        mine.push((
+                            4,
+                            LengthConstraint {
+                                nets: matched.clone(),
+                                max: Some(v),
+                                ..LengthConstraint::default()
+                            },
+                            false,
+                        ));
+                    }
+                }
                 Some(other) => out.warnings.push(format!(
                     "rule {name:?}: constraint {other:?} isn't read for routing"
                 )),
@@ -215,15 +283,34 @@ pub fn length_rules(text: &str, board: &KicadBoard) -> Result<LengthRules, Kicad
         }
         found.push(mine);
     }
-    // The last rule to give a net a length, or a skew, is the one that holds for it.
-    let mut taken: [Vec<NetId>; 2] = Default::default();
+    // The last rule to give a net a kind of constraint is the one that holds for it.
+    let mut taken: [Vec<NetId>; 5] = Default::default();
     let mut constraints: Vec<Vec<LengthConstraint>> = vec![Vec::new(); found.len()];
+    // By net, its width, and by pair, its gap and uncoupled length.
+    let mut widths: Vec<Option<i64>> = vec![None; board.nets.len()];
+    let mut gaps: Vec<[Option<i64>; 2]> = vec![[None; 2]; pairs.len()];
     for (r, mine) in found.into_iter().enumerate().rev() {
         let mut here = Vec::new();
         for (kind, mut c, within) in mine {
             c.nets.retain(|n| !taken[kind].contains(n));
             taken[kind].extend(c.nets.iter().copied());
             if c.nets.is_empty() {
+                continue;
+            }
+            if kind == 2 {
+                for n in &c.nets {
+                    widths[n.index()] = c.target;
+                }
+                continue;
+            }
+            if kind >= 3 {
+                for (k, p) in pairs.iter().enumerate() {
+                    // A pair is given what is given to either of its nets.
+                    if c.nets.contains(&p.positive) || c.nets.contains(&p.negative) {
+                        let g = &mut gaps[k][kind - 3];
+                        *g = g.or(if kind == 3 { c.target } else { c.max });
+                    }
+                }
                 continue;
             }
             if within {
@@ -242,6 +329,19 @@ pub fn length_rules(text: &str, board: &KicadBoard) -> Result<LengthRules, Kicad
         constraints[r] = here;
     }
     out.constraints = constraints.into_iter().flatten().collect();
+    out.widths = widths
+        .iter()
+        .enumerate()
+        .filter_map(|(i, w)| w.map(|w| (NetId(i as u32), w)))
+        .collect();
+    for (p, [gap, uncoupled]) in pairs.iter().zip(gaps) {
+        if let Some(g) = gap {
+            out.pair_gaps.push((p.positive, p.negative, g));
+        }
+        if let Some(u) = uncoupled {
+            out.uncoupled.push((p.positive, p.negative, u));
+        }
+    }
     Ok(out)
 }
 
@@ -318,6 +418,44 @@ mod tests {
         );
         assert_eq!(rules.warnings.len(), 2, "{:?}", rules.warnings);
         assert!(length_rules("(rule (", &board).is_err());
+    }
+
+    #[test]
+    fn widths_gaps_and_uncoupled_lengths() {
+        let pcb = r#"(kicad_pcb (version 20240108) (generator test)
+            (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+            (net 0 "") (net 1 "CLK_P") (net 2 "CLK_N") (net 3 "DQ0") (net 4 "DQ1"))"#;
+        let board = crate::kicad::read(pcb, None).unwrap();
+        let dru = "(version 1)\n\
+            (rule dq (condition \"A.NetName == 'DQ*'\")\n\
+              (constraint track_width (min 0.1mm) (opt 0.12mm)))\n\
+            (rule clk (condition \"A.inDiffPair('CLK_')\")\n\
+              (constraint track_width (min 0.1016mm))\n\
+              (constraint diff_pair_gap (min 0.2mm) (opt 0.25mm) (max 0.3mm))\n\
+              (constraint diff_pair_uncoupled (max 2mm)))\n\
+            (rule last (condition \"A.NetName == 'DQ1'\")\n\
+              (constraint track_width (opt 0.15mm)))\n";
+        let rules = length_rules(dru, &board).unwrap();
+        let n = |i: u32| NetId(i);
+        assert_eq!(
+            rules.widths,
+            [
+                (n(1), 101_600),
+                (n(2), 101_600),
+                (n(3), 120_000),
+                (n(4), 150_000)
+            ]
+        );
+        assert_eq!(rules.pair_gaps, [(n(1), n(2), 250_000)]);
+        assert_eq!(rules.uncoupled, [(n(1), n(2), 2_000_000)]);
+        assert!(rules.warnings.is_empty(), "{:?}", rules.warnings);
+        let mut design = Design::from_kicad(&board);
+        rules.apply(&mut design);
+        assert_eq!(design.nets[4].track_width, 150_000);
+        assert_eq!(
+            (design.pairs[0].width, design.pairs[0].gap),
+            (101_600, 250_000)
+        );
     }
 
     #[test]

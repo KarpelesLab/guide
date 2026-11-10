@@ -26,7 +26,8 @@
 //!   minimum clearance, the hole clearance and the hole-to-hole clearance, from the
 //!   project, or from the board itself for KiCad 5 files and boards without a project.
 //!   KiCad's defaults apply where neither says. Custom rules, in a `.kicad_dru`, are not
-//!   read for the checks; [`length_rules`] reads their lengths and skews, for routing.
+//!   read for the checks; [`length_rules`] reads what they ask of routing: lengths and
+//!   skews, track widths, and differential pairs' gaps and uncoupled lengths.
 //!
 //! [`replace_routing`] writes routes back: it takes a board's text, and replaces its
 //! tracks, vias and zone fills with others, such as [`pcb::route`](crate::pcb::route)'s,

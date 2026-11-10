@@ -11,13 +11,18 @@
 //! they run side by side, the one inside the other at the pair's gap, which add the same
 //! length to both. What is left of a skew between the two is then made up on the shorter
 //! alone, as for any net.
+//!
+//! A net still short after that, where its neighbours' meanders took the room it needed, has
+//! them taken out: it is meandered first, and they after it, wherever they find room, and
+//! that is kept if fewer nets are left short, or by less. This goes round a few times, for
+//! as long as it helps.
 
 use super::measure::net_length;
 use super::pairs::offset;
 use super::world::{Placed, Verdict, World};
 use super::{Design, LengthConstraint, Options, Routed};
-use crate::geom::drc::Track;
-use crate::geom::{GeomError, LayerId, Point, Shape};
+use crate::geom::drc::{Track, Via};
+use crate::geom::{GeomError, LayerId, Point, Rect, Shape};
 use crate::id::NetId;
 
 /// The board as it is routed, with what each routed track put into the world.
@@ -26,10 +31,26 @@ struct Tuner<'a> {
     world: World<'a>,
     tracks: Vec<Track>,
     placed: Vec<Option<Placed>>,
-    /// The routed vias, by net, which meanders keep clear of as of the net's own copper.
-    vias: Vec<(NetId, Point, i64)>,
+    /// The routed vias, which meanders keep clear of as of the net's own copper.
+    vias: Vec<Via>,
     amplitude: i64,
+    /// The meanders of single nets, in the order added, to take out again.
+    log: Vec<Bump>,
 }
+
+/// A meander added to one net's track: the track as it was, by position, and the pieces
+/// that replaced it.
+#[derive(Clone, Debug)]
+struct Bump {
+    net: NetId,
+    at: usize,
+    original: Track,
+    pieces: Vec<usize>,
+}
+
+/// How many times the nets still short have their neighbours' meanders taken out, to be
+/// meandered first.
+const MAKE_ROOM_ROUNDS: usize = 3;
 
 /// A straight track as steps along one of the eight directions: the direction, as a step
 /// of one nanometre along each axis it moves on, and how many steps.
@@ -146,13 +167,11 @@ impl<'a> Tuner<'a> {
                 return false;
             }
         }
-        let vias = self.vias.iter().map(|&(n, at, d)| (n, at, d)).chain(
-            self.design
-                .board
-                .vias
-                .iter()
-                .filter_map(|v| v.net.map(|n| (n, v.at, v.diameter))),
-        );
+        let vias = self
+            .vias
+            .iter()
+            .chain(&self.design.board.vias)
+            .filter_map(|v| v.net.map(|n| (n, v.at, v.diameter)));
         for (n, at, d) in vias {
             if n == net
                 && let Ok(v) = Shape::circle(at, d)
@@ -284,8 +303,107 @@ impl<'a> Tuner<'a> {
             .collect();
         let before = length(t.start, t.end);
         let after: f64 = pieces.iter().map(|p| length(p.start, p.end)).sum();
-        self.replace(i, pieces);
+        let pieces = self.replace(i, pieces);
+        self.log.push(Bump {
+            net,
+            at: i,
+            original: t,
+            pieces,
+        });
         after - before
+    }
+
+    /// Takes out every meander of `net` that [`meander`](Tuner::meander) added, the last
+    /// first.
+    fn unmeander(&mut self, net: NetId) {
+        let mut k = self.log.len();
+        while k > 0 {
+            k -= 1;
+            if self.log[k].net != net {
+                continue;
+            }
+            let bump = self.log.remove(k);
+            for &p in &bump.pieces {
+                if let Some(placed) = self.placed[p].take() {
+                    self.world.remove(&placed);
+                }
+                if p != bump.at {
+                    self.tracks[p].end = self.tracks[p].start;
+                }
+            }
+            self.tracks[bump.at] = bump.original;
+            self.place(bump.at);
+        }
+    }
+
+    /// The nets other than `net`, and not of a pair, with meanders near its tracks: within
+    /// `reach` of them, on the same layer.
+    fn neighbours(&self, net: NetId, reach: i64) -> Vec<NetId> {
+        let boxes: Vec<(LayerId, Rect)> = self
+            .tracks
+            .iter()
+            .filter(|t| t.net == Some(net) && t.start != t.end)
+            .map(|t| {
+                (
+                    t.layer,
+                    Rect::new(t.start, t.start)
+                        .union(&Rect::new(t.end, t.end))
+                        .expand(reach),
+                )
+            })
+            .collect();
+        let mut out: Vec<NetId> = Vec::new();
+        for b in &self.log {
+            if b.net == net || out.contains(&b.net) || self.paired(b.net) {
+                continue;
+            }
+            let near = b.pieces.iter().any(|&p| {
+                let t = &self.tracks[p];
+                let r = Rect::new(t.start, t.start).union(&Rect::new(t.end, t.end));
+                t.start != t.end
+                    && boxes
+                        .iter()
+                        .any(|(l, bb)| *l == t.layer && bb.intersects(&r))
+            });
+            if near {
+                out.push(b.net);
+            }
+        }
+        out.sort_unstable();
+        out
+    }
+
+    /// Whether a net is of a differential pair.
+    fn paired(&self, net: NetId) -> bool {
+        self.design
+            .pairs
+            .iter()
+            .any(|p| p.positive == net || p.negative == net)
+    }
+
+    /// The world again, from the tracks and vias, after they were put back as they were.
+    fn rebuild(&mut self) -> Result<(), GeomError> {
+        let d = self.design;
+        self.world = World::new(
+            &d.board,
+            &d.rules,
+            &d.outline,
+            d.edge_clearance,
+            &d.masks,
+            &d.obstacles,
+        )?;
+        self.placed = vec![None; self.tracks.len()];
+        for i in 0..self.tracks.len() {
+            if self.tracks[i].start != self.tracks[i].end {
+                self.place(i);
+            }
+        }
+        for v in &self.vias {
+            if let Some(net) = v.net {
+                self.world.add_via(net, v.at, v.diameter, v.drill);
+            }
+        }
+        Ok(())
     }
 
     /// Adds up to `need` to both nets of a pair, with meanders of both together where they
@@ -613,15 +731,21 @@ pub(crate) fn run(
         world,
         tracks: routed.tracks.clone(),
         placed,
-        vias: routed
-            .vias
-            .iter()
-            .filter_map(|v| v.net.map(|n| (n, v.at, v.diameter)))
-            .collect(),
+        vias: routed.vias.clone(),
         amplitude: options.max_amplitude.max(0),
+        log: Vec::new(),
     };
+    let total = |tracks: &[Track]| -> f64 {
+        tracks
+            .iter()
+            .filter(|t| t.mid.is_none())
+            .map(|t| length(t.start, t.end))
+            .sum()
+    };
+    let before = total(&tuner.tracks);
     let routed_net = |net: NetId| !routed.unrouted.contains(&net);
-    let mut added = 0.0;
+    // By constraint, its nets that are routed, and what it asks of them before meanders.
+    let mut groups: Vec<(Vec<NetId>, f64, f64)> = Vec::new();
     for c in &design.lengths {
         let mut nets: Vec<NetId> = Vec::new();
         for &n in &c.nets {
@@ -634,6 +758,7 @@ pub(crate) fn run(
         }
         let lengths: Vec<f64> = nets.iter().map(|&n| tuner.length(n)).collect();
         let (lo, aim) = window(c, &lengths);
+        groups.push((nets.clone(), lo, aim));
         // Pairs first, together.
         for pair in &design.pairs {
             if !(nets.contains(&pair.positive) && nets.contains(&pair.negative)) {
@@ -650,8 +775,7 @@ pub(crate) fn run(
                         )
                     })
                     .fold(pair.gap, i64::max);
-                added +=
-                    2.0 * tuner.lengthen_pair((pair.positive, pair.negative), gap, aim - longer);
+                tuner.lengthen_pair((pair.positive, pair.negative), gap, aim - longer);
             }
         }
         // Then each net on its own, to what is left, with the pairs' skews.
@@ -662,11 +786,87 @@ pub(crate) fn run(
         order.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
         for (have, n) in order {
             if have < lo {
-                added += tuner.lengthen(n, aim - have);
+                tuner.lengthen(n, aim - have);
             }
         }
     }
-    routed.stats.meanders = added;
+    // Nets still short: their neighbours' meanders taken out, they are meandered first,
+    // then the neighbours again, and that is kept if fewer nets are short, or by less.
+    let shortfall = |tuner: &Tuner<'_>| -> (usize, f64) {
+        let mut count = 0;
+        let mut sum = 0.0;
+        for (nets, lo, _) in &groups {
+            for &n in nets {
+                let have = tuner.length(n);
+                if have + 1.0 < *lo {
+                    count += 1;
+                    sum += lo - have;
+                }
+            }
+        }
+        (count, sum)
+    };
+    for _ in 0..MAKE_ROOM_ROUNDS {
+        let mut short: Vec<(f64, NetId, f64, f64)> = Vec::new();
+        for (nets, lo, aim) in &groups {
+            for &n in nets {
+                let have = tuner.length(n);
+                if have + 1.0 < *lo && !tuner.paired(n) {
+                    short.push((lo - have, n, *lo, *aim));
+                }
+            }
+        }
+        if short.is_empty() {
+            break;
+        }
+        short.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+        let mut better = false;
+        for (need, n, lo, aim) in short {
+            if tuner.length(n) + 1.0 >= lo {
+                continue;
+            }
+            let was = shortfall(&tuner);
+            let saved = (tuner.tracks.clone(), tuner.log.clone());
+            let width = design.nets.get(n.index()).map_or(0, |s| s.track_width);
+            let reach = ((need / 2.0) as i64 + 2 * (width + rules.max_clearance()))
+                .min(tuner.amplitude + 2 * (width + rules.max_clearance()));
+            let near = tuner.neighbours(n, reach);
+            if near.is_empty() {
+                continue;
+            }
+            for &v in &near {
+                tuner.unmeander(v);
+            }
+            let have = tuner.length(n);
+            tuner.lengthen(n, aim - have);
+            // The neighbours again, those that need most first.
+            let mut again: Vec<(f64, NetId, f64)> = Vec::new();
+            for &v in &near {
+                if let Some((_, lo, aim)) = groups.iter().find(|(nets, _, _)| nets.contains(&v)) {
+                    let have = tuner.length(v);
+                    if have < *lo {
+                        again.push((aim - have, v, *aim));
+                    }
+                }
+            }
+            again.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+            for (_, v, aim) in again {
+                let have = tuner.length(v);
+                tuner.lengthen(v, aim - have);
+            }
+            let now = shortfall(&tuner);
+            if now.0 < was.0 || (now.0 == was.0 && now.1 + 1.0 < was.1) {
+                better = true;
+            } else {
+                (tuner.tracks, tuner.log) = saved;
+                tuner.rebuild()?;
+            }
+        }
+        if !better {
+            break;
+        }
+    }
+    routed.stats.meanders = total(&tuner.tracks) - before;
     routed.stats.lengths = (
         design.lengths.len(),
         design

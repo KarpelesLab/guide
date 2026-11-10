@@ -91,6 +91,7 @@ pub fn read(pcb: &str, project: Option<&str>) -> Result<KicadBoard, KicadError> 
     let rules = r.rules(&project)?;
     r.propagate();
     r.mask_nets();
+    r.rank_zones();
     let Reader {
         board,
         names,
@@ -102,11 +103,15 @@ pub fn read(pcb: &str, project: Option<&str>) -> Result<KicadBoard, KicadError> 
         outline,
         masks,
         text,
+        zone_specs,
+        zone_lists,
         ..
     } = r;
     let mut routing = routing(&project, &names, outline);
     routing.masks = masks;
     routing.text = text;
+    routing.zones = zone_specs;
+    routing.zone_lists = zone_lists;
     Ok(KicadBoard {
         board,
         rules,
@@ -254,6 +259,8 @@ fn routing(project: &ProjectRules, names: &[String], outline: Vec<Shape>) -> Rou
         masks: Vec::new(),
         text: Vec::new(),
         pairs,
+        zones: crate::pcb::Zones::default(),
+        zone_lists: Vec::new(),
     }
 }
 
@@ -282,6 +289,8 @@ struct Footprint {
     clearance: Option<i64>,
     /// Its pads' solder mask expansion, if it sets one.
     mask_margin: Option<i64>,
+    /// How zones join its pads, and their thermal reliefs, if it says.
+    zone: crate::pcb::PadConnection,
 }
 
 /// Whether KiCad's connectivity may give an item another net: tracks, vias and graphics
@@ -317,6 +326,14 @@ struct Reader {
     text: Vec<(Shape, LayerId)>,
     /// The board's solder mask expansion of pads.
     mask_margin: i64,
+    /// Zones' outlines, pads' zone connections, and pour keepouts.
+    zone_specs: crate::pcb::Zones,
+    /// By zone of `zone_specs`, the position of its list among all zones'.
+    zone_lists: Vec<usize>,
+    /// How many `(zone ...)` lists have been read.
+    zone_count: usize,
+    /// By zone of `zone_specs`, its UUID, which breaks ties between priorities.
+    zone_uuids: Vec<String>,
 }
 
 /// The text of the UUID of an item: `uuid` from KiCad 7 on, `tstamp` before.
@@ -378,6 +395,35 @@ fn filled(node: &Sexp<'_>) -> bool {
     }
 }
 
+/// What a pad or a footprint says of how zones join it, falling back on `outer`, the
+/// footprint's, for what a pad doesn't say.
+fn pad_connection(
+    node: &Sexp<'_>,
+    outer: Option<&crate::pcb::PadConnection>,
+) -> crate::pcb::PadConnection {
+    use crate::pcb::ZoneConnection;
+    let outer = outer.copied().unwrap_or_default();
+    let connection = match node.child("zone_connect").and_then(|z| z.arg(0)) {
+        Some("0") => Some(ZoneConnection::None),
+        Some("1") => Some(ZoneConnection::Thermal),
+        Some("2") => Some(ZoneConnection::Solid),
+        Some("3") => Some(ZoneConnection::ThermalThroughHole),
+        _ => outer.connection,
+    };
+    let positive = |v: Option<i64>| v.filter(|&v| v > 0);
+    crate::pcb::PadConnection {
+        connection,
+        thermal_gap: positive(length(node, "thermal_gap")).or(outer.thermal_gap),
+        spoke_width: positive(
+            length(node, "thermal_bridge_width").or_else(|| length(node, "thermal_width")),
+        )
+        .or(outer.spoke_width),
+        anchor: None,
+        spoke_direction: None,
+        spoke_reach: None,
+    }
+}
+
 /// An own clearance as KiCad stores it: zero is none.
 fn own_clearance(value: Option<i64>) -> Option<i64> {
     value.filter(|&v| v > 0)
@@ -432,6 +478,10 @@ impl Reader {
                 .child("setup")
                 .and_then(|s| length(s, "pad_to_mask_clearance"))
                 .unwrap_or(0),
+            zone_specs: crate::pcb::Zones::default(),
+            zone_lists: Vec::new(),
+            zone_count: 0,
+            zone_uuids: Vec::new(),
         };
         // Copper with no net is of the net with no name, so that it is never checked
         // against itself, as in KiCad.
@@ -638,6 +688,7 @@ impl Reader {
                 length(node, "clearance").or_else(|| length(node, "local_clearance")),
             ),
             mask_margin: length(node, "solder_mask_margin"),
+            zone: pad_connection(node, None),
         };
         for item in node.args() {
             match item.name() {
@@ -694,6 +745,18 @@ impl Reader {
             origin: add(center, rotate(offset, angle)),
             angle,
         };
+        let mut zone = pad_connection(node, Some(&fp.zone));
+        // Spokes along the pad's axes, or at 45° to them for a round pad, unless it says.
+        let spoke = node
+            .child("thermal_bridge_angle")
+            .and_then(|a| a.arg(0))
+            .and_then(degrees_to_millidegrees)
+            .unwrap_or(if shape == "circle" { 45_000 } else { 0 });
+        let (dx, dy) = rotate((1_000_000, 0), angle + spoke);
+        zone.spoke_direction = Some((dx, -dy));
+        zone.anchor = Some(to_point(geometry.origin));
+        // KiCad lays spokes out on the pad's size, but a custom pad's reaches further.
+        zone.spoke_reach = (shape != "custom").then_some((size.0 / 2, size.1 / 2));
 
         // A plain round or oval hole as big as its pad leaves no copper.
         let bare = kind == "np_thru_hole"
@@ -734,6 +797,7 @@ impl Reader {
                     clearance,
                 });
                 self.pads.push(source);
+                self.pad_zone(zone);
             }
             return;
         }
@@ -759,7 +823,17 @@ impl Reader {
                 clearance,
             });
             self.pads.push(source.clone());
+            self.pad_zone(zone);
         }
+    }
+
+    /// What the pad just pushed says of zones.
+    fn pad_zone(&mut self, zone: crate::pcb::PadConnection) {
+        let n = self.board.pads.len();
+        self.zone_specs
+            .pads
+            .resize(n, crate::pcb::PadConnection::default());
+        self.zone_specs.pads[n - 1] = zone;
     }
 
     /// A pad's hole: round, or an oval slot, centred on the pad's position and turned with
@@ -1152,7 +1226,8 @@ impl Reader {
             not_allowed("vias"),
             not_allowed("pads"),
         );
-        if !(tracks || vias || pads) {
+        let pours = not_allowed("copperpour");
+        if !(tracks || vias || pads || pours) {
             return;
         }
         // `(layers ...)`, or `(layer ...)` for a rule area on one layer.
@@ -1174,23 +1249,35 @@ impl Reader {
                 continue;
             };
             for shape in pieces {
-                self.board.keepouts.push(drc::Keepout {
-                    shape,
-                    layers,
-                    tracks,
-                    vias,
-                    pads,
-                });
+                if pours {
+                    self.zone_specs.keepouts.push((shape.clone(), layers));
+                }
+                if tracks || vias || pads {
+                    self.board.keepouts.push(drc::Keepout {
+                        shape,
+                        layers,
+                        tracks,
+                        vias,
+                        pads,
+                    });
+                }
             }
         }
     }
 
     /// A zone's fill, which is copper unless the zone is a rule area.
     fn zone(&mut self, node: &Sexp<'_>, fp: Option<&Footprint>) {
+        let list = self.zone_count;
+        self.zone_count += 1;
         if let Some(rules) = node.child("keepout") {
             return self.keepout(node, rules);
         }
         let net = self.net(node);
+        if let Some(spec) = self.zone_spec(node, net) {
+            self.zone_specs.zones.push(spec);
+            self.zone_lists.push(list);
+            self.zone_uuids.push(uuid(node).unwrap_or_default());
+        }
         let name = &self.names[net.index()];
         let description = match (fp, name.is_empty()) {
             (Some(fp), _) => format!("zone of {}", fp.reference),
@@ -1241,6 +1328,97 @@ impl Reader {
                 );
             }
         }
+    }
+
+    /// Makes zones' priorities distinct, as KiCad does: between two of the same priority,
+    /// the one with the greater UUID comes first (`ZONE::HigherPriority`).
+    fn rank_zones(&mut self) {
+        let zones = &mut self.zone_specs.zones;
+        let mut order: Vec<usize> = (0..zones.len()).collect();
+        order.sort_by(|&a, &b| {
+            (zones[a].priority, &self.zone_uuids[a]).cmp(&(zones[b].priority, &self.zone_uuids[b]))
+        });
+        for (rank, &z) in order.iter().enumerate() {
+            zones[z].priority = rank as u32;
+        }
+    }
+
+    /// A zone's outline and settings, for filling it, or `None` for a teardrop.
+    fn zone_spec(&mut self, node: &Sexp<'_>, net: NetId) -> Option<crate::pcb::CopperZone> {
+        use crate::pcb::{CopperZone, Islands, ZoneConnection};
+        let teardrop = node
+            .child("name")
+            .and_then(|n| n.arg(0))
+            .is_some_and(|n| n.starts_with("$teardrop"))
+            || node
+                .child("attr")
+                .is_some_and(|a| a.child("teardrop").is_some());
+        if teardrop {
+            return None;
+        }
+        let layers = LayerSet(
+            self.layer_set(node.child("layers")).0 | self.layer_set(node.child("layer")).0,
+        );
+        let mut rings = Vec::new();
+        for polygon in node.children("polygon") {
+            let Some((ring, arcs)) = points(polygon) else {
+                self.warn("malformed zone outline, skipped");
+                return None;
+            };
+            if arcs > 0 {
+                self.warn("zone outline with arcs: taken as straight between their points");
+            }
+            rings.push(ring.into_iter().map(to_point).collect::<Vec<Point>>());
+        }
+        if rings.is_empty() || layers == LayerSet::EMPTY {
+            return None;
+        }
+        let outline = rings.remove(0);
+        let connect = node.child("connect_pads");
+        let connection = match connect.and_then(|c| c.arg(0)) {
+            Some("yes") => ZoneConnection::Solid,
+            Some("no") => ZoneConnection::None,
+            Some("thru_hole_only") => ZoneConnection::ThermalThroughHole,
+            _ => ZoneConnection::Thermal,
+        };
+        let fill = node.child("fill");
+        if fill
+            .and_then(|f| f.child("mode"))
+            .and_then(|m| m.arg(0))
+            .is_some_and(|m| m == "hatch" || m == "hatched")
+        {
+            self.warn("hatched zone: filled solid");
+        }
+        let islands = match fill
+            .and_then(|f| f.child("island_removal_mode"))
+            .and_then(|m| m.arg(0))
+        {
+            Some("1") => Islands::Keep,
+            Some("2") => Islands::RemoveBelow(
+                fill.and_then(|f| length(f, "island_area_min"))
+                    .map_or(0, |a| i128::from(a) * 1_000_000),
+            ),
+            _ => Islands::Remove,
+        };
+        Some(CopperZone {
+            outline,
+            holes: rings,
+            layers,
+            net: Some(net).filter(|&n| n != NetId(0)),
+            priority: node
+                .child("priority")
+                .and_then(|p| p.arg(0))
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(0),
+            clearance: connect.and_then(|c| length(c, "clearance")).unwrap_or(0),
+            min_width: length(node, "min_thickness").unwrap_or(0),
+            connection,
+            thermal_gap: fill.and_then(|f| length(f, "thermal_gap")).unwrap_or(0),
+            spoke_width: fill
+                .and_then(|f| length(f, "thermal_bridge_width"))
+                .unwrap_or(0),
+            islands,
+        })
     }
 
     /// KiCad 5's rules, kept in the board file: net classes and a few limits.

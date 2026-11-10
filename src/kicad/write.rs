@@ -2,23 +2,33 @@
 
 use std::fmt::Write as _;
 
+use super::KicadBoard;
 use crate::geom::Point;
 use crate::geom::Rules;
 use crate::geom::drc::{Track, Via};
+use crate::pcb::Fill;
 
-/// What a list in the text is: its name and where it is.
+/// Where a list is in the text.
+#[derive(Clone, Copy)]
 struct Span {
     start: usize,
     end: usize,
 }
 
-/// The lists to drop from a board's text: tracks, arcs and vias at the top level, and every
-/// zone's fill, wherever it is.
-fn dropped(text: &str) -> Vec<Span> {
+/// A zone's list: where it is, and whether it is a teardrop's.
+struct ZoneList {
+    span: Span,
+    teardrop: bool,
+}
+
+/// The lists to drop from a board's text, tracks, arcs and vias at the top level and every
+/// zone's fill, wherever it is; and every zone's list, in the order they start in.
+fn scan(text: &str) -> (Vec<Span>, Vec<ZoneList>) {
     let bytes = text.as_bytes();
     let mut out: Vec<Span> = Vec::new();
-    // For each open list, where it starts and its name.
-    let mut stack: Vec<(usize, &str)> = Vec::new();
+    let mut zones: Vec<ZoneList> = Vec::new();
+    // For each open list, where it starts, its name, and for a zone, its position.
+    let mut stack: Vec<(usize, &str, usize)> = Vec::new();
     let (mut quoted, mut escaped) = (false, false);
     let mut i = 0;
     while i < bytes.len() {
@@ -43,15 +53,29 @@ fn dropped(text: &str) -> Vec<Span> {
                 {
                     to += 1;
                 }
-                stack.push((i, &text[from..to]));
+                let name = &text[from..to];
+                let zone = zones.len();
+                if name == "zone" {
+                    zones.push(ZoneList {
+                        span: Span { start: i, end: i },
+                        teardrop: false,
+                    });
+                }
+                stack.push((i, name, zone));
             }
             b')' => {
-                if let Some((start, name)) = stack.pop() {
+                if let Some((start, name, zone)) = stack.pop() {
                     let top = stack.len() == 1 && matches!(name, "segment" | "arc" | "via");
                     let fill = matches!(name, "filled_polygon" | "fill_segments");
                     let inside = out.last().is_some_and(|s| s.end > start);
                     if (top || fill) && !inside {
                         out.push(Span { start, end: i + 1 });
+                    }
+                    if name == "zone" {
+                        let body = &text[start..=i];
+                        zones[zone].span.end = i + 1;
+                        zones[zone].teardrop =
+                            body.contains("\"$teardrop") || body.contains("(teardrop");
                     }
                 }
             }
@@ -59,7 +83,7 @@ fn dropped(text: &str) -> Vec<Span> {
         }
         i += 1;
     }
-    out
+    (out, zones)
 }
 
 /// Millimetres with up to six decimals, from nanometres, exactly.
@@ -83,9 +107,10 @@ fn xy(p: Point) -> String {
 /// Replaces a board's routing with other tracks and vias, and returns the new text.
 ///
 /// Every track, arc and via of `pcb` is taken out, and so is every zone's fill, which was
-/// made for the old routing: KiCad fills zones again when asked. Everything else is kept as
-/// it was, byte for byte, and the tracks and vias are added at the end of the board, in
-/// the order given, each with a new UUID. `nets` names the nets by
+/// made for the old routing: KiCad fills zones again when asked, as `kicad-cli pcb drc
+/// --refill-zones` does, and [`replace_routing_and_fills`] writes fills of `guide`'s own.
+/// Everything else is kept as it was, byte for byte, and the tracks and vias are added at
+/// the end of the board, in the order given, each with a new UUID. `nets` names the nets by
 /// [`NetId`](crate::id::NetId), as [`KicadBoard::nets`](super::KicadBoard::nets) does, and
 /// `rules` names the layers. Tracks with an arc's middle point are written as arcs.
 ///
@@ -118,6 +143,94 @@ fn xy(p: Point) -> String {
 /// # Ok::<(), guide::kicad::KicadError>(())
 /// ```
 pub fn replace_routing(
+    pcb: &str,
+    tracks: &[Track],
+    vias: &[Via],
+    nets: &[String],
+    rules: &Rules,
+) -> String {
+    let added = routing_text(pcb, tracks, vias, nets, rules);
+    rewrite(pcb, &added, &[], false)
+}
+
+/// Replaces a board's routing and zone fills with others, such as
+/// [`pcb::route`](crate::pcb::route)'s tracks and vias and
+/// [`fill_zones`](crate::pcb::fill_zones)'s fills,
+/// and returns the new text. `board` is the board as [`read`](super::read) read it from
+/// `pcb`, whose [zones](super::Routing::zones) the fills are of.
+///
+/// This is [`replace_routing`], and then each zone's fill is written into it, one
+/// `filled_polygon` for each piece, its holes joined to its outline as KiCad saves them.
+/// Teardrops are taken out, zones and all, as they were made for the old tracks.
+///
+/// ```
+/// use guide::pcb::{Design, fill_zones};
+///
+/// let pcb = r#"(kicad_pcb (version 20240108) (generator "pcbnew")
+///   (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+///   (net 0 "") (net 1 "GND")
+///   (zone (net 1) (net_name "GND") (layer "B.Cu") (uuid "z1")
+///     (connect_pads (clearance 0.2)) (min_thickness 0.2)
+///     (fill yes (island_removal_mode 1))
+///     (polygon (pts (xy 0 0) (xy 10 0) (xy 10 10) (xy 0 10)))))"#;
+/// let read = guide::kicad::read(pcb, None)?;
+/// let design = Design::from_kicad(&read);
+/// let fills = fill_zones(&design.board, &design)?;
+/// assert_eq!(fills.len(), 1);
+/// let text = guide::kicad::replace_routing_and_fills(pcb, &[], &[], &fills, &read);
+/// let again = guide::kicad::read(&text, None)?;
+/// assert_eq!(again.board.zones.len(), 1);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub fn replace_routing_and_fills(
+    pcb: &str,
+    tracks: &[Track],
+    vias: &[Via],
+    fills: &[Fill],
+    board: &KicadBoard,
+) -> String {
+    let added = routing_text(pcb, tracks, vias, &board.nets, &board.rules);
+    let layer = |l: crate::geom::LayerId| {
+        board
+            .rules
+            .spec()
+            .layers
+            .get(usize::from(l.0))
+            .cloned()
+            .unwrap_or_default()
+    };
+    // By zone list, the fills to write into it.
+    let mut by_list: Vec<(usize, String)> = Vec::new();
+    for f in fills {
+        let Some(&list) = board.routing.zone_lists.get(f.zone) else {
+            continue;
+        };
+        let Some(ring) = crate::geom::fractured(&f.shape) else {
+            continue;
+        };
+        let mut text = format!(
+            "    (filled_polygon (layer \"{}\")\n      (pts\n",
+            layer(f.layer)
+        );
+        for p in ring {
+            let _ = writeln!(text, "        (xy {})", xy(p));
+        }
+        text.push_str("      )\n    )\n");
+        by_list.push((list, text));
+    }
+    by_list.sort_by_key(|&(list, _)| list);
+    let mut merged: Vec<(usize, String)> = Vec::new();
+    for (list, text) in by_list {
+        match merged.last_mut() {
+            Some((l, t)) if *l == list => t.push_str(&text),
+            _ => merged.push((list, text)),
+        }
+    }
+    rewrite(pcb, &added, &merged, true)
+}
+
+/// The text of tracks and vias to add to a board.
+fn routing_text(
     pcb: &str,
     tracks: &[Track],
     vias: &[Via],
@@ -194,10 +307,42 @@ pub fn replace_routing(
             uuid()
         );
     }
+    added
+}
+
+/// The board's text with its routing and fills taken out, `fills`, by position of the zone
+/// list, written into their zones, teardrops taken out if `teardrops` says, and `added` at
+/// the end.
+fn rewrite(pcb: &str, added: &str, fills: &[(usize, String)], teardrops: bool) -> String {
+    let (mut drops, zones) = scan(pcb);
+    if teardrops {
+        drops.extend(zones.iter().filter(|z| z.teardrop).map(|z| z.span));
+    }
+    drops.sort_by_key(|s| (s.start, core::cmp::Reverse(s.end)));
+    // Lists inside others dropped go with them.
+    let mut kept: Vec<Span> = Vec::new();
+    for s in drops {
+        if kept.last().is_none_or(|k| s.start >= k.end) {
+            kept.push(s);
+        }
+    }
+    // Where each zone's fills go: before its closing parenthesis.
+    let mut inserts: Vec<(usize, &str)> = fills
+        .iter()
+        .filter_map(|(list, text)| {
+            let z = zones.get(*list)?;
+            let gone = kept
+                .iter()
+                .any(|k| k.start <= z.span.start && z.span.end <= k.end);
+            (!gone && z.span.end > z.span.start).then_some((z.span.end - 1, text.as_str()))
+        })
+        .collect();
+    inserts.sort_by_key(|&(at, _)| at);
 
     let mut out = String::with_capacity(pcb.len() + added.len());
     let mut at = 0;
-    for span in dropped(pcb) {
+    let mut next = inserts.iter().peekable();
+    for span in kept {
         // Take the indentation before the list with it, and its line if nothing else is on it.
         let line_start = pcb[..span.start].rfind('\n').map_or(0, |i| i + 1);
         let start = if pcb[line_start..span.start].trim().is_empty() {
@@ -209,8 +354,21 @@ pub fn replace_routing(
         if start == line_start && pcb[end..].starts_with('\n') {
             end += 1;
         }
+        while let Some(&&(pos, text)) = next.peek()
+            && pos < start.max(at)
+        {
+            out.push_str(&pcb[at..pos.max(at)]);
+            at = pos.max(at);
+            push_fill(&mut out, text);
+            next.next();
+        }
         out.push_str(&pcb[at..start.max(at)]);
         at = end.max(at);
+    }
+    for &(pos, text) in next {
+        out.push_str(&pcb[at..pos.max(at)]);
+        at = pos.max(at);
+        push_fill(&mut out, text);
     }
     out.push_str(&pcb[at..]);
     // Before the board's closing parenthesis.
@@ -220,10 +378,19 @@ pub fn replace_routing(
             if !text.ends_with('\n') {
                 text.push('\n');
             }
-            text.push_str(&added);
+            text.push_str(added);
             text.push_str(&out[close..]);
             text
         }
         None => out,
     }
+}
+
+/// A zone's fills, on lines of their own, before its closing parenthesis.
+fn push_fill(out: &mut String, text: &str) {
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(text);
+    out.push_str("  ");
 }

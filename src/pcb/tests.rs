@@ -62,6 +62,7 @@ pub(super) fn design(layers: usize, pads: Vec<Pad>, nets: usize) -> Design {
         obstacles: Vec::new(),
         pairs: Vec::new(),
         lengths: Vec::new(),
+        zones: Default::default(),
     }
 }
 

@@ -46,7 +46,7 @@ fn check_dimension(what: &'static str, value: i64) -> Result<i64, GeomError> {
 }
 
 impl Shape {
-    fn new(core: Core, radius2: i64, error2: i64) -> Shape {
+    pub(super) fn new(core: Core, radius2: i64, error2: i64) -> Shape {
         let (min, max) = core.bounds();
         Shape {
             core,

@@ -11,7 +11,10 @@
 //! - `polyclip_stays_private` in the tests fails if any other file under `src/geom` names
 //!   polyclip in code, or if this one has an item plainly `pub` or a trait impl.
 
-use polyclip::{ArcTol, Curve, FillRule, Geometry, Polygon, Ring, Side};
+use polyclip::{
+    ArcTol, Boolean, Circle, Curve, EndCap, FillRule, Geometry, Join, Op, Polygon, Ring, Side,
+    offset, offset_paths, opening,
+};
 
 use super::types::{GeomError, Point};
 
@@ -207,5 +210,252 @@ impl Core {
     /// Whether the cores share a point, exactly.
     pub(crate) fn intersects(&self, other: &Core) -> bool {
         polyclip::intersects(self.geometry(), other.geometry())
+    }
+}
+
+/// An area of copper, such as a zone's fill, as polygons with holes: what zone filling adds,
+/// takes away and measures. Every operation is polyclip's, exact but for the rounding of new
+/// crossings and of the vertices of arcs and offsets, which moves no edge by more than a
+/// unit, besides the tolerance of arcs.
+///
+/// Its polygons are in polyclip's canonical form, so that equal areas compare equal and every
+/// result is the same on every platform.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Area {
+    polygons: Vec<Polygon>,
+}
+
+/// The side that arcs are approximated on, as an area grows or shrinks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ArcSide {
+    /// The approximation holds the true area: for obstacles.
+    Outside,
+    /// The true area holds the approximation.
+    Inside,
+}
+
+fn arc_tol(tolerance: i64, side: ArcSide) -> ArcTol {
+    let side = match side {
+        ArcSide::Outside => Side::Outside,
+        ArcSide::Inside => Side::Inside,
+    };
+    ArcTol::new(tolerance.max(1), side)
+}
+
+fn geometry_error(e: polyclip::Error) -> GeomError {
+    GeomError::InvalidPolygon {
+        reason: e.to_string(),
+    }
+}
+
+impl Area {
+    /// Nothing.
+    pub(crate) fn empty() -> Area {
+        Area::default()
+    }
+
+    /// What rings enclose under the non-zero winding rule, in any orientation.
+    pub(crate) fn from_rings(rings: &[&[Point]]) -> Result<Area, GeomError> {
+        let rings: Vec<Ring> = rings
+            .iter()
+            .map(|r| Ring(r.iter().copied().map(to_poly).collect()))
+            .collect();
+        let polygons = polyclip::union_all(&rings, FillRule::NonZero).map_err(geometry_error)?;
+        Ok(Area { polygons })
+    }
+
+    /// A shape grown by `by`, which may be negative for a polygon, with arcs, of circles,
+    /// tracks' ends and grown corners, within `tolerance` of the true ones, on `side`.
+    pub(crate) fn of_shape(
+        shape: &super::shape::Shape,
+        by: i64,
+        tolerance: i64,
+        side: ArcSide,
+    ) -> Result<Area, GeomError> {
+        // Half the doubled radius and error, rounded away from the true shape.
+        let base = match side {
+            ArcSide::Outside => (shape.radius2 + shape.error2 + 1) / 2,
+            ArcSide::Inside => shape.radius2 / 2,
+        };
+        Area::of_core(shape, base + by, tolerance, side)
+    }
+
+    /// A shape's core, its centreline for a track, grown by `by`, as
+    /// [`of_shape`](Area::of_shape) grows the whole shape.
+    pub(crate) fn of_centerline(
+        shape: &super::shape::Shape,
+        by: i64,
+        tolerance: i64,
+    ) -> Result<Area, GeomError> {
+        Area::of_core(
+            shape,
+            by + (shape.error2 + 1) / 2,
+            tolerance,
+            ArcSide::Outside,
+        )
+    }
+
+    fn of_core(
+        shape: &super::shape::Shape,
+        r: i64,
+        tolerance: i64,
+        side: ArcSide,
+    ) -> Result<Area, GeomError> {
+        let tol = arc_tol(tolerance, side);
+        let polygons = match &shape.core {
+            Core::Point(p) => {
+                if r <= 0 {
+                    Vec::new()
+                } else {
+                    let ring = Circle::new(*p, r).to_ring(tol).map_err(geometry_error)?;
+                    vec![Polygon::new(ring, Vec::new())]
+                }
+            }
+            Core::Segment(s) => {
+                if r <= 0 {
+                    Vec::new()
+                } else if s.a == s.b {
+                    let ring = Circle::new(s.a, r).to_ring(tol).map_err(geometry_error)?;
+                    vec![Polygon::new(ring, Vec::new())]
+                } else {
+                    let path = polyclip::Path(vec![s.a, s.b]);
+                    offset_paths(&path, r, Join::Round, EndCap::Round, tol)
+                        .map_err(geometry_error)?
+                }
+            }
+            Core::Path(path) => {
+                if r <= 0 {
+                    Vec::new()
+                } else {
+                    offset_paths(path, r, Join::Round, EndCap::Round, tol)
+                        .map_err(geometry_error)?
+                }
+            }
+            Core::Polygon(polygon) => {
+                if r == 0 {
+                    polyclip::union_all(polygon, FillRule::NonZero).map_err(geometry_error)?
+                } else {
+                    offset(polygon, r, Join::Round, tol).map_err(geometry_error)?
+                }
+            }
+        };
+        Ok(Area { polygons })
+    }
+
+    /// Whether there is nothing.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.polygons.is_empty()
+    }
+
+    fn boolean(&self, op: Op, other: &Area) -> Result<Area, GeomError> {
+        let polygons = Boolean::new()
+            .subject(&self.polygons, FillRule::NonZero)
+            .clip(&other.polygons, FillRule::NonZero)
+            .op(op)
+            .execute()
+            .map_err(geometry_error)?;
+        Ok(Area { polygons })
+    }
+
+    /// This with any of `others` taken away, in one operation.
+    pub(crate) fn minus_all(&self, others: &[Area]) -> Result<Area, GeomError> {
+        if others.iter().all(Area::is_empty) {
+            return Ok(self.clone());
+        }
+        let clip: Vec<&Polygon> = others.iter().flat_map(|a| &a.polygons).collect();
+        let clip: Vec<Polygon> = clip.into_iter().cloned().collect();
+        let polygons = Boolean::new()
+            .subject(&self.polygons, FillRule::NonZero)
+            .clip(&clip, FillRule::NonZero)
+            .op(Op::Difference)
+            .execute()
+            .map_err(geometry_error)?;
+        Ok(Area { polygons })
+    }
+
+    /// Everything in any of `areas`.
+    pub(crate) fn union_all(areas: &[Area]) -> Result<Area, GeomError> {
+        let all: Vec<Polygon> = areas
+            .iter()
+            .flat_map(|a| a.polygons.iter().cloned())
+            .collect();
+        if all.is_empty() {
+            return Ok(Area::empty());
+        }
+        let polygons = polyclip::union_all(&all, FillRule::NonZero).map_err(geometry_error)?;
+        Ok(Area { polygons })
+    }
+
+    /// What this and `other` share.
+    pub(crate) fn and(&self, other: &Area) -> Result<Area, GeomError> {
+        self.boolean(Op::Intersection, other)
+    }
+
+    /// What one of the two has and the other doesn't.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn xor(&self, other: &Area) -> Result<Area, GeomError> {
+        self.boolean(Op::Xor, other)
+    }
+
+    /// This without the parts narrower than `2 * d`: shrunk by `d` and grown again, with
+    /// round corners, then kept within itself, so that it never reaches beyond it.
+    pub(crate) fn opening(&self, d: i64, tolerance: i64) -> Result<Area, GeomError> {
+        if d <= 0 || self.is_empty() {
+            return Ok(self.clone());
+        }
+        let polygons = opening(&self.polygons, d, arc_tol(tolerance, ArcSide::Inside))
+            .map_err(geometry_error)?;
+        Area { polygons }.and(self)
+    }
+
+    /// The connected pieces, each a polygon with its holes, in a fixed order.
+    pub(crate) fn pieces(&self) -> Vec<Area> {
+        self.polygons
+            .iter()
+            .map(|p| Area {
+                polygons: vec![p.clone()],
+            })
+            .collect()
+    }
+
+    /// Twice the area, exactly.
+    pub(crate) fn area2(&self) -> i128 {
+        self.polygons.iter().map(Polygon::signed_area2).sum()
+    }
+
+    /// The pieces as polygon shapes, with no radius.
+    pub(crate) fn shapes(&self) -> Vec<super::shape::Shape> {
+        self.polygons
+            .iter()
+            .map(|p| super::shape::Shape::new(Core::Polygon(p.clone()), 0, 0))
+            .collect()
+    }
+
+    /// Whether a point is inside, or on the boundary.
+    pub(crate) fn contains_point(&self, p: Point) -> bool {
+        let p = to_poly(p);
+        self.polygons
+            .iter()
+            .any(|poly| polyclip::locate_in_polygon(poly, p) != polyclip::Location::Outside)
+    }
+
+    /// The box of every vertex, if there are any.
+    pub(crate) fn bbox(&self) -> Option<super::types::Rect> {
+        self.polygons
+            .iter()
+            .filter_map(Polygon::bbox)
+            .map(|r| super::types::Rect::new(from_poly(r.min), from_poly(r.max)))
+            .reduce(|a, b| a.union(&b))
+    }
+}
+
+/// A polygon shape as one ring, with each hole joined to the outside by a cut of no width,
+/// as KiCad saves zone fills. `None` for any other shape.
+pub(crate) fn fractured(shape: &super::shape::Shape) -> Option<Vec<Point>> {
+    match &shape.core {
+        Core::Polygon(p) if shape.radius2 == 0 => polyclip::fracture(p)
+            .ok()
+            .map(|ring| ring.0.into_iter().map(from_poly).collect()),
+        _ => None,
     }
 }

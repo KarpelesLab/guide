@@ -69,6 +69,7 @@ mod router;
 mod tune;
 mod verify;
 mod world;
+mod zones;
 
 use core::fmt;
 
@@ -78,6 +79,7 @@ use crate::id::NetId;
 
 pub use measure::{coupling, net_length};
 pub use verify::unconnected;
+pub use zones::{CopperZone, Fill, Islands, PadConnection, ZoneConnection, Zones, fill_zones};
 
 /// The size of a net's through vias.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -173,10 +175,13 @@ pub struct Design {
     pub pairs: Vec<DiffPair>,
     /// Lengths to route nets to, which meanders make up after routing.
     pub lengths: Vec<LengthConstraint>,
+    /// Copper zones, which [`fill_zones`] fills.
+    pub zones: Zones,
 }
 
 impl Design {
-    /// The same design with no tracks, vias or zones: only pads, keepouts and the edge.
+    /// The same design with no tracks, vias or zones' fills: only pads, keepouts, the edge
+    /// and the zones' outlines in [`zones`](Design::zones).
     pub fn without_routing(&self) -> Design {
         let mut design = self.clone();
         design.board.tracks.clear();
@@ -237,6 +242,7 @@ impl Design {
             obstacles: board.routing.text.clone(),
             pairs,
             lengths: Vec::new(),
+            zones: board.routing.zones.clone(),
         }
     }
 }
@@ -406,6 +412,7 @@ impl std::error::Error for RouteError {}
 ///     obstacles: Vec::new(),
 ///     pairs: Vec::new(),
 ///     lengths: Vec::new(),
+///     zones: Default::default(),
 ///     nets: vec![NetSpec {
 ///         route: true,
 ///         track_width: 200_000,

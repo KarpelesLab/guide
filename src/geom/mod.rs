@@ -80,6 +80,7 @@ mod types;
 
 pub use clearance::Gap;
 pub use index::{EntryId, ShapeIndex, SpatialIndex};
+pub(crate) use poly::{ArcSide, Area, fractured};
 pub use rules::{
     ClassId, LayerId, LayerSet, MAX_LAYERS, NetClass, Overrides, RuleError, RuleSpec, Rules,
     ViaDef, ViaId,

@@ -15,6 +15,9 @@
 //!   own clearances or their footprint's;
 //! - copper graphics, on the board and in footprints;
 //! - zones' fills, as saved: `kicad-cli pcb drc` doesn't refill them either, unless asked;
+//! - for filling and routing, zones' outlines with their net, layers, priority, clearance,
+//!   minimum width, thermal reliefs and island removal, pads' own zone connections, and
+//!   rule areas that keep copper pours out;
 //! - rule areas that keep tracks, vias or pads out, as [keepouts](drc::Keepout);
 //! - for routing, in [`KicadBoard::routing`], the board's edge, the copper-to-edge
 //!   clearance, the track width and via size of each net's class, and differential pairs
@@ -90,7 +93,7 @@ use crate::geom::drc::{self, Item};
 
 pub use board::read;
 pub use rules::{LengthRules, length_rules};
-pub use write::replace_routing;
+pub use write::{replace_routing, replace_routing_and_fills};
 
 /// A board read from KiCad's files, ready for [`drc::check`].
 #[derive(Clone, Debug)]
@@ -157,6 +160,15 @@ pub struct Routing {
     /// underscores at the end, `P` pairs with `N` and `+` with `-`. Each has the width and
     /// gap of the class that gives its positive net its track width.
     pub pairs: Vec<crate::pcb::DiffPair>,
+    /// The copper zones, as outlines to fill with their settings, with what each pad says of
+    /// how zones join it, by position in [`drc::Board::pads`], and rule areas that keep
+    /// copper pours out. Teardrops, which KiCad keeps as zones, are left out: they belong
+    /// to the tracks they widen.
+    pub zones: crate::pcb::Zones,
+    /// By zone of [`zones`](Routing::zones), the position of its `(zone ...)` list among all
+    /// those of the file, rule areas included, in the order they come in, for
+    /// [`replace_routing_and_fills`] to write its fill into.
+    pub zone_lists: Vec<usize>,
 }
 
 /// What new routes of one net take, from its net class: see [`Routing`].
@@ -247,3 +259,5 @@ mod freerouting_tests;
 mod routing_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod zone_tests;

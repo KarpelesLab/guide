@@ -830,24 +830,36 @@ impl RrGraph {
     }
 
     /// Returns options for routing on this graph: the engine's defaults, but for a
-    /// [`history_factor`](EngineOptions::history_factor) of one tile of wire, the
-    /// [`delay_normalization`](RrGraph::delay_normalization),
-    /// [`incremental_reroute`](EngineOptions::incremental_reroute) on, and, once
+    /// [`history_factor`](EngineOptions::history_factor) of two tiles of wire, twice the
+    /// [`delay_normalization`](RrGraph::delay_normalization), a
+    /// [`present_growth`](EngineOptions::present_growth) of 1.5,
+    /// [`incremental_reroute`](EngineOptions::incremental_reroute) on, a
+    /// [`give_up_factor`](EngineOptions::give_up_factor) of 1, and, once
     /// [`use_map_lookahead`](RrGraph::use_map_lookahead) has been called, a
     /// [`bound_weight`](EngineOptions::bound_weight) of 1.1.
     ///
-    /// The factor is in the units of the space's costs, and the default of 1 suits steps that
-    /// cost about 1. This graph's costs are in seconds, as VPR's are, with a tile of wire at
-    /// about 1e-10, so at the default a node that is overused once costs as much as ten
-    /// billion tiles of wire from then on, and nets go far around it. On VTR's MCNC circuits,
-    /// which `docs/benchmarks.md` has, the default gave 7% to 56% more wire than this at a
-    /// relaxed channel width, critical paths 3% to 134% longer, and needed channels up to 1.9
-    /// times as wide.
+    /// The history factor is in the units of the space's costs, and the default of 1 suits
+    /// steps that cost about 1. This graph's costs are in seconds, as VPR's are, with a tile of
+    /// wire at about 1e-10, so at the default a node that is overused once costs as much as
+    /// ten billion tiles of wire from then on, and nets go far around it. On VTR's MCNC
+    /// circuits, which `docs/benchmarks.md` has, the default gave 7% to 56% more wire than a
+    /// tile at a relaxed channel width, critical paths 3% to 134% longer, and needed channels
+    /// up to 1.9 times as wide.
     ///
     /// VPR's own history multiplies a node's base cost, starting at 1 and adding 1 per unit of
-    /// overuse, which is the same as adding its base cost each time. A tile, a quarter of the
-    /// base cost of the length-4 wires in those circuits, did slightly better there than a
-    /// whole wire.
+    /// overuse, which is the same as adding its base cost each time, a whole length-4 wire on
+    /// the architectures measured. Two tiles and a growth of 1.5, against one tile and the
+    /// engine's 1.8, were chosen on both VTR suites together, with the map lookahead and the
+    /// rest of these options: channels 2% narrower on MCNC and 5% on VTR's Verilog
+    /// circuits, critical paths 0.3% and 0.6% shorter, the same wire, and about 5% more
+    /// expansions at a relaxed width. More history narrows channels further but costs wire
+    /// and delay, and VPR's growth of 1.3 costs more time for no narrower channels once
+    /// history is two tiles.
+    ///
+    /// Giving up early cuts the time spent on widths that cannot be routed, which is most of
+    /// the time of a search for the narrowest channel, to about half, and changed no width
+    /// found on either suite. Allowed to give up on fewer than VPR's 100 overused nodes, it
+    /// gave up on runs that would have succeeded.
     ///
     /// On the same circuits, with the map lookahead, keeping what is not overused of a net
     /// routed again took 0.53 times the expansions of routing it whole, and 0.78 times the
@@ -857,10 +869,14 @@ impl RrGraph {
     /// expansions than that, for critical paths 0.4% longer.
     pub fn engine_options(&self) -> EngineOptions<'static> {
         let mut options = EngineOptions::default();
-        if let Some(factor) = Cost::new(self.delay_normalization) {
+        if let Some(factor) = Cost::new(2.0 * self.delay_normalization) {
             options.history_factor = factor;
         }
+        if let Some(growth) = Cost::new(1.5) {
+            options.present_growth = growth;
+        }
         options.incremental_reroute = true;
+        options.give_up_factor = 1.0;
         if self.map_lookahead().is_some() {
             options.bound_weight = 1.1;
         }

@@ -23,11 +23,13 @@
 //! | `--threads N` | Threads to search with | 1 |
 //! | `--batch N` | `EngineOptions::batch_size` | 1 |
 //! | `--max-iterations N` | `EngineOptions::max_iterations` | The default, 100 |
-//! | `--timing-iterations N` | `EngineOptions::timing_iterations` | The default, 0 |
-//! | `--history F` | `EngineOptions::history_factor`, in tiles of wire: `RrGraph::delay_normalization` | 1, from `RrGraph::engine_options` |
+//! | `--timing-iterations N` | `EngineOptions::timing_iterations` | From `RrGraph::engine_options` |
+//! | `--give-up F` | `EngineOptions::give_up_factor` | From `RrGraph::engine_options` |
+//! | `--give-up-overused N` | `EngineOptions::give_up_overused` | From `RrGraph::engine_options` |
+//! | `--history F` | `EngineOptions::history_factor`, in tiles of wire: `RrGraph::delay_normalization` | 2, from `RrGraph::engine_options` |
 //! | `--first-present F` | `EngineOptions::first_present` | The default, 0.5 |
 //! | `--initial-present F` | `EngineOptions::initial_present` | The default, 0.5 |
-//! | `--present-growth F` | `EngineOptions::present_growth` | The default, 1.8 |
+//! | `--present-growth F` | `EngineOptions::present_growth` | 1.5, from `RrGraph::engine_options` |
 //! | `--no-timing` | Route for cost alone | Timing-driven |
 //! | `--lookahead KIND` | `map` for `RrGraph::use_map_lookahead`, `location` for the graph's own bound | `map` |
 //! | `--lookahead-samples N` | `LookaheadOptions::samples_per_axis` | The default, 2 |
@@ -65,7 +67,9 @@ struct Args {
     threads: usize,
     batch: u32,
     max_iterations: Option<u32>,
-    timing_iterations: u32,
+    timing_iterations: Option<u32>,
+    give_up: Option<f64>,
+    give_up_overused: Option<u32>,
     timing: bool,
     /// Factors for the negotiation, `None` for the defaults. History is in tiles of wire.
     history: Option<f64>,
@@ -90,7 +94,9 @@ fn parse_args() -> Result<Args, String> {
         threads: 1,
         batch: 1,
         max_iterations: None,
-        timing_iterations: 0,
+        timing_iterations: None,
+        give_up: None,
+        give_up_overused: None,
         timing: true,
         history: None,
         first_present: None,
@@ -137,7 +143,9 @@ fn parse_args() -> Result<Args, String> {
             "--threads" => args.threads = number(&value)? as usize,
             "--batch" => args.batch = number(&value)?,
             "--max-iterations" => args.max_iterations = Some(number(&value)?),
-            "--timing-iterations" => args.timing_iterations = number(&value)?,
+            "--timing-iterations" => args.timing_iterations = Some(number(&value)?),
+            "--give-up" => args.give_up = Some(factor(&value)?),
+            "--give-up-overused" => args.give_up_overused = Some(number(&value)?),
             "--history" => args.history = Some(factor(&value)?),
             "--first-present" => args.first_present = Some(factor(&value)?),
             "--initial-present" => args.initial_present = Some(factor(&value)?),
@@ -267,7 +275,15 @@ fn run(args: &Args) -> Result<bool, String> {
     if let Some(max) = args.max_iterations {
         options.max_iterations = max;
     }
-    options.timing_iterations = args.timing_iterations;
+    if let Some(value) = args.timing_iterations {
+        options.timing_iterations = value;
+    }
+    if let Some(value) = args.give_up {
+        options.give_up_factor = value;
+    }
+    if let Some(value) = args.give_up_overused {
+        options.give_up_overused = value;
+    }
     let cost = |value: f64| Cost::new(value).ok_or_else(|| format!("bad factor {value}"));
     if let Some(history) = args.history {
         options.history_factor = cost(history * device.delay_normalization())?;

@@ -442,17 +442,26 @@ fn engine_options_put_history_in_the_units_of_the_graph() {
     let (device, _, _) = mult_4x4();
     let options = device.engine_options();
     let defaults = crate::engine::EngineOptions::default();
-    // A tile of wire, a quarter of a length-4 wire's base cost, and far from the default of 1.
-    assert_eq!(options.history_factor.get(), device.delay_normalization());
+    // Two tiles of wire, half a length-4 wire's base cost, and far from the default of 1.
+    assert_eq!(
+        options.history_factor.get(),
+        2.0 * device.delay_normalization()
+    );
     assert!(options.history_factor.get() < 1e-9);
     assert_eq!(defaults.history_factor, Cost::ONE);
+    // The present factor grows more slowly, and hopeless runs give up early.
+    assert_eq!(options.present_growth.get(), 1.5);
+    assert_eq!(defaults.present_growth.get(), 1.8);
+    assert_eq!(options.give_up_factor, 1.0);
+    assert_eq!(defaults.give_up_factor, 0.0);
+    assert_eq!(options.give_up_overused, defaults.give_up_overused);
     // Nothing else changes.
     assert_eq!(options.max_iterations, defaults.max_iterations);
     assert_eq!(options.first_present, defaults.first_present);
     assert_eq!(options.initial_present, defaults.initial_present);
-    assert_eq!(options.present_growth, defaults.present_growth);
     assert_eq!(options.max_present, defaults.max_present);
     assert_eq!(options.batch_size, defaults.batch_size);
+    assert_eq!(options.timing_iterations, defaults.timing_iterations);
     // Nets keep what is not overused, and the bound is exact until there's a map.
     assert!(options.incremental_reroute && !defaults.incremental_reroute);
     assert_eq!(options.bound_weight, 1.0);

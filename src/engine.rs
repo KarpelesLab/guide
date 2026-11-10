@@ -137,7 +137,9 @@
 //! [`max_expansions`](EngineOptions::max_expansions), or when the
 //! [`cancel`](EngineOptions::cancel) flag is set. The flag is read before every net and
 //! during long searches, on every thread. A net interrupted part way through keeps the route
-//! it had.
+//! it had. With [`give_up_factor`](EngineOptions::give_up_factor) set, a run also ends early
+//! when the trend of its overuse says it would not end in time, as VPR's routing failure
+//! predictor has it.
 //!
 //! There is deliberately no time limit. How far a run gets in a given time depends on the
 //! machine and its load, so a time limit would make the result depend on them too. An
@@ -615,6 +617,29 @@ pub struct EngineOptions<'c> {
     /// one search or a few, rather than one for each terminal. The part kept was found at
     /// older prices, so this changes results, which is why it is off by default.
     pub incremental_reroute: bool,
+    /// How late a predicted end of the conflicts may be, as a multiple of
+    /// [`max_iterations`](EngineOptions::max_iterations), before a run gives up early with
+    /// [`StopReason::GaveUp`], as VPR's routing failure predictor does. The default is 0,
+    /// which never gives up early.
+    ///
+    /// From the tenth iteration, a line is fitted to the logarithm of the number of overused
+    /// resources over the later half of the iterations so far, and the iteration at which it
+    /// reaches a single resource is the prediction. A count that does not fall predicts
+    /// never. The run gives up if the prediction is later than this factor times
+    /// `max_iterations`, while at least
+    /// [`give_up_overused`](EngineOptions::give_up_overused) resources are overused. VPR's
+    /// default, `--routing_failure_predictor safe`, is a factor of 3 and 100 resources, and
+    /// `aggressive` is 1.5.
+    ///
+    /// A run that gives up has used fewer iterations than one that is allowed all of them,
+    /// which is what a search for the narrowest channel that routes spends most of its time
+    /// on. Only runs that have had no legal result yet give up, and none that would end
+    /// within the iteration limit can be told apart from those that would not: a factor too
+    /// small gives up on some of those.
+    pub give_up_factor: f64,
+    /// How many resources must be overused for [`give_up_factor`](EngineOptions::give_up_factor)
+    /// to give up. The default is 100, as in VPR.
+    pub give_up_overused: u32,
 }
 
 impl Default for EngineOptions<'_> {
@@ -635,6 +660,8 @@ impl Default for EngineOptions<'_> {
             timing_reroute_criticality: 0.9,
             bound_weight: 1.0,
             incremental_reroute: false,
+            give_up_factor: 0.0,
+            give_up_overused: 100,
         }
     }
 }
@@ -879,6 +906,10 @@ pub enum StopReason {
     BudgetExhausted,
     /// The [`cancel`](EngineOptions::cancel) flag was set.
     Cancelled,
+    /// The run gave up before [`max_iterations`](EngineOptions::max_iterations), because
+    /// [`give_up_factor`](EngineOptions::give_up_factor) predicted that it would not get rid of
+    /// its conflicts in time.
+    GaveUp,
     /// The engine has not stopped: the caller asked for its result before it finished.
     NotFinished,
 }
@@ -1170,6 +1201,15 @@ impl ResourceState {
 
 /// How far beyond capacity a resource would be with one more net on it.
 #[inline]
+/// log2 of `n`, for `n` at least 1, exact at powers of two and linear between them, so within
+/// 0.09 of the true value. It is made from the bits of `n` alone, which keeps it the same on
+/// every platform without a call into a math library.
+fn rough_log2(n: u32) -> f64 {
+    let power = 31 - n.max(1).leading_zeros();
+    let base = 1u64 << power;
+    f64::from(power) + (u64::from(n.max(1)) - base) as f64 / base as f64
+}
+
 fn overuse_with_one_more(occupancy: u32, capacity: u32) -> u32 {
     occupancy.saturating_add(1).saturating_sub(capacity)
 }
@@ -3335,10 +3375,54 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
             } else {
                 StopReason::IterationLimit
             });
+        } else if !legal && self.first_legal.is_none() && self.hopeless() {
+            self.stop = Some(StopReason::GaveUp);
         } else if !legal {
             self.table.add_history(self.options.history_factor);
         }
         report
+    }
+
+    /// Whether [`EngineOptions::give_up_factor`] predicts that the conflicts will not end in
+    /// time, from the reports so far.
+    fn hopeless(&self) -> bool {
+        /// Iterations to have seen before predicting anything, which VPR has as more than 8.
+        const MIN_HISTORY: usize = 9;
+        let factor = self.options.give_up_factor;
+        let Some(last) = self.reports.last() else {
+            return false;
+        };
+        if factor <= 0.0
+            || self.reports.len() < MIN_HISTORY
+            || last.overused_resources < self.options.give_up_overused.max(1)
+        {
+            return false;
+        }
+        // A least-squares line through (iteration, log2 overused) over the later half.
+        let window = &self.reports[self.reports.len() / 2..];
+        let n = window.len() as f64;
+        let points = || {
+            window.iter().map(|report| {
+                (
+                    f64::from(report.iteration),
+                    rough_log2(report.overused_resources.max(1)),
+                )
+            })
+        };
+        let (sum_x, sum_y) = points().fold((0.0, 0.0), |(x, y), (px, py)| (x + px, y + py));
+        let (mean_x, mean_y) = (sum_x / n, sum_y / n);
+        let (covariance, variance) = points().fold((0.0, 0.0), |(c, v), (px, py)| {
+            let dx = px - mean_x;
+            (c + dx * (py - mean_y), v + dx * dx)
+        });
+        let slope = covariance / variance;
+        // A count that does not fall, or a slope that is not a number, predicts never.
+        if slope.is_nan() || slope >= 0.0 {
+            return true;
+        }
+        // Where the line reaches log2 1 = 0.
+        let predicted = mean_x - mean_y / slope;
+        predicted > factor * f64::from(self.options.max_iterations)
     }
 
     /// Whether the run goes on after its first legal result, to improve its timing.
@@ -3409,9 +3493,9 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
             ),
             None => {
                 let reason = match stop {
-                    StopReason::IterationLimit | StopReason::BudgetExhausted => {
-                        UnroutedReason::BudgetExhausted
-                    }
+                    StopReason::IterationLimit
+                    | StopReason::GaveUp
+                    | StopReason::BudgetExhausted => UnroutedReason::BudgetExhausted,
                     _ => UnroutedReason::Cancelled,
                 };
                 let timing = self.timing.as_ref().map(|t| t.outcome(&self.states));
@@ -4678,6 +4762,78 @@ mod tests {
         assert_eq!(outcome.overused[0].occupancy, 3);
         assert_eq!(outcome.overused[0].capacity, 1);
         assert_eq!(outcome.conflicted_nets(), [NetId(0), NetId(1), NetId(2)]);
+    }
+
+    #[test]
+    fn a_run_whose_conflicts_do_not_fall_gives_up_early() {
+        let space = graph(7, &[(0, 3), (1, 3), (2, 3), (3, 4), (3, 5), (3, 6)]);
+        let nets = [net(0, &[0, 4]), net(1, &[1, 5]), net(2, &[2, 6])];
+        let predicting = EngineOptions {
+            max_iterations: 20,
+            give_up_factor: 3.0,
+            give_up_overused: 1,
+            ..options()
+        };
+        let outcome = route_checked(&space, &nets, predicting);
+        assert_eq!(outcome.stop, StopReason::GaveUp);
+        // From the ninth iteration on, the first that has the history to predict from.
+        assert_eq!(outcome.routes.stats.iterations, 9);
+        assert!(!outcome.is_success());
+        assert_eq!(outcome.overused.len(), 1);
+
+        // Too few overused resources to give up on, as VPR has it.
+        let few = EngineOptions {
+            give_up_overused: 2,
+            ..predicting
+        };
+        let outcome = route_checked(&space, &nets, few);
+        assert_eq!(outcome.stop, StopReason::IterationLimit);
+        assert_eq!(outcome.routes.stats.iterations, 20);
+    }
+
+    #[test]
+    fn giving_up_never_stops_a_run_that_converges() {
+        // Three nets that each have a way of their own, once they stop sharing node 3.
+        let space = graph(
+            9,
+            &[
+                (0, 3),
+                (1, 3),
+                (2, 3),
+                (3, 4),
+                (3, 5),
+                (3, 6),
+                (0, 7),
+                (7, 4),
+                (1, 8),
+                (8, 5),
+            ],
+        );
+        let nets = [net(0, &[0, 4]), net(1, &[1, 5]), net(2, &[2, 6])];
+        let plain = route_checked(&space, &nets, options());
+        let predicting = route_checked(
+            &space,
+            &nets,
+            EngineOptions {
+                give_up_factor: 0.1,
+                give_up_overused: 1,
+                ..options()
+            },
+        );
+        assert!(plain.is_success());
+        assert_eq!(predicting.stop, StopReason::Converged);
+        assert_eq!(predicting.routes.stats, plain.routes.stats);
+    }
+
+    #[test]
+    fn rough_log2_is_exact_at_powers_of_two_and_close_between() {
+        for power in 0..32 {
+            assert_eq!(rough_log2(1 << power), f64::from(power));
+        }
+        assert_eq!(rough_log2(0), 0.0);
+        for n in [3u32, 5, 7, 100, 1000, 12345, u32::MAX] {
+            assert!((rough_log2(n) - f64::from(n).log2()).abs() < 0.09, "{n}");
+        }
     }
 
     #[test]

@@ -257,18 +257,34 @@ with ten times its default moves, and 2% to 19% above in free space, including 1
 packed exactly full, which went from 1.70 to 1.19 once rows after Abacus replaced the packing
 that ignored the global placement; 8.8% as a geometric mean, from 16%. Annealing alone at its
 default effort is 25% to 80% above, and 0% to 33% with ten times the moves. Left for later: an
-unanchored grid packed exactly full that comes out sheared (21% above on two seeds of three), and
-an FPGA hookup, building a problem from a VTR netlist and architecture, which comes with M8.
+unanchored grid packed exactly full that comes out sheared (21% above on two seeds of three). The
+FPGA hookup, building a problem from a VTR netlist and architecture, came with M8.
 
 ### M8: Domain placement
 
 - **FPGA:** packing-aware site legalization, fixed I/O, carry chains and other
-  macros, clock regions, timing-driven optimization.
+  macros, clock regions, timing-driven optimization. Done but for clock regions, in
+  `fpga::build_place_problem` and `fpga::place_design`: a placement problem from VPR's packed
+  netlist on the device of its routing graph, with a site per position of each tile, pins on the
+  tiles VPR puts them on, carry chains from the architecture's direct connections as macros,
+  and blocks fixed by a `.place` file as with `--fix_clusters`; VPR's bounding-box and
+  timing cost, with criticalities from a timing analysis each temperature and delays from a
+  delta-delay table searched on the graph; analytic global placement, then annealing that
+  starts cold; and `fpga::write_placement` for VPR. VTR's architectures have no clock regions,
+  so nothing models them yet.
 - **PCB:** fixed connectors and mounting holes, courtyards, both board sides, 90°
   or free rotation, decoupling capacitors kept near their pins, thermal grouping.
 
 **Exit:** FPGA placement competitive with VPR after routing; PCB placement that
 routes to completion on the curated boards with the original placement discarded.
+
+The FPGA half is met ([results](docs/benchmarks.md#fpga-placement-against-vpr)): on VTR's 20
+MCNC circuits and 21 Verilog benchmarks, from VPR's packing, VPR 9.0.0 accepts every placement
+of `guide`'s, and routed by VPR's router they give critical paths 0.2% and 2.0% shorter than
+VPR's own placements, with 4.5% and 2.7% less wire, in 1.6 and 0.6 times VPR's placement time;
+`guide`'s router finds the same. Channel width is the same on average, but the largest Verilog
+circuits need 2% to 11% wider channels on `guide`'s placements, as nothing in the cost looks at
+congestion yet. The PCB half is not started.
 
 ### M9: Co-optimization
 

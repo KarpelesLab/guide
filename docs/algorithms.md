@@ -109,7 +109,7 @@ both tracks together, which add the same length to both.
 | Force-directed | PCB | Natural for free-space placement with few items. |
 | Legalization (Tetris, Abacus, min-cost flow) | All discrete | Snaps a global solution to legal sites with minimum displacement. Tetris-like greedy legalization built as `place::legalize`, for sites and free space, with rows after Abacus in free space. |
 | Detailed placement | All | Local window swaps after legalization. Built as low-temperature annealing over a few steps. FastPlace-DP's global swap was tried and gained nothing on top of it. |
-| Timing-driven weighting | FPGA, ASIC | Re-weights critical connections between iterations. |
+| Timing-driven weighting | FPGA, ASIC | Re-weights critical connections between iterations. Built for FPGAs as VPR's timing cost, criticalities from a timing analysis each temperature. |
 | RUDY congestion estimate | All | Spreads each net's wire evenly over its bounding box. Built as `place::CongestionGrid::rudy`, priced by `place::CongestionCost`. |
 
 ### What `place` does
@@ -158,6 +158,32 @@ Generic placement (roadmap M7) is in `src/place`, measured in
   bound, after Peko (Chang, Cong and Xie, 2003): grids, chains, Peko netlists with pads and typed
   columns, and squares in free space.
 
+### FPGA placement
+
+FPGA placement (roadmap M8) is in `src/fpga/placer.rs`, on top of `src/place`, and measured
+against VPR in [`docs/benchmarks.md`](benchmarks.md#fpga-placement-against-vpr).
+
+- **Problem.** `fpga::build_place_problem` makes a `place::PlacementProblem` from a packed
+  netlist and the device of a routing resource graph: a site per position of each tile, typed by
+  the tile, pins on the tile of the block that VPR's `pin_width_offset` and `pin_height_offset`
+  put them on, carry chains as macros from the architecture's `<directlist>`, as VPR's
+  `alloc_and_load_placement_macros` finds them, and fixed blocks from a `.place` file, as with
+  VPR's `--fix_clusters`. Clock and constant nets are left out, as VPR leaves them out.
+- **Cost.** VPR's, for `criticality_timing`: each net's bounding box counted in tiles, times the
+  crossing factor for its size (Cheng, 1994), and each connection's delay times its criticality
+  to an exponent that grows from 1 to 8 as the range limit shrinks. Each temperature the
+  placement is timed again with every connection at the delay model's delay, and both terms are
+  divided by their totals so that the cost stays near 1, as VPR does, through
+  `place::Annealer::set_cost`.
+- **Delay model.** A table by columns and rows apart, after VPR's `delta` model: the least delay
+  from any `SOURCE` of a tile of the most common type, from five places, to any `SINK` at each
+  offset, by Dijkstra on the graph's own step delays, leaving out carry chains' direct
+  connections.
+- **Flow.** Analytic global placement and legalization by plain wirelength, then annealing that
+  starts cold, at a twentieth of the moves' standard deviation over 8 steps, which is how VPR 9
+  starts too, from a placement that puts blocks near their neighbours' centroid at
+  `std_dev / 64`. Annealing from a random placement, hot, as VPR did before, is the other method.
+
 ## Support structures
 
 | Structure | Use |
@@ -184,6 +210,8 @@ Generic placement (roadmap M7) is in `src/place`, measured in
 - J. Ousterhout, "Corner Stitching: A Data-Structuring Technique for VLSI Layout
   Tools", *IEEE TCAD*, 1984.
 - R. Nair, "A Simple Yet Effective Technique for Global Wiring", *IEEE TCAD*, 1987.
+- C.-E. Cheng, "RISA: Accurate and Efficient Placement Routability Modeling", *ICCAD*, 1994.
+  The crossing factor of VPR's bounding-box cost.
 - L. McMurchie, C. Ebeling, "PathFinder: A Negotiation-Based Performance-Driven
   Router for FPGAs", *FPGA*, 1995.
 - V. Betz, J. Rose, "VPR: A New Packing, Placement and Routing Tool for FPGA

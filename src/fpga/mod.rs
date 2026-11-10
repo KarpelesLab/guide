@@ -1,12 +1,13 @@
-//! FPGA routing problems, read from and written back to VTR's file formats.
+//! FPGA placement and routing problems, read from and written back to VTR's file formats.
 //!
-//! This imports what VPR's router works from, and writes what it produces:
+//! This imports what VPR's placer and router work from, and writes what they produce:
 //!
 //! | File | Read or written by | Becomes |
 //! | --- | --- | --- |
 //! | Routing resource graph (`rr_graph.xml`) | [`read_rr_graph`] | [`RrGraph`], holding a [`Graph`] and its side tables |
 //! | Packed netlist (`.net`) | [`read_netlist`] | [`PackedNetlist`] |
-//! | Placement (`.place`) | [`read_placement`] | [`Placement`] |
+//! | Placement (`.place`) | [`read_placement`], [`write_placement`] | [`Placement`] |
+//! | The graph, the netlist and the architecture's carry chains | [`build_place_problem`] | [`PlaceProblem`], holding a [`PlacementProblem`] that [`place_design`] places |
 //! | The last three together | [`resolve_nets`] | [`Design`], holding [`Net`]s |
 //! | Architecture (`arch.xml`), for the delays inside blocks | [`read_architecture`] | [`Architecture`], holding [`LogicDelays`] |
 //! | The packed netlist again, and delays inside blocks | [`build_timing`] | [`DesignTiming`], holding a [`TimingGraph`] and the engine's [`Connection`]s |
@@ -129,6 +130,11 @@
 //!   [what VPR does differently](build_timing#what-vpr-does-differently).
 //! - **Constant nets**, which VPR doesn't route, are found by [`constant_nets`] as VPR finds
 //!   them, and agreed with VPR's count on every Verilog benchmark.
+//! - **Placements** that [`place_design`] makes were loaded by VPR 9.0.0 with every block fixed,
+//!   which checks them as it checks its own, on all 41 circuits of both suites, carry chains,
+//!   memories and multipliers included, and routed by it and by this crate. Their
+//!   [`bb_estimate`](PlaceProblem::bb_estimate) equals what VPR prints for the same placement
+//!   on every circuit. See the FPGA placement section of `docs/benchmarks.md`.
 //!
 //! # Limitations
 //!
@@ -164,6 +170,7 @@
 //! [`Net`]: crate::net::Net
 //! [`Route`]: crate::net::Route
 //! [`TimingGraph`]: crate::timing::TimingGraph
+//! [`PlacementProblem`]: crate::place::PlacementProblem
 //! [`Connection`]: crate::engine::Connection
 
 use core::fmt;

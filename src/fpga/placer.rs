@@ -33,7 +33,8 @@ use crate::timing::{ArcId, Constraints, CriticalityOptions, TimingAnalysis};
 #[non_exhaustive]
 pub struct ProblemOptions<'a> {
     /// Blocks to fix where this placement puts them, as VPR's `--fix_clusters` does: I/O pads,
-    /// say. Blocks it doesn't name are free. A block of a carry chain can't be fixed.
+    /// say. Blocks it doesn't name are free. A carry chain with a fixed block is not kept
+    /// together, so fix all of a chain where its connections can be routed, or none of it.
     pub fixed: Option<&'a Placement>,
     /// Nets that placement leaves out, besides those that reach a clock port, which are always
     /// left out as VPR leaves them to an ideal clock. VPR also leaves out constant nets, which
@@ -255,7 +256,8 @@ fn crossing_count(pins: usize) -> f64 {
 ///
 /// A block goes on tiles of the type of its own name, which is how VTR's architectures have
 /// it. `equivalent_sites` that let a block go on tiles of other types are not followed. Only
-/// the first layer of a 3D device is used.
+/// the first layer of a 3D device is used. Nothing keeps blocks of a clock within a region of
+/// the device, which VTR's architectures don't have.
 pub fn build_place_problem(
     device: &RrGraph,
     netlist: &PackedNetlist,

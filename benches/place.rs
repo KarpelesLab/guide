@@ -7,6 +7,7 @@
 //! cargo bench --bench place                            # timings, by criterion
 //! GUIDE_PLACE_SWEEP=quality cargo bench --bench place  # ratios to the optimum, no criterion
 //! GUIDE_PLACE_SWEEP=threads cargo bench --bench place  # the same results on 1 and 16 threads
+//! GUIDE_PLACE_SWEEP=effort cargo bench --bench place   # annealing's ratios against its moves
 //! ```
 //!
 //! The quality sweep runs one instance at a time, so that its times are fair. Wirelengths do
@@ -190,6 +191,67 @@ fn quality_sweep() {
     );
 }
 
+/// Moves per temperature, as `inner_num`, that the effort sweep tries.
+const EFFORTS: [f64; 4] = [0.3, 1.0, 3.0, 10.0];
+
+/// Annealing alone at several efforts, with and without median moves: the mean ratio to the
+/// optimum over the seeds, per family, and the geometric mean and moves over all of them.
+fn effort_sweep() {
+    let settings: Vec<(f64, f64)> = [0.0, 0.3]
+        .into_iter()
+        .flat_map(|median| EFFORTS.map(|effort| (median, effort)))
+        .collect();
+    let header: Vec<String> = settings
+        .iter()
+        .map(|(median, effort)| format!("{effort}x, median {median}"))
+        .collect();
+    println!("| Problem | {} |", header.join(" | "));
+    println!("| --- |{}", " ---: |".repeat(settings.len()));
+    let mut ratios: Vec<Vec<f64>> = vec![Vec::new(); settings.len()];
+    let mut moves = vec![0u64; settings.len()];
+    let mut seconds = vec![0.0; settings.len()];
+    for (name, make) in families() {
+        let mut row = Vec::new();
+        for (k, &(median, effort)) in settings.iter().enumerate() {
+            let mut sum = 0.0;
+            for seed in 1..=SEEDS {
+                let generated = make(seed);
+                let mut options = AnnealOptions::default();
+                options.seed = seed;
+                options.inner_num = effort;
+                options.median_moves = median;
+                let (outcome, time) =
+                    timed(|| anneal(&generated.problem, Wirelength, options).expect("anneal"));
+                moves[k] += outcome.moves;
+                seconds[k] += time;
+                sum += checked(&generated, outcome) as f64 / generated.optimum as f64;
+            }
+            let mean = sum / SEEDS as f64;
+            ratios[k].push(mean);
+            row.push(format!("{mean:.3}"));
+        }
+        println!("| {name} | {} |", row.join(" | "));
+    }
+    let geomean =
+        |values: &[f64]| (values.iter().map(|v| v.ln()).sum::<f64>() / values.len() as f64).exp();
+    let cells = |f: &dyn Fn(usize) -> String| -> String {
+        (0..settings.len()).map(f).collect::<Vec<_>>().join(" | ")
+    };
+    println!(
+        "| Geometric mean | {} |",
+        cells(&|k| format!("{:.3}", geomean(&ratios[k])))
+    );
+    let runs = families().len() as u64 * SEEDS;
+    println!(
+        "| Moves per run, mean | {} |",
+        cells(&|k| format!("{}", moves[k] / runs))
+    );
+    println!(
+        "| Seconds, all runs | {} |",
+        cells(&|k| format!("{:.1}", seconds[k]))
+    );
+}
+
 fn cell((mean, worst): (f64, f64)) -> String {
     format!("{mean:.3} ({worst:.3})")
 }
@@ -287,8 +349,9 @@ fn main() {
     match sweep.as_str() {
         "quality" => quality_sweep(),
         "threads" => thread_sweep(),
+        "effort" => effort_sweep(),
         _ => {
-            eprintln!("{SWEEP_VARIABLE} must be quality or threads, not {sweep:?}");
+            eprintln!("{SWEEP_VARIABLE} must be quality, threads or effort, not {sweep:?}");
             std::process::exit(2);
         }
     }

@@ -1615,11 +1615,13 @@ that nothing of the answer is left in the numbering.
 
 The methods, all from `guide::place` with default options but for the seed:
 
-- **Annealing**: `anneal`, from a random legal placement. VPR's schedule with `inner_num` 1.
+- **Annealing**: `anneal`, from a random legal placement. VPR's schedule with `inner_num` 1, and
+  30% of single items' moves sent to the median region of their nets.
 - **Annealing, 10x moves**: the same with `inner_num` 10.
 - **Analytic, legalized**: `place_analytic`'s global placement and legalization, before
   detailed placement (`AnalyticReport::legalized`).
-- **Analytic, detailed**: its result, after detailed placement by low-temperature annealing.
+- **Analytic, detailed**: its result, after detailed placement by annealing that starts cold,
+  with a range limit of 8 steps and `inner_num` 3 (`AnnealOptions::detailed`).
 
 Each family is run at seeds 1 to 3, one run at a time, on one thread of a shared 192-thread
 machine. Ratios are the mean over the seeds, with the worst in brackets, and times are means in
@@ -1629,49 +1631,136 @@ seconds. `GUIDE_PLACE_SWEEP=quality cargo bench --bench place` prints the table.
 
 | Problem | Items | Nets | Optimum | Annealing | Annealing, 10x moves | Analytic, legalized | Analytic, detailed | Annealing s | 10x s | Analytic s |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Grid 16 x 16 | 256 | 480 | 480 | 1.778 (1.904) | 1.499 (1.600) | 1.000 (1.000) | 1.000 (1.000) | 0.030 | 0.29 | 0.010 |
-| Grid 16 x 16, pads | 320 | 544 | 544 | 1.496 (1.724) | 1.085 (1.158) | 1.000 (1.000) | 1.000 (1.000) | 0.031 | 0.31 | 0.008 |
-| Grid 32 x 32, pads | 1152 | 2112 | 2112 | 1.860 (2.014) | 1.188 (1.207) | 1.000 (1.000) | 1.000 (1.000) | 0.243 | 2.39 | 0.052 |
-| Grid 16 x 16, pads, macros of 4 | 320 | 544 | 544 | 1.999 (2.239) | 1.420 (1.562) | 1.000 (1.000) | 1.000 (1.000) | 0.007 | 0.07 | 0.004 |
-| Chain of 200 on 16 x 16 | 200 | 199 | 199 | 1.328 (1.387) | 1.057 (1.070) | 1.414 (1.432) | 1.060 (1.070) | 0.014 | 0.14 | 0.006 |
-| Peko 16 x 16 | 256 | 272 | 471 | 1.444 (1.489) | 1.253 (1.291) | 1.504 (1.560) | 1.259 (1.283) | 0.058 | 0.56 | 0.017 |
-| Peko 32 x 32, pads | 1152 | 1196 | 2020 | 1.611 (1.683) | 1.186 (1.210) | 1.462 (1.470) | 1.267 (1.280) | 0.459 | 4.50 | 0.108 |
-| Peko 32 x 32, pads, typed columns | 1152 | 1196 | 2020 | 1.877 (1.936) | 1.298 (1.433) | 1.635 (1.688) | 1.325 (1.360) | 0.461 | 4.44 | 0.156 |
-| Free space 8 x 8, full | 64 | 112 | 1120 | 1.568 (1.625) | 1.259 (1.286) | 1.143 (1.214) | 1.143 (1.214) | 0.015 | 0.16 | 0.005 |
-| Free space 12 x 12, full | 144 | 264 | 2640 | 1.856 (2.030) | 1.451 (1.602) | 3.867 (3.867) | 1.702 (1.860) | 0.050 | 0.50 | 0.019 |
-| Free space 12 x 12, 20% wider | 144 | 264 | 2640 | 2.105 (2.227) | 1.268 (1.396) | 1.665 (1.665) | 1.188 (1.216) | 0.052 | 0.53 | 0.019 |
-| Geometric mean | | | | 1.704 | 1.262 | 1.390 | 1.161 | | | |
+| Grid 16 x 16 | 256 | 480 | 480 | 1.798 (1.846) | 1.077 (1.198) | 1.000 (1.000) | 1.000 (1.000) | 0.032 | 0.29 | 0.023 |
+| Grid 16 x 16, pads | 320 | 544 | 544 | 1.306 (1.415) | 1.000 (1.000) | 1.000 (1.000) | 1.000 (1.000) | 0.032 | 0.29 | 0.021 |
+| Grid 32 x 32, pads | 1152 | 2112 | 2112 | 1.382 (1.487) | 1.115 (1.205) | 1.000 (1.000) | 1.000 (1.000) | 0.254 | 2.42 | 0.150 |
+| Grid 16 x 16, pads, macros of 4 | 320 | 544 | 544 | 1.556 (1.886) | 1.000 (1.000) | 1.000 (1.000) | 1.000 (1.000) | 0.009 | 0.09 | 0.012 |
+| Chain of 200 on 16 x 16 | 200 | 199 | 199 | 1.248 (1.296) | 1.049 (1.065) | 1.414 (1.432) | 1.040 (1.045) | 0.015 | 0.15 | 0.016 |
+| Peko 16 x 16 | 256 | 272 | 471 | 1.485 (1.556) | 1.215 (1.240) | 1.504 (1.560) | 1.205 (1.231) | 0.066 | 0.66 | 0.065 |
+| Peko 32 x 32, pads | 1152 | 1196 | 2020 | 1.646 (1.687) | 1.123 (1.132) | 1.462 (1.470) | 1.182 (1.186) | 0.518 | 5.15 | 0.453 |
+| Peko 32 x 32, pads, typed columns | 1152 | 1196 | 2020 | 1.677 (1.745) | 1.218 (1.278) | 1.635 (1.688) | 1.222 (1.256) | 0.511 | 4.98 | 0.486 |
+| Free space 8 x 8, full | 64 | 112 | 1120 | 1.438 (1.679) | 1.327 (1.402) | 1.143 (1.214) | 1.143 (1.214) | 0.015 | 0.17 | 0.023 |
+| Free space 12 x 12, full | 144 | 264 | 2640 | 1.674 (1.936) | 1.280 (1.390) | 1.538 (1.538) | 1.189 (1.212) | 0.057 | 0.56 | 0.080 |
+| Free space 12 x 12, 20% wider | 144 | 264 | 2640 | 1.665 (1.894) | 1.096 (1.265) | 1.564 (1.564) | 1.023 (1.068) | 0.049 | 0.46 | 0.073 |
+| Geometric mean | | | | 1.525 | 1.132 | 1.271 | 1.088 | | | |
 
 Every placement is legal by `place::check`, which shares no code with the placers.
+
+Before the changes that closed M7, the same sweep gave this (commit `06dbc12`, same machine):
+
+| Problem | Annealing | Annealing, 10x moves | Analytic, legalized | Analytic, detailed | Analytic s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Grid 16 x 16 | 1.778 (1.904) | 1.499 (1.600) | 1.000 (1.000) | 1.000 (1.000) | 0.010 |
+| Grid 16 x 16, pads | 1.496 (1.724) | 1.085 (1.158) | 1.000 (1.000) | 1.000 (1.000) | 0.008 |
+| Grid 32 x 32, pads | 1.860 (2.014) | 1.188 (1.207) | 1.000 (1.000) | 1.000 (1.000) | 0.052 |
+| Grid 16 x 16, pads, macros of 4 | 1.999 (2.239) | 1.420 (1.562) | 1.000 (1.000) | 1.000 (1.000) | 0.004 |
+| Chain of 200 on 16 x 16 | 1.328 (1.387) | 1.057 (1.070) | 1.414 (1.432) | 1.060 (1.070) | 0.006 |
+| Peko 16 x 16 | 1.444 (1.489) | 1.253 (1.291) | 1.504 (1.560) | 1.259 (1.283) | 0.017 |
+| Peko 32 x 32, pads | 1.611 (1.683) | 1.186 (1.210) | 1.462 (1.470) | 1.267 (1.280) | 0.108 |
+| Peko 32 x 32, pads, typed columns | 1.877 (1.936) | 1.298 (1.433) | 1.635 (1.688) | 1.325 (1.360) | 0.156 |
+| Free space 8 x 8, full | 1.568 (1.625) | 1.259 (1.286) | 1.143 (1.214) | 1.143 (1.214) | 0.005 |
+| Free space 12 x 12, full | 1.856 (2.030) | 1.451 (1.602) | 3.867 (3.867) | 1.702 (1.860) | 0.019 |
+| Free space 12 x 12, 20% wider | 2.105 (2.227) | 1.268 (1.396) | 1.665 (1.665) | 1.188 (1.216) | 0.019 |
+| Geometric mean | 1.704 | 1.262 | 1.390 | 1.161 | |
+
+**Annealing against its moves.** `GUIDE_PLACE_SWEEP=effort` runs annealing alone at four values
+of `inner_num`, without median moves and with 30% of them, and prints the mean ratio over the
+three seeds:
+
+| Problem | 0.3x | 1x | 3x | 10x | 0.3x, median | 1x, median | 3x, median | 10x, median |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Grid 16 x 16 | 2.426 | 1.778 | 1.539 | 1.499 | 2.136 | 1.798 | 1.438 | 1.077 |
+| Grid 16 x 16, pads | 2.086 | 1.496 | 1.221 | 1.085 | 1.464 | 1.306 | 1.185 | 1.000 |
+| Grid 32 x 32, pads | 2.844 | 1.860 | 1.435 | 1.188 | 2.068 | 1.382 | 1.192 | 1.115 |
+| Grid 16 x 16, pads, macros of 4 | 2.618 | 1.556 | 1.597 | 1.000 | 2.618 | 1.556 | 1.597 | 1.000 |
+| Chain of 200 on 16 x 16 | 1.621 | 1.328 | 1.121 | 1.057 | 1.513 | 1.248 | 1.101 | 1.049 |
+| Peko 16 x 16 | 1.680 | 1.444 | 1.313 | 1.253 | 1.767 | 1.485 | 1.350 | 1.215 |
+| Peko 32 x 32, pads | 2.250 | 1.611 | 1.357 | 1.186 | 1.960 | 1.646 | 1.406 | 1.123 |
+| Peko 32 x 32, pads, typed columns | 2.475 | 1.877 | 1.576 | 1.298 | 2.200 | 1.677 | 1.397 | 1.218 |
+| Free space 8 x 8, full | 1.812 | 1.693 | 1.304 | 1.289 | 1.661 | 1.438 | 1.295 | 1.327 |
+| Free space 12 x 12, full | 2.167 | 1.806 | 1.559 | 1.451 | 1.972 | 1.674 | 1.347 | 1.280 |
+| Free space 12 x 12, 20% wider | 2.424 | 1.956 | 1.456 | 1.479 | 2.146 | 1.665 | 1.431 | 1.096 |
+| Geometric mean | 2.186 | 1.662 | 1.399 | 1.242 | 1.928 | 1.525 | 1.333 | 1.132 |
+| Moves per run, mean | 126982 | 417466 | 1241569 | 4122116 | 128082 | 416762 | 1246431 | 4157773 |
+| Seconds, all 33 runs | 1.3 | 4.1 | 12.2 | 39.5 | 1.4 | 4.5 | 13.7 | 45.7 |
+
+Median moves only move single items, so macros of 4, which hold every item of their grid, are
+the same either way.
 
 **Determinism.** The same seed gives the same placement: property tests check it on random
 problems for every method, and a regression test pins the wirelengths of one problem. Nothing
 runs in parallel inside a placer, so thread counts can't change anything; to check the claim
 anyway, `GUIDE_PLACE_SWEEP=threads` runs all 33 instances of the table with every method on one
 thread and then 16 at once, and gets the same wirelengths. Floating point is used only in a fixed
-order, with `math::exp` for the acceptance test and Newton's method for a cube root.
+order, with `math::exp` for the acceptance test and Newton's method for a cube root; the row
+legalizer is all integers.
+
+### What changed, and what each change did
+
+Measured with the quality sweep as each went in; the ratios are geometric means over the
+families unless a family is named.
+
+- **Rows after Abacus in free space.** Greedy legalization of 144 squares packed exactly full
+  left gaps of half a square and fell back to packing that ignored the global placement, at 3.87
+  times the optimum. Rows, along x and along y, with each unit in its nearest row or with rows
+  filled in order, legalize the same upper bound (1.31 times the optimum) at 1.54, and detailed
+  placement takes that to 1.22, from 1.70, or 1.19 with the stronger detailed placement below.
+  With 20% to spare, rows win too: 1.56 legalized, from 1.67. On sites, legalization costs nothing on any of
+  these problems, as spreading leaves every item on its own site already (the upper bound and the
+  legalized wirelength are equal on every sites family), so a row legalizer there would gain
+  nothing and was not built.
+- **A unit in free space can always reach as far as it is wide.** Before, with the range limit
+  at one pitch, half a square here, a square in a full area could only swap with a neighbour
+  whose edge its moved centre happened to touch. On its own this changed little in these sweeps.
+- **The acceptance rate counts only moves that were priced.** Moves abandoned as illegal, which
+  macros and full free space make common, held the rate down and so shrank the range limit and
+  cooled the schedule at the wrong pace. Counting only priced moves took annealing with 10 times
+  the moves from 1.198 to 1.129, with median moves, and macros of 4 from 1.420 to 1.000.
+- **Median moves**, 30% of single items' moves: 1.662 to 1.525 at the default effort and 1.242 to
+  1.132 at ten times it. 50% did about as well as 30%, and 10% less well.
+- **Macros push the macros they land on** back the other way, and single items go to the nearest
+  sites the shifts leave free. On the grid of macros this finds the same trades as before, as
+  only macros of one shape fit each other's room, so the gain there is the rate's.
+- **Stronger detailed placement.** Starting from the legalized placement, annealing at a
+  twentieth of the moves' standard deviation with a range limit of 8 steps and `inner_num` 3,
+  instead of 3 steps and 1, takes Peko from 1.26-1.33 to 1.18-1.22, for four times the time
+  (0.45 s against 0.12 s on 1152 items, the time of annealing alone at its default effort).
+  Starting hotter does worse: at the moves' full standard deviation the annealer undoes the
+  global placement and, at this effort, can't rebuild it (1.18 to 1.25 geometric mean). With
+  `inner_num` 10 it reaches 1.13-1.14 on the large Peko problems, in 1.4 to 1.5 s.
+- **Global swap**, after FastPlace-DP (each item tries every place in the median region of its
+  nets, and takes the best swap), was tried before and after detailed annealing, with windows of
+  3 to 9 steps, and changed the geometric mean by at most 0.005, mostly for the worse, so it was
+  left out: detailed annealing already finds what it finds.
+- **VPR's schedule**, checked against Betz and Rose (1997): the temperature factors (0.5, 0.9,
+  0.95, 0.8 by acceptance rate), the range limit's update towards 44% acceptance, the first
+  temperature at 20 standard deviations and the exit at 0.005 of the cost per net are VPR's.
+  Lower first temperatures, of 1 and 3 standard deviations, did no better at the default effort
+  (1.544 against 1.525).
 
 ### What the results say
 
-- **Analytic placement is the better default.** It finds the optimum on every grid, with or
-  without pads, and with macros, where a quadratic placement held by its pads is the grid itself
-  and spreading keeps it. On Peko problems it is within 26% to 33% of the optimum, about where
-  annealing gets with ten times its moves (19% to 30%), in a thirtieth to a fortieth of that
-  time, and a third of the time annealing takes at its default effort. Detailed placement takes
-  13% to 25% off what legalization leaves on sites.
-- **Annealing alone needs effort.** At VPR's `inner_num` of 1 it is 33% to 111% above the
-  optimum, and at 10 it is 6% to 50% above, gaining as annealing does with time. Grids are hard
-  for it, as for any annealer: regions settle into the grid's pattern at different orientations,
-  and undoing the walls between them takes moves that only lose at first. Macros are harder
-  still, as one only trades places with another of its shape that it lands on exactly.
+- **M7's exit is met.** The threshold taken is that the analytic flow, the default, lands
+  within 25% of the optimum on average on every family and within 10% over all of them. It is at
+  most 22% above on average (Peko with typed columns; 26% at worst over the seeds), 0% on every
+  grid, with or without pads and macros, 4% on the chain, 2% to 19% in free space, and 8.8% as a
+  geometric mean.
+- **Analytic placement is the better default.** It is as good as annealing with ten times its
+  moves on Peko problems (18% to 22% against 12% to 22% above the optimum), better everywhere
+  else, and takes a seventh to a sixteenth of the time, about what annealing takes at its
+  default effort.
+- **Annealing alone needs effort.** At VPR's `inner_num` of 1 it is 25% to 80% above the
+  optimum, and at 10 it is 0% to 33% above. Grids are hard for it, as for any annealer: regions
+  settle into the grid's pattern at different orientations, and undoing the walls between them
+  takes moves that only lose at first.
 - **For context**, Peko's authors found the placers of 2003 far from the optimum on their
   problems, which were much larger, of tens of thousands of cells and more. Small problems are
   easier, so that is no comparison.
-- **Free space is the weak spot**, and legalization is why. Packed exactly, with a pitch of half
-  an item, greedy legalization leaves gaps of half an item that nothing fits, and the fallback,
-  packing from the bottom left, ignores the global placement: 12 x 12 squares legalize at 3.9
-  times the optimum, which detailed placement brings back to 1.7. With 20% to spare, the result is
-  1.19. Annealing does better than the analytic flow when space is exactly full.
+- **What is left in free space** is the grid without pads packed exactly full, 8 x 8, where two
+  seeds of three end 21% above the optimum. Its quadratic placement has nothing to hold it, collapses to
+  a point, and the first spreading decides its shape, which here comes out sheared, each row a
+  step to the side of the one below. That is legal and locally optimal: undoing it takes moving
+  whole diagonals, which neither swaps nor detailed annealing do.
 
 ### What this does not show
 
@@ -1684,5 +1773,4 @@ order, with `math::exp` for the acceptance test and Newton's method for a cube r
 - Congestion feedback is only tested for doing what it should on a tiny case; nothing here
   measures what it does to routability.
 - Free-space problems are squares of one size. Mixed sizes, which PCBs have, are only tested for
-  legality.
-
+  legality, and rows as tall as the tallest unit waste room when sizes differ much.

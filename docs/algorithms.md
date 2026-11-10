@@ -107,8 +107,8 @@ both tracks together, which add the same length to both.
 | Quadratic and analytic placement (SimPL, HeAP) | Large FPGA | Solve a relaxed problem, then spread and legalize. Built as `place::place_analytic`, after SimPL with bound-to-bound net models. |
 | Electrostatic placement (ePlace, DREAMPlace) | Very large | State of the art for wirelength at scale. Heavier machinery; GPU optional. |
 | Force-directed | PCB | Natural for free-space placement with few items. |
-| Legalization (Tetris, Abacus, min-cost flow) | All discrete | Snaps a global solution to legal sites with minimum displacement. Tetris-like greedy legalization built as `place::legalize`, for sites and free space. |
-| Detailed placement | All | Local window swaps after legalization. Built as low-temperature annealing over a few steps. |
+| Legalization (Tetris, Abacus, min-cost flow) | All discrete | Snaps a global solution to legal sites with minimum displacement. Tetris-like greedy legalization built as `place::legalize`, for sites and free space, with rows after Abacus in free space. |
+| Detailed placement | All | Local window swaps after legalization. Built as low-temperature annealing over a few steps. FastPlace-DP's global swap was tried and gained nothing on top of it. |
 | Timing-driven weighting | FPGA, ASIC | Re-weights critical connections between iterations. |
 | RUDY congestion estimate | All | Spreads each net's wire evenly over its bounding box. Built as `place::CongestionGrid::rudy`, priced by `place::CongestionCost`. |
 
@@ -124,9 +124,15 @@ Generic placement (roadmap M7) is in `src/place`, measured in
 - **Annealing.** VPR's schedule: the first temperature is 20 standard deviations of random moves'
   cost changes, each temperature tries `inner_num * units^(4/3)` moves, the temperature falls by
   0.5 to 0.8 depending on the fraction accepted, and the range limit, counted in columns and rows
-  of the item's kind of site or in pitches, follows that fraction towards 44%. Moves are moves to
-  empty places, swaps, quarter turns, macro shifts that push single items into the sites they
-  leave, and swaps of macros of one shape. The acceptance test uses `math::exp`.
+  of the item's kind of site or in pitches, follows that fraction towards 44%; the fraction is of
+  the moves priced, not counting those abandoned as illegal. Moves are moves to empty places,
+  swaps, quarter turns, median moves as in VPR, which send an item into the median region of its
+  nets, and macro shifts that send the single items they land on to the nearest sites they leave
+  and push a macro they land on back the other way, which lets macros of one shape trade places.
+  Checked against VPR's published schedule (Betz and Rose, 1997), the temperature factors, the
+  range limit's update, the first temperature and the exit test are VPR's; only the rate is
+  taken over the moves priced rather than all moves tried.
+  The acceptance test uses `math::exp`.
 - **Analytic.** Bound-to-bound springs (Spindler, Schlichtmann and Johannes, 2008), whose
   quadratic cost equals half-perimeter wirelength at the positions they were built from, solved
   per axis by conjugate gradients with a Jacobi preconditioner, written here with a fixed order of
@@ -136,8 +142,14 @@ Generic placement (roadmap M7) is in `src/place`, measured in
   first spreading then decides its shape, which on grids happened to be the right one.
 - **Legalization.** Tetris-like: macros from the bottom up, then items from left to right, each to
   the nearest free spot by Manhattan distance, searched in rings. Items limited to a region go
-  first. When greedy choices leave gaps that later units can't use, it packs instead (Hill's
-  Tetris, then bottom-left packing in free space), which is legal but ignores the targets.
+  first. In free space, rows after Abacus (Spindler, Schlichtmann and Johannes, 2008) are tried
+  too, along x and along y, as tall as the tallest unit and cut by fixed items: units in order of
+  their targets go to the row where they move least, or fill rows in turn where space is tight,
+  and units that would overlap in a row merge into clusters placed at their mean target, in
+  integers on the pitch lattice. The shortest legal result wins. On sites, spreading already
+  leaves the global placement legal on every benchmark, so rows there would gain nothing. When
+  everything leaves gaps that later units can't use, it packs instead (Hill's Tetris, then
+  bottom-left packing in free space), which is legal but ignores the targets.
 - **Congestion feedback.** `CongestionEstimate` is the narrow interface: an overflow, in
   thousandths, for a rectangle. `CongestionGrid` implements it from RUDY (Spindler and Johannes,
   2007) or from demand and capacity a router fills in, and `CongestionCost` adds a net's
@@ -181,6 +193,8 @@ Generic placement (roadmap M7) is in `src/place`, measured in
 - J. Cong, M. Romesis, M. Xie, "Optimality and Scalability Study of Partitioning and Placement
   Algorithms", *ISPD*, 2003; and C.-C. Chang, J. Cong, M. Xie, "Optimality and Scalability Study
   of Existing Placement Algorithms", *ASP-DAC*, 2003. The Peko benchmarks.
+- M. Pan, N. Viswanathan, C. Chu, "An Efficient and Effective Detailed Placement Algorithm",
+  *ICCAD*, 2005. FastPlace-DP's global swap.
 - P. Spindler, F. Johannes, "Fast and Accurate Routing Demand Estimation for Efficient
   Routability-Driven Placement", *DATE*, 2007. RUDY.
 - C. Chu, Y.-C. Wong, "FLUTE: Fast Lookup Table Based Rectilinear Steiner Minimal

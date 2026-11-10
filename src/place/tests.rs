@@ -228,6 +228,55 @@ fn stepping_reports_each_temperature_and_ends() {
     assert!(annealer.step().is_none());
 }
 
+/// Wirelength times a factor, to swap in for plain wirelength.
+struct Scaled(u64);
+
+impl CostTerm for Scaled {
+    fn net_cost(&self, net: &NetView<'_>) -> u64 {
+        Wirelength.net_cost(net) * self.0
+    }
+}
+
+#[test]
+fn a_cost_term_swapped_between_temperatures_prices_every_net_again() {
+    let generated = synth::peko(PekoOptions::new(6, 6, 2));
+    let problem = &generated.problem;
+    let n = problem.items().len();
+    let start = legalize(problem, &vec![Point::default(); n], &vec![0; n]).expect("legal");
+    let options = AnnealOptions::default();
+    let mut scaled = Annealer::new(problem, Scaled(1), start.clone(), options).expect("ok");
+    let mut same = Annealer::new(problem, Scaled(1), start.clone(), options).expect("ok");
+    let mut plain = Annealer::new(problem, Scaled(1), start, options).expect("ok");
+    assert_eq!(scaled.max_range(), 6.0);
+    assert_eq!(scaled.temperature(), 0.0);
+    for annealer in [&mut scaled, &mut same, &mut plain] {
+        annealer.step();
+    }
+    let (temperature, range) = (scaled.temperature(), scaled.range());
+    assert!(temperature > 0.0 && range >= 1.0);
+
+    let cost = scaled.cost();
+    scaled.set_cost(Scaled(3));
+    assert_eq!(scaled.cost(), 3 * cost);
+    assert_eq!(scaled.cost_term().0, 3);
+    assert_eq!((scaled.temperature(), scaled.range()), (temperature, range));
+    // The best placement is now the one it is at.
+    assert_eq!(scaled.outcome().cost, 3 * cost);
+    while scaled.step().is_some() {
+        assert_legal(problem, scaled.placement());
+        assert_eq!(scaled.cost(), 3 * problem.wirelength(scaled.placement()));
+    }
+    assert_eq!(scaled.stop_reason(), Some(PlaceStop::Converged));
+
+    // The same term again changes nothing about the run.
+    same.set_cost(Scaled(1));
+    while plain.step().is_some() {
+        assert!(same.step().is_some());
+        assert_eq!(same.placement(), plain.placement());
+    }
+    assert!(same.step().is_none());
+}
+
 #[test]
 fn budgets_and_cancellation_stop_with_a_legal_result() {
     let generated = synth::peko(PekoOptions::new(8, 8, 3));

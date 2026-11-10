@@ -2326,3 +2326,490 @@ fn the_delay_bound_holds_on_a_graph_from_vprs_routes() {
     let checked = assert_delay_bound_holds(&device, (0..nodes).map(NodeId));
     assert!(checked > 100, "{checked}");
 }
+
+// Placement.
+
+/// A device of three columns: pads two to a tile, logic blocks with a carry chain's pins, and
+/// rams two tiles tall, whose second input is on their upper tile.
+const PLACE_DEVICE: &str = "<rr_graph>\
+    <switches><switch id=\"0\" name=\"s\"><timing Tdel=\"1e-10\"/></switch></switches>\
+    <segments><segment id=\"0\" name=\"L1\"/></segments>\
+    <block_types>\
+    <block_type id=\"0\" name=\"EMPTY\" width=\"1\" height=\"1\"/>\
+    <block_type id=\"1\" name=\"io\" width=\"1\" height=\"1\">\
+    <pin_class type=\"OUTPUT\"><pin ptc=\"0\">io[0].inpad[0]</pin></pin_class>\
+    <pin_class type=\"INPUT\"><pin ptc=\"1\">io[0].outpad[0]</pin></pin_class>\
+    <pin_class type=\"OUTPUT\"><pin ptc=\"2\">io[1].inpad[0]</pin></pin_class>\
+    <pin_class type=\"INPUT\"><pin ptc=\"3\">io[1].outpad[0]</pin></pin_class>\
+    </block_type>\
+    <block_type id=\"2\" name=\"clb\" width=\"1\" height=\"1\">\
+    <pin_class type=\"INPUT\"><pin ptc=\"0\">clb.I[0]</pin></pin_class>\
+    <pin_class type=\"INPUT\"><pin ptc=\"1\">clb.cin[0]</pin></pin_class>\
+    <pin_class type=\"OUTPUT\"><pin ptc=\"2\">clb.O[0]</pin></pin_class>\
+    <pin_class type=\"OUTPUT\"><pin ptc=\"3\">clb.cout[0]</pin></pin_class>\
+    </block_type>\
+    <block_type id=\"3\" name=\"ram\" width=\"1\" height=\"2\">\
+    <pin_class type=\"INPUT\"><pin ptc=\"0\">ram.a[0]</pin></pin_class>\
+    <pin_class type=\"INPUT\"><pin ptc=\"1\">ram.a[1]</pin></pin_class>\
+    <pin_class type=\"OUTPUT\"><pin ptc=\"2\">ram.o[0]</pin></pin_class>\
+    </block_type>\
+    </block_types>\
+    <grid>\
+    <grid_loc x=\"0\" y=\"0\" block_type_id=\"1\" width_offset=\"0\" height_offset=\"0\"/>\
+    <grid_loc x=\"0\" y=\"1\" block_type_id=\"1\" width_offset=\"0\" height_offset=\"0\"/>\
+    <grid_loc x=\"0\" y=\"2\" block_type_id=\"1\" width_offset=\"0\" height_offset=\"0\"/>\
+    <grid_loc x=\"0\" y=\"3\" block_type_id=\"1\" width_offset=\"0\" height_offset=\"0\"/>\
+    <grid_loc x=\"1\" y=\"0\" block_type_id=\"2\" width_offset=\"0\" height_offset=\"0\"/>\
+    <grid_loc x=\"1\" y=\"1\" block_type_id=\"2\" width_offset=\"0\" height_offset=\"0\"/>\
+    <grid_loc x=\"1\" y=\"2\" block_type_id=\"2\" width_offset=\"0\" height_offset=\"0\"/>\
+    <grid_loc x=\"1\" y=\"3\" block_type_id=\"2\" width_offset=\"0\" height_offset=\"0\"/>\
+    <grid_loc x=\"2\" y=\"0\" block_type_id=\"3\" width_offset=\"0\" height_offset=\"0\"/>\
+    <grid_loc x=\"2\" y=\"1\" block_type_id=\"3\" width_offset=\"0\" height_offset=\"1\"/>\
+    <grid_loc x=\"2\" y=\"2\" block_type_id=\"3\" width_offset=\"0\" height_offset=\"0\"/>\
+    <grid_loc x=\"2\" y=\"3\" block_type_id=\"3\" width_offset=\"0\" height_offset=\"1\"/>\
+    </grid>\
+    <rr_nodes>\
+    <node id=\"0\" type=\"IPIN\" capacity=\"1\"><loc xlow=\"2\" ylow=\"0\" xhigh=\"2\" yhigh=\"0\" side=\"RIGHT\" ptc=\"0\"/></node>\
+    <node id=\"1\" type=\"IPIN\" capacity=\"1\"><loc xlow=\"2\" ylow=\"1\" xhigh=\"2\" yhigh=\"1\" side=\"RIGHT\" ptc=\"1\"/></node>\
+    <node id=\"2\" type=\"IPIN\" capacity=\"1\"><loc xlow=\"2\" ylow=\"1\" xhigh=\"2\" yhigh=\"1\" side=\"LEFT\" ptc=\"1\"/></node>\
+    <node id=\"3\" type=\"OPIN\" capacity=\"1\"><loc xlow=\"2\" ylow=\"0\" xhigh=\"2\" yhigh=\"0\" side=\"LEFT\" ptc=\"2\"/></node>\
+    <node id=\"4\" type=\"OPIN\" capacity=\"1\"><loc xlow=\"2\" ylow=\"1\" xhigh=\"2\" yhigh=\"1\" side=\"LEFT\" ptc=\"2\"/></node>\
+    <node id=\"5\" type=\"OPIN\" capacity=\"1\"><loc xlow=\"2\" ylow=\"1\" xhigh=\"2\" yhigh=\"1\" side=\"RIGHT\" ptc=\"2\"/></node>\
+    </rr_nodes>\
+    <rr_edges/>\
+    </rr_graph>";
+
+/// A logic block of [`PLACE_DEVICE`], with its inputs, and the nets on its two outputs.
+fn place_clb(
+    name: &str,
+    index: u32,
+    input: &str,
+    carry_in: &str,
+    carry_out: Option<&str>,
+) -> String {
+    let (cout, cout_block) = match carry_out {
+        Some(net) => (
+            "q[0].o[0]-&gt;x".to_owned(),
+            format!(
+                "<block name=\"{net}\" instance=\"q[0]\"><outputs><port name=\"o\">{net}</port></outputs></block>"
+            ),
+        ),
+        None => ("open".to_owned(), String::new()),
+    };
+    format!(
+        "<block name=\"{name}\" instance=\"clb[{index}]\" mode=\"m\">\
+         <inputs><port name=\"I\">{input}</port><port name=\"cin\">{carry_in}</port></inputs>\
+         <outputs><port name=\"O\">p[0].o[0]-&gt;x</port><port name=\"cout\">{cout}</port></outputs>\
+         <block name=\"n{index}\" instance=\"p[0]\"><outputs><port name=\"o\">n{index}</port></outputs></block>\
+         {cout_block}</block>"
+    )
+}
+
+/// A pad, three logic blocks in a carry chain, a ram, and a pad out.
+fn place_netlist() -> PackedNetlist {
+    let text = format!(
+        "<block name=\"t\" instance=\"FPGA_packed_netlist[0]\">\
+         <block name=\"in\" instance=\"io[0]\" mode=\"m\"><outputs><port name=\"inpad\">inpad[0].inpad[0]-&gt;x</port></outputs>\
+         <block name=\"in\" instance=\"inpad[0]\"><outputs><port name=\"inpad\">in</port></outputs></block></block>\
+         {}{}{}\
+         <block name=\"r0\" instance=\"ram[3]\" mode=\"m\"><inputs><port name=\"a\">n2 n0</port></inputs>\
+         <outputs><port name=\"o\">m[0].o[0]-&gt;x</port></outputs>\
+         <block name=\"r\" instance=\"m[0]\"><outputs><port name=\"o\">r</port></outputs></block></block>\
+         <block name=\"out:r\" instance=\"io[1]\" mode=\"m\"><inputs><port name=\"outpad\">r</port></inputs></block>\
+         </block>",
+        place_clb("c0", 0, "in", "open", Some("k0")),
+        place_clb("c1", 1, "n0", "k0", Some("k1")),
+        place_clb("c2", 2, "n1", "k1", None),
+    );
+    read_netlist(text.as_bytes()).unwrap()
+}
+
+const CARRY: &str = "<architecture><directlist>\
+    <direct name=\"carry\" from_pin=\"clb.cout\" to_pin=\"clb.cin\" x_offset=\"0\" y_offset=\"-1\" z_offset=\"0\"/>\
+    </directlist></architecture>";
+
+#[test]
+fn directs_are_read_from_the_architecture() {
+    let arch = read_architecture(CARRY.as_bytes()).unwrap();
+    let direct = &arch.directs()[0];
+    assert_eq!(direct.name, "carry");
+    assert_eq!(
+        (direct.from_type.as_str(), direct.from_port.as_str()),
+        ("clb", "cout")
+    );
+    assert_eq!(
+        (direct.to_type.as_str(), direct.to_port.as_str()),
+        ("clb", "cin")
+    );
+    assert_eq!(
+        (direct.x_offset, direct.y_offset, direct.z_offset),
+        (0, -1, 0)
+    );
+    let ranged = "<architecture><directlist><direct name=\"d\" from_pin=\"a.o[0:0]\" to_pin=\"b.i\"/></directlist></architecture>";
+    let ranged = read_architecture(ranged.as_bytes()).unwrap();
+    let direct = &ranged.directs()[0];
+    assert_eq!((direct.from_port.as_str(), direct.y_offset), ("o", 0));
+    for bad in [
+        "<architecture><directlist><direct name=\"d\" from_pin=\"a\" to_pin=\"b.i\"/></directlist></architecture>",
+        "<architecture><directlist><direct name=\"d\" from_pin=\"a.o\" to_pin=\"b.i\" y_offset=\"up\"/></directlist></architecture>",
+        "<architecture><directlist><direct from_pin=\"a.o\" to_pin=\"b.i\"/></directlist></architecture>",
+    ] {
+        assert!(read_architecture(bad.as_bytes()).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn a_place_problem_has_the_devices_sites_and_the_netlists_chains() {
+    let device = read_rr_graph(PLACE_DEVICE.as_bytes()).unwrap();
+    assert_eq!(
+        device
+            .block_types()
+            .iter()
+            .map(BlockType::capacity)
+            .collect::<Vec<_>>(),
+        [0, 2, 1, 1]
+    );
+    let netlist = place_netlist();
+    let arch = read_architecture(CARRY.as_bytes()).unwrap();
+    let problem =
+        build_place_problem(&device, &netlist, &arch, &ProblemOptions::default()).unwrap();
+    let places = problem.problem();
+    assert_eq!(problem.grid_size(), (3, 4));
+
+    // A site per position: two per pad tile, and one at the foot of each ram.
+    let kinds: Vec<u32> = places.sites().iter().map(|site| site.kind).collect();
+    assert_eq!(kinds.iter().filter(|&&kind| kind == 1).count(), 8);
+    assert_eq!(kinds.iter().filter(|&&kind| kind == 2).count(), 4);
+    assert_eq!(kinds.iter().filter(|&&kind| kind == 3).count(), 2);
+    let rams: Vec<(u32, u32, u32)> = (0..places.sites().len() as u32)
+        .filter(|&site| kinds[site as usize] == 3)
+        .map(|site| problem.site_location(crate::place::SiteId(site)).unwrap())
+        .collect();
+    assert_eq!(rams, [(2, 0, 0), (2, 2, 0)]);
+
+    // The chain runs downwards from c0, as the direct connection goes.
+    assert_eq!(problem.chains(), (1, 3));
+    let p = crate::place::Point::new;
+    assert_eq!(
+        places.macros(),
+        [vec![
+            (problem.item(1), p(0, 0)),
+            (problem.item(2), p(0, -1)),
+            (problem.item(3), p(0, -2)),
+        ]]
+    );
+
+    // Every net with a driver and a sink, carry nets too, and n0 reaches the ram's upper tile.
+    assert_eq!(places.net_count(), 7);
+    let n0 = (0..places.net_count() as u32)
+        .map(NetId)
+        .find(|&net| netlist.nets()[problem.packed_net(net).unwrap().index()].name == "n0")
+        .unwrap();
+    assert_eq!(
+        places.net_pins(n0),
+        [
+            crate::place::Pin::new(problem.item(1)),
+            crate::place::Pin::new(problem.item(2)),
+            crate::place::Pin::at(problem.item(4), 0, 1),
+        ]
+    );
+
+    // Ignored nets are left out.
+    let options = ProblemOptions {
+        ignored_nets: vec![problem.packed_net(n0).unwrap()],
+        ..ProblemOptions::default()
+    };
+    let fewer = build_place_problem(&device, &netlist, &arch, &options).unwrap();
+    assert_eq!(fewer.problem().net_count(), 6);
+}
+
+#[test]
+fn designs_are_placed_legally_and_written_for_vpr() {
+    let device = read_rr_graph(PLACE_DEVICE.as_bytes()).unwrap();
+    let netlist = place_netlist();
+    let arch = read_architecture(CARRY.as_bytes()).unwrap();
+    let fixed = read_placement("in 0 3 1\n".as_bytes()).unwrap();
+    let options = ProblemOptions {
+        fixed: Some(&fixed),
+        ..ProblemOptions::default()
+    };
+    let problem = build_place_problem(&device, &netlist, &arch, &options).unwrap();
+    assert!(problem.problem().item(problem.item(0)).fixed().is_some());
+    let delays = PlaceDelayModel::from_rr_graph(&device);
+
+    for method in [PlaceMethod::Analytic, PlaceMethod::Anneal] {
+        let placer = PlacerOptions {
+            method,
+            ..PlacerOptions::default()
+        };
+        let result = place_design(&problem, &delays, None, &placer).unwrap();
+        assert!(crate::place::check(problem.problem(), &result.placement).is_empty());
+        assert_eq!(result.worst_slack, None);
+        assert_eq!(result.bb_estimate, problem.bb_estimate(&result.placement));
+        assert_eq!(
+            place_design(&problem, &delays, None, &placer).unwrap(),
+            result,
+            "the same seed gives the same placement"
+        );
+
+        let placement = problem.to_placement(&netlist, &result.placement, "t.net", "SHA256:1");
+        assert_eq!(placement.array_size(), Some((3, 4)));
+        assert_eq!(placement.netlist_id(), Some("SHA256:1"));
+        let block = |name: &str| placement.block(name).unwrap().clone();
+        assert_eq!(
+            (block("in").x, block("in").y, block("in").sub_block),
+            (0, 3, 1)
+        );
+        let chain = [block("c0"), block("c1"), block("c2")];
+        assert!(chain.iter().all(|b| b.x == 1));
+        assert_eq!((chain[0].y - 1, chain[0].y - 2), (chain[1].y, chain[2].y));
+        assert_eq!(block("r0").x, 2);
+
+        let mut text = Vec::new();
+        write_placement(&mut text, &placement).unwrap();
+        let read = read_placement(text.as_slice()).unwrap();
+        assert_eq!(read, placement);
+        assert_eq!(
+            problem.from_placement(&netlist, &read).unwrap(),
+            result.placement
+        );
+    }
+}
+
+#[test]
+fn placement_problems_refuse_what_cannot_be_placed() {
+    let device = read_rr_graph(PLACE_DEVICE.as_bytes()).unwrap();
+    let netlist = place_netlist();
+    let arch = Architecture::default();
+    for fixed in ["in 1 0 0\n", "in 0 0 2\n", "r0 2 1 0\n"] {
+        let fixed = read_placement(fixed.as_bytes()).unwrap();
+        let options = ProblemOptions {
+            fixed: Some(&fixed),
+            ..ProblemOptions::default()
+        };
+        assert!(matches!(
+            build_place_problem(&device, &netlist, &arch, &options),
+            Err(ImportError::BadLocation { .. })
+        ));
+    }
+    let strange = read_netlist(
+        "<block name=\"t\" instance=\"FPGA_packed_netlist[0]\">\
+         <block name=\"d\" instance=\"dsp[0]\" mode=\"m\"/></block>"
+            .as_bytes(),
+    )
+    .unwrap();
+    let error =
+        build_place_problem(&device, &strange, &arch, &ProblemOptions::default()).unwrap_err();
+    assert!(matches!(error, ImportError::NoTileType { .. }));
+    assert!(error.to_string().contains("dsp"));
+
+    // Without the chain, there is no macro, and a placement that leaves a block out is
+    // refused.
+    let problem =
+        build_place_problem(&device, &netlist, &arch, &ProblemOptions::default()).unwrap();
+    assert_eq!(problem.chains(), (0, 0));
+    let partial = read_placement("in 0 0 0\n".as_bytes()).unwrap();
+    assert!(matches!(
+        problem.from_placement(&netlist, &partial),
+        Err(ImportError::UnplacedBlock { .. })
+    ));
+}
+
+/// Logic blocks in a line, each driving the next through its one input, from a pad in the
+/// first block to a pad in the last, as the root names them.
+fn line_netlist(blocks: u32) -> PackedNetlist {
+    let mut text = "<block name=\"t\" instance=\"FPGA_packed_netlist[0]\">\
+         <inputs>n0</inputs><outputs>out:z</outputs><clocks></clocks>"
+        .to_owned();
+    for k in 0..blocks {
+        let input = if k == 0 {
+            "open".to_owned()
+        } else {
+            format!("n{}", k - 1)
+        };
+        let inner_input = if k == 0 {
+            ""
+        } else {
+            "<inputs><port name=\"i\">clb.I[0]-&gt;x</port></inputs>"
+        };
+        if k + 1 == blocks {
+            write!(
+                text,
+                "<block name=\"b{k}\" instance=\"clb[{k}]\" mode=\"m\">\
+                 <inputs><port name=\"I\">{input}</port></inputs>\
+                 <block name=\"out:z\" instance=\"p[0]\">{inner_input}</block></block>"
+            )
+            .unwrap();
+        } else {
+            write!(
+                text,
+                "<block name=\"b{k}\" instance=\"clb[{k}]\" mode=\"m\">\
+                 <inputs><port name=\"I\">{input}</port></inputs>\
+                 <outputs><port name=\"O\">p[0].o[0]-&gt;x</port></outputs>\
+                 <block name=\"n{k}\" instance=\"p[0]\">{inner_input}\
+                 <outputs><port name=\"o\">n{k}</port></outputs></block></block>"
+            )
+            .unwrap();
+        }
+    }
+    text.push_str("</block>");
+    read_netlist(text.as_bytes()).unwrap()
+}
+
+/// A square of logic blocks, each with `tracks` wires of one tile that join the same track on
+/// the tiles beside it, both ways, and that its output pin drives and its input pin listens to.
+fn mesh_graph(size: u32, tracks: u32) -> String {
+    let mut nodes = String::new();
+    let mut edges = String::new();
+    let mut next = 0u32;
+    let mut add = |kind: &str, x: u32, y: u32, ptc: u32| {
+        let id = next;
+        next += 1;
+        let extra = if kind == "CHANX" {
+            "<timing R=\"100\" C=\"1e-14\"/><segment segment_id=\"0\"/>"
+        } else {
+            ""
+        };
+        writeln!(
+            nodes,
+            "<node id=\"{id}\" type=\"{kind}\" capacity=\"1\"><loc xlow=\"{x}\" ylow=\"{y}\" xhigh=\"{x}\" yhigh=\"{y}\" ptc=\"{ptc}\"/>{extra}</node>"
+        )
+        .unwrap();
+        id
+    };
+    let mut edge = |from: u32, to: u32, switch: u32| {
+        writeln!(
+            edges,
+            "<edge src_node=\"{from}\" sink_node=\"{to}\" switch_id=\"{switch}\"/>"
+        )
+        .unwrap();
+    };
+    let mut wire = HashMap::new();
+    for y in 1..=size {
+        for x in 1..=size {
+            let source = add("SOURCE", x, y, 1);
+            let opin = add("OPIN", x, y, 1);
+            let ipin = add("IPIN", x, y, 0);
+            let sink = add("SINK", x, y, 0);
+            edge(source, opin, 0);
+            edge(ipin, sink, 0);
+            for track in 0..tracks {
+                let w = add("CHANX", x, y, track);
+                edge(opin, w, 1);
+                edge(w, ipin, 1);
+                wire.insert((x, y, track), w);
+            }
+        }
+    }
+    for (&(x, y, track), &w) in &wire {
+        for (nx, ny) in [(x + 1, y), (x, y + 1)] {
+            if let Some(&other) = wire.get(&(nx, ny, track)) {
+                edge(w, other, 1);
+                edge(other, w, 1);
+            }
+        }
+    }
+    let mut grid = String::new();
+    for y in 0..=size + 1 {
+        for x in 0..=size + 1 {
+            let block = u32::from((1..=size).contains(&x) && (1..=size).contains(&y));
+            writeln!(grid, "<grid_loc x=\"{x}\" y=\"{y}\" block_type_id=\"{block}\" width_offset=\"0\" height_offset=\"0\"/>").unwrap();
+        }
+    }
+    // Edges in a fixed order, whatever the map's.
+    let mut lines: Vec<&str> = edges.lines().collect();
+    lines.sort_unstable();
+    format!(
+        "<rr_graph>\n<switches>\n\
+         <switch id=\"0\" name=\"none\" type=\"mux\"><timing Tdel=\"0\"/></switch>\n\
+         <switch id=\"1\" name=\"sw\" type=\"mux\"><timing R=\"500\" Cout=\"1e-15\" Cin=\"1e-15\" Tdel=\"5e-11\"/></switch>\n\
+         </switches>\n<segments><segment id=\"0\" name=\"wire\" length=\"1\"/></segments>\n\
+         <block_types><block_type id=\"0\" name=\"EMPTY\" width=\"1\" height=\"1\"/>\
+         <block_type id=\"1\" name=\"clb\" width=\"1\" height=\"1\">\
+         <pin_class type=\"INPUT\"><pin ptc=\"0\">clb.I[0]</pin></pin_class>\
+         <pin_class type=\"OUTPUT\"><pin ptc=\"1\">clb.O[0]</pin></pin_class></block_type></block_types>\n\
+         <grid>\n{grid}</grid>\n<rr_nodes>\n{nodes}</rr_nodes>\n<rr_edges>\n{}\n</rr_edges>\n</rr_graph>\n",
+        lines.join("\n")
+    )
+}
+
+#[test]
+fn delays_for_placement_grow_with_distance() {
+    let device = read_rr_graph(mesh_graph(5, 2).as_bytes()).unwrap();
+    let delays = PlaceDelayModel::from_rr_graph(&device);
+    // Out of a block and back in takes a wire.
+    assert!(delays.delay(0, 0) > 0);
+    for d in 0..4 {
+        assert!(delays.delay(d + 1, 0) > delays.delay(d, 0), "{d}");
+        assert!(delays.delay(0, d + 1) > delays.delay(0, d), "{d}");
+        assert_eq!(delays.delay(d, 1), delays.delay(1, d), "{d}");
+    }
+    assert!(delays.delay(4, 4) > delays.delay(3, 4));
+    // Offsets that no block is apart from take the nearest.
+    assert_eq!(delays.delay(100, 100), delays.delay(6, 6));
+    assert_eq!(delays.delay(6, 6), delays.delay(4, 4));
+}
+
+#[test]
+fn timing_driven_placements_route() {
+    let device = read_rr_graph(mesh_graph(4, 2).as_bytes()).unwrap();
+    let netlist = line_netlist(10);
+    let problem = build_place_problem(
+        &device,
+        &netlist,
+        &Architecture::default(),
+        &ProblemOptions::default(),
+    )
+    .unwrap();
+    let delays = PlaceDelayModel::from_rr_graph(&device);
+    let mut timing =
+        build_timing(&netlist, &LogicDelays::new(), &TimingOptions::default()).unwrap();
+    let constraints = timing.vpr_constraints(0).unwrap();
+    let result = place_design(
+        &problem,
+        &delays,
+        Some((&mut timing, &constraints)),
+        &PlacerOptions::default(),
+    )
+    .unwrap();
+    assert!(crate::place::check(problem.problem(), &result.placement).is_empty());
+    // Nine nets between neighbours, each over two tiles at best.
+    assert_eq!(problem.problem().net_count(), 9);
+    assert!(
+        result.bb_estimate <= 9.0 * 3.0 * 1.2,
+        "{}",
+        result.bb_estimate
+    );
+    let slack = result.worst_slack.unwrap();
+    assert!(slack < 0);
+    assert_eq!(
+        estimate_slack(
+            &problem,
+            &delays,
+            &mut timing,
+            &constraints,
+            &result.placement
+        ),
+        Some(slack)
+    );
+    // The same seed gives the same placement.
+    let mut again = build_timing(&netlist, &LogicDelays::new(), &TimingOptions::default()).unwrap();
+    let repeated = place_design(
+        &problem,
+        &delays,
+        Some((&mut again, &constraints)),
+        &PlacerOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(repeated, result);
+
+    let placement = problem.to_placement(&netlist, &result.placement, "t.net", "SHA256:0");
+    let design = resolve_nets(&device, &netlist, &placement, &NetOptions::default()).unwrap();
+    let outcome =
+        crate::engine::route(device.graph(), design.nets(), device.engine_options()).unwrap();
+    let routes = outcome
+        .legal_routes()
+        .expect("a placement this short routes");
+    let report = crate::validate::check(device.graph(), design.nets(), routes);
+    assert!(report.is_complete() && report.faults().is_empty());
+}

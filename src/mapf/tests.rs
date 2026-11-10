@@ -40,11 +40,16 @@ fn agents_pass_each_other_in_a_corridor_with_a_siding() {
     let solution = solve(&instance, &SolveOptions::default());
     let plans = solution.plans.as_ref().unwrap();
     let summary = check::check(&graph, &agents, plans).unwrap();
-    // One agent steps into the siding and out again, and the other waits for it: 5 + 6, as
-    // any other way round costs as much.
-    assert_eq!(summary.sum_of_costs, 11);
-    assert_eq!(solution.sum_of_costs(), Some(11));
-    assert_eq!(solution.makespan(), Some(6));
+    // At best, one agent steps into the siding and out again, and the other waits for it:
+    // 5 + 6, as any other way round costs as much. Negotiation isn't exact, and here it has
+    // both wait a step longer.
+    assert_eq!(summary.sum_of_costs, 13);
+    assert_eq!(solution.sum_of_costs(), Some(13));
+    assert_eq!(solution.makespan(), Some(7));
+    // The engine's own default history finds the optimum.
+    let mut options = SolveOptions::default();
+    options.engine.history_factor = crate::cost::Cost::ONE;
+    assert_eq!(solve(&instance, &options).sum_of_costs(), Some(11));
 }
 
 #[test]
@@ -106,4 +111,33 @@ fn an_expansion_budget_stops_the_solve() {
     assert_eq!(solution.plans, None);
     assert_eq!(solution.rounds.len(), 1);
     assert_eq!(solution.rounds[0].stop, StopReason::BudgetExhausted);
+}
+
+#[test]
+fn shortening_keeps_solutions_legal_and_never_longer() {
+    let mut shortened = 0;
+    for seed in 0..8 {
+        let (graph, agents) = random_instance(seed, 10, 30);
+        let instance = Instance::new(&graph, agents.clone()).unwrap();
+        let mut options = SolveOptions {
+            improve_passes: 5,
+            ..SolveOptions::default()
+        };
+        let solution = solve(&instance, &options);
+        let Some(plans) = solution.plans.as_ref() else {
+            continue;
+        };
+        let summary = check::check(&graph, &agents, plans).unwrap();
+        let negotiated = solution.negotiated_sum_of_costs.unwrap();
+        assert!(summary.sum_of_costs <= negotiated);
+        assert!(solution.improve_passes >= 1 && solution.improve_passes <= 5);
+        assert!(solution.improve_expanded > 0);
+        shortened += u32::from(summary.sum_of_costs < negotiated);
+
+        options.improve_passes = 0;
+        let plain = solve(&instance, &options);
+        assert_eq!(plain.sum_of_costs(), Some(negotiated));
+        assert_eq!(plain.improve_expanded, 0);
+    }
+    assert!(shortened > 0, "no solution was shortened");
 }

@@ -4,11 +4,12 @@
 //! cargo run --release --features mapf --example mapf_bench -- \
 //!     MAP SCEN AGENTS[,AGENTS...] [--time SECONDS] [--slack N] [--rounds N]
 //!     [--first-present X] [--initial-present X] [--growth X] [--history X]
-//!     [--iterations N] [--batch N] [--threads N] [--incremental]
+//!     [--iterations N] [--batch N] [--threads N] [--incremental] [--improve PASSES]
 //! ```
 //!
 //! The columns are: scenario, agents, solved, sum of costs, the sum of the agents' shortest
-//! paths, makespan, milliseconds, iterations, expansions, rounds, and the last round's horizon.
+//! paths, makespan, milliseconds, iterations, expansions, rounds, the last round's horizon, and
+//! the sum of costs before shortening.
 //! Every solution is checked by `guide::mapf::check` before it is printed, and a solution that
 //! fails the check stops the program.
 //!
@@ -65,6 +66,7 @@ fn run() -> Result<(), String> {
                 time_limit = Some(Duration::from_secs_f64(seconds));
             }
             "--slack" => options.slack = number()?,
+            "--improve" => options.improve_passes = number()?,
             "--rounds" => options.rounds = number()?,
             "--iterations" => options.engine.max_iterations = number()?,
             "--batch" => options.engine.batch_size = number()?,
@@ -139,13 +141,16 @@ fn run() -> Result<(), String> {
         };
         let last = solution.rounds.last();
         println!(
-            "{scen_name}\t{count}\t{solved}\t{soc}\t{}\t{makespan}\t{}\t{}\t{}\t{}\t{}",
+            "{scen_name}\t{count}\t{solved}\t{soc}\t{}\t{makespan}\t{}\t{}\t{}\t{}\t{}\t{}",
             instance.sum_of_shortest(),
             elapsed.as_millis(),
             solution.iterations(),
             solution.nodes_expanded(),
             solution.rounds.len(),
             last.map_or(0, |round| round.horizon),
+            solution
+                .negotiated_sum_of_costs
+                .map_or("-".into(), |soc| soc.to_string()),
         );
     }
     Ok(())

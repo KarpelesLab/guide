@@ -38,6 +38,18 @@
 //! history it ended with (iterative deepening). Searches are never offered a state from which
 //! the goal can't be reached by the horizon, so a horizon costs nothing where no route goes.
 //!
+//! # Shortening
+//!
+//! Negotiation stops at the first legal solution, found at prices that no longer hold. With
+//! [`improve_passes`](SolveOptions::improve_passes), as by default, [`solve`] then plans each agent again in
+//! turn, by an exact search against the others as hard reservations, and keeps what arrives
+//! sooner, until a pass changes nothing. No agent gets worse, and the solution stays legal.
+//!
+//! Routing small groups of agents again by negotiation after that, a late agent and those in
+//! the way of its shortest path, with everyone else's resources at a capacity of 0, as MAPF-LNS
+//! does with prioritized planning, was tried and dropped: 200 groups of up to 8 took the sum
+//! of costs a further 0.1% to 0.6% down, for 5 to 25 times the time, and 1000 no further.
+//!
 //! # Checking
 //!
 //! [`check`](check::check) checks plans against the graph and the agents only, and knows
@@ -45,12 +57,14 @@
 
 pub mod check;
 mod graph;
+mod improve;
 pub mod movingai;
 mod space;
 
 pub use graph::{Agent, Graph, GraphError};
 pub use space::{Instance, InstanceError, Resource, State, TimeSpace};
 
+use crate::cost::Cost;
 use crate::engine::{Engine, EngineOptions, StopReason};
 
 /// How [`solve`] runs.
@@ -69,6 +83,13 @@ pub struct SolveOptions<'c> {
     /// [`batch_size`](EngineOptions::batch_size) above 1, and never changes results. The
     /// default is 1.
     pub threads: usize,
+    /// How many passes to make over the agents after a legal solution, planning each again
+    /// against the others to arrive sooner, as [shortening](self#shortening) has it. The
+    /// default is 10, and 0 turns it off.
+    ///
+    /// On the MovingAI maps of `docs/benchmarks.md`, it took the sum of costs 0.3% to 2.3%
+    /// closer to the lower bound, for 15% to 30% more time.
+    pub improve_passes: u32,
 }
 
 impl Default for SolveOptions<'_> {
@@ -78,13 +99,26 @@ impl Default for SolveOptions<'_> {
             slack: 16,
             rounds: 4,
             threads: 1,
+            improve_passes: 10,
         }
     }
 }
 
-/// The engine's options for multi-agent path finding.
+/// The engine's options for multi-agent path finding: the engine's defaults, with a history
+/// factor of 0.5.
+///
+/// A move costs 2 in a [`TimeSpace`], so the default history of 1 is half a move per unit of
+/// overuse. A quarter of one gave sums of costs 0.5% to 1% lower on the MovingAI maps of
+/// `docs/benchmarks.md`, and solved as many instances or more within the time limit; an eighth
+/// was no better. A first present factor of 1000, which makes the first iteration nearly
+/// prioritized planning, gave sums of costs 5% to 17% higher, and solved far fewer instances on
+/// den520d. A present factor growth of 1.3 gave sums of costs about 1% lower and took 1.2 to
+/// 1.7 times as long.
 pub fn engine_options() -> EngineOptions<'static> {
-    EngineOptions::default()
+    EngineOptions {
+        history_factor: Cost::new(0.5).unwrap_or(Cost::ONE),
+        ..EngineOptions::default()
+    }
 }
 
 /// What one round of [`solve`] did.
@@ -110,6 +144,13 @@ pub struct Solution {
     pub plans: Option<Vec<Vec<u32>>>,
     /// Each round, in order.
     pub rounds: Vec<Round>,
+    /// The sum of costs of the solution that negotiation found, before
+    /// [shortening](self#shortening) it, if it found one.
+    pub negotiated_sum_of_costs: Option<u64>,
+    /// How many passes shortening made.
+    pub improve_passes: u32,
+    /// How many nodes shortening expanded.
+    pub improve_expanded: u64,
 }
 
 impl Solution {
@@ -137,9 +178,13 @@ impl Solution {
         )
     }
 
-    /// Returns how many nodes all rounds expanded.
+    /// Returns how many nodes all rounds and shortening expanded.
     pub fn nodes_expanded(&self) -> u64 {
-        self.rounds.iter().map(|round| round.nodes_expanded).sum()
+        self.rounds
+            .iter()
+            .map(|round| round.nodes_expanded)
+            .sum::<u64>()
+            + self.improve_expanded
     }
 
     /// Returns how many iterations all rounds ran.
@@ -155,8 +200,9 @@ impl Solution {
 ///
 /// # Examples
 ///
-/// Two agents swap ends of a corridor with a siding. One steps into the siding to let the other
-/// by, which takes it 4 steps, and the other waits a step, which takes it 3.
+/// Two agents swap ends of a corridor with a siding. At best, one steps into the siding to let
+/// the other by, which takes it 4 steps, and the other waits a step, which takes it 3.
+/// Negotiation is not exact, and here both wait a step more than they need to.
 ///
 /// ```
 /// use guide::mapf::{Agent, Graph, Instance, SolveOptions, check, solve};
@@ -171,8 +217,9 @@ impl Solution {
 /// let solution = solve(&instance, &SolveOptions::default());
 /// let plans = solution.plans.as_ref().expect("the siding lets them pass");
 /// let summary = check::check(&graph, &agents, plans).expect("the plans are legal");
-/// assert_eq!(summary.sum_of_costs, 3 + 4);
-/// assert_eq!(solution.sum_of_costs(), Some(7));
+/// assert_eq!(summary.sum_of_costs, 9);
+/// assert_eq!(solution.sum_of_costs(), Some(9));
+/// assert!(summary.sum_of_costs >= instance.sum_of_shortest());
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub fn solve(instance: &Instance<'_>, options: &SolveOptions<'_>) -> Solution {
@@ -207,12 +254,32 @@ pub fn solve(instance: &Instance<'_>, options: &SolveOptions<'_>) -> Solution {
             conflicts: outcome.overused.len(),
         });
         if outcome.is_success() {
-            let plans = outcome
-                .routes
-                .routes()
-                .map(|(_, route)| TimeSpace::plan(route))
-                .collect::<Option<Vec<_>>>();
-            return Solution { plans, rounds };
+            let mut solution = Solution {
+                plans: outcome
+                    .routes
+                    .routes()
+                    .map(|(_, route)| TimeSpace::plan(route))
+                    .collect::<Option<Vec<_>>>(),
+                rounds,
+                negotiated_sum_of_costs: None,
+                improve_passes: 0,
+                improve_expanded: 0,
+            };
+            solution.negotiated_sum_of_costs = solution.sum_of_costs();
+            if let Some(plans) = solution.plans.as_mut()
+                && options.improve_passes > 0
+            {
+                let improved = improve::improve(
+                    &space,
+                    plans,
+                    options.improve_passes,
+                    budget,
+                    options.engine.cancel,
+                );
+                solution.improve_passes = improved.passes;
+                solution.improve_expanded = improved.nodes_expanded;
+            }
+            return solution;
         }
         if matches!(
             outcome.stop,
@@ -231,6 +298,9 @@ pub fn solve(instance: &Instance<'_>, options: &SolveOptions<'_>) -> Solution {
     Solution {
         plans: None,
         rounds,
+        negotiated_sum_of_costs: None,
+        improve_passes: 0,
+        improve_expanded: 0,
     }
 }
 

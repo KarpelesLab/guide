@@ -422,6 +422,21 @@ pub struct Search<S: RoutingSpace> {
     deferred: Vec<(usize, Cost, usize, u64)>,
     /// Whether the offers held back have been made, after which none are held back.
     flushed: bool,
+    /// Whether the next search may keep heuristics from this one: see
+    /// [`Search::reuse_bounds`].
+    reuse_next: bool,
+    /// The targets of the previous search, while the current one decides what it can reuse.
+    previous_targets: Vec<Target<S::Node>>,
+    /// The targets of the previous search that the current one does not have, when it
+    /// reuses heuristics, and otherwise empty.
+    removed: Vec<Target<S::Node>>,
+    /// For each target of the current search, where it was among the previous one's, while
+    /// the current one decides what it can reuse.
+    was_at: Vec<usize>,
+    /// For each target of the previous search, whether the current one has it too.
+    kept: Vec<bool>,
+    /// Whether the current search reuses the heuristics of the previous one.
+    reusing: bool,
 }
 
 impl<S: RoutingSpace> fmt::Debug for Search<S> {
@@ -451,7 +466,30 @@ impl<S: RoutingSpace> Search<S> {
             bound_weight: 1.0,
             deferred: Vec::new(),
             flushed: false,
+            reuse_next: false,
+            previous_targets: Vec::new(),
+            removed: Vec::new(),
+            was_at: Vec::new(),
+            kept: Vec::new(),
+            reusing: false,
         }
+    }
+
+    /// Lets the next search keep the heuristic of each node that this one reached, where it
+    /// is sure to come out the same, which it then does not ask the space for again.
+    ///
+    /// The caller promises that the next search is for the same net, through a space with the
+    /// same [`lower_bound`](RoutingSpace::lower_bound), at the same
+    /// [weight](Search::set_bound_weight). The search checks the rest: that its targets are
+    /// some of this one's, with the same costs. Then a node's heuristic, the lowest bound over
+    /// the targets, can only have changed if it came from a target that is gone, which only
+    /// those targets are asked about. Nothing a search finds changes.
+    ///
+    /// This is for a tree growing one connection at a time, whose every node is a source of
+    /// each search, towards every terminal it has still to reach. Without it a net of `n`
+    /// terminals asks for bounds on the order of `n` cubed times.
+    pub(crate) fn reuse_bounds(&mut self) {
+        self.reuse_next = true;
     }
 
     /// Multiplies the heuristic by `weight` in the searches that follow, which is weighted
@@ -619,7 +657,17 @@ impl<S: RoutingSpace> Search<S> {
     where
         T: RoutingSpace<Node = S::Node>,
     {
+        // The previous search's targets, and their positions in `target_positions`, are still
+        // there to compare with until each slot is overwritten.
+        mem::swap(&mut self.targets, &mut self.previous_targets);
         self.begin();
+        let previous = self.generation - 1;
+        let mut reuse = self.reusing && previous > 0;
+        self.was_at.clear();
+        self.kept.clear();
+        if reuse {
+            self.kept.resize(self.previous_targets.len(), false);
+        }
 
         // Asked of `space` and not of a slot mapping, since a mapping might have no answer
         // but a slot number that is far too large to allocate.
@@ -631,11 +679,38 @@ impl<S: RoutingSpace> Search<S> {
                 let kept = &mut self.targets[self.target_positions[slot]].cost;
                 *kept = (*kept).min(target.cost);
             } else {
+                if reuse {
+                    // A target that was not one before ends it. A slot mapping may have given
+                    // the slot to another node since, which the node itself tells apart.
+                    let position = self.target_positions[slot];
+                    reuse = self.states[slot].target == previous
+                        && self
+                            .previous_targets
+                            .get(position)
+                            .is_some_and(|before| before.node == target.node);
+                    if reuse {
+                        self.was_at.push(position);
+                        self.kept[position] = true;
+                    }
+                }
                 self.states[slot].target = self.generation;
                 self.target_positions[slot] = self.targets.len();
                 self.targets.push(target);
             }
         }
+        // The lowest cost of each target has to be what it was, once duplicates are in.
+        reuse = reuse
+            && self
+                .targets
+                .iter()
+                .zip(&self.was_at)
+                .all(|(now, &position)| now.cost == self.previous_targets[position].cost);
+        if reuse {
+            let gone = self.previous_targets.iter().zip(&self.kept);
+            self.removed
+                .extend(gone.filter(|&(_, &kept)| !kept).map(|(&before, _)| before));
+        }
+        self.reusing = reuse;
         if self.targets.is_empty() {
             return SearchOutcome::Unreachable;
         }
@@ -719,11 +794,14 @@ impl<S: RoutingSpace> Search<S> {
         self.stats = SearchStats::default();
         self.deferred.clear();
         self.flushed = false;
+        self.removed.clear();
+        self.reusing = mem::take(&mut self.reuse_next);
 
         if self.generation == u32::MAX {
             // After 4 billion searches an old stamp could match again, so they all go.
             self.states.fill(SlotState::UNSEEN);
             self.generation = 0;
+            self.reusing = false;
         }
         self.generation += 1;
     }
@@ -749,26 +827,36 @@ impl<S: RoutingSpace> Search<S> {
         let slot = self.slots.slot(node);
         self.ensure_slot(slot, node);
 
-        let state = &mut self.states[slot];
-        if state.reached == self.generation {
+        let before = self.states[slot];
+        if before.reached == self.generation {
             // A tie must not win: this keeps the first-found path, and it also keeps
             // parents acyclic. A child's `g` is never below its parent's, because adding
             // a cost never lowers a total, so closing a cycle would need a strict decrease
             // that cannot exist.
-            if state.parent != DEFERRED && g >= state.g {
+            if before.parent != DEFERRED && g >= before.g {
                 return;
             }
         } else {
-            state.reached = self.generation;
-            state.h = if state.target == self.generation {
+            let previous = self.generation - 1;
+            let h = if before.target == self.generation {
                 // Already the true remaining cost, and needs no call into the space.
                 Cost::ZERO
-            } else if self.bound_weight == 1.0 {
-                min_lower_bound(space, net, node, &self.targets)
+            } else if self.reusing
+                && before.reached == previous
+                && before.target != previous
+                && self.nodes[slot] == node
+                && before.h < self.weighted_bound(space, net, node, &self.removed)
+            {
+                // The lowest bound came from a target that is still there, with the same
+                // cost, as none of those gone were as low. A weighted bound never rounds
+                // below another for a higher plain bound, so this holds for weights too.
+                before.h
             } else {
-                let bound = min_lower_bound(space, net, node, &self.targets);
-                Cost::new(bound.get() * self.bound_weight).unwrap_or(Cost::MAX)
+                self.weighted_bound(space, net, node, &self.targets)
             };
+            let state = &mut self.states[slot];
+            state.reached = self.generation;
+            state.h = h;
             self.nodes[slot] = node;
             // Set either way, as an old search may have left the mark.
             state.parent = if state.h == Cost::MAX && !self.flushed {
@@ -777,6 +865,7 @@ impl<S: RoutingSpace> Search<S> {
                 NO_PARENT
             };
         }
+        let state = &mut self.states[slot];
         if state.parent == DEFERRED {
             // Only before the flush, which offers every node held back.
             self.deferred.push((slot, g, parent, self.next_sequence));
@@ -788,6 +877,26 @@ impl<S: RoutingSpace> Search<S> {
 
         let f = g + state.h;
         self.push_entry(f, g, slot);
+    }
+
+    /// Returns the weighted heuristic of `node` over `targets`.
+    #[inline]
+    fn weighted_bound<T>(
+        &self,
+        space: &T,
+        net: NetId,
+        node: S::Node,
+        targets: &[Target<S::Node>],
+    ) -> Cost
+    where
+        T: RoutingSpace<Node = S::Node>,
+    {
+        let bound = min_lower_bound(space, net, node, targets);
+        if self.bound_weight == 1.0 {
+            bound
+        } else {
+            Cost::new(bound.get() * self.bound_weight).unwrap_or(Cost::MAX)
+        }
     }
 
     /// Makes the offers held back, in the order they were made, with the sequence numbers
@@ -2387,6 +2496,149 @@ mod tests {
                     prop_assert_eq!(reused.stats(), fresh.stats());
                 }
             }
+        }
+    }
+
+    /// One search of a run that reuses bounds: its sources, and its targets with their costs.
+    type Round = (Vec<(u32, u32)>, Vec<(u32, u32)>);
+
+    /// Up to four searches over one graph, whose targets mostly shrink from one to the next,
+    /// as a tree's do, but not always.
+    fn rounds() -> impl Strategy<Value = (Case, Vec<Round>, u8)> {
+        (case(), 0..4u8).prop_flat_map(|(case, weight)| {
+            let node = 0..case.nodes as u32;
+            let first = prop::collection::vec((node.clone(), 0..=3u32), 1..8);
+            let later = (
+                prop::collection::vec((node.clone(), 0..=20u32), 0..4),
+                prop::collection::vec(any::<bool>(), 8),
+                prop::option::weighted(0.2, prop::collection::vec((node.clone(), 0..=3u32), 0..4)),
+            );
+            (
+                Just(case),
+                first,
+                prop::collection::vec(later, 0..4),
+                Just(weight),
+            )
+                .prop_map(|(case, first, later, weight)| {
+                    let mut rounds = vec![(integer_starts_of(&case), first)];
+                    for (sources, keep, other) in later {
+                        let previous = &rounds[rounds.len() - 1].1;
+                        let targets = other.unwrap_or_else(|| {
+                            previous
+                                .iter()
+                                .zip(keep.iter().cycle())
+                                .filter(|&(_, &keep)| keep)
+                                .map(|(&target, _)| target)
+                                .collect()
+                        });
+                        rounds.push((sources, targets));
+                    }
+                    (case, rounds, weight)
+                })
+        })
+    }
+
+    fn integer_starts_of(case: &Case) -> Vec<(u32, u32)> {
+        case.sources.clone()
+    }
+
+    /// A graph whose slots are given out in the order nodes come up, anew in each search.
+    struct Reslotted<'a>(&'a TestGraph);
+
+    impl RoutingSpace for Reslotted<'_> {
+        type Node = NodeId;
+        type Resource = NodeId;
+        type Slots = InternedSlots<NodeId>;
+        type ResourceSlots = InternedSlots<NodeId>;
+
+        fn new_slots(&self) -> Self::Slots {
+            InternedSlots::new()
+        }
+
+        fn new_resource_slots(&self) -> Self::ResourceSlots {
+            InternedSlots::new()
+        }
+
+        fn contains(&self, node: NodeId) -> bool {
+            self.0.contains(node)
+        }
+
+        fn expand(&self, net: NetId, from: NodeId, out: &mut Vec<Step<NodeId>>) {
+            self.0.expand(net, from, out);
+        }
+
+        fn lower_bound(&self, net: NetId, from: NodeId, to: NodeId) -> Cost {
+            self.0.lower_bound(net, from, to)
+        }
+
+        fn resources(&self, net: NetId, from: NodeId, to: NodeId, out: &mut Vec<NodeId>) {
+            self.0.resources(net, from, to, out);
+        }
+
+        fn capacity(&self, resource: NodeId) -> u32 {
+            self.0.capacity(resource)
+        }
+    }
+
+    /// Runs `rounds` with one search that reuses bounds and checks each against a new one.
+    fn check_reuse<T: RoutingSpace<Node = NodeId>>(
+        space: &T,
+        rounds: &[Round],
+        weight: f64,
+    ) -> Result<(), TestCaseError> {
+        let mut reusing = Search::new(space);
+        reusing.set_bound_weight(weight);
+        for (sources, targets) in rounds {
+            let sources: Vec<_> = sources
+                .iter()
+                .map(|&(node, cost)| Source::with_cost(NodeId(node), Cost::from(cost)))
+                .collect();
+            let targets: Vec<_> = targets
+                .iter()
+                .map(|&(node, cost)| Target::with_cost(NodeId(node), Cost::from(cost)))
+                .collect();
+            let mut fresh = Search::new(space);
+            fresh.set_bound_weight(weight);
+            let expected = outcome_summary(fresh.find_path_with(
+                space,
+                NET,
+                sources.iter().copied(),
+                targets.iter().copied(),
+                SearchLimits::default(),
+            ));
+            reusing.reuse_bounds();
+            let found = outcome_summary(reusing.find_path_with(
+                space,
+                NET,
+                sources.iter().copied(),
+                targets.iter().copied(),
+                SearchLimits::default(),
+            ));
+            prop_assert_eq!(found, expected);
+            prop_assert_eq!(reusing.stats(), fresh.stats());
+        }
+        Ok(())
+    }
+
+    proptest! {
+        // Many cases, as it takes a tie between a target that goes and one that stays to tell
+        // a test that is almost right from one that is.
+        #![proptest_config(ProptestConfig::with_cases(8192))]
+
+        /// Reusing heuristics changes nothing about any search, including its statistics,
+        /// whatever its targets, weight and bounds, which here include the maximum.
+        #[test]
+        fn reused_bounds_change_nothing((case, rounds, weight) in rounds()) {
+            let space = TestGraph::with_integer_edges(case.nodes, &case.edges).with_bound(
+                |from, to| match case.fractions[from * case.nodes + to] {
+                    255 => Cost::MAX,
+                    fraction => Cost::from(u32::from(fraction) / 16),
+                },
+            );
+            let weight = [1.0, 1.1, 0.7, 2.0][usize::from(weight)];
+            check_reuse(&space, &rounds, weight)?;
+            // Slots handed out afresh for each search, so that one goes to another node.
+            check_reuse(&Reslotted(&space), &rounds, weight)?;
         }
     }
 }

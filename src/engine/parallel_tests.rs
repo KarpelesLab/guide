@@ -293,7 +293,7 @@ where
     S::Node: Send + Sync,
     S::Resource: Send + Sync,
     S::Slots: Send,
-    S::ResourceSlots: Sync,
+    S::ResourceSlots: Send + Sync,
 {
     let mut engine = Engine::new(space, nets, options).unwrap();
     while engine.step_parallel(threads).is_some() {}
@@ -313,7 +313,7 @@ where
     S::Node: Send + Sync,
     S::Resource: Send + Sync,
     S::Slots: Send,
-    S::ResourceSlots: Sync,
+    S::ResourceSlots: Send + Sync,
 {
     let reference = run_stepped(space, nets, options);
     if let Err(problem) = check_honest(space, nets, &reference.0) {
@@ -677,6 +677,85 @@ fn a_route_that_conflicts_with_an_earlier_commit_of_its_batch_is_found_again() {
     assert!(outcome.is_success());
     let route = outcome.routes.route(NetId(1)).unwrap();
     assert!(route.nodes().any(|node| node == NodeId(3)));
+}
+
+/// Runs the first iteration through the batch machinery, returning its report and the nets of
+/// each batch.
+fn first_batches<S: RoutingSpace>(
+    space: &S,
+    nets: &[Net<S::Node>],
+    options: EngineOptions<'_>,
+) -> (IterationReport, Vec<Vec<u32>>) {
+    let mut engine = Engine::new(space, nets, options).unwrap();
+    assert!(engine.begin_iteration());
+    let before = engine.stats;
+    let mut batches = Vec::new();
+    let turns = engine.take_turns_in_batches(|engine, jobs| {
+        batches.push(jobs.to_vec());
+        engine.route_batch_here(jobs)
+    });
+    (engine.finish_iteration(before, turns), batches)
+}
+
+#[test]
+fn a_dropped_net_routes_again_after_the_rest_of_its_batch() {
+    // The bottleneck's two nets, then three that share nothing with anything.
+    let (builder, mut nets) = {
+        let (_, nets) = bottleneck();
+        let mut builder = GraphBuilder::new(13);
+        for (from, to, cost) in [
+            (0, 2, 1),
+            (2, 4, 1),
+            (0, 3, 2),
+            (3, 4, 2),
+            (1, 2, 1),
+            (2, 5, 1),
+            (7, 8, 1),
+            (9, 10, 1),
+            (11, 12, 1),
+        ] {
+            builder
+                .add_edge(NodeId(from), NodeId(to), Cost::from(cost))
+                .unwrap();
+        }
+        (builder, nets)
+    };
+    for (id, from) in [(2, 7), (3, 9), (4, 11)] {
+        nets.push(net_of(id, &[NodeId(from), NodeId(from + 1)]));
+    }
+    let graph = builder.build();
+    let options = EngineOptions {
+        first_present: Cost::from(100),
+        ..with_batch(3)
+    };
+    let (first, batches) = first_batches(&graph, &nets, options);
+    // The second net lost, and the third was committed all the same, so that the next batch
+    // is full: the dropped net first, then the two nets after the third.
+    assert_eq!(batches, [vec![0, 1, 2], vec![1, 3, 4]]);
+    assert_eq!(
+        (first.batches, first.discarded, first.nets_rerouted),
+        (2, 1, 5)
+    );
+    assert_eq!(first.total_overuse, 0);
+}
+
+#[test]
+fn a_net_of_many_terminals_only_routes_first_in_its_batch() {
+    let grid = Grid::new(16, 16, 1).unwrap();
+    let at = |x, y| grid.node_at(x, y, 0).unwrap();
+    // Short nets in rows 8 and up, with one of 64 terminals in rows 0 to 3 among them.
+    let mut nets: Vec<_> = (0..6)
+        .map(|n| net_of(n, &[at(0, 8 + n), at(15, 8 + n)]))
+        .collect();
+    let big: Vec<_> = (0..4).flat_map(|y| (0..16).map(move |x| (x, y))).collect();
+    let big: Vec<_> = big.into_iter().map(|(x, y)| at(x, y)).collect();
+    assert_eq!(big.len(), LEADING_TERMINALS);
+    nets.insert(3, net_of(6, &big));
+    let (first, batches) = first_batches(&grid, &nets, with_batch(4));
+    // The batch before it ends early, and it sees everything that batch committed.
+    assert_eq!(batches, [vec![0, 1, 2], vec![3, 4, 5, 6]]);
+    assert_eq!(first.discarded, 0);
+    assert!(route(&grid, &nets, with_batch(4)).unwrap().is_success());
 }
 
 #[test]
@@ -1119,7 +1198,7 @@ fn the_spaces_of_this_crate_can_be_shared_between_threads() {
         S::Node: Send + Sync,
         S::Resource: Send + Sync,
         S::Slots: Send,
-        S::ResourceSlots: Sync,
+        S::ResourceSlots: Send + Sync,
     {
     }
     assert_parallel::<Grid>();
@@ -1197,14 +1276,14 @@ fn batches_match_their_regression_values() {
     let (grid, nets) = permutation_problem(16, 2, 42);
     let (outcome, reports) = assert_same_for_all_threads(&grid, &nets, with_batch(8));
     assert!(outcome.is_success());
-    assert_eq!(hash_everything(&outcome, &reports), 11404029007665868765);
+    assert_eq!(hash_everything(&outcome, &reports), 6790892157793294191);
 
     // A fabric's costs include fractions, and its nets have several terminals.
     let fabric = small_fabric(12, 1);
     let (graph, nets) = (fabric_graph(fabric), fabric.nets(50, 6, 3));
     let (outcome, reports) = assert_same_for_all_threads(&graph, &nets, with_batch(16));
     assert!(outcome.is_success());
-    assert_eq!(hash_everything(&outcome, &reports), 1662400927455191562);
+    assert_eq!(hash_everything(&outcome, &reports), 8570704114041813701);
 
     // A budget that runs out part way through a negotiation.
     let limited = EngineOptions {
@@ -1213,7 +1292,7 @@ fn batches_match_their_regression_values() {
     };
     let (outcome, reports) = assert_same_for_all_threads(&graph, &nets, limited);
     assert_eq!(outcome.stop, StopReason::BudgetExhausted);
-    assert_eq!(hash_everything(&outcome, &reports), 12229596907529484558);
+    assert_eq!(hash_everything(&outcome, &reports), 5364956525097003118);
 }
 
 // Properties.
@@ -1230,7 +1309,7 @@ where
     S::Node: Send + Sync,
     S::Resource: Send + Sync,
     S::Slots: Send,
-    S::ResourceSlots: Sync,
+    S::ResourceSlots: Send + Sync,
 {
     let options = EngineOptions {
         max_iterations: 8,
@@ -1330,7 +1409,7 @@ where
     S: RoutingSpace<Node = NodeId> + Sync,
     S::Resource: Send + Sync,
     S::Slots: Send,
-    S::ResourceSlots: Sync,
+    S::ResourceSlots: Send + Sync,
 {
     let threads = env_num("GUIDE_THREADS", 1);
     let options = EngineOptions {
@@ -1427,6 +1506,152 @@ fn measure() {
             measure_one(&problem, &graph, &nets);
         }
         other => panic!("unknown problem {other:?}"),
+    }
+}
+
+/// One problem of [`measure_quality`]: its family and its parameters.
+#[derive(Clone, Copy)]
+enum QualityProblem {
+    /// Rows and seed, on 2 layers.
+    Dense(u32, u32),
+    /// Tiles along a side and seed, at one track, with three nets for every ten tiles.
+    Fabric(u32, u32),
+    /// Cells along a side, nets and seed, on 2 layers, with a reach of 16.
+    Local(u32, u32, u32),
+}
+
+impl QualityProblem {
+    fn family(self) -> &'static str {
+        match self {
+            QualityProblem::Dense(..) => "Dense",
+            QualityProblem::Fabric(..) => "Fabrics",
+            QualityProblem::Local(..) => "Short nets",
+        }
+    }
+}
+
+/// What [`measure_quality`] keeps of a run.
+#[derive(Clone, Copy, Default)]
+struct QualityRun {
+    solved: bool,
+    cost: f64,
+    expanded: u64,
+    iterations: u64,
+}
+
+fn quality_run<S: RoutingSpace>(space: &S, nets: &[Net<S::Node>], batch: u32) -> QualityRun {
+    let options = EngineOptions {
+        max_iterations: 100,
+        ..with_batch(batch)
+    };
+    let outcome = route(space, nets, options).unwrap();
+    QualityRun {
+        solved: outcome.is_success(),
+        cost: outcome.total_cost.get(),
+        expanded: outcome.routes.stats.nodes_expanded,
+        iterations: outcome.routes.stats.iterations,
+    }
+}
+
+/// Compares batch sizes with a batch size of 1 on three families of problems, for the table in
+/// the [engine's documentation](super#quality-and-convergence). Problems run at once, one to
+/// each thread of the machine, and each on one thread, which gives the same results as any
+/// number would.
+#[test]
+#[ignore = "a measurement, for release builds"]
+fn measure_quality() {
+    const BATCHES: [u32; 5] = [1, 8, 32, 64, 256];
+    let mut problems = Vec::new();
+    for rows in [32, 48, 64, 96] {
+        problems.extend((1..=6).map(|seed| QualityProblem::Dense(rows, seed)));
+    }
+    for tiles in [24, 32, 40, 48] {
+        problems.extend((1..=5).map(|seed| QualityProblem::Fabric(tiles, seed)));
+    }
+    for (size, nets) in [(256, 800), (512, 3000)] {
+        problems.extend((1..=10).map(|seed| QualityProblem::Local(size, nets, seed)));
+    }
+    let jobs: Vec<(usize, u32)> = (0..problems.len())
+        .flat_map(|problem| BATCHES.map(|batch| (problem, batch)))
+        .collect();
+    let next = AtomicUsize::new(0);
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let mut runs: Vec<((usize, u32), QualityRun)> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..threads)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut done = Vec::new();
+                    while let Some(&(problem, batch)) =
+                        jobs.get(next.fetch_add(1, Ordering::Relaxed))
+                    {
+                        let run = match problems[problem] {
+                            QualityProblem::Dense(rows, seed) => {
+                                let (grid, nets) = dense_grid(rows, 2, u64::from(seed));
+                                quality_run(&grid, &nets, batch)
+                            }
+                            QualityProblem::Fabric(tiles, seed) => {
+                                let fabric = small_fabric(tiles, 1);
+                                let nets = fabric.nets(tiles * tiles * 3 / 10, 8, u64::from(seed));
+                                quality_run(&fabric_graph(fabric), &nets, batch)
+                            }
+                            QualityProblem::Local(size, count, seed) => {
+                                let (grid, nets) = local_grid(size, 2, count, 16, u64::from(seed));
+                                quality_run(&grid, &nets, batch)
+                            }
+                        };
+                        done.push(((problem, batch), run));
+                    }
+                    done
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|worker| worker.join().unwrap())
+            .collect()
+    });
+    runs.sort_by_key(|&(key, _)| key);
+    let run_of = |problem: usize, batch: u32| {
+        runs.iter()
+            .find(|&&(key, _)| key == (problem, batch))
+            .map(|&(_, run)| run)
+            .unwrap_or_default()
+    };
+    let mean = |values: &[f64]| values.iter().sum::<f64>() / values.len().max(1) as f64;
+    println!("| Batch size | Family | Solved | Cost | Worst cost | Expansions | Iterations |");
+    println!("| --- | --- | --- | --- | --- | --- | --- |");
+    for batch in BATCHES {
+        for family in ["Dense", "Fabrics", "Short nets"] {
+            let mine: Vec<usize> = (0..problems.len())
+                .filter(|&p| problems[p].family() == family)
+                .collect();
+            let solved = mine.iter().filter(|&&p| run_of(p, batch).solved).count();
+            let both: Vec<usize> = mine
+                .iter()
+                .copied()
+                .filter(|&p| run_of(p, batch).solved && run_of(p, 1).solved)
+                .collect();
+            let ratio = |p: usize, of: fn(QualityRun) -> f64| {
+                of(run_of(p, batch)) / of(run_of(p, 1)).max(f64::MIN_POSITIVE)
+            };
+            let costs: Vec<f64> = both.iter().map(|&p| ratio(p, |run| run.cost)).collect();
+            let worst = costs.iter().copied().fold(0.0, f64::max);
+            let expansions: Vec<f64> = mine
+                .iter()
+                .map(|&p| ratio(p, |run| run.expanded as f64))
+                .collect();
+            let iterations: Vec<f64> = both
+                .iter()
+                .map(|&p| ratio(p, |run| run.iterations as f64))
+                .collect();
+            println!(
+                "| {batch} | {family} | {solved} of {} | {:.3} | {worst:.3} | {:.2} | {:.2} |",
+                mine.len(),
+                mean(&costs),
+                mean(&expansions),
+                mean(&iterations),
+            );
+        }
     }
 }
 

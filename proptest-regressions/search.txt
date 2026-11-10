@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc fd2d85c9ff24bae5daa220848475c20ebc63fc463519cc0770d1155d6e0a2750 # shrinks to (case, rounds, weight) = (Case { nodes: 7, edges: [(4, 0, 6), (0, 5, 0), (2, 2, 12), (5, 0, 10), (0, 5, 4), (3, 0, 4), (4, 2, 5), (3, 6, 20), (6, 0, 17), (6, 3, 5), (3, 1, 6)], sources: [(3, 20)], targets: [1, 2], fractions: [186, 235, 143, 106, 181, 34, 213, 242, 16, 7, 229, 223, 142, 226, 125, 196, 51, 9, 98, 74, 103, 133, 227, 121, 181, 20, 238, 196, 199, 79, 206, 193, 169, 219, 134, 148, 173, 176, 68, 24, 80, 60, 250, 172, 178, 206, 42, 243, 189] }, [([(3, 20)], [(1, 0), (1, 0), (5, 0)]), ([(3, 0)], [(1, 0)])], 2)
+cc 537342a26bad1c8ae5a0d89609f00dc9c5948c9faa5bcd7607fd0cbb35a79f9a # shrinks to (case, rounds, weight) = (Case { nodes: 10, edges: [], sources: [], targets: [], fractions: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 90, 157, 148, 175, 25, 10, 240, 101, 176, 111, 116, 34, 140, 62, 152, 10, 45, 20, 70, 18, 96, 126, 56, 185, 26, 99, 65, 143, 92, 203, 219, 139, 219, 104, 167, 36, 214, 198, 188, 153, 252, 254, 90, 237, 133, 130, 41, 196, 29, 10, 188, 74, 128, 19, 27, 114, 52, 205, 51, 170, 179, 69, 65, 238, 172, 132, 241, 243, 166, 105, 27, 4, 45, 140, 194, 63, 192, 135, 193, 82, 46, 103, 147, 107, 110, 235, 191, 239, 76] }, [([], [(0, 0), (3, 1), (8, 2), (0, 1)]), ([(6, 0)], [(0, 1)]), ([(2, 7), (0, 8)], [(0, 1)])], 1)

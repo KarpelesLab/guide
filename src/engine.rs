@@ -340,14 +340,22 @@
 //! to give. Here it is [`batch_size`](EngineOptions::batch_size), a choice with an effect on the
 //! result, which the caller makes and which no thread count has any say in:
 //!
-//! 1. The next `batch_size` nets that want routing make up a batch, and they all route against
-//!    the table as it stands, with each net seeing its own old route as gone. Nothing writes to
-//!    the table in the meantime, which is what makes it safe to share and the same for all.
-//! 2. On one thread, in the order of the nets, each route is then looked at. A net that no
+//! 1. Up to `batch_size` nets that want routing make up a batch: first those that lost their
+//!    turn in the batch before, and then the next ones in order. They all route against the
+//!    table as it stands, with each net seeing its own old route as gone. Nothing writes to the
+//!    table in the meantime, which is what makes it safe to share and the same for all.
+//! 2. On one thread, in the order of the batch, each route is then looked at. A net that no
 //!    longer wants routing, as an earlier one settled its conflict, drops its route. If an
-//!    earlier commit of the iteration has since taken a resource that the route uses, the route
-//!    is dropped and the net is routed again in the next batch, which now sees that commit. Any
-//!    other route is committed. Routes after a dropped one wait, and fill up the next batch.
+//!    earlier commit of the batch has taken a resource that the route uses, the route is
+//!    dropped and the net loses its turn to the nets after it: it routes again first in the
+//!    next batch, which sees every commit of this one. Any other route is committed.
+//! 3. A net that the batch passed over, as it did not want routing then, but wants it once a
+//!    commit before it is in, has its turn in the next batch too, as it would have had in
+//!    order.
+//!
+//! A net with 64 terminals or more only routes first in its batch, which ends before it if
+//! need be. Such a net costs as much as many small ones, and first in its batch it sees every
+//! commit before it and cannot be dropped.
 //!
 //! What goes in a batch only depends on those commits, and a route only depends on the table,
 //! so the threads have nothing to decide. They only choose who does the work. The same batches
@@ -360,6 +368,12 @@
 //! A route that is kept was still found without seeing earlier commits of its batch, as long
 //! as it does not use what they took. That is what makes this faster than a stricter check,
 //! and why its results differ from the sequential router's.
+//!
+//! The routes after a dropped one used to wait for it, which kept the order of the nets. But
+//! then a batch could only take in as many new nets as the one before had committed, up to
+//! the first dropped route. On FPGA graphs, where a fifth of routes were dropped, that left
+//! about 4 new nets to a batch of 32, whatever its size, and threads with nothing to do. See
+//! [quality and convergence](#quality-and-convergence) for what giving up the order costs.
 //!
 //! ## Why not something else
 //!
@@ -382,65 +396,89 @@
 //!
 //! ## Quality and convergence
 //!
-//! Against a batch size of 1, on the same problems and within 100 iterations, with the ratios as
-//! means. The dense grids are each row to a shuffled row, at 32, 48, 64 and 96 rows on 2 layers.
-//! The fabrics are those of this crate's benchmarks at narrow channels, and there are 20. The 19
-//! grids of short nets all have room to spare. Costs compare problems solved at both batch sizes.
+//! Against a batch size of 1, within 100 iterations, with the ratios as means. The dense grids
+//! are each row to a shuffled row, at 32, 48, 64 and 96 rows on 2 layers and 6 seeds. The 20
+//! fabrics are those of this crate's benchmarks at one track, 24 to 48 tiles along a side, with
+//! three nets for every ten tiles. The 20 grids of short nets have room to spare. Costs and
+//! iterations compare problems solved at both batch sizes, and expansions all of them. The
+//! columns before the arrows are for batches that kept the order of the nets, as they did
+//! until routes after a dropped one stopped waiting for it:
 //!
 //! | Batch size | Dense: solved | Dense: cost | Dense: expansions | Fabrics: cost | Fabrics: expansions | Short nets: cost | Short nets: expansions |
 //! | --- | --- | --- | --- | --- | --- | --- | --- |
 //! | 1 | 16 of 24 | 1 | 1 | 1 | 1 | 1 | 1 |
-//! | 8 | 19 of 24 | 0.995 | 1.67 | 1.000 | 1.04 | 1.000 | 0.99 |
-//! | 32 | 16 of 24 | 0.994 | 2.00 | 1.001 | 1.20 | 1.001 | 1.13 |
-//! | 64 | 19 of 24 | 0.996 | 1.92 | 1.002 | 1.39 | 1.002 | 1.19 |
-//! | 256 | 20 of 24 | 0.996 | 1.81 | 1.003 | 1.72 | 1.001 | 1.51 |
+//! | 8 | 19 → 20 of 24 | 0.995 → 1.004 | 1.67 → 1.81 | 1.000 → 1.000 | 1.08 → 1.07 | 1.000 → 1.000 | 1.02 → 1.02 |
+//! | 32 | 16 → 14 of 24 | 0.994 → 1.007 | 2.00 → 3.04 | 1.001 → 1.001 | 1.30 → 1.24 | 1.000 → 1.000 | 1.09 → 1.07 |
+//! | 64 | 19 → 15 of 24 | 0.995 → 1.006 | 1.92 → 3.43 | 1.002 → 1.002 | 1.50 → 1.38 | 1.000 → 1.000 | 1.19 → 1.13 |
+//! | 256 | 20 → 15 of 24 | 0.996 → 1.006 | 1.81 → 3.46 | 1.002 → 1.004 | 1.74 → 1.78 | 1.000 → 1.001 | 1.48 → 1.42 |
 //!
-//! All of the fabrics and grids of short nets were solved at all nine batch sizes tried, in about
-//! the same number of iterations on average (0.96 to 1.03 times as many), and no route set cost
-//! more than 1.1% over sequential.
+//! All of the fabrics and grids of short nets were solved at every batch size, in 0.94 to 1.04
+//! times the iterations, and no route set cost more than 1.5% over sequential.
 //!
-//! Dense grids are chaotic. Solved counts run from 16 to 21 of 24 with no pattern, which shows no
-//! sign that batches hurt, and 24 problems are too few to say that they help. Single problems
-//! cost from 3% less to 5% more, and can take from a fifth to several times the iterations.
-//! They do cost expansions: about 40% of searches at a batch size of 32 are thrown away, which is
-//! most of what threads could have gained.
+//! Dense grids are chaotic, and they are where giving up the order of the nets shows. A net
+//! that loses its turn now routes around the nets after it in its batch, where it used to
+//! push them away, and on a grid where every net crosses every other that takes more turns:
+//! at batch sizes from 32, half again as many iterations and expansions, and 14 or 15 problems
+//! solved of 24 where it was 16 to 20. Single problems are still all over the place: the one
+//! of 128 rows used to take half the iterations in batches of 32, and now does not finish in
+//! 100, while the one of 64 takes 60 where sequential routing takes 81. On fabrics, grids of
+//! short nets and the FPGA graphs of the [benchmarks](../docs/benchmarks.md), batches take
+//! about as much work as before, for the same costs and delays, and they stay full.
+//!
+//! The commands to reproduce this are at the end of [batches and threads](#batches-and-threads).
 //!
 //! ## Speed
 //!
-//! Speedup against a batch size of 1 on one thread, as the median of runs taken in turn, with
-//! the lowest and highest in brackets. This was a shared machine of 96 cores and 192 threads at
-//! a load between 26 and 82, in 3 to 7 rounds per problem. Any one run could be off by anything
-//! from a few percent to 75%, so differences in the second digit mean nothing here.
+//! Speedup against a batch size of 1 on one thread, before the changes below and after them,
+//! as the median of 3 rounds taken in turn, but for the wide fabric's one. This was a shared
+//! machine of 96 cores and 192 threads, under other work, and with other measurements running
+//! alongside, so any one run could be off by a few percent and sometimes much more:
 //!
-//! | Problem | Alone | Batch | 2 threads | 4 threads | 8 threads | 16 threads |
+//! | Problem | Alone | Batch | 1 thread | 4 threads | 16 threads | 64 threads |
 //! | --- | --- | --- | --- | --- | --- | --- |
-//! | 20 000 short nets on a grid of 4.2M nodes | 4.4 s | 64 | 1.17 (1.13 to 1.25) | 2.07 (1.66 to 2.19) | 2.60 (1.61 to 2.92) | 2.93 (2.56 to 3.19) |
-//! | 6000 nets, wide fabric of 1.3M nodes | 48 s | 64 | 1.59 (1.57 to 1.74) | 2.21 (2.20 to 2.51) | 2.52 (2.45 to 2.72) | 2.42 (2.40 to 2.57) |
-//! | 4000 nets, narrow fabric of 426 000 nodes | 11 s | 32 | 1.46 (1.43 to 1.47) | 1.87 (1.74 to 1.95) | 2.04 (1.81 to 2.04) | 2.10 (1.88 to 2.10) |
-//! | Dense grid of 128 rows | 5.7 s | 32 | 1.51 (1.44 to 1.63) | 1.88 (1.59 to 1.97) | 2.08 (1.66 to 2.25) | 2.19 (2.14 to 2.35) |
-//! | Dense grid of 64 rows | 0.40 s | 32 | 1.01 (0.98 to 1.02) | 1.24 (1.21 to 1.30) | 1.36 (1.33 to 1.40) | 1.44 (1.40 to 1.51) |
-//! | 800 short nets on a grid of 131 000 nodes | 49 ms | 32 | 1.11 (1.00 to 1.33) | 1.10 (1.00 to 1.34) | 1.27 (1.20 to 1.59) | 1.10 (1.06 to 1.34) |
-//! | 300 nets, narrow fabric of 27 000 nodes | 18 ms | 16 | 0.62 (0.59 to 0.68) | 1.04 (0.96 to 1.18) | 1.09 (1.03 to 1.13) | 1.01 (0.96 to 1.07) |
+//! | 20 000 short nets on a grid of 4.2M nodes | 4.2 s | 64 | 0.93 → 0.92 | 2.18 → 2.55 | 3.00 → 3.72 | 1.88 → 2.66 |
+//! | 6000 nets, wide fabric of 1.3M nodes | 50 s | 64 | 1.08 → 0.99 | 2.80 → 2.82 | 3.21 → 3.50 | 3.31 → 3.63 |
+//! | 4000 nets, narrow fabric of 426 000 nodes | 11.5 s | 32 | 0.87 → 0.84 | 2.08 → 2.30 | 2.21 → 2.73 | 2.21 → 2.69 |
+//! | Dense grid of 128 rows | 5.4 s | 32 | 1.45 → 0.49 | 2.20 → 1.58 | 2.52 → 3.17 | 2.52 → 3.37 |
+//! | Dense grid of 64 rows | 0.40 s | 32 | 1.04 → 0.46 | 1.45 → 1.27 | 1.58 → 2.16 | 1.60 → 2.13 |
+//! | 800 short nets on a grid of 131 000 nodes | 96 ms | 32 | 0.85 → 0.92 | 1.25 → 2.00 | 1.42 → 2.78 | 1.25 → 2.38 |
+//! | 300 nets, narrow fabric of 27 000 nodes | 18 ms | 16 | 0.85 → 0.87 | 1.05 → 1.46 | 1.02 → 1.42 | 1.01 → 1.40 |
 //!
-//! So **expect 2 to 3 times the speed, with little to gain beyond 8 threads**, on problems that
-//! take seconds. Problems of milliseconds gain nothing and can get slower. Some of the dense
-//! grid of 128 rows is not due to threads: that one problem happens to take half the iterations
-//! in batches, so it runs 1.50 times as fast on one thread, and it is a single sample of a chaotic
-//! process. What threads add to that is the 1.45 at 16 threads.
+//! So **expect 2.5 to 3.5 times the speed at 16 threads** on problems that take seconds, and
+//! little more beyond. Problems of milliseconds now gain too, up to 2.8 times. The dense grids
+//! are another story at one thread: batches now take more iterations there, the one of 128 rows
+//! all 100 of them, which [quality and convergence](#quality-and-convergence) explains, and
+//! threads only make up for it from about 8 of them.
 //!
-//! Mostly this is not overhead. A batch is as slow as its biggest search, a net is the unit of
-//! work, and a few searches are far bigger than the rest. Going by expansions alone, 16 threads
-//! could not beat about 2.5 times the speed of one on the narrow fabric at these batch sizes, or
-//! 2.9 on the wide one, and thread counts past that gain nothing. The grid of short nets has
-//! a limit of 10.6 and falls short for another reason: each batch starts on cold caches, so its
-//! searches took 45% more CPU time than on one thread, or about 20% more with all threads kept
-//! to one 8-core group of this machine. That is at batches of about 3 ms. The fabrics, with longer
-//! batches, did not show it. Starting and joining threads took 22 us for one and 173 us for 15,
-//! so it is no large part of this.
+//! On the FPGA graphs that VPR writes, batches used to be slower on 16 threads than one thread
+//! with batches of 1, and are now about twice as fast on the larger circuits:
+//! [the benchmarks](../docs/benchmarks.md#threads-on-the-larger-circuits) have the tables, and
+//! how the time was found. In short:
 //!
-//! A good start is a batch size of 32 and 8 threads. Large batches waste work, and past 64 the
-//! limits above stayed level or fell on every problem but the wide fabric.
-//! [`IterationReport::discarded`] shows how much is being thrown away.
+//! - **Batches ran short.** A route dropped for a conflict held up every route after it, and
+//!   the next batch could only take in as many new nets as had been committed. With a fifth of
+//!   routes dropped, batches of 32 held 4 to 6 new nets on those graphs. A dropped net now
+//!   routes again after the rest of its batch, as above, and batches stay full.
+//! - **A few nets of hundreds of terminals** took a quarter of the time on one thread, and
+//!   each held up its batch, and was often dropped and routed again. A search's heuristic is
+//!   the lowest bound over every terminal still to connect, for every node of the tree that it
+//!   starts from, so such a net asked for bounds on the order of `n` cubed times. Searches of a
+//!   tree now keep the heuristics that cannot have changed, and such nets only route first in
+//!   their batch, where they cannot be dropped. That took a third off their time at a batch
+//!   size of 1 without timing, for the same results, and half of what was being dropped.
+//! - **Threads were started for every batch**, at up to 50 us a batch, and now once an
+//!   iteration.
+//!   Each keeps its worker, and they are lent the table for a batch through a lock that only
+//!   the committing thread writes, between batches.
+//! - **Searches take more CPU time on more threads**: on those graphs 1.2 to 1.6 times as much
+//!   with 8 threads in one 8-core group of this machine, and 2.2 times with 16 spread over it.
+//!   That is caches, and the engine does nothing about it.
+//!
+//! A batch is still as slow as its biggest search, a net is the unit of work, and on one thread
+//! batches are slower than batches of 1, as they drop routes and take more expansions. A good
+//! start is a batch size of 32 and 8 to 16 threads, or 64 on large problems. Threads beyond the
+//! batch size have nothing to do. [`IterationReport::discarded`] shows how much is being
+//! thrown away.
 //!
 //! ## Memory
 //!
@@ -448,9 +486,11 @@
 //! highest slot it reaches.** That is about 13 GB per thread on a graph of 300 million nodes, on
 //! top of what the engine holds anyway, and it is why threads are for the caller to ask for. It
 //! is kept from batch to batch and iteration to iteration, and only as many workers are made
-//! as a batch can use. On the 20 000 nets above, the peak was 301 MiB on one thread, 831 at 4,
-//! 1535 at 8 and 2943 at 16, which is the predicted 176 MiB for each thread added, at 4.2 million
-//! nodes. Routes waiting in a batch take a little more.
+//! as a batch can use. On the 20 000 nets above, the peak was 302 MiB on one thread, 832 at 4
+//! and 2944 at 16, which is the predicted 176 MiB for each thread added, at 4.2 million nodes.
+//! At 64 threads it was 11.4 GB, as full batches let every thread search the whole grid, where
+//! batches that kept the order of the nets reached 7.6 GB. The routes of a batch take a little
+//! more.
 //!
 //! ## What is guaranteed
 //!
@@ -478,15 +518,22 @@
 //!     engine::parallel_tests::measure -- --ignored --nocapture --exact
 //! GUIDE_PROBLEM=fabric:128:1:4000:8:1 cargo test --release --lib \
 //!     engine::parallel_tests::measure_regions -- --ignored --nocapture --exact
+//! cargo test --release --lib engine::parallel_tests::measure_quality -- --ignored --nocapture
 //! ```
+//!
+//! The wide fabric is `fabric:176:3:6000:8:1`, and the grids of short nets are
+//! `local:256:2:800:16:1` and `local:1024:4:20000:16:1`.
 
 use core::cell::RefCell;
 use core::fmt;
+use core::mem;
 use std::error::Error;
-use std::panic::resume_unwind;
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, PoisonError, RwLock, mpsc};
 
 use crate::cost::Cost;
+
 use crate::id::NetId;
 use crate::net::{Edge, FixedRoute, Net, Route, RouteSet, RouteStats, Terminal, UnroutedReason};
 use crate::rng::Rng;
@@ -945,8 +992,8 @@ pub struct IterationReport {
     pub total_cost: Cost,
     /// How many batches of searches ran, which at a batch size of 1 is one for each net.
     pub batches: u32,
-    /// How many routes from those batches were thrown away, because an earlier net of the
-    /// iteration had taken something they use or had left them with nothing to resolve. Their
+    /// How many routes from those batches were thrown away, because an earlier net of their
+    /// batch had taken something they use or had left them with nothing to resolve. Their
     /// expansions are in [`nodes_expanded`](IterationReport::nodes_expanded).
     pub discarded: u32,
     /// What timing analysis found of the routes the iteration left, or `None` if the run is
@@ -1121,7 +1168,7 @@ where
     S::Node: Send + Sync,
     S::Resource: Send + Sync,
     S::Slots: Send,
-    S::ResourceSlots: Sync,
+    S::ResourceSlots: Send + Sync,
 {
     Ok(Engine::new(space, nets, options)?.run_parallel(threads))
 }
@@ -1166,7 +1213,7 @@ where
     S::Node: Send + Sync,
     S::Resource: Send + Sync,
     S::Slots: Send,
-    S::ResourceSlots: Sync,
+    S::ResourceSlots: Send + Sync,
 {
     Ok(Engine::with_timing(space, nets, options, timing)?.run_parallel(threads))
 }
@@ -2017,6 +2064,9 @@ fn route_net<S: RoutingSpace>(
             }
         }
 
+        // Whether the latest search grew this tree without timing, so that the next one may
+        // keep its heuristics: see `Search::reuse_bounds`.
+        let mut grew_priced = false;
         while !worker.pending.is_empty() {
             let priced = Priced {
                 inner: space,
@@ -2099,10 +2149,16 @@ fn route_net<S: RoutingSpace>(
                 Some((_, blend)) => worker
                     .search
                     .find_path_with(blend, net.id, sources, targets, limits),
-                None => worker
-                    .search
-                    .find_path_with(&priced, net.id, sources, targets, limits),
+                None => {
+                    if grew_priced {
+                        worker.search.reuse_bounds();
+                    }
+                    worker
+                        .search
+                        .find_path_with(&priced, net.id, sources, targets, limits)
+                }
             };
+            grew_priced = critical.is_none();
             let end = match outcome {
                 SearchOutcome::Found(found) => {
                     worker.path.clear();
@@ -2171,8 +2227,6 @@ struct BatchRoute<N, R> {
     dead_roots: Vec<N>,
     searches: u64,
     expanded: u64,
-    /// What the engine's count of commits stood at when the batch began.
-    commits_seen: u64,
 }
 
 /// Routes the net at `index` as a member of a batch, leaving the table to the caller.
@@ -2232,13 +2286,16 @@ fn route_in_batch<S: RoutingSpace>(
         dead_roots,
         searches,
         expanded,
-        commits_seen: context.commits,
     }
 }
 
-/// The routes of a batch, each with the index of its net.
+/// A net with at least this many terminals only routes as the first of its batch, where it
+/// sees every commit before it and cannot be thrown away.
+const LEADING_TERMINALS: usize = 64;
+
+/// The routes of a batch, each with the place of its net in the batch.
 type RoutedBatch<S> = Vec<(
-    u32,
+    usize,
     BatchRoute<<S as RoutingSpace>::Node, <S as RoutingSpace>::Resource>,
 )>;
 
@@ -2248,7 +2305,6 @@ struct BatchContext<'a, S: RoutingSpace> {
     nets: &'a [Net<S::Node>],
     states: &'a [NetState<S::Node, S::Resource>],
     budget: u64,
-    commits: u64,
 }
 
 /// Where one net stands.
@@ -2665,12 +2721,9 @@ pub struct Engine<'a, S: RoutingSpace> {
     /// batch to batch, because those are large and take time to grow: see the [module
     /// documentation](self#batches-and-threads).
     workers: Vec<Worker<S>>,
-    /// How many routes the current iteration's batches have committed.
-    commits: u64,
-    /// For resources that a commit left with no room for another net, the value of `commits`
-    /// after the latest such commit. A batch route that uses one, and began before that, has
-    /// a conflict. It is only ever looked up.
-    taken: FastMap<S::Resource, u64>,
+    /// The resources that a commit of the current batch left with no room for another net.
+    /// A route of the batch that uses one has a conflict. It is only ever looked up.
+    taken: FastSet<S::Resource>,
     /// For each batch, the most expansions of any member and of all members together, which
     /// show how much any number of threads could have gained.
     #[cfg(test)]
@@ -2739,8 +2792,7 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
             table: ResourceTable::new(space),
             states,
             workers: vec![Worker::new(space)],
-            commits: 0,
-            taken: FastMap::default(),
+            taken: FastSet::default(),
             #[cfg(test)]
             batch_work: Vec::new(),
             order: (0..nets.len() as u32).collect(),
@@ -3087,7 +3139,8 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
     }
 
     /// Gives every net its turn with routes from batches, which `route_batch` provides: it
-    /// routes the given nets against the current table, by whatever means it likes.
+    /// routes the given nets against the current table, by whatever means it likes, and
+    /// returns each route with the place of its net among them.
     ///
     /// Everything that decides the result happens here, on one thread, in the order of the
     /// nets. That is what leaves the thread count out of it, as long as which nets go in a
@@ -3098,68 +3151,83 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
     ) -> Turns {
         let batch_size = self.options.batch_size.max(1) as usize;
         let mut turns = Turns::default();
-        // Looked up by net and never iterated.
-        let mut waiting = FastMap::default();
-        let mut jobs = Vec::with_capacity(batch_size);
-        let mut position = 0;
-        self.commits = 0;
+        // Positions in `order` of nets to route before any new ones, as they lost their turn.
+        let mut again: Vec<usize> = Vec::new();
+        // Positions that the batch being filled passed over, as they did not want routing.
+        let mut passed: Vec<usize> = Vec::new();
+        let mut jobs: Vec<u32> = Vec::with_capacity(batch_size);
+        let mut positions: Vec<usize> = Vec::with_capacity(batch_size);
+        let mut routes = Vec::with_capacity(batch_size);
+        let mut next = 0;
         self.taken.clear();
 
-        while position < self.order.len() {
-            // A batch is the next nets that want routing now. Those with a route still waiting
-            // from an earlier batch count towards its size.
+        loop {
+            // Positions only grow along a batch: those to route again all come before the
+            // rest, which come in order after them.
             jobs.clear();
-            let mut filled = 0;
-            for &index in &self.order[position..] {
-                if filled == batch_size {
-                    break;
-                }
-                if waiting.contains_key(&index) {
-                    filled += 1;
-                } else if self.wants_routing(index as usize) {
+            positions.clear();
+            passed.clear();
+            again.sort_unstable();
+            for &at in &again {
+                let index = self.order[at];
+                if self.wants_routing(index as usize) {
                     jobs.push(index);
-                    filled += 1;
+                    positions.push(at);
                 }
             }
-            if filled == 0 {
+            again.clear();
+            while jobs.len() < batch_size && next < self.order.len() {
+                let index = self.order[next];
+                if !self.wants_routing(index as usize) {
+                    passed.push(next);
+                } else if !jobs.is_empty()
+                    && self.nets[index as usize].terminals.len() >= LEADING_TERMINALS
+                {
+                    break;
+                } else {
+                    jobs.push(index);
+                    positions.push(next);
+                }
+                next += 1;
+            }
+            if jobs.is_empty() {
                 break;
             }
-            if !jobs.is_empty() {
-                turns.batches += 1;
-                waiting.extend(route_batch(self, &jobs));
-                #[cfg(test)]
-                {
-                    let work = jobs.iter().map(|job| waiting[job].expanded);
-                    let (most, total) = work.fold((0, 0), |(m, t), e: u64| (m.max(e), t + e));
-                    self.batch_work.push((most, total));
-                }
+
+            turns.batches += 1;
+            routes.clear();
+            routes.resize_with(jobs.len(), || None);
+            for (place, routed) in route_batch(self, &jobs) {
+                routes[place] = Some(routed);
+            }
+            #[cfg(test)]
+            {
+                let work = routes.iter().flatten().map(|routed| routed.expanded);
+                let (most, total) = work.fold((0, 0), |(m, t), e: u64| (m.max(e), t + e));
+                self.batch_work.push((most, total));
             }
 
-            while position < self.order.len() {
-                let index = self.order[position];
-                if !self.wants_routing(index as usize) {
+            let mut first_commit = None;
+            for (place, routed) in routes.drain(..).enumerate() {
+                let (index, at) = (jobs[place] as usize, positions[place]);
+                let routed = routed.expect("every member of a batch has a route");
+                if !self.wants_routing(index) {
                     // An earlier net settled this one's conflict while it was being routed.
-                    if let Some(unwanted) = waiting.remove(&index) {
-                        turns.discarded += 1;
-                        if let Err(interrupt) = self.charge(&unwanted) {
-                            turns.interrupted = Some(interrupt);
-                            return turns;
-                        }
+                    turns.discarded += 1;
+                    if let Err(interrupt) = self.charge(&routed) {
+                        turns.interrupted = Some(interrupt);
+                        return turns;
                     }
-                    position += 1;
                     continue;
                 }
                 if self.cancelled() {
                     turns.interrupted = Some(Interrupt::Cancel);
                     return turns;
                 }
-                let Some(routed) = waiting.remove(&index) else {
-                    // It only wants routing because of a commit since the batch was chosen.
-                    break;
-                };
                 // Stopped by a flag that has since been cleared, which says nothing about it.
                 if matches!(routed.attempt, Attempt::Interrupted(Interrupt::Cancel)) {
-                    break;
+                    again.push(at);
+                    continue;
                 }
                 if self.has_conflict(&routed) {
                     turns.discarded += 1;
@@ -3167,37 +3235,43 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
                         turns.interrupted = Some(interrupt);
                         return turns;
                     }
-                    break;
+                    again.push(at);
+                    continue;
                 }
 
                 turns.nets_rerouted += 1;
-                position += 1;
                 if let Err(interrupt) = self.charge(&routed) {
                     turns.interrupted = Some(interrupt);
                     return turns;
                 }
-                self.commit(index as usize, routed);
+                first_commit.get_or_insert(at);
+                self.commit(index, routed);
             }
-            if waiting.is_empty() {
-                // Nothing is left that began before these, and the map only costs lookups.
-                self.taken.clear();
+            // A net passed over, which wants routing now because of a commit before it, has
+            // its turn in the next batch, as it would have had with one net to a batch.
+            for &at in &passed {
+                if first_commit.is_some_and(|first| first < at)
+                    && self.wants_routing(self.order[at] as usize)
+                {
+                    again.push(at);
+                }
             }
+            // Every route found from here on sees these commits.
+            self.taken.clear();
         }
         turns
     }
 
-    /// Returns whether an earlier net of the iteration has taken something that `routed` uses
-    /// since the route was found. A resource given up in that time can only have made the
-    /// route better than it looked, so that is no conflict.
+    /// Returns whether an earlier net of the batch has taken something that `routed` uses. A
+    /// resource given up in that time can only have made the route better than it looked, so
+    /// that is no conflict.
     fn has_conflict(&self, routed: &BatchRoute<S::Node, S::Resource>) -> bool {
         let Attempt::Routed { resources, .. } = &routed.attempt else {
             return false;
         };
-        resources.iter().any(|resource| {
-            self.taken
-                .get(resource)
-                .is_some_and(|&commit| commit > routed.commits_seen)
-        })
+        resources
+            .iter()
+            .any(|resource| self.taken.contains(resource))
     }
 
     /// Takes the work of a batch route out of the budget, in the order of the nets. This is
@@ -3229,7 +3303,6 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
                 resources,
                 delays,
             } => {
-                self.commits += 1;
                 for &resource in &resources {
                     let slot = self.table.intern(self.space, resource);
                     state.held.push(slot);
@@ -3239,7 +3312,7 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
                     if state.resources.binary_search(&resource).is_err()
                         && table_state.occupancy.saturating_add(1) >= table_state.capacity
                     {
-                        self.taken.insert(resource, self.commits);
+                        self.taken.insert(resource);
                     }
                 }
                 self.table.acquire(&state.held);
@@ -3280,22 +3353,26 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
             },
             nets: self.nets,
             states: &self.states,
-            budget: self
-                .options
-                .max_expansions
-                .saturating_sub(self.stats.nodes_expanded),
-            commits: self.commits,
+            budget: self.budget_left(),
         }
+    }
+
+    /// Returns how many expansions are left of the budget.
+    fn budget_left(&self) -> u64 {
+        self.options
+            .max_expansions
+            .saturating_sub(self.stats.nodes_expanded)
     }
 
     /// Routes a batch on the calling thread, for a space that threads cannot share.
     fn route_batch_here(&mut self, jobs: &[u32]) -> RoutedBatch<S> {
         // Taken out for now so that the rest of the engine can be borrowed as a whole.
-        let mut workers = core::mem::take(&mut self.workers);
+        let mut workers = mem::take(&mut self.workers);
         let context = self.batch_context();
         let routed = jobs
             .iter()
-            .map(|&index| (index, route_in_batch(&context, index, &mut workers[0])))
+            .enumerate()
+            .map(|(place, &index)| (place, route_in_batch(&context, index, &mut workers[0])))
             .collect();
         self.workers = workers;
         routed
@@ -3849,7 +3926,7 @@ where
     S::Node: Send + Sync,
     S::Resource: Send + Sync,
     S::Slots: Send,
-    S::ResourceSlots: Sync,
+    S::ResourceSlots: Send + Sync,
 {
     /// Runs one iteration like [`step`](Engine::step), with up to `threads` threads searching
     /// at once. A value of 0 means 1.
@@ -3867,8 +3944,10 @@ where
             return None;
         }
         let before = self.stats;
-        let turns = if self.options.batch_size > 1 {
-            self.take_turns_in_batches(|engine, jobs| engine.route_batch_on_threads(jobs, threads))
+        let turns = if self.options.batch_size > 1 && threads > 1 {
+            self.take_turns_on_threads(threads)
+        } else if self.options.batch_size > 1 {
+            self.take_turns_in_batches(|engine, jobs| engine.route_batch_here(jobs))
         } else {
             self.take_turns()
         };
@@ -3881,54 +3960,190 @@ where
         self.outcome()
     }
 
-    /// Routes a batch with up to `threads` threads, in no particular order.
+    /// Gives every net its turn with routes from batches, which up to `threads` threads route.
     ///
-    /// Threads are started for each batch because the table cannot be borrowed by a thread
-    /// that outlives it, and commits have to change it between batches. Sharing it for longer
-    /// would take a lock on the hottest read in the crate, or `unsafe`. A batch takes
-    /// milliseconds in the cases that are worth parallelising, against tens of microseconds to
-    /// start a thread.
-    fn route_batch_on_threads(&mut self, jobs: &[u32], threads: usize) -> RoutedBatch<S> {
-        let threads = threads.clamp(1, jobs.len().max(1));
-        if threads == 1 {
-            return self.route_batch_here(jobs);
-        }
-        while self.workers.len() < threads {
-            self.workers.push(Worker::new(self.space));
-        }
-
-        // Taken out for now so that the rest of the engine can be borrowed as a whole.
-        let mut workers = core::mem::take(&mut self.workers);
-        let context = self.batch_context();
-        let next_job = AtomicUsize::new(0);
-        // Taking jobs as they come balances searches of very different sizes. Which worker gets
-        // which does not matter, as a search leaves nothing behind in its worker that shows.
-        let work_through = |worker: &mut Worker<S>| {
-            let mut routed = Vec::new();
-            while let Some(&index) = jobs.get(next_job.fetch_add(1, Ordering::Relaxed)) {
-                routed.push((index, route_in_batch(&context, index, worker)));
-            }
-            routed
+    /// The threads are started once for the iteration, as a batch needs more of them, and wait
+    /// for batches in between. Each keeps its worker, and its caches, from batch to batch. They
+    /// cannot borrow the table while it changes, so for each batch the calling thread lends
+    /// them what changes with commits, the table and the nets' states, through a lock that
+    /// only it ever writes to and only between batches. A batch takes one look at the lock on
+    /// each thread, and not one for each read.
+    fn take_turns_on_threads(&mut self, threads: usize) -> Turns {
+        let iteration = IterationContext {
+            space: self.space,
+            nets: self.nets,
+            present: self.present,
+            cancel: self.options.cancel,
+            bound_weight: self.options.bound_weight,
+            incremental: self.incremental(),
         };
-        let (first, helpers) = workers.split_at_mut(1);
-        let routed = std::thread::scope(|scope| {
-            let running: Vec<_> = helpers[..threads - 1]
-                .iter_mut()
-                .map(|helper| scope.spawn(|| work_through(helper)))
-                .collect();
-            let mut routed = work_through(&mut first[0]);
-            for thread in running {
-                match thread.join() {
-                    Ok(more) => routed.extend(more),
-                    // As it is and not the scope's own message, so that the caller gets the
-                    // space's panic. The other threads run out of jobs and finish first.
-                    Err(panic) => resume_unwind(panic),
-                }
-            }
-            routed
+        let lent = RwLock::new(Lent {
+            table: ResourceTable::new(self.space),
+            states: Vec::new(),
+            timing: None,
         });
-        self.workers = workers;
-        routed
+        // Workers from earlier iterations, for the threads to take before making new ones.
+        let mut spare: Vec<Worker<S>> = self.workers.drain(1..).collect();
+        let (results, finished) = mpsc::channel();
+        let (turns, mut returned) = std::thread::scope(|scope| {
+            let mut helpers: Vec<Helper<'_, S>> = Vec::new();
+            let turns = self.take_turns_in_batches(|engine, jobs| {
+                let wanted = threads.min(jobs.len());
+                if wanted <= 1 {
+                    return engine.route_batch_here(jobs);
+                }
+                while helpers.len() < wanted - 1 {
+                    let worker = spare.pop().unwrap_or_else(|| Worker::new(iteration.space));
+                    let (orders, received) = mpsc::channel::<Arc<BatchOrder>>();
+                    let results = results.clone();
+                    let (lent, iteration) = (&lent, &iteration);
+                    let thread = scope.spawn(move || {
+                        let mut worker = worker;
+                        for order in received {
+                            let routed = catch_unwind(AssertUnwindSafe(|| {
+                                let lent = lent.read().unwrap_or_else(PoisonError::into_inner);
+                                let context = iteration.batch(&lent, order.budget);
+                                work_through(&context, &order, &mut worker)
+                            }));
+                            if results.send(routed).is_err() {
+                                break;
+                            }
+                        }
+                        worker
+                    });
+                    helpers.push(Helper { orders, thread });
+                }
+
+                let order = Arc::new(BatchOrder {
+                    jobs: jobs.to_vec(),
+                    next: AtomicUsize::new(0),
+                    budget: engine.budget_left(),
+                });
+                engine.lend(&lent);
+                for helper in &helpers[..wanted - 1] {
+                    // A thread only stops early once the calling thread has gone.
+                    let _ = helper.orders.send(Arc::clone(&order));
+                }
+                let mut routed = {
+                    let lent = lent.read().unwrap_or_else(PoisonError::into_inner);
+                    let context = iteration.batch(&lent, order.budget);
+                    work_through(&context, &order, &mut engine.workers[0])
+                };
+                let mut panic = None;
+                for _ in 1..wanted {
+                    match finished.recv() {
+                        Ok(Ok(more)) => routed.extend(more),
+                        Ok(Err(payload)) => {
+                            panic.get_or_insert(payload);
+                        }
+                        // The calling thread holds a sender too.
+                        Err(_) => unreachable!("the channel outlives the threads"),
+                    }
+                }
+                engine.lend(&lent);
+                if let Some(payload) = panic {
+                    // As it is and not the scope's own message, so that the caller gets the
+                    // space's panic. The other threads have run out of jobs by now.
+                    resume_unwind(payload);
+                }
+                routed
+            });
+            // Closing the threads' channels ends them.
+            let returned: Vec<Worker<S>> = helpers
+                .into_iter()
+                .map(|helper| {
+                    drop(helper.orders);
+                    helper
+                        .thread
+                        .join()
+                        .unwrap_or_else(|panic| resume_unwind(panic))
+                })
+                .collect();
+            (turns, returned)
+        });
+        self.workers.append(&mut returned);
+        self.workers.append(&mut spare);
+        turns
+    }
+
+    /// Swaps what commits change with what `lent` holds: hands it to the threads before a
+    /// batch, and takes it back after.
+    fn lend(&mut self, lent: &RwLock<Lent<S>>) {
+        let mut lent = lent.write().unwrap_or_else(PoisonError::into_inner);
+        mem::swap(&mut lent.table, &mut self.table);
+        mem::swap(&mut lent.states, &mut self.states);
+        mem::swap(&mut lent.timing, &mut self.timing);
+    }
+}
+
+/// What a thread routing in a batch needs that commits change, lent to the threads by the
+/// engine for each batch.
+struct Lent<S: RoutingSpace> {
+    table: ResourceTable<S>,
+    states: Vec<NetState<S::Node, S::Resource>>,
+    timing: Option<TimingState<S>>,
+}
+
+/// What every batch of an iteration shares and nothing changes until the iteration ends.
+struct IterationContext<'a, S: RoutingSpace> {
+    space: &'a S,
+    nets: &'a [Net<S::Node>],
+    present: Cost,
+    cancel: Option<&'a AtomicBool>,
+    bound_weight: f64,
+    incremental: bool,
+}
+
+impl<S: RoutingSpace> IterationContext<'_, S> {
+    /// Returns what the members of a batch share, from what the engine has lent.
+    fn batch<'b>(&'b self, lent: &'b Lent<S>, budget: u64) -> BatchContext<'b, S> {
+        BatchContext {
+            route: RouteContext {
+                space: self.space,
+                table: &lent.table,
+                present: self.present,
+                cancel: self.cancel,
+                timing: lent.timing.as_ref().map(TimingState::route_timing),
+                bound_weight: self.bound_weight,
+                incremental: self.incremental,
+            },
+            nets: self.nets,
+            states: &lent.states,
+            budget,
+        }
+    }
+}
+
+/// A batch, for threads to take its jobs from in turn.
+struct BatchOrder {
+    jobs: Vec<u32>,
+    /// The position in `jobs` of the next one to take.
+    next: AtomicUsize,
+    budget: u64,
+}
+
+/// A thread that routes in batches, and how to give it one.
+struct Helper<'scope, S: RoutingSpace> {
+    orders: mpsc::Sender<Arc<BatchOrder>>,
+    thread: std::thread::ScopedJoinHandle<'scope, Worker<S>>,
+}
+
+/// Routes jobs of `order` until there are none left to take.
+///
+/// Taking jobs as they come balances searches of very different sizes. Which worker gets which
+/// does not matter, as a search leaves nothing behind in its worker that shows.
+fn work_through<S: RoutingSpace>(
+    context: &BatchContext<'_, S>,
+    order: &BatchOrder,
+    worker: &mut Worker<S>,
+) -> RoutedBatch<S> {
+    let mut routed = Vec::new();
+    loop {
+        let place = order.next.fetch_add(1, Ordering::Relaxed);
+        let Some(&index) = order.jobs.get(place) else {
+            return routed;
+        };
+        routed.push((place, route_in_batch(context, index, worker)));
     }
 }
 

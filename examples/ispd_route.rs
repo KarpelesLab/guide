@@ -2,6 +2,7 @@
 //! contests' format, and scores them as the 2008 contest's `eval2008.pl` does.
 //!
 //! This is the harness for `scripts/ispd/` and the ASIC section of `docs/benchmarks.md`.
+//! `guide asic route` and `guide asic score` (the `cli` feature) do the same with the defaults.
 //!
 //! ```text
 //! cargo run --release --features asic --example ispd_route -- adaptec1.capo70.3d.35.50.90.gr \

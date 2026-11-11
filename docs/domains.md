@@ -51,6 +51,21 @@ the `kicad` feature: the copper, the nets, and the rules from the project, as Ki
 sees them. So do reading DSN designs and writing SES sessions, behind the `dsn` feature, into
 and from the same model, which KiCad's session import takes back.
 
+`guide dsn route board.dsn -o board.ses` (also `-de board.dsn -do board.ses`, as Freerouting is
+called) routes a design as KiCad exports it and writes a session for KiCad to import, which
+makes the tool a drop-in for Freerouting in KiCad's DSN workflow. `pcb::Design::from_dsn` makes
+the design: wiring the file marks `protect` or `fix` stays and is left out of the session, as
+KiCad keeps locked tracks on import, and planes with a net become zones that their net is routed
+to. What a DSN file lacks is assumed: zones take KiCad's defaults for new zones (or the board's
+clearance where larger), and copper keeps the board's clearance from the edge, which
+`--edge-clearance` overrides; KiCad's export doesn't carry the board's own edge clearance, so
+without it `kicad-cli pcb drc` can find tracks too close to the edge. Imported back into KiCad
+and refilled, the sessions of four curated boards (`TS4231-BOB`, `lisn`, `flea`, `placebo`),
+routed from scratch (`flea` with `--edge-clearance 0.254`, its board's), were fully connected, and KiCad's DRC found no more errors on them than on
+the same boards routed by `guide pcb route` from their `.kicad_pcb`, but for 8 solder mask
+bridges on `flea`, whose openings a DSN file doesn't have. `guide pcb route` reads everything
+the board has, and is the better choice where it can be used.
+
 ## FPGA
 
 **Input.** A device description and a technology-mapped netlist, plus constraints:

@@ -38,6 +38,23 @@ which implies `pcb` too, for reading Specctra designs into it and writing sessio
 through unchanged, with a reader for the MovingAI benchmarks, and `asic` for ASIC global
 routing on the ISPD contests' designs.
 
+The `guide` command-line tool, `src/bin/guide`, sits on top of all of it, behind the `cli`
+feature, which enables every domain. It uses only the public API, as any other consumer would,
+so it is also a check that the API is enough to run each domain from its files to its files.
+It has no dependency either: a small table-driven argument parser gives each command its
+options and its `--help`. Commands follow one pattern, `guide <domain> <action> [options]
+<files>`, with the same options for the same things everywhere (`-o`, `--json`, `--seed`,
+`--threads`, `--time-limit`, `-q`, `-v`) and the same exit status: 0 for a complete and legal
+result, 1 for an incomplete or illegal one, 2 for an error. The time limit is the engine's
+cancel flag set from a timer thread, so it stops negotiated-congestion routing (FPGA routing,
+multi-agent path finding) with the best result so far; PCB routing, the placers and ASIC routing
+have no cancel flag, and are bounded by iteration or expansion limits instead. There is no
+signal handler, since std has none, so Ctrl-C ends a run without writing anything.
+
+The examples in `examples/` stay what they were: research harnesses with every tuning knob,
+printing `key=value` lines that the scripts in `scripts/` parse. The tool exposes the settings
+a user needs, with the library's defaults.
+
 ## Target consumers
 
 Two existing crates are expected to adopt `guide`, and they constrain its design:

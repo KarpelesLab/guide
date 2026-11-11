@@ -5,7 +5,8 @@
 //!
 //! This is the harness for measuring the loop against the one-pass flow on the VTR
 //! benchmarks: see `scripts/vtr/loop-circuit.sh` and the section on the loop in
-//! `docs/benchmarks.md`.
+//! `docs/benchmarks.md`. `guide fpga flow` (the `cli` feature) places and then runs this loop,
+//! with the defaults.
 //!
 //! ```text
 //! cargo run --release --features fpga --example vtr_loop -- \

@@ -2,7 +2,8 @@
 //! writes the result as a VPR `.route` file.
 //!
 //! This is the harness for comparing `guide` with VPR on the VTR benchmarks: see
-//! `scripts/vtr/` and the FPGA routing section of `docs/benchmarks.md`.
+//! `scripts/vtr/` and the FPGA routing section of `docs/benchmarks.md`. To route a design
+//! with the defaults, `guide fpga route` (the `cli` feature) does the same.
 //!
 //! ```text
 //! cargo run --release --features fpga --example vtr_route -- \

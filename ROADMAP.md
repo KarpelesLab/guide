@@ -450,7 +450,15 @@ the first routing on the small boards.
   tracker's best known solutions.
 - ASIC global routing against the ISPD benchmarks (first results, below).
 - `nextpnr`/FPGA Interchange and IPC-2581 interop as demand dictates.
-- Command-line tool; API review and stabilization.
+- Command-line tool. **Done:** `guide`, behind the `cli` feature (`cargo install guide
+  --features cli`), with no dependency: `guide <domain> <action>` for `fpga route|place|flow`,
+  `pcb route|place|flow|drc`, `dsn route` (a drop-in for Freerouting in KiCad's DSN workflow),
+  `mapf solve` and `asic route|score`, each with `--help`, a JSON report, one meaning for exit
+  statuses, and a time limit where the engine can be cancelled
+  ([README](README.md#command-line-tool)). Left: a time limit or cancellation for PCB routing,
+  the placers and ASIC routing, which have no cancel flag yet; Ctrl-C handling, which needs a
+  signal handler std doesn't have; and progress within a run, not only between its phases.
+- API review and stabilization.
 
 **Exit (1.0):** published benchmark results in at least three domains; a documented,
 stable public API; a semver policy that covers result determinism.

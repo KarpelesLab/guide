@@ -2,7 +2,8 @@
 //! and writes the result as a VPR `.place` file.
 //!
 //! This is the harness for comparing `guide`'s placement with VPR's on the VTR benchmarks:
-//! see `scripts/vtr/` and the FPGA placement section of `docs/benchmarks.md`.
+//! see `scripts/vtr/` and the FPGA placement section of `docs/benchmarks.md`. To place a design
+//! with the defaults, `guide fpga place` (the `cli` feature) does the same.
 //!
 //! ```text
 //! cargo run --release --features fpga --example vtr_place -- \

@@ -33,6 +33,36 @@ All optional, so the default build has no dependencies:
 | `dsn` | Specctra DSN import and SES export (implies `pcb`) |
 | `mapf` | Multi-agent path finding on graphs and grids, and the MovingAI benchmarks |
 | `asic` | ASIC global routing: the ISPD 2007 and 2008 contests' designs and route files, and their scoring |
+| `cli` | The `guide` command-line tool, below; enables all of the above |
+
+## Command-line tool
+
+```sh
+cargo install guide --features cli
+```
+
+`guide <domain> <action> [options] <files>` runs each domain on its field's own files:
+
+| Command | Does |
+| --- | --- |
+| `guide pcb route board.kicad_pcb -o routed.kicad_pcb` | Routes what a KiCad board's tracks don't connect yet (`--strip`: everything), fills its zones, and writes the board back. The `.kicad_pro` beside it gives the rules |
+| `guide pcb place board.kicad_pcb -o placed.kicad_pcb` | Places the footprints that aren't locked or fixed |
+| `guide pcb flow board.kicad_pcb -o done.kicad_pcb` | Places and routes, then places again where routing found trouble |
+| `guide pcb drc board.kicad_pcb` | Checks clearances, holes, keepouts, mask bridges and connectivity, of a `.kicad_pcb` or a `.dsn` |
+| `guide dsn route board.dsn -o board.ses` | Routes a Specctra design into a session, in place of Freerouting: export the DSN from KiCad, import the session back. `-de`/`-do` are accepted, as Freerouting's |
+| `guide fpga route --arch arch.xml --rr-graph rr.xml --net c.net --place c.place -o c.route` | Timing-driven routing of a VPR design, to a `.route` file VPR loads |
+| `guide fpga place --arch arch.xml --rr-graph rr.xml --net c.net -o c.place` | Placement of a packed VPR netlist |
+| `guide fpga flow --arch arch.xml --rr-graph rr.xml --net c.net -o c.place --route-output c.route` | Both, placing again around what routing overused |
+| `guide mapf solve room.map room.scen --agents 100 -o plans.txt` | Multi-agent paths on a MovingAI map, checked, written as LaCAM writes them |
+| `guide asic route design.gr -o design.route` | ISPD 2007/2008 global routing, scored as `eval2008.pl` scores it; `guide asic score` scores any router's routes |
+
+Every command takes `--help`, `--json FILE` for a machine-readable report (`-` for standard
+output), `-q` and `-v`; those that use them take `--seed`, `--threads` (`-j`) and
+`--time-limit SECONDS`, after which routing stops with the best result so far. Results are the
+same for any thread count. The exit status is 0 for a complete and legal result, 1 for an
+incomplete or illegal one (nets unrouted, overuse, violations), and 2 for a wrong command line
+or an input that can't be read. There is no signal handler, so Ctrl-C ends a run at once,
+without writing anything: use `--time-limit` to stop early and keep the result.
 
 ## Why one engine?
 

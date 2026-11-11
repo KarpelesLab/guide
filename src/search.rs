@@ -172,6 +172,7 @@ impl<N> Target<N> {
 
 /// What may stop a [`Search::find_path_with`] before it reaches a target.
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct SearchLimits<'a> {
     /// How many expansions the search may make, re-expansions included. A search that can
     /// finish without another expansion still does, so zero allows a source that is also
@@ -201,6 +202,7 @@ impl Default for SearchLimits<'_> {
 ///
 /// It borrows the search's buffers when a path was found, like [`Found`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SearchOutcome<'a, N> {
     /// The cheapest path.
     Found(Found<'a, N>),
@@ -219,6 +221,7 @@ pub enum SearchOutcome<'a, N> {
 /// It borrows the search's buffers, so copy out what you need to keep before starting
 /// the next search.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Found<'a, N> {
     /// The nodes in order, from a source to a target. A source that is also the cheapest
     /// target gives a path of just that node.
@@ -229,6 +232,7 @@ pub struct Found<'a, N> {
 
 /// Counters for the most recent search, which are reset when the next one starts.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SearchStats {
     /// How many times a node was expanded, counting re-expansions of re-opened nodes.
     pub expanded: u64,
@@ -641,7 +645,8 @@ impl<S: RoutingSpace> Search<S> {
     /// assert_eq!(found.cost, Cost::from(5));
     ///
     /// // Three expansions cannot get that far, which says nothing about reachability.
-    /// let limits = SearchLimits { max_expansions: 3, cancel: None };
+    /// let mut limits = SearchLimits::NONE;
+    /// limits.max_expansions = 3;
     /// let outcome = search.find_path_with(&grid, NetId(0), source, targets, limits);
     /// assert_eq!(outcome, SearchOutcome::LimitReached);
     /// # Ok::<(), guide::space::grid::GridError>(())

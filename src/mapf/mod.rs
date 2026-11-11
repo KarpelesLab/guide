@@ -123,6 +123,7 @@ pub fn engine_options() -> EngineOptions<'static> {
 
 /// What one round of [`solve`] did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Round {
     /// Its horizon.
     pub horizon: u32,
@@ -138,6 +139,7 @@ pub struct Round {
 
 /// The result of [`solve`].
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Solution {
     /// One plan per agent, the vertex at each time from 0 to its last arrival on its goal, if
     /// every conflict was settled.

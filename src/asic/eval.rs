@@ -53,6 +53,7 @@ pub enum RouteFault {
 
 /// The scores of a set of routes.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Evaluation {
     /// The sum of all edges' overflows.
     pub total_overflow: u64,

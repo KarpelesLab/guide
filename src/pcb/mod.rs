@@ -473,6 +473,7 @@ pub struct Stats {
 
 /// The result of [`route`].
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Routed {
     /// The tracks added, all straight.
     pub tracks: Vec<Track>,

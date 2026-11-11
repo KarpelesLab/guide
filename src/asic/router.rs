@@ -130,6 +130,7 @@ impl Default for AsicOptions {
 
 /// What [`route_design`] found.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct AsicRouting {
     /// By net of the design, its wires and vias, empty for a net that needs none.
     pub routes: Vec<Vec<Segment>>,

@@ -266,6 +266,85 @@ impl Design {
             zones: board.routing.zones.clone(),
         }
     }
+
+    /// The design of a Specctra DSN board: every net with a name, at its class's track width
+    /// and via, the boundary as the board's edge, which copper keeps the board's clearance
+    /// from, and each plane with a net as a copper zone of that net, so that its net connects
+    /// to it as Freerouting's do. Enabled by the `dsn` feature.
+    ///
+    /// The wiring already in the file stays, as fixed copper: take the tracks and vias out
+    /// of [`board`](Design::board) to route those nets again. A DSN file has no differential
+    /// pairs, lengths, copper text or zone settings, so zones take KiCad's defaults for new
+    /// zones, or the board's clearance and track width where those are larger: a clearance of
+    /// 0.5 mm, a minimum width of 0.25 mm, and thermal reliefs with a gap of 0.5 mm and spokes
+    /// 0.5 mm wide. Those err on the side of fills that reach less than the board's own
+    /// zones will, once refilled, so that what routing joins to a zone stays joined.
+    #[cfg(feature = "dsn")]
+    pub fn from_dsn(board: &crate::dsn::DsnBoard) -> Design {
+        /// Clearance, minimum width, thermal gap and spoke width.
+        const ZONE_DEFAULTS: (i64, i64, i64, i64) = (500_000, 250_000, 500_000, 500_000);
+        let spec = board.rules.spec();
+        let nets = board
+            .nets
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                let net = Some(NetId(i as u32));
+                NetSpec {
+                    route: !name.is_empty(),
+                    track_width: board.rules.track_width(net, LayerId(0)),
+                    via: board.rules.via(net).map(|v| ViaSize {
+                        diameter: v.diameter(),
+                        drill: v.drill,
+                    }),
+                }
+            })
+            .collect();
+        let mut outline = Vec::new();
+        for ring in &board.boundary {
+            for (i, &a) in ring.iter().enumerate() {
+                let b = ring[(i + 1) % ring.len()];
+                if a != b
+                    && let Ok(edge) = Shape::track(a, b, 1)
+                {
+                    outline.push(edge);
+                }
+            }
+        }
+        let zones = board
+            .planes
+            .iter()
+            .filter(|p| p.net.is_some() && p.outline.len() >= 3)
+            .map(|p| CopperZone {
+                outline: p.outline.clone(),
+                holes: Vec::new(),
+                layers: crate::geom::LayerSet::EMPTY.with(p.layer),
+                net: p.net,
+                priority: 0,
+                clearance: spec.clearance.max(ZONE_DEFAULTS.0),
+                min_width: spec.track_width.max(ZONE_DEFAULTS.1),
+                connection: ZoneConnection::Thermal,
+                thermal_gap: ZONE_DEFAULTS.2,
+                spoke_width: ZONE_DEFAULTS.3,
+                islands: Islands::Remove,
+            })
+            .collect();
+        Design {
+            board: board.board.clone(),
+            rules: board.rules.clone(),
+            outline,
+            edge_clearance: spec.clearance,
+            nets,
+            obstacles: Vec::new(),
+            pairs: Vec::new(),
+            lengths: Vec::new(),
+            zones: Zones {
+                zones,
+                pads: Vec::new(),
+                keepouts: Vec::new(),
+            },
+        }
+    }
 }
 
 /// What [`route`] may do.

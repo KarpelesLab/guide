@@ -10,7 +10,7 @@ readme = "README.md"
 keywords = ["routing", "placement", "pcb", "fpga", "eda"]
 categories = ["algorithms", "science"]
 # The sample files are only used by tests, and some have licences of their own.
-exclude = [".github", "testdata"]
+exclude = [".github", "testdata", "scripts"]
 
 [package.metadata.docs.rs]
 all-features = true

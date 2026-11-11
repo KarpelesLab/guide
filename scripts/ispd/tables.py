@@ -79,13 +79,19 @@ def read(work, names):
     for name in names:
         log = Path(work) / f"{name}.log"
         err = Path(work) / f"{name}.err"
-        if not log.exists():
+        if not log.exists() or not log.read_text().strip():
             continue
         fields = dict(re.findall(r"(\w+)=(\S+)", log.read_text()))
-        if err.exists():
-            fields.update(re.findall(r"(\w+)=(\S+)", err.read_text().splitlines()[-1]))
+        lines = err.read_text().splitlines() if err.exists() else []
+        if lines:
+            fields.update(re.findall(r"(\w+)=(\S+)", lines[-1]))
         out[name] = fields
     return out
+
+
+def sep(value):
+    """A whole number with its thousands apart."""
+    return f"{int(value):,}".replace(",", " ")
 
 
 def geomean(values):
@@ -95,34 +101,54 @@ def geomean(values):
     return product ** (1.0 / len(values)) if values else float("nan")
 
 
+def ratio(ours, published):
+    """WL over a published WL, when both are free of overflow."""
+    tof, wl = ours
+    ptof, pwl = published
+    if tof == 0 and ptof == 0:
+        return wl / pwl
+    return None
+
+
 def ispd08(runs):
-    print("| Benchmark | TOF | MOF | WL | Wire | Vias | Iterations | Wall s | CPU s "
-          "| NTHU-Route TOF, WL | WL / NTHU-Route | SGR TOF, WL | WL / SGR | WL / FastRoute 4.1 |")
-    print("| --- " * 15 + "|")
+    print("| Benchmark | TOF | MOF | WL | Wire | Vias | Iterations | Wall s | CPU s |")
+    print("| --- " * 9 + "|")
+    for name in ISPD08:
+        if name not in runs:
+            continue
+        r = runs[name]
+        print(f"| {name} | {r['tof']} | {r['mof']} | {sep(r['wl'])} | {sep(r['wire'])} "
+              f"| {sep(r['vias'])} | {r['iterations']} | {float(r['time']):.0f} "
+              f"| {float(r['cpu']):.0f} |")
+    print()
+    print("| Benchmark | TOF: guide | NTHU-Route (contest) | Best of contest | SGR | FastRoute 4.1 "
+          "| WL / NTHU-Route | WL / SGR | WL / FastRoute 4.1 | Seconds: guide, NTHU-Route, SGR |")
+    print("| --- " * 10 + "|")
     ratios = {"nthu": [], "sgr": [], "fr": []}
     free = 0
     for name in ISPD08:
         if name not in runs:
             continue
         r = runs[name]
-        tof, wl = int(r["tof"]), int(r["wl"])
-        free += tof == 0
+        ours = (int(r["tof"]), int(r["wl"]))
+        free += ours[0] == 0
         nthu, sgr, fr = CONTEST[name], SGR[name], FASTROUTE41[name]
+        best = CONTEST_BEST_TOF.get(name, 0)
         cells = []
-        for key, (ptof, pwl) in (("nthu", (nthu[0], nthu[1])),
-                                 ("sgr", (sgr[0], sgr[1] * 1e5)),
-                                 ("fr", (fr[0], fr[1] * 1e5))):
-            if ptof == 0 and tof == 0:
-                ratios[key].append(wl / pwl)
-                cells.append(f"{wl / pwl:.3f}")
-            else:
+        for key, published in (("nthu", (nthu[0], nthu[1])),
+                               ("sgr", (sgr[0], sgr[1] * 1e5)),
+                               ("fr", (fr[0], fr[1] * 1e5))):
+            q = ratio(ours, published)
+            if q is None:
                 cells.append("")
-        print(f"| {name} | {tof} | {r['mof']} | {wl} | {r['wire']} | {r['vias']} "
-              f"| {r['iterations']} | {float(r['time']):.0f} | {float(r['cpu']):.0f} "
-              f"| {nthu[0]}, {nthu[1]} | {cells[0]} | {sgr[0]}, {sgr[1]:.2f}e5 | {cells[1]} "
-              f"| {cells[2]} |")
+            else:
+                ratios[key].append(q)
+                cells.append(f"{q:.3f}")
+        print(f"| {name} | {ours[0]} | {nthu[0]} | {best} | {sgr[0]} | {fr[0]} "
+              f"| {cells[0]} | {cells[1]} | {cells[2]} "
+              f"| {float(r['time']):.0f}, {nthu[2]}, {sgr[2] * 60:.0f} |")
     print()
-    print(f"Overflow-free: {free} of {len(runs)}")
+    print(f"Overflow-free: {free} of {len(runs)}; NTHU-Route 12, SGR 12, FastRoute 4.1 12")
     for key, label in (("nthu", "NTHU-Route (contest)"), ("sgr", "NCTU-GR 2.0 SGR"),
                        ("fr", "FastRoute 4.1")):
         v = ratios[key]
@@ -133,22 +159,25 @@ def ispd08(runs):
 
 def ispd07(runs, table):
     print("| Benchmark | TOF | MOF | WL | Wire | Vias | Iterations | Wall s | CPU s "
-          "| NTHU-Route 2.0 TOF, WL | WL / NTHU-Route 2.0 |")
+          "| NTHU-Route 2.0: TOF, WL, min | WL / NTHU-Route 2.0 |")
     print("| --- " * 11 + "|")
     ratios = []
     for name in ISPD07:
         if name not in runs:
             continue
         r = runs[name]
-        tof, wl = int(r["tof"]), int(r["wl"])
-        ptof, pwl, _ = table[name]
+        ours = (int(r["tof"]), int(r["wl"]))
+        ptof, pwl, minutes = table[name]
+        q = ratio(ours, (ptof, pwl * 1e5))
         cell = ""
-        if tof == 0 and ptof == 0:
-            ratios.append(wl / (pwl * 1e5))
-            cell = f"{wl / (pwl * 1e5):.3f}"
-        print(f"| {name} | {tof} | {r['mof']} | {wl} | {r['wire']} | {r['vias']} "
-              f"| {r['iterations']} | {float(r['time']):.0f} | {float(r['cpu']):.0f} "
-              f"| {ptof}, {pwl:.2f}e5 | {cell} |")
+        if q is not None:
+            ratios.append(q)
+            cell = f"{q:.3f}"
+        iterations = r.get("iterations", "")
+        wall = f"{float(r['time']):.0f}" if "time" in r else ""
+        cpu = f"{float(r['cpu']):.0f}" if "cpu" in r else ""
+        print(f"| {name} | {r['tof']} | {r['mof']} | {sep(r['wl'])} | {sep(r['wire'])} "
+              f"| {sep(r['vias'])} | {iterations} | {wall} | {cpu} | {ptof}, {pwl:.2f}e5, {minutes} | {cell} |")
     print()
     if ratios:
         print(f"Wirelength / NTHU-Route 2.0, geometric mean over {len(ratios)}: "

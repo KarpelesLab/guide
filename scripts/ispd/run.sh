@@ -8,6 +8,11 @@
 #
 #     SUITE=ispd07-2d scripts/ispd/run.sh DIR WORK   # the eight 2D benchmarks of 2007
 #     SUITE=ispd07-3d scripts/ispd/run.sh DIR WORK   # the eight 3D ones, scored as in 2007
+#     SUITE=ispd07-3d ROUTES=WORK08 scripts/ispd/run.sh DIR WORK
+#
+# The 3D designs of 2007 are those of 2008, and routing does not depend on how vias are
+# scored, so ROUTES can name the WORK of an ISPD 2008 run, whose route files are then scored
+# with 2007's via cost instead of routing again.
 #
 # NAME is a benchmark's name without its suffix, such as adaptec1. Benchmarks run $JOBS at a
 # time (default 1), each on $THREADS threads (default 16). GUIDE_ARGS passes more options to
@@ -69,6 +74,12 @@ run_one() {
     if [ -z "$file" ]; then
         echo "$name: no $PATTERN benchmark in $DIR/bench" >&2
         return 1
+    fi
+    if [ -n "${ROUTES:-}" ]; then
+        "$BIN" "$file" --score "$ROUTES/$name.route" --via-cost "$VIA" \
+            > "$WORK/$name.log" 2> "$WORK/$name.err"
+        echo "$name: $(cat "$WORK/$name.log")"
+        return
     fi
     # shellcheck disable=SC2086
     /usr/bin/time -f "time=%e cpu=%U maxrss_kb=%M" "$BIN" "$file" --threads "$THREADS" \

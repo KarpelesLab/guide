@@ -46,7 +46,7 @@ jobs:
         if: runner.os == 'Linux' # feature gating is platform-independent
         run: |
           cargo clippy --all-targets -- -D warnings
-          for feature in fpga pcb kicad dsn mapf asic; do
+          for feature in fpga pcb kicad dsn mapf asic cli; do
             cargo clippy --all-targets --features "$feature" -- -D warnings
           done
 

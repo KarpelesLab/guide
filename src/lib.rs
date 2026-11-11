@@ -19,6 +19,9 @@
 //! engine through a time-expanded space, and the `asic` feature ASIC global routing, `asic`, on
 //! the ISPD contests' designs.
 //!
+//! The `cli` feature builds the `guide` command-line tool, with every domain: `cargo install
+//! guide --features cli`. A library user needs none of it.
+//!
 //! [roadmap]: https://github.com/KarpelesLab/guide/blob/master/ROADMAP.md
 //! [architecture notes]: https://github.com/KarpelesLab/guide/blob/master/docs/architecture.md
 

@@ -448,12 +448,24 @@ the first routing on the small boards.
   LaCAM3 is several times faster to a first solution on crowded maps. Left: larger maps,
   where safe-interval path planning would likely be needed, the even scenarios, and the
   tracker's best known solutions.
-- ASIC global routing against the ISPD benchmarks.
+- ASIC global routing against the ISPD benchmarks (first results, below).
 - `nextpnr`/FPGA Interchange and IPC-2581 interop as demand dictates.
 - Command-line tool; API review and stabilization.
 
 **Exit (1.0):** published benchmark results in at least three domains; a documented,
 stable public API; a semver policy that covers result determinism.
+
+ASIC global routing has its first results ([benchmarks](docs/benchmarks.md#asic-global-routing-against-the-ispd-contests)):
+the `asic` feature reads the ISPD 2007 and 2008 contests' designs, routes them with the engine,
+pattern routes and layer assignment, writes their route files and scores them as the contest's
+own script does, which agrees with `eval2008.pl` on all of the 2008 routes. Of the ISPD 2008
+designs, 9 of the 12 that the best routers route free of overflow are free of it, with 2.9% more
+wirelength than the contest's winner, 4.0% more than NCTU-GR 2.0 and 3.0% more than FastRoute
+4.1, in seconds to minutes on 12 threads. Left for later: the rest, bigblue2, newblue1 and
+newblue5, where negotiation stalls with a few to a few hundred edges one net over; the four
+designs that no router solves, where `guide` is at the bottom of the contest's range or below,
+and newblue3 and newblue7 take hours; and vias, where the gap to the published routers mostly
+is.
 
 ## Not yet scheduled
 

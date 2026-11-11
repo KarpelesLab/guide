@@ -14,7 +14,8 @@ checked by KiCad, and [their zones' fills](#pcb-zones-and-planes) against KiCad'
 [engineering changes](#engineering-changes), routed and placed again incrementally, on generated
 problems and VTR's circuits, and [placement and routing in a
 loop](#pcb-placement-and-routing-in-a-loop) on the curated boards, with engineering changes and
-pin swaps there.
+pin swaps there, and [ASIC global routing](#asic-global-routing-against-the-ispd-contests) on the
+ISPD 2007 and 2008 contests' designs, against their published results.
 [Placement](#placement-on-synthetic-problems) is also measured on synthetic problems whose
 optimum is known. Outside electronics, [multi-agent path
 finding](#multi-agent-path-finding-on-the-movingai-benchmarks) is measured on the MovingAI
@@ -553,7 +554,7 @@ done so far are below. There are no results for the others yet.
 | PCB DSN import, SES export | KiCad 10.0.3's reading of the same boards, and its session import | The same boards | [Done](#pcb-dsn-designs-against-kicad-boards) |
 | PCB routing | Freerouting 2.5.0, both checked by KiCad 10.0.3 | The same boards | [First results](#pcb-routing-against-freerouting) |
 | PCB placement | Hand-placed originals, both routed by `guide` and checked by KiCad 10.0.3 | The same boards | [Done](#pcb-placement-of-the-curated-boards) |
-| ASIC global routing | Published contest results | ISPD 2007/2008 | Not yet done |
+| ASIC global routing | Published contest results, NTHU-Route 2.0, NCTU-GR 2.0, FastRoute 4.1 | ISPD 2007/2008 | [Done](#asic-global-routing-against-the-ispd-contests) |
 
 ## FPGA routing against VPR
 
@@ -4542,3 +4543,254 @@ first step, which was timed alone.
 - **Sum of costs only.** `guide` reports the makespan but does not minimize it.
 - **Other variants** of the problem, such as agents that disappear at their goals, k-robust
   plans, or lifelong MAPF, are not modelled.
+
+## ASIC global routing against the ISPD contests
+
+M10's ASIC item: global routing of the ISPD 2008 contest's 16 designs, and of the ISPD 2007
+contest's 2D and 3D ones, against the contests' published results and the routers that came
+after them, by the contests' own measures: total overflow (TOF), maximum overflow (MOF), and
+wirelength (WL), which counts each edge between two cells that wires cross and, for each layer
+a via spans, 1 in 2008 and 3 in 2007. Overflow ranks first: a router with less total overflow
+wins whatever its wirelength. Measured on 2026-11-11 with rustc 1.97.1, on commit `86023ce`, the
+same code as `122dc49` before it was rebased.
+
+### How
+
+```text
+scripts/ispd/fetch.sh DIR                       # the benchmarks and the contests' scripts
+scripts/ispd/run.sh DIR WORK                    # route and score the 16 ISPD 2008 designs
+python3 scripts/ispd/tables.py WORK             # the table below
+SUITE=ispd07-2d scripts/ispd/run.sh DIR WORK07  # and the 2007 ones
+```
+
+- **The designs** are downloaded from the contests' pages at ispd.cc by
+  [`scripts/ispd/fetch.sh`](../scripts/ispd/fetch.sh), which also fetches `eval2008.pl` and the
+  2007 contest's scripts. The pages post them for research use and state no licence, so they
+  are not copied here. The 2007 contest had adaptec1 to 5 and newblue1 to 3, each as a 2D
+  problem of two layers and a 3D one of six, and 2008 reused the eight 3D ones and added bigblue1
+  to 4 and newblue4 to 7. Every net is of width 1 on layers of width 1 and spacing 1, so each
+  net takes 2 of an edge's capacity, and every pin is on layer 1.
+- **The router** is [`asic::route_design`](../src/asic/router.rs) with its defaults, through
+  [`examples/ispd_route.rs`](../examples/ispd_route.rs), which writes the contest's route format.
+  It routes all nets of at most 1000 pins whose pins are in more than one cell; the contests
+  require no others.
+- **Scoring** is [`asic::evaluate`](../src/asic/eval.rs), which follows `eval2008.pl` rule by
+  rule: usage of the net's width or the layer's, whichever is more, plus spacing, for each edge
+  each wire crosses; overflow in those units, so that one net too many on an edge is an overflow
+  of 2; and the script's checks that every segment is connected to the net's first pin and every
+  pin is reached. `eval2008.pl` (perl 5.44) printed the same total overflow, maximum overflow
+  and wirelength, to the unit, as the evaluator for every file it was given: the handmade
+  cases of [`src/asic/tests.rs`](../src/asic/tests.rs), faults included, and the route files
+  of the 14 ISPD 2008 designs below. The 2007 contest's script, `grc_eval`, counts 3 for each via
+  and is scored here as `eval2008.pl` with that via cost; its other rules were not reproduced.
+- **Published results** are from the papers' tables as printed, with their machines: the 2008
+  contest's final results (Sze, Nam and Yildiz, ISPD 2008 slides, `S7-3.pdf`): wall time on a
+  2.8 GHz Opteron 8220, at most 4 threads; NTHU-Route 2.0 (Chang, Lee and Wang, ICCAD 2008,
+  Tables III and IV), on a 2.2 GHz Opteron; NCTU-GR 2.0 (Liu, Kao, Li and Chao, IEEE TCAD 32(5),
+  2013, Tables V and VI), whose single-threaded router SGR and FastRoute 4.1 were run on the same
+  3.0 GHz Xeon. NTHU-Route, an earlier version of NTHU-Route 2.0, won the 2008 contest.
+- **Runtime** here is wall time and CPU time of the whole run, reading and scoring included, on
+  12 threads each of an AMD Ryzen Threadripper PRO 9995WX's 192, with all 16 designs routed at
+  once and the 2007 ones alongside part of the time, so that they shared the machine. It is not
+  comparable with the published times, which are of other machines from 2008 to 2013 and
+  mostly one thread.
+
+The flow is the one most of the contests' routers share, built on `guide`'s engine:
+
+1. **The plane.** Each layer's capacity becomes tracks, its capacity over a wire's width and
+   spacing, and the tracks of all layers are added up onto one plane, an `asic::PlanarSpace`.
+   Its nodes are cells twice over, for arriving along a row and along a column, so that a turn
+   can cost 1 more than a straight step: a turn on the plane is a via once layers are given.
+2. **Pattern routes.** Each net's pins are joined by a rectilinear minimum spanning tree, and
+   each of its edges is laid as whichever L shape costs less against the nets before, with the
+   net's own edges free, so that its Ls overlap where they can; nets go shortest first. These
+   are the engine's seeds (`Engine::seed_routes`), so that it only routes again what overflows.
+3. **Negotiation.** The engine routes again the nets on edges that overflow, by A\* within a box
+   around each net's pins, 10 cells larger, that grows by 5 each iteration the net ends on an
+   edge that overflows, in batches of 32 on as many threads as given, with
+   `EngineOptions::crowding` at 1: a step into an edge costs 1 more for each layer of fullness
+   squared, so that nets keep away from full edges while there is room elsewhere.
+4. **Layers.** Each net's tree is given layers exactly for the fewest vias that fit, by dynamic
+   programming over the tree as in COLA (Lee and Wang, 2008), nets with the least wire per pin
+   first; nets on an edge that still overflows on its layer are given layers again with that
+   edge dearer, up to 4 times.
+
+### Results: ISPD 2008
+
+Each design routed once with the defaults, scored by `asic::evaluate`. Wire is the length of
+wires alone and vias the layers they span, so that WL is their sum:
+
+| Benchmark | TOF | MOF | WL | Wire | Vias | Iterations | Wall s | CPU s |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| adaptec1 | 0 | 0 | 5 534 077 | 3 676 020 | 1 858 057 | 10 | 103 | 534 |
+| adaptec2 | 0 | 0 | 5 375 045 | 3 372 221 | 2 002 824 | 10 | 26 | 109 |
+| adaptec3 | 0 | 0 | 13 358 999 | 9 737 623 | 3 621 376 | 7 | 157 | 668 |
+| adaptec4 | 0 | 0 | 12 384 400 | 9 045 987 | 3 338 413 | 5 | 30 | 92 |
+| adaptec5 | 0 | 0 | 16 094 152 | 10 574 677 | 5 519 475 | 16 | 304 | 1517 |
+| bigblue1 | 0 | 0 | 5 914 908 | 3 885 687 | 2 029 221 | 16 | 233 | 1112 |
+| bigblue2 | 110 | 2 | 9 211 740 | 4 907 002 | 4 304 738 | 100 | 974 | 4225 |
+| bigblue3 | 0 | 0 | 13 406 848 | 7 951 250 | 5 455 598 | 15 | 69 | 236 |
+| bigblue4 | 444 | 4 | 23 594 734 | 12 272 531 | 11 322 203 | 100 | 7340 | 56770 |
+| newblue1 | 416 | 2 | 4 754 960 | 2 454 233 | 2 300 727 | 100 | 2601 | 15241 |
+| newblue2 | 0 | 0 | 7 722 773 | 4 688 472 | 3 034 301 | 5 | 11 | 23 |
+| newblue4 | 332 | 2 | 13 233 056 | 8 370 926 | 4 862 130 | 100 | 2831 | 19672 |
+| newblue5 | 14 | 2 | 23 866 018 | 15 043 635 | 8 822 383 | 100 | 727 | 4589 |
+| newblue6 | 0 | 0 | 18 350 549 | 10 496 677 | 7 853 872 | 14 | 177 | 834 |
+
+Against the published results, the contest's winner, NCTU-GR 2.0's single-threaded router SGR
+and FastRoute 4.1 as NCTU-GR 2.0 ran it. "Best of contest" is the least total overflow of any
+entrant, and wirelength is only compared where both are free of overflow; seconds are wall
+time here and in the contest, and SGR's minutes:
+
+| Benchmark | TOF: guide | NTHU-Route (contest) | Best of contest | SGR | FastRoute 4.1 | WL / NTHU-Route | WL / SGR | WL / FastRoute 4.1 | Seconds: guide, NTHU-Route, SGR |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| adaptec1 | 0 | 0 | 0 | 0 | 0 | 1.034 | 1.043 | 1.030 | 103, 475, 151 |
+| adaptec2 | 0 | 0 | 0 | 0 | 0 | 1.028 | 1.043 | 1.030 | 26, 104, 39 |
+| adaptec3 | 0 | 0 | 0 | 0 | 0 | 1.019 | 1.034 | 1.021 | 157, 481, 204 |
+| adaptec4 | 0 | 0 | 0 | 0 | 0 | 1.017 | 1.027 | 1.021 | 30, 135, 74 |
+| adaptec5 | 0 | 0 | 0 | 0 | 0 | 1.035 | 1.045 | 1.033 | 304, 1030, 362 |
+| bigblue1 | 0 | 0 | 0 | 0 | 0 | 1.050 | 1.051 | 1.044 | 233, 586, 245 |
+| bigblue2 | 110 | 0 | 0 | 0 | 0 |  |  |  | 974, 594, 253 |
+| bigblue3 | 0 | 0 | 0 | 0 | 0 | 1.025 | 1.036 | 1.031 | 69, 259, 115 |
+| bigblue4 | 444 | 182 | 182 | 194 | 130 |  |  |  | 7340, 7533, 3614 |
+| newblue1 | 416 | 0 | 0 | 0 | 0 |  |  |  | 2601, 306, 142 |
+| newblue2 | 0 | 0 | 0 | 0 | 0 | 1.020 | 1.036 | 1.028 | 11, 67, 38 |
+| newblue4 | 332 | 152 | 142 | 144 | 136 |  |  |  | 2831, 4023, 1040 |
+| newblue5 | 14 | 0 | 0 | 0 | 0 |  |  |  | 727, 854, 316 |
+| newblue6 | 0 | 0 | 0 | 0 | 0 | 1.037 | 1.046 | 1.032 | 177, 818, 266 |
+
+- **Overflow.** 9 of the 12 designs that NTHU-Route, SGR and FastRoute 4.1 all route free of
+  overflow are free of it here. bigblue2, newblue1 and newblue5 are left with 110, 416 and 14:
+  the contest's six leading entrants all solved newblue5, four of them bigblue2, and only the
+  winner newblue1, where the next five left 6 to 76. On the four that nobody solves, bigblue4's
+  444 is within the contest's range, 182 to 472, newblue4's 332 is above it, 142 to 262, and
+  newblue3 and newblue7 had not finished their 100 iterations after 5 hours 40 minutes each, and
+  are left out of the tables rather than guessed at. So by the contest's ranking, total overflow
+  first, `guide` would have placed near the bottom of those six on the designs that are hard,
+  and behind them on wirelength on the rest.
+- **Wirelength**, where both are free of overflow, is 2.9% above the contest's winner over the
+  nine, by geometric mean, 4.0% above SGR and 3.0% above FastRoute 4.1, from 1.7% to 5.1% each.
+  FastRoute 4.0's paper gives wire and vias apart for two of them: against it, bigblue1 has 2.4%
+  more wire and 2.0% more vias here, and bigblue3 0.8% more wire and 5.3% more vias.
+- **Runtime.** On 12 threads, the nine took 11 s to 5 minutes, and 23 to 1517 s of CPU time,
+  where SGR took 38 to 362 s on one thread of a 3.0 GHz Xeon from 2012: from 0.6 to 4.5 times
+  its time in CPU seconds, on a newer machine. Designs that do not converge run all 100
+  iterations, with boxes ever larger, which took from 12 minutes to more than 5 hours, for
+  newblue3 and newblue7, which had not finished.
+
+### Results: ISPD 2007
+
+The 2007 contest's 3D designs are 2008's first eight, and routing does not depend on how vias
+are scored, so the 3D results are the 2008 runs scored with 3 for each via. The 2D designs
+are the same nets on two layers, horizontal on layer 1 and vertical on layer 2, with the same
+capacities added up; they route the same on the plane, and differ in their vias. Against
+NTHU-Route 2.0's tables, the best published on these:
+
+2D, two layers, as routed:
+
+| Benchmark | TOF | MOF | WL | Wire | Vias | Iterations | Wall s | CPU s | NTHU-Route 2.0: TOF, WL, min | WL / NTHU-Route 2.0 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| adaptec1 | 0 | 0 | 5 849 517 | 3 676 020 | 724 499 | 10 | 105 | 547 | 0, 55.91e5, 9.7 | 1.046 |
+| adaptec2 | 0 | 0 | 5 542 829 | 3 372 221 | 723 536 | 10 | 27 | 115 | 0, 54.01e5, 1.9 | 1.026 |
+| adaptec3 | 0 | 0 | 13 717 969 | 9 737 623 | 1 326 782 | 7 | 159 | 684 | 0, 134.39e5, 10.3 | 1.021 |
+| adaptec4 | 0 | 0 | 12 992 187 | 9 045 987 | 1 315 400 | 5 | 31 | 97 | 0, 127.81e5, 2.2 | 1.017 |
+| adaptec5 | 0 | 0 | 16 397 923 | 10 574 677 | 1 941 082 | 16 | 290 | 1463 | 0, 157.03e5, 20.5 | 1.044 |
+| newblue1 | 416 | 2 | 4 921 100 | 2 454 233 | 822 289 | 100 | 2568 | 15029 | 0, 48.60e5, 5.5 |  |
+| newblue2 | 0 | 0 | 8 042 412 | 4 688 472 | 1 117 980 | 5 | 11 | 24 | 0, 78.54e5, 1.1 | 1.024 |
+
+3D, six layers: the 2008 routes, scored with 3 for each via, so that iterations and times are
+in the 2008 table:
+
+| Benchmark | TOF | MOF | WL | Wire | Vias | Iterations | Wall s | CPU s | NTHU-Route 2.0: TOF, WL, min | WL / NTHU-Route 2.0 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| adaptec1 | 0 | 0 | 9 250 191 | 3 676 020 | 1 858 057 |  |  |  | 0, 88.81e5, 10.0 | 1.042 |
+| adaptec2 | 0 | 0 | 9 380 693 | 3 372 221 | 2 002 824 |  |  |  | 0, 90.88e5, 2.1 | 1.032 |
+| adaptec3 | 0 | 0 | 20 601 751 | 9 737 623 | 3 621 376 |  |  |  | 0, 200.84e5, 10.9 | 1.026 |
+| adaptec4 | 0 | 0 | 19 061 226 | 9 045 987 | 3 338 413 |  |  |  | 0, 185.99e5, 2.6 | 1.025 |
+| adaptec5 | 0 | 0 | 27 133 102 | 10 574 677 | 5 519 475 |  |  |  | 0, 260.18e5, 23.0 | 1.043 |
+| newblue1 | 416 | 2 | 9 356 414 | 2 454 233 | 2 300 727 |  |  |  | 0, 90.96e5, 6.2 |  |
+| newblue2 | 0 | 0 | 13 791 375 | 4 688 472 | 3 034 301 |  |  |  | 0, 134.63e5, 1.2 | 1.024 |
+
+Overflow is as in 2008: newblue1 is left with 416, which NTHU-Route 2.0 routes free of overflow,
+and newblue3, which no router solves, has no result, as its runs had not finished. Wirelength is
+2.4% to 4.3% above NTHU-Route 2.0's in 3D, 3.2% by geometric mean, where vias count three times,
+and 1.7% to 4.6% in 2D, 3.0% by geometric mean.
+
+### What it took
+
+On adaptec2, from the first version to the defaults, each step in turn, on 24 to 48 threads of
+a machine shared with the other runs, so that the times are rough:
+
+| Version | TOF | WL | Wire | Vias | Iterations | Expansions | Route s |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Maze routing alone, batches of 64, no boxes | 4 | 6 119 165 | 3 567 851 | 2 551 314 | 100 | 5.74e9 | 177 |
+| Boxes 10 cells beyond the pins, batches of 16 | 0 | 6 147 473 | 3 583 444 | 2 564 029 | 72 | 1.77e9 | 146 |
+| A turn costs 1 | 0 | 5 729 581 | 3 505 618 | 2 223 963 | 59 | 1.02e9 | 83 |
+| Pattern routes as seeds | 0 | 5 487 121 | 3 346 520 | 2 140 601 | 47 | 0.64e9 | 53 |
+| Layers given in order of wire per pin, not of length | 0 | 5 374 857 | 3 346 520 | 2 028 337 | 47 | 0.64e9 | 59 |
+| `crowding` 1, batches of 32: the defaults | 0 | 5 375 045 | 3 372 221 | 2 002 824 | 10 | 0.38e9 | 25 |
+
+- **Turns.** Maze routes take any of the many equally short paths, and a staircase has a turn,
+  and so a via, at every step. Pricing a turn at 1 halved the cells where wires turn, from
+  757 000 to 442 000, and took 13% off the vias. 2 and 3 instead of 1 changed the wirelength by
+  less than 0.2% either way, on adaptec2 and newblue2.
+- **Pattern routes** gave 4.5% less wire than maze routing from nothing, and fewer turns again.
+- **Layer order** matters: nets in order of length, shortest first, gave 2.14 million vias;
+  longest first 2.80 million; by congestion, most congested first, 2.42 million; by pins, fewest
+  first, 2.31 million; by wire per pin, least first, 2.03 million. Assigning every net again
+  against all the others afterwards changed nothing, as no net can do better than its exact
+  assignment against the rest. Negotiating layers instead, letting low layers overflow at first
+  at a rising price, was far worse on newblue2: 4.33 million vias against 3.03 million.
+- **Crowding.** Plain negotiation only prices an edge once it overflows, and on these grids,
+  with 30 to 40 tracks to an edge, the first routes overflow thousands of edges by a little, and
+  the last few take tens of iterations. With `crowding` at 1, adaptec2 converged in 10 iterations
+  rather than 51, for the same wirelength: 0.7% more wire and 1.3% fewer vias. At 0.5 it took 29
+  iterations, for 0.2% less, and at 2 and 4 it took 10, for 0.7% and 1.9% more.
+- **Batches and threads** change results, as on FPGAs, and late in a run nets that fight over
+  the same edge move all at once in a batch. Before crowding, batches of 64 left an edge
+  overflowing on adaptec2 after 100 iterations where 32 converged in 51.
+- **Weighted A\*** (`EngineOptions::bound_weight` 1.2, 1.5, 2) took 0.9, 1.06 and 1.9 times the
+  expansions on adaptec1: with the node re-expansions that an inconsistent bound brings, it does
+  not pay here.
+
+#### What did not converge
+
+The negotiation stalls with a few hundred edges overflowing by one net each on bigblue2,
+newblue1, newblue4 and bigblue4, and a few on newblue5, and runs to its 100 iterations, each
+slower than the last as the boxes of the nets on those edges grow: bigblue4 took 2 hours, and
+newblue3 and newblue7 had not finished after more than 5.
+
+The overflow left on newblue1 is in one region of about 40 by 40 cells, of 23 pins to a cell, on
+edges of 31 tracks that each hold 32 nets: the nets that fill the region never move, as
+negotiation only routes again the nets on an edge that overflows. These were tried on newblue1,
+bigblue2 and newblue5, each against the defaults at the same iteration, and none was kept:
+
+- **Ripping up the nets on full edges near the overflow as well**, within 1 or 2 cells, through
+  an engine method added for it and taken out again, so that they could make room, with their
+  boxes grown: 430 edges overflowing on newblue1 after 13
+  iterations against 482, 108 on bigblue2 after 29 against 135, and 66 on newblue5 after 16
+  against 51, for 1.5 to 2 times the time of an iteration.
+- **Raising `crowding` each iteration**, by 1.3 or 1.5 times from the third or fifth, as
+  NTHU-Route 2.0 lowers its base cost over the iterations so that nets take longer ways round
+  full regions: 339 and 303 edges overflowing on newblue1 after 27 and 28 iterations against 368
+  and 375, and with ripping up as well, on bigblue2, 144 after 17 against 159.
+- **Batches of 1**, so that nets on the same edge do not all move at once, were not the cure
+  either: before crowding, with batches of 1 throughout, adaptec2 still had 3 edges
+  overflowing after 100 iterations.
+
+None got any of the three closer to no overflow, and each cost more time.
+
+### What this does not show
+
+- **One run each, with one set of options**, as the contest required. Batches change results,
+  so another batch size or thread count than these would give other numbers, by about as much
+  as the differences between options above.
+- **Runtimes are not comparable** with the published ones: other machines, years apart, and
+  mostly one thread against many here. What can be compared is the work: the expansions are in
+  the logs.
+- **2007 is scored by eval2008.pl's rules** with 2007's via cost, not by `grc_eval`, whose other
+  rules, such as counting a via's usage, were not reproduced.
+- **No detailed routing**, and nothing of what makes a global route good for it beyond overflow
+  and length: pin access, track assignment, local congestion inside cells.
+- **`EngineOptions::crowding` was made for this domain.** It is general, and off unless set,
+  but has only been measured here.

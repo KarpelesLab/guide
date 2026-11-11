@@ -14,7 +14,7 @@ domain-specific. PCB, FPGA and multi-agent path finding are implemented; see the
 | Placement | Components | Logic to sites | Standard cells, macros | Task assignment | Initial qubit layout |
 | Fixed items | Connectors, holes | I/O, hard blocks | Macros, pads | Obstacles | Device topology |
 | Main objective | Completion, DRC-clean, signal integrity | Critical-path delay | Timing, DRC-clean, wirelength | Makespan, total cost | Gate count, fidelity |
-| Roadmap priority | Primary | Primary | Later | Implemented (`mapf`) | Exploratory |
+| Roadmap priority | Primary | Primary | Global routing implemented (`asic`) | Implemented (`mapf`) | Exploratory |
 
 ## PCB
 
@@ -139,6 +139,34 @@ routing adds track assignment, complex design rules at advanced nodes, and pin a
 Global routing and placement are realistic targets, given the ISPD benchmarks. A
 signoff-grade advanced-node detailed router is not a goal for now. Interchange would
 be LEF/DEF.
+
+**Where it stands.** The `asic` feature does global routing on the ISPD 2007 and 2008 contests'
+problems: it reads their designs (`asic::read_design`), routes them (`asic::route_design`),
+writes routes in their format, and scores routes from any router as the 2008 contest's
+`eval2008.pl` does (`asic::evaluate`), which agrees with the script on every file both have
+scored. The flow is the one most of the contests' routers use:
+
+- **The plane.** Each layer's capacity becomes tracks, and the layers are added up onto one
+  plane, an `asic::PlanarSpace` whose nodes are cells, twice over, for arriving along a row or a
+  column, so that a turn, which takes a via, can cost more than a straight step.
+- **Pattern routes first.** Each net starts from L shapes along a spanning tree of its pins,
+  sharing what they can, against the use of the nets before it: `seed_routes`, so that the
+  engine only routes again what overflows.
+- **The engine negotiates the rest**, by maze routing within a box around each net's pins that
+  grows while the net stays on an edge that overflows, with `EngineOptions::crowding` pricing
+  edges as they fill, which is what made the negotiation converge in a few iterations, not
+  tens.
+- **Layers** are then given to each net's tree exactly for the fewest vias that fit, by dynamic
+  programming over the tree as in COLA, nets with the least wire per pin first.
+
+Nothing of the engine or search code is specific to it: the domain is the space, the pattern
+routes, the layer assignment and the file formats. The engine gained one option for it,
+`EngineOptions::crowding`, off by default. The
+[results](benchmarks.md#asic-global-routing-against-the-ispd-contests) compare it with the
+contests' winners and later routers: on the ISPD 2008 designs, 9 of the 12 that they route free
+of overflow are free of it here, with 2.9% more wirelength than the contest's winner and 4.0%
+more than NCTU-GR 2.0. The other three stall with a few to a few hundred edges one net over, and
+on the four that no router solves, `guide` leaves more overflow than the best of them.
 
 ## Multi-agent path finding
 

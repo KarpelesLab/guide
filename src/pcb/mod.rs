@@ -27,7 +27,7 @@
 //!    if it has any, as one terminal, which also holds places in that fill near each of the
 //!    net's other pads where a via fits. So routing it is a stub from each other pad to the
 //!    fill, a track and a via, rather than tracks across the board. Other nets' tracks pay
-//!    more for their length inside another net's plane, [`Options::plane_cost`].
+//!    more for their length inside another net's plane, [`RouteOptions::plane_cost`].
 //! 1. **Global routing.** The board is cut into square tiles on each layer, and the
 //!    negotiated-congestion [engine](crate::engine) routes every net over them. A resource
 //!    is the side between two tiles on a layer, with as many tracks as fit along its free
@@ -59,7 +59,7 @@
 //!    for its centreline, wide enough for both tracks, offset into the two tracks, with
 //!    vias side by side and each net's own fan-out near its pads. It is kept if it connects
 //!    all that the two routes did, so it can't cost another net its route. Pairs whose
-//!    two nets' pads are far apart are left as they are. With [`Options::pairs_first`],
+//!    two nets' pads are far apart are left as they are. With [`RouteOptions::pairs_first`],
 //!    pairs are routed this way before anything else instead, with a place for a via kept
 //!    free of them beside each pad of a net with zones next to their pads, such as a ground
 //!    pin beside a pair's pins. They stay where they are in the first pass, as fixed
@@ -197,7 +197,7 @@ pub struct Design {
     /// Lengths to route nets to, which meanders make up after routing.
     pub lengths: Vec<LengthConstraint>,
     /// Copper zones, which are filled after routing, and which their nets connect to
-    /// rather than routing tracks between all their pads: see [`Options::planes`].
+    /// rather than routing tracks between all their pads: see [`RouteOptions::planes`].
     pub zones: Zones,
 }
 
@@ -352,7 +352,7 @@ impl Design {
 /// Create this with [`Default`] and set the fields.
 #[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
-pub struct Options {
+pub struct RouteOptions {
     /// The pitch of the lattice that tracks move on, or `None` for half the smallest track
     /// width plus clearance of the nets routed.
     pub pitch: Option<i64>,
@@ -405,9 +405,9 @@ pub struct Options {
     pub plane_cost: f64,
 }
 
-impl Default for Options {
-    fn default() -> Options {
-        Options {
+impl Default for RouteOptions {
+    fn default() -> RouteOptions {
+        RouteOptions {
             pitch: None,
             tile: None,
             global: true,
@@ -522,7 +522,7 @@ impl std::error::Error for RouteError {}
 /// use guide::geom::drc::{self, Pad};
 /// use guide::geom::{LayerId, LayerSet, Point, Rect, RuleSpec, Rules, Shape};
 /// use guide::id::NetId;
-/// use guide::pcb::{self, Design, NetSpec, Options, ViaSize};
+/// use guide::pcb::{self, Design, NetSpec, RouteOptions, ViaSize};
 ///
 /// let rules = Rules::new(RuleSpec::new(&["F.Cu", "B.Cu"], 200_000, 200_000))?;
 /// let top = LayerSet::EMPTY.with(LayerId(0));
@@ -554,14 +554,14 @@ impl std::error::Error for RouteError {}
 ///     pad(0, 5_000_000, 1), pad(10_000_000, 5_000_000, 1),
 ///     pad(5_000_000, 0, 2), pad(5_000_000, 10_000_000, 2),
 /// ];
-/// let routed = pcb::route(&design, &Options::default())?;
+/// let routed = pcb::route(&design, &RouteOptions::default())?;
 /// assert!(routed.unrouted.is_empty());
 /// let board = routed.board(&design);
 /// assert!(drc::check(&board, &design.rules)?.is_empty());
 /// assert!(pcb::unconnected(&board, &design.rules).is_empty());
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
-pub fn route(design: &Design, options: &Options) -> Result<Routed, RouteError> {
+pub fn route(design: &Design, options: &RouteOptions) -> Result<Routed, RouteError> {
     router::run(design, options)
 }
 

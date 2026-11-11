@@ -10,7 +10,7 @@ use std::time::Instant;
 use super::json::{self, Json};
 use super::{KicadBoard, replace_routing_and_fills};
 use crate::geom::drc::{self, Item, Violation};
-use crate::pcb::{self, Design, Options, Routed};
+use crate::pcb::{self, Design, RouteOptions, Routed};
 
 const BOARDS: [(&str, &str); 11] = [
     ("gekkio", "GB-BRK-LINK-A"),
@@ -107,8 +107,8 @@ impl Row {
 
 /// The options to route with: the defaults, but for `GUIDE_PLANES=0`, which routes nets
 /// with zones as any others, and `GUIDE_PLANE_COST`, for measuring them.
-fn options() -> Options {
-    let mut options = Options::default();
+fn options() -> RouteOptions {
+    let mut options = RouteOptions::default();
     if std::env::var("GUIDE_PLANES").is_ok_and(|v| v == "0") {
         options.planes = false;
     }
@@ -132,7 +132,7 @@ fn route_board(dir: &str, name: &'static str) -> (Row, String, Routed, String) {
 fn route_board_with(
     dir: &str,
     name: &'static str,
-    options: Options,
+    options: RouteOptions,
     change: impl FnOnce(&KicadBoard, &mut Design),
 ) -> (Row, String, Routed, String, Design, KicadBoard) {
     let (pcb, pro) = load(dir, name);
@@ -349,7 +349,7 @@ const PAIRED: [(&str, &str, &str); 6] = [
     ),
 ];
 
-/// The boards whose pairs are routed first, [`Options::pairs_first`]: on the DRAM boards,
+/// The boards whose pairs are routed first, [`RouteOptions::pairs_first`]: on the DRAM boards,
 /// routed last, they find no room through the buses around their BGAs.
 const PAIRS_FIRST: [&str; 2] = ["lpddr4-testbed", "ddr5-testbed"];
 
@@ -431,7 +431,7 @@ fn curated_pairs() {
         {
             continue;
         }
-        let options = Options {
+        let options = RouteOptions {
             pairs_first: PAIRS_FIRST.contains(&name),
             ..options()
         };
@@ -445,10 +445,10 @@ fn curated_pairs() {
         } else {
             pcb::route(
                 &design,
-                &Options {
+                &RouteOptions {
                     couple_pairs: false,
                     tune_lengths: false,
-                    ..Options::default()
+                    ..RouteOptions::default()
                 },
             )
             .unwrap()

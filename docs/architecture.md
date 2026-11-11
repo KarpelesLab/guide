@@ -291,7 +291,7 @@ where it fits, and kept only if it connects what its two routes did, so no other
 at all, and a pair that doesn't fit stays as two nets. Meanders come after that, for the same
 reason ([results](benchmarks.md#pcb-differential-pairs-and-lengths)). On the DRAM boards,
 though, routed last, no pair finds room through the buses around the BGA, even with the routes
-in its way ripped up and routed again, which was tried; so `Options::pairs_first` routes them
+in its way ripped up and routed again, which was tried; so `RouteOptions::pairs_first` routes them
 first, before anything else, as fixed copper, for boards whose pairs matter most
 ([results](benchmarks.md#pcb-routing-of-dram-boards)). Fixed, they can wall a pad in, so
 while they are routed, a pad of a net with zones beside a pair's pads keeps a place for its via

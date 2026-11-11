@@ -14,7 +14,7 @@ use crate::pcb::place::{
     Feedback, PlaceOptions, Placed, PlacementDesign, place_components, refine_components,
 };
 use crate::pcb::swap::{PinSwap, SwapGroup, apply_swaps, optimize_swaps, two_pin_groups};
-use crate::pcb::{self, Design, Options, RouteError, Routed};
+use crate::pcb::{self, Design, RouteError, RouteOptions, Routed};
 use crate::place::{CongestionGrid, PlaceError};
 
 /// How many times a round gives starved thermal reliefs back their spokes, at most.
@@ -27,7 +27,7 @@ pub struct FlowOptions {
     /// How parts are placed.
     pub place: PlaceOptions,
     /// How the board is routed.
-    pub route: Options,
+    pub route: RouteOptions,
     /// How many times at most parts are placed again around what routing found. The default
     /// is 6; zero is the one-pass flow, placement then routing.
     pub rounds: usize,
@@ -49,7 +49,7 @@ impl Default for FlowOptions {
     fn default() -> Self {
         FlowOptions {
             place: PlaceOptions::default(),
-            route: Options::default(),
+            route: RouteOptions::default(),
             rounds: 6,
             patience: 3,
             via_mm: 3.0,

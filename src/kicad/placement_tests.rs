@@ -14,7 +14,7 @@ use super::json::{self, Json};
 use super::{KicadBoard, fixed_because, placement_design, replace_placement};
 use crate::geom::drc::{self, Item, Violation};
 use crate::pcb::place::{PlaceOptions, PlaceReport, outline_overlaps, place_components};
-use crate::pcb::{self, Design, Options, Routed};
+use crate::pcb::{self, Design, RouteOptions, Routed};
 
 pub(super) const BOARDS: [(&str, &str); 11] = [
     ("gekkio", "GB-BRK-LINK-A"),
@@ -101,7 +101,7 @@ pub(super) fn route(
     let read = super::read(pcb, Some(pro)).unwrap();
     let design = stripped(&read);
     let start = Instant::now();
-    let routed = pcb::route(&design, &Options::default()).unwrap();
+    let routed = pcb::route(&design, &RouteOptions::default()).unwrap();
     let seconds = start.elapsed().as_secs_f64();
     let board = routed.board(&design);
     let ours = |item: Item| match item {

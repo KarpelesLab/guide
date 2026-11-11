@@ -2,7 +2,8 @@
 
 use super::tests::{MM, design, outline, route_checked, smd, through};
 use super::{
-    CopperZone, Design, Islands, Options, PadConnection, ZoneConnection, fill_zones, unconnected,
+    CopperZone, Design, Islands, PadConnection, RouteOptions, ZoneConnection, fill_zones,
+    unconnected,
 };
 use crate::geom::drc::{self, Board};
 use crate::geom::{Area, LayerId, LayerSet, Point, Rect};
@@ -159,7 +160,7 @@ fn plane_board() -> Design {
 #[test]
 fn a_net_with_a_plane_connects_to_it_with_stubs() {
     let d = plane_board();
-    let routed = route_checked(&d, &Options::default());
+    let routed = route_checked(&d, &RouteOptions::default());
     assert!(routed.unrouted.is_empty());
     assert!(!routed.fills.is_empty());
     // Each surface pad has a via of its own to the plane, close by, and the net has no
@@ -190,9 +191,9 @@ fn a_net_with_a_plane_connects_to_it_with_stubs() {
 #[test]
 fn without_planes_nets_with_zones_are_routed_as_tracks_and_filled_after() {
     let d = plane_board();
-    let options = Options {
+    let options = RouteOptions {
         planes: false,
-        ..Options::default()
+        ..RouteOptions::default()
     };
     let routed = route_checked(&d, &options);
     assert!(routed.unrouted.is_empty());
@@ -209,8 +210,8 @@ fn without_planes_nets_with_zones_are_routed_as_tracks_and_filled_after() {
 #[test]
 fn plane_routing_is_deterministic() {
     let d = plane_board();
-    let a = route_checked(&d, &Options::default());
-    let b = route_checked(&d, &Options::default());
+    let a = route_checked(&d, &RouteOptions::default());
+    let b = route_checked(&d, &RouteOptions::default());
     assert_eq!(a.tracks, b.tracks);
     assert_eq!(a.vias, b.vias);
     assert_eq!(a.fills, b.fills);

@@ -1,7 +1,7 @@
 //! Cleanup after routing: fewer vias, then shorter and straighter tracks. Every change is
 //! checked against the world as routing is, so cleanup can't make a route illegal.
 
-use super::Options;
+use super::RouteOptions;
 use super::detail::{self, NetCtx, Params, octile};
 use super::geometry::{NetCopper, Seg};
 use super::router::Job;
@@ -17,7 +17,7 @@ pub(crate) fn run(
     jobs: &[Job],
     copper: &mut [Option<NetCopper>],
     params: Params,
-    options: &Options,
+    options: &RouteOptions,
 ) -> u64 {
     let mut expanded = 0;
     for (job, slot) in jobs.iter().zip(copper.iter_mut()) {
@@ -42,7 +42,7 @@ fn fewer_vias(
     job: &Job,
     c: &mut NetCopper,
     params: Params,
-    options: &Options,
+    options: &RouteOptions,
 ) -> u64 {
     c.unplace(world);
     let p = Params {

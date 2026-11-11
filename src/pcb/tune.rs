@@ -3,7 +3,7 @@
 //! Lengths can only be added. A net shorter than it must be gets *trombone* meanders: on
 //! its straight tracks, longest first, the track goes out sideways, along and back, as
 //! often and as far as it takes, each meander as high as there is room for up to
-//! [`Options::max_amplitude`], the last one just high enough. Each is checked exactly
+//! [`RouteOptions::max_amplitude`], the last one just high enough. Each is checked exactly
 //! against everything else, as routing is, and kept a clearance from the net's own copper,
 //! as a meander that touched it would short its own length out.
 //!
@@ -20,7 +20,7 @@
 use super::measure::net_length;
 use super::pairs::offset;
 use super::world::{Placed, Verdict, World};
-use super::{Design, LengthConstraint, Options, Routed};
+use super::{Design, LengthConstraint, RouteOptions, Routed};
 use crate::geom::drc::{Track, Via};
 use crate::geom::{GeomError, LayerId, Point, Rect, Shape};
 use crate::id::NetId;
@@ -701,7 +701,7 @@ fn met(c: &LengthConstraint, lengths: &[f64]) -> bool {
 pub(crate) fn run(
     design: &Design,
     routed: &mut Routed,
-    options: &Options,
+    options: &RouteOptions,
 ) -> Result<(), GeomError> {
     let rules = &design.rules;
     let mut world = World::new(

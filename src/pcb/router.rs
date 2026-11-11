@@ -13,7 +13,7 @@ use super::planes;
 use super::tune;
 use super::world::{Placed, Planes, Verdict, World};
 use super::zones::{self, Fill};
-use super::{Design, DiffPair, Options, RouteError, Routed, Stats};
+use super::{Design, DiffPair, RouteError, RouteOptions, Routed, Stats};
 use crate::geom::drc::{Board, Track, Via};
 use crate::geom::{LayerId, LayerSet, Point, Rect, Shape};
 use crate::id::NetId;
@@ -467,7 +467,7 @@ fn most_common(values: impl Iterator<Item = i64>) -> Option<i64> {
         .map(|(v, _)| v)
 }
 
-pub(crate) fn run(design: &Design, options: &Options) -> Result<Routed, RouteError> {
+pub(crate) fn run(design: &Design, options: &RouteOptions) -> Result<Routed, RouteError> {
     let mut routed = route_all(design, options)?;
     if options.tune_lengths && !design.lengths.is_empty() {
         tune::run(design, &mut routed, options).map_err(RouteError::Geometry)?;
@@ -511,7 +511,7 @@ pub(crate) fn run(design: &Design, options: &Options) -> Result<Routed, RouteErr
 
 /// The lattice's pitch: half the tightest pitch of the tracks routed, unless the options
 /// set one.
-pub(crate) fn pitch(design: &Design, options: &Options) -> i64 {
+pub(crate) fn pitch(design: &Design, options: &RouteOptions) -> i64 {
     let rules = &design.rules;
     options.pitch.unwrap_or_else(|| {
         (0..design.nets.len())
@@ -620,7 +620,7 @@ fn join_planes(
     world: &mut World<'_>,
     out: &mut Joined<'_>,
     pitch: i64,
-    options: &Options,
+    options: &RouteOptions,
 ) -> Result<(), RouteError> {
     let keeping = keep_islands(design);
     for round in 0..=REPAIRS {
@@ -701,7 +701,7 @@ fn keep_islands(design: &Design) -> Design {
 const REPAIRS: usize = 3;
 
 /// Routes everything but meanders.
-fn route_all(design: &Design, options: &Options) -> Result<Routed, RouteError> {
+fn route_all(design: &Design, options: &RouteOptions) -> Result<Routed, RouteError> {
     let original = design;
     let rules = &design.rules;
     let world_of = |design: &Design| {

@@ -15,7 +15,7 @@ use super::replace_routing;
 use crate::geom::drc::{self, Board, Item, Violation};
 use crate::geom::{LayerSet, Rules, Shape, SpatialIndex};
 use crate::id::NetId;
-use crate::pcb::{self, Design, Options};
+use crate::pcb::{self, Design, RouteOptions};
 
 /// The boards, in the order of `docs/benchmarks.md`.
 const BOARDS: [&str; 11] = [
@@ -307,7 +307,7 @@ fn curated_boards_against_freerouting() {
         );
 
         let start = Instant::now();
-        let routed = pcb::route(&design, &Options::default()).unwrap();
+        let routed = pcb::route(&design, &RouteOptions::default()).unwrap();
         let seconds = start.elapsed().as_secs_f64();
         let text = replace_routing(&pcb, &routed.tracks, &routed.vias, &read.nets, &read.rules);
         let ours = dir.join(format!("{name}.guide.kicad_pcb"));

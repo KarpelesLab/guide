@@ -27,7 +27,7 @@
 use std::collections::BTreeSet;
 
 use super::router;
-use super::{Design, Options, RouteError, Routed};
+use super::{Design, RouteError, RouteOptions, Routed};
 use crate::geom::drc::{self, Item, Track, Via, Violation};
 use crate::geom::{LayerSet, Rect, Shape};
 use crate::id::NetId;
@@ -386,7 +386,7 @@ const WIDEN: i64 = 2_000_000;
 /// use guide::geom::drc::{self, Pad};
 /// use guide::geom::{LayerId, LayerSet, Point, Rect, RuleSpec, Rules, Shape};
 /// use guide::id::NetId;
-/// use guide::pcb::{self, Design, NetSpec, Options, ViaSize};
+/// use guide::pcb::{self, Design, NetSpec, RouteOptions, ViaSize};
 /// use guide::pcb::eco::{self, Change};
 ///
 /// let rules = Rules::new(RuleSpec::new(&["F.Cu", "B.Cu"], 200_000, 200_000))?;
@@ -417,11 +417,11 @@ const WIDEN: i64 = 2_000_000;
 ///     pad(0, 0, 1), pad(5_000_000, 0, 1),
 ///     pad(0, 3_000_000, 2), pad(5_000_000, 3_000_000, 2),
 /// ];
-/// let before = pcb::route(&design, &Options::default())?;
+/// let before = pcb::route(&design, &RouteOptions::default())?;
 /// // Net 2's second pad moves: net 1 keeps its copper.
 /// design.board.pads[3] = pad(5_000_000, 5_000_000, 2);
 /// let change = Change::new(vec![NetId(2)], Vec::new());
-/// let after = eco::reroute(&design, &before.tracks, &before.vias, &change, &Options::default())?;
+/// let after = eco::reroute(&design, &before.tracks, &before.vias, &change, &RouteOptions::default())?;
 /// assert!(after.routed.unrouted.is_empty());
 /// assert_eq!(after.rerouted, [NetId(2)]);
 /// assert!(before.tracks.iter().filter(|t| t.net == Some(NetId(1))).all(|t| after.routed.tracks.contains(t)));
@@ -433,7 +433,7 @@ pub fn reroute(
     tracks: &[Track],
     vias: &[Via],
     change: &Change,
-    options: &Options,
+    options: &RouteOptions,
 ) -> Result<Rerouted, RouteError> {
     let mut options = *options;
     options.pitch = Some(router::pitch(design, &options));
@@ -489,7 +489,11 @@ pub fn reroute(
 }
 
 /// Routes the design around the copper `old` keeps.
-fn route_kept(design: &Design, old: &Old<'_>, options: &Options) -> Result<Rerouted, RouteError> {
+fn route_kept(
+    design: &Design,
+    old: &Old<'_>,
+    options: &RouteOptions,
+) -> Result<Rerouted, RouteError> {
     let (kept_tracks, kept_vias) = old.kept();
     let mut fixed = design.clone();
     fixed.board.tracks.extend(kept_tracks.iter().cloned());
@@ -564,7 +568,7 @@ pub fn relieve(
     design: &Design,
     tracks: &[Track],
     vias: &[Via],
-    options: &Options,
+    options: &RouteOptions,
 ) -> Result<Option<Rerouted>, RouteError> {
     let starved = starved_reliefs(design, tracks, vias)?;
     if starved.is_empty() {
@@ -759,13 +763,13 @@ mod tests {
     #[test]
     fn nothing_changed_keeps_everything() {
         let d = design();
-        let before = super::super::route(&d, &Options::default()).unwrap();
+        let before = super::super::route(&d, &RouteOptions::default()).unwrap();
         let after = reroute(
             &d,
             &before.tracks,
             &before.vias,
             &Change::default(),
-            &Options::default(),
+            &RouteOptions::default(),
         )
         .unwrap();
         assert!(after.rerouted.is_empty(), "{:?}", after.rerouted);
@@ -777,7 +781,7 @@ mod tests {
     #[test]
     fn a_moved_pad_reroutes_its_net_and_whatever_it_lands_on() {
         let mut d = design();
-        let before = super::super::route(&d, &Options::default()).unwrap();
+        let before = super::super::route(&d, &RouteOptions::default()).unwrap();
         // Net 1's far pad moves onto where net 2 was routed.
         let pad = d.board.pads[1].clone();
         let to = Point::new(4_000_000, 4_500_000);
@@ -795,7 +799,7 @@ mod tests {
             &before.tracks,
             &before.vias,
             &change,
-            &Options::default(),
+            &RouteOptions::default(),
         )
         .unwrap();
         assert!(after.routed.unrouted.is_empty());

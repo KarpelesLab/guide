@@ -8,7 +8,7 @@ use guide::geom::{LayerId, Rules};
 use guide::id::NetId;
 use guide::kicad::{self, FlowOptions, KicadBoard};
 use guide::pcb::place::{PlaceOptions, Side, outline_overlaps, place_components};
-use guide::pcb::{self, Design, Options, Routed};
+use guide::pcb::{self, Design, RouteOptions, Routed};
 
 use crate::Outcome;
 use crate::args::{self, Command, Failure, Matches, Opt};
@@ -69,8 +69,8 @@ fn route_opts() -> Vec<Opt> {
     ]
 }
 
-fn route_options(m: &Matches) -> Result<Options, Failure> {
-    let mut o = Options::default();
+fn route_options(m: &Matches) -> Result<RouteOptions, Failure> {
+    let mut o = RouteOptions::default();
     if let Some(v) = m.factor("via-cost")? {
         o.via_cost = v;
     }

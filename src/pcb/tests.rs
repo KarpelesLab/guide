@@ -1,6 +1,6 @@
 //! Tests of PCB routing on small boards.
 
-use super::{Design, MaskOpening, NetSpec, Options, Routed, ViaSize, route, unconnected};
+use super::{Design, MaskOpening, NetSpec, RouteOptions, Routed, ViaSize, route, unconnected};
 use crate::geom::drc::{self, Board, Item, Keepout, Pad, Track, Violation};
 use crate::geom::{LayerId, LayerSet, Point, Rect, RuleSpec, Rules, Shape};
 use crate::id::NetId;
@@ -66,7 +66,7 @@ pub(super) fn design(layers: usize, pads: Vec<Pad>, nets: usize) -> Design {
 }
 
 /// Routes, and checks that what is routed breaks no rule and connects its nets.
-pub(super) fn route_checked(design: &Design, options: &Options) -> Routed {
+pub(super) fn route_checked(design: &Design, options: &RouteOptions) -> Routed {
     let routed = route(design, options).unwrap();
     let board = routed.board(design);
     let found = drc::check(&board, &design.rules).unwrap();
@@ -102,7 +102,7 @@ fn crossing_nets_take_a_via_on_two_layers() {
         Point::new(-600_000, -600_000),
         Point::new(10_600_000, 10_600_000),
     ));
-    let routed = route_checked(&d, &Options::default());
+    let routed = route_checked(&d, &RouteOptions::default());
     assert!(routed.unrouted.is_empty());
     assert_eq!(routed.stats.routed, 2);
     assert!(!routed.vias.is_empty());
@@ -128,7 +128,7 @@ fn on_one_layer_one_crossing_net_is_left_unrouted() {
         Point::new(-600_000, -600_000),
         Point::new(10_600_000, 10_600_000),
     ));
-    let routed = route_checked(&d, &Options::default());
+    let routed = route_checked(&d, &RouteOptions::default());
     assert_eq!(routed.unrouted.len(), 1);
     assert!(routed.vias.is_empty());
 }
@@ -153,7 +153,7 @@ fn routes_keep_out_of_keepouts_and_away_from_the_edge() {
         Point::new(12 * MM, 4 * MM),
     ));
     d.edge_clearance = 500_000;
-    let routed = route_checked(&d, &Options::default());
+    let routed = route_checked(&d, &RouteOptions::default());
     assert!(routed.unrouted.is_empty());
     for t in &routed.tracks {
         let shape = Shape::track(t.start, t.end, t.width).unwrap();
@@ -183,7 +183,7 @@ fn a_net_with_no_way_out_is_unrouted_without_breaking_rules() {
         Point::new(-2 * MM, -10 * MM),
         Point::new(12 * MM, 10 * MM),
     ));
-    let routed = route_checked(&d, &Options::default());
+    let routed = route_checked(&d, &RouteOptions::default());
     assert_eq!(routed.unrouted, [NetId(1)]);
     assert!(routed.tracks.is_empty());
 }
@@ -208,7 +208,7 @@ fn fixed_routes_are_obstacles_or_part_of_their_net() {
     d.board
         .tracks
         .push(track((6 * MM, -3 * MM), (6 * MM, 3 * MM), 3));
-    let routed = route_checked(&d, &Options::default());
+    let routed = route_checked(&d, &RouteOptions::default());
     assert!(routed.unrouted.is_empty());
     // The route goes on from the end of the fixed half, and round net 3's track.
     assert!(
@@ -246,7 +246,7 @@ fn net_classes_set_widths_and_clearances() {
         ..Default::default()
     });
     d.rules = Rules::new(spec).unwrap();
-    let routed = route_checked(&d, &Options::default());
+    let routed = route_checked(&d, &RouteOptions::default());
     assert!(routed.unrouted.is_empty());
     for t in &routed.tracks {
         let want = if t.net == Some(NetId(2)) {
@@ -279,7 +279,7 @@ fn through_hole_pads_connect_their_layers() {
         Point::new(-3 * MM, -10 * MM),
         Point::new(13 * MM, 10 * MM),
     ));
-    let routed = route_checked(&d, &Options::default());
+    let routed = route_checked(&d, &RouteOptions::default());
     assert!(routed.unrouted.is_empty());
     assert!(routed.vias.is_empty());
     assert!(routed.tracks.iter().all(|t| t.layer == LayerId(1)));
@@ -300,7 +300,7 @@ fn routes_stay_out_of_other_nets_mask_openings() {
         margin: 3 * MM,
         net: Some(NetId(2)),
     });
-    let routed = route_checked(&d, &Options::default());
+    let routed = route_checked(&d, &RouteOptions::default());
     assert!(routed.unrouted.is_empty());
     for t in &routed.tracks {
         let shape = Shape::track(t.start, t.end, t.width).unwrap();
@@ -319,15 +319,15 @@ fn routing_is_deterministic() {
         })
         .collect();
     let d = design(2, pads, 7);
-    let a = route_checked(&d, &Options::default());
-    let b = route_checked(&d, &Options::default());
+    let a = route_checked(&d, &RouteOptions::default());
+    let b = route_checked(&d, &RouteOptions::default());
     assert!(a.unrouted.is_empty());
     assert_eq!(a.tracks, b.tracks);
     assert_eq!(a.vias, b.vias);
     // And the same without global routing, which only changes where nets may go.
-    let options = Options {
+    let options = RouteOptions {
         global: false,
-        ..Options::default()
+        ..RouteOptions::default()
     };
     let c = route_checked(&d, &options);
     assert!(c.unrouted.is_empty());
@@ -344,12 +344,12 @@ fn cleanup_never_lengthens_tracks_or_adds_vias_and_breaks_nothing() {
         })
         .collect();
     let d = design(2, pads, 7);
-    let options = Options {
+    let options = RouteOptions {
         cleanup: false,
-        ..Options::default()
+        ..RouteOptions::default()
     };
     let raw = route_checked(&d, &options);
-    let clean = route_checked(&d, &Options::default());
+    let clean = route_checked(&d, &RouteOptions::default());
     assert_eq!(raw.stats.before_cleanup, clean.stats.before_cleanup);
     assert!(clean.stats.after_cleanup.0 <= raw.stats.after_cleanup.0);
     assert!(clean.vias.len() <= raw.vias.len());
@@ -366,7 +366,7 @@ fn hole_to_hole_holds_between_a_nets_own_vias() {
         pads.push(smd(i * MM + 2 * MM, 6 * MM, i as u32 + 5));
     }
     let d = design(2, pads, 9);
-    let routed = route_checked(&d, &Options::default());
+    let routed = route_checked(&d, &RouteOptions::default());
     let board = routed.board(&d);
     let found = drc::check(&board, &d.rules).unwrap();
     assert!(
@@ -408,7 +408,7 @@ fn pads_trapped_in_an_area_array_escape_through_vias() {
         }
     }
     let d = design(2, pads, lone as usize + 1);
-    let routed = route_checked(&d, &Options::default());
+    let routed = route_checked(&d, &RouteOptions::default());
     assert!(routed.unrouted.is_empty(), "{:?}", routed.unrouted);
     // Each of the 8 needs a via to get out.
     for n in 1..9 {
@@ -430,7 +430,7 @@ fn a_pad_whose_centre_is_blocked_is_reached_where_it_has_room() {
     ))
     .unwrap();
     d.obstacles.push((text.clone(), LayerId(0)));
-    let routed = route_checked(&d, &Options::default());
+    let routed = route_checked(&d, &RouteOptions::default());
     assert!(routed.unrouted.is_empty());
     for t in &routed.tracks {
         let shape = Shape::track(t.start, t.end, t.width).unwrap();
@@ -461,7 +461,7 @@ fn a_net_of_many_pads_keeps_what_it_reaches() {
         Point::new(-2 * MM, -3 * MM),
         Point::new(41 * MM, 3 * MM),
     ));
-    let routed = route_checked(&d, &Options::default());
+    let routed = route_checked(&d, &RouteOptions::default());
     assert_eq!(routed.unrouted, [NetId(1)]);
     assert_eq!(routed.stats.connections, 19);
     assert_eq!(routed.stats.connected, 18);

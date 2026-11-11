@@ -199,7 +199,7 @@ Each item is independently useful, and they can land in any order.
   USB pairs that the router can reach run side by side for about half their length, against
   28% and 73% by hand, and KiCad's DRC accepts them
   ([results](docs/benchmarks.md#pcb-differential-pairs-and-lengths)). Pairs can be routed
-  first instead, `Options::pairs_first`, which the DRAM boards need, and a pair whose end is in
+  first instead, `RouteOptions::pairs_first`, which the DRAM boards need, and a pair whose end is in
   a BGA fans out of it apart. A pair whose ends are on different layers changes layers side by
   side: `ddr5-testbed`'s `TDQS`, balls on top and fingers below, runs side by side for 63% of
   its length, against 15% by hand. Routed first, pairs keep a place for a via free beside the

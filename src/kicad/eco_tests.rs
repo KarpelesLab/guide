@@ -17,7 +17,7 @@ use crate::geom::{LayerId, LayerSet, Point, Rect, Shape};
 use crate::id::NetId;
 use crate::pcb::eco::{self, Change};
 use crate::pcb::place::{Placed, Side, edge_segments, near_segments, outline_overlaps};
-use crate::pcb::{self, Design, Options, Routed};
+use crate::pcb::{self, Design, RouteOptions, Routed};
 
 /// The boards changed with `GUIDE_ECO=1`: those with parts to move.
 const ECO_BOARDS: [&str; 9] = [
@@ -412,7 +412,7 @@ fn board_ecos(name: &str, full: bool) -> (Vec<String>, Vec<String>) {
     let (pcb, pro) = load(dir, name);
     let read = super::read(&pcb, Some(&pro)).unwrap();
     let d0 = stripped(&read);
-    let options = Options::default();
+    let options = RouteOptions::default();
     let mut r0 = pcb::route(&d0, &options).unwrap();
     recount(&d0, &mut r0);
     let mut rows = Vec::new();

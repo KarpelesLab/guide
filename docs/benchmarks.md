@@ -2453,7 +2453,7 @@ routers](#pcb-routing-against-freerouting) is below too. Nothing here depends on
 tracks, arcs, vias and zone fills, so that every net with pads on two copper islands has to be
 routed again, ground and power included, which the originals mostly connect through zones.
 These are the results of the router as it was before zones, which it still gives with
-`Options::planes` off; [below](#pcb-zones-and-planes), the same boards keep their zones'
+`RouteOptions::planes` off; [below](#pcb-zones-and-planes), the same boards keep their zones'
 outlines, and their nets connect through them. Copper graphics, pads, keepouts, the board's edge, text on copper and solder mask openings
 stay. Each net gets its class's track width and via size.
 
@@ -2791,7 +2791,7 @@ Getting there took what KiCad 10 does and doesn't:
 | `ddr5-testbed` | 66/66 | 255/255 | 0 | 190 → 170 (-) (180) | 843 → 876 (-) (1119) | 137 (-) | 0 violations, 0 unconnected |
 
 The two DRAM boards, added for M6, are [below](#pcb-routing-of-dram-boards), and weren't
-routed as tracks. *As tracks* is the router with `Options::planes` off, which routes zones' nets as any others
+routed as tracks. *As tracks* is the router with `RouteOptions::planes` off, which routes zones' nets as any others
 and fills the zones after: its tracks and vias are exactly [the results
 above](#pcb-routing-of-the-curated-boards), before zones, and its times are those recorded
 there. Connections count what the zones join as made. The original's track is now comparable,
@@ -2812,7 +2812,7 @@ as it too leaves to zones what they join.
 ### What the cost of a plane does
 
 The extra cost of another net's track inside a plane, as a fraction of its length,
-`Options::plane_cost`:
+`RouteOptions::plane_cost`:
 
 | Plane cost | Boards complete | `GB-LIVE32` vias, mm, s | `nk3-nrf-mini` |
 | --- | --- | --- | --- |
@@ -2858,7 +2858,7 @@ GUIDE_ROUTE=1 GUIDE_KICAD=1 GUIDE_BOARDS=lpddr4-testbed,ddr5-testbed cargo test 
 
 The first routes them with the defaults and no constraints; the second with constraints, as
 `.kicad_dru` custom rules that `kicad::length_rules` reads and `LengthRules::apply` gives the
-design, and with [`Options::pairs_first`](../src/pcb/mod.rs); it routes each board a second
+design, and with [`RouteOptions::pairs_first`](../src/pcb/mod.rs); it routes each board a second
 time, apart and with no meanders, for the tables' *apart* columns, which `GUIDE_APART=0` leaves
 out. Neither board has rules of its
 own, but their hand routing shows what their designers asked of it, and the rules ask the same:
@@ -2932,7 +2932,7 @@ give up some of their coupling to make the room, 53% and 58%.
 Before M6, both boards came out complete but for their ground, of 168 and 114 pads, which
 failed whole, 9 and 7 connections short, in 100 and 120 s:
 
-- **Budgets by connection.** A net's search budget, `Options::max_expansions`, is now for each
+- **Budgets by connection.** A net's search budget, `RouteOptions::max_expansions`, is now for each
   64 connections, so that a net of 168 pads doesn't run out where one of 2 wouldn't. Nets of
   fewer, every net of the nine smaller boards, are as before.
 - **Stubs one at a time.** A net of more than 64 terminals is searched a terminal at a time,
@@ -2948,7 +2948,7 @@ failed whole, 9 and 7 connections short, in 100 and 120 s:
   to be ripped up again: `ddr5-testbed`'s `CA12` came out so.
 - **Planes joined after meanders.** Meanders may cut a plane on an outer layer, and they did on
   `ddr5-testbed`'s `VDD`, so its pieces are joined again after them as after routing.
-- **Pairs first** ([`Options::pairs_first`](../src/pcb/mod.rs)), off by default: routed last, no
+- **Pairs first** ([`RouteOptions::pairs_first`](../src/pcb/mod.rs)), off by default: routed last, no
   pair of `ddr5-testbed` finds room through the buses around the BGA, even with the routes in
   its way ripped up and routed again, which was tried and dropped. Routed first, they do. And a
   pair whose end is in an array of pads that it can't pass between, as a BGA, fans out of the

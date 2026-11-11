@@ -18,17 +18,25 @@
 //! | `--via-cost N` | Wirelength per layer a via spans: 1 in 2008, 3 in 2007 | 1 |
 //! | `--threads N` | `AsicOptions::threads` | 1 |
 //! | `--batch N` | `AsicOptions::batch_size` | 32 |
-//! | `--max-iterations N` | `AsicOptions::max_iterations` | 100 |
+//! | `--max-iterations N` | `AsicOptions::max_iterations` | 400 |
+//! | `--stall N` | `AsicOptions::stall_iterations` | 10 |
+//! | `--restarts N` | `AsicOptions::restarts` | 20 |
 //! | `--layer-passes N` | `AsicOptions::layer_passes` | 4 |
 //! | `--box-margin N` | `AsicOptions::box_margin`, -1 for none | 10 |
 //! | `--box-growth N` | `AsicOptions::box_growth` | 5 |
+//! | `--max-box-growth N` | `AsicOptions::max_box_growth` | 40 |
 //! | `--first-present F` | `AsicOptions::first_present` | 0.5 |
 //! | `--initial-present F` | `AsicOptions::initial_present` | 0.5 |
 //! | `--present-growth F` | `AsicOptions::present_growth` | 1.8 |
 //! | `--history F` | `AsicOptions::history_factor` | 1 |
 //! | `--bend F` | `AsicOptions::bend_cost` | 1 |
 //! | `--no-pattern` | `AsicOptions::pattern` off | On |
-//! | `--crowding F` | `AsicOptions::crowding` | 1 |
+//! | `--no-steiner` | `AsicOptions::steiner` off | On |
+//! | `--no-z` | `AsicOptions::z_shapes` off | On |
+//! | `--design-order` | `AsicOptions::longest_first` off | Longest first |
+//! | `--crowding F` | `AsicOptions::crowding` | 16 |
+//! | `--crowding-exponent N` | `AsicOptions::crowding_exponent` | 8 |
+//! | `--no-refine` | `AsicOptions::refine` off | On |
 //!
 //! It prints one line of `key=value` pairs, which the scripts parse.
 
@@ -77,7 +85,15 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             "--history" => options.history_factor = value()?.parse()?,
             "--bend" => options.bend_cost = value()?.parse()?,
             "--no-pattern" => options.pattern = false,
+            "--no-steiner" => options.steiner = false,
+            "--no-z" => options.z_shapes = false,
+            "--no-refine" => options.refine = false,
+            "--design-order" => options.longest_first = false,
+            "--stall" => options.stall_iterations = value()?.parse()?,
+            "--restarts" => options.restarts = value()?.parse()?,
+            "--max-box-growth" => options.max_box_growth = value()?.parse()?,
             "--crowding" => options.crowding = value()?.parse()?,
+            "--crowding-exponent" => options.crowding_exponent = value()?.parse()?,
             _ if !arg.starts_with("--") && design_path.is_none() => design_path = Some(arg),
             _ => return Err(format!("unknown argument {arg}").into()),
         }
@@ -119,9 +135,11 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         }
         let last = routing.iterations.last();
         let extra = format!(
-            " routed_nets={} iterations={} planar_overflow={} expanded={}",
+            " routed_nets={} iterations={} restarts={} refined_nets={} planar_overflow={} expanded={}",
             routing.routed_nets,
             routing.iterations.len(),
+            routing.restarts,
+            routing.refined_nets,
             routing.planar_overflow,
             routing
                 .iterations

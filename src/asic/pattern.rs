@@ -1,13 +1,16 @@
 //! Pattern routing: a first route for every net on the plane, quickly, before negotiation.
 //!
-//! Each net's pins are joined by a rectilinear minimum spanning tree, by Prim's algorithm on
-//! the Manhattan distance, and each edge of that tree is laid as whichever of its two L shapes
-//! costs less against what earlier nets use, with edges this net already has free, so that
-//! the Ls of a net overlap where they can and the tree gains Steiner points. Nets go shortest
-//! first. Edges that would be over capacity cost much more than any detour of an L, and nearly
-//! full ones a little more, so that this spreads nets before the engine negotiates.
+//! Each net's pins are joined by a rectilinear Steiner tree, by the iterated 1-Steiner
+//! heuristic of [`rsmt`](super::rsmt), or a minimum spanning tree, by Prim's algorithm on the
+//! Manhattan distance. Each edge of that tree is laid as whichever of its two L shapes costs
+//! less against what earlier nets use, with edges this net already has free, so that the Ls of
+//! a net overlap where they can; or, if asked, as a Z shape, with two turns, where that costs
+//! less still. Nets go shortest first. Edges that would be over capacity cost much more than
+//! any detour of an L, and nearly full ones a little more, so that this spreads nets before
+//! the engine negotiates.
 
 use super::planar::PlanarSpace;
+use super::rsmt;
 
 /// What one unit over an edge's capacity costs, against 1 for an edge's length.
 const OVER: f64 = 20.0;
@@ -21,6 +24,8 @@ pub(crate) fn pattern_routes(
     plane: &PlanarSpace,
     nets: &[Vec<usize>],
     bend: f64,
+    steiner: bool,
+    zs: bool,
 ) -> Vec<Vec<(usize, usize)>> {
     let edges = plane.horizontal_edges() + plane.cols() * plane.rows().saturating_sub(1);
     let mut usage = vec![0u32; edges];
@@ -55,28 +60,56 @@ pub(crate) fn pattern_routes(
                 1.0 + FULL * r * r
             }
         };
-        for (a, b) in spanning_tree(plane, &nets[n]) {
+        let links: Vec<(usize, usize)> = if steiner {
+            let xy: Vec<(u32, u32)> = nets[n]
+                .iter()
+                .map(|&c| {
+                    let (x, y) = plane.cell_xy(c);
+                    (x as u32, y as u32)
+                })
+                .collect();
+            let (points, edges) = rsmt::steiner_tree(&xy);
+            let cell = |i: usize| plane.cell_at(points[i].0 as usize, points[i].1 as usize);
+            edges.into_iter().map(|(a, b)| (cell(a), cell(b))).collect()
+        } else {
+            spanning_tree(plane, &nets[n])
+        };
+        for (a, b) in links {
             let (ax, ay) = plane.cell_xy(a);
             let (bx, by) = plane.cell_xy(b);
             let mut best_cost = f64::INFINITY;
-            // Along the row first, then along the column; and the other way round.
-            for corner in [plane.cell_at(bx, ay), plane.cell_at(ax, by)] {
+            // Along the row first, then along the column; and the other way round. Then, if
+            // asked, the Z shapes: along the row to a column between, along it, and on along
+            // the row; and the same turned round.
+            let mut shapes: Vec<[usize; 2]> = vec![
+                [plane.cell_at(bx, ay), plane.cell_at(bx, ay)],
+                [plane.cell_at(ax, by), plane.cell_at(ax, by)],
+            ];
+            if ax == bx || ay == by {
+                shapes.truncate(1);
+            } else if zs {
+                for xm in ax.min(bx) + 1..ax.max(bx) {
+                    shapes.push([plane.cell_at(xm, ay), plane.cell_at(xm, by)]);
+                }
+                for ym in ay.min(by) + 1..ay.max(by) {
+                    shapes.push([plane.cell_at(ax, ym), plane.cell_at(bx, ym)]);
+                }
+            }
+            for (k, [c1, c2]) in shapes.into_iter().enumerate() {
                 path.clear();
-                walk(plane, a, corner, &mut path);
-                walk(plane, corner, b, &mut path);
+                walk(plane, a, c1, &mut path);
+                walk(plane, c1, c2, &mut path);
+                walk(plane, c2, b, &mut path);
                 let mut total: f64 = path
                     .iter()
                     .map(|&(c, d)| cost(plane.edge(c, d).unwrap_or(0), &owner, &usage))
                     .sum();
                 if ax != bx && ay != by {
-                    total += bend;
+                    total += if k < 2 { bend } else { 2.0 * bend };
                 }
                 if total < best_cost {
                     best_cost = total;
                     core::mem::swap(&mut best, &mut path);
-                }
-                if ax == bx || ay == by {
-                    break;
                 }
             }
             for &(c, d) in &best {
@@ -176,7 +209,7 @@ mod tests {
     fn a_net_along_a_row_and_a_column_is_as_short_as_it_can_be() {
         let p = plane(4, &[]);
         let net = vec![p.cell_at(0, 0), p.cell_at(4, 0), p.cell_at(4, 3)];
-        let routes = pattern_routes(&p, core::slice::from_ref(&net), 1.0);
+        let routes = pattern_routes(&p, core::slice::from_ref(&net), 1.0, false, false);
         let (length, cells) = length_and_cells(&p, &routes[0]);
         assert_eq!(length, 7);
         assert!(net.iter().all(|c| cells.contains(c)));
@@ -190,13 +223,36 @@ mod tests {
             vec![p.cell_at(1, 0), p.cell_at(2, 0)],
             vec![p.cell_at(0, 0), p.cell_at(4, 2)],
         ];
-        let routes = pattern_routes(&p, &nets, 1.0);
+        let routes = pattern_routes(&p, &nets, 1.0, false, false);
         assert_eq!(routes[0], [(p.cell_at(1, 0), p.cell_at(2, 0))]);
         // The second net goes up first and along row 2, not along row 0.
         let (length, cells) = length_and_cells(&p, &routes[1]);
         assert_eq!(length, 6);
         assert!(cells.contains(&p.cell_at(0, 2)));
         assert!(!cells.contains(&p.cell_at(2, 0)));
+    }
+
+    #[test]
+    fn a_z_shape_goes_round_where_both_ls_are_full() {
+        // Row 0 from x = 1 to 2 and row 2 from x = 2 to 3 have one track each, which the
+        // first two nets take, and both Ls of the third would cross one of them.
+        let p = plane(4, &[(1, 0), (2, 2)]);
+        let nets = vec![
+            vec![p.cell_at(1, 0), p.cell_at(2, 0)],
+            vec![p.cell_at(2, 2), p.cell_at(3, 2)],
+            vec![p.cell_at(0, 0), p.cell_at(4, 2)],
+        ];
+        let routes = pattern_routes(&p, &nets, 1.0, false, true);
+        let (length, cells) = length_and_cells(&p, &routes[2]);
+        assert_eq!(length, 6);
+        // Up a row, along it, and up again.
+        assert!(cells.contains(&p.cell_at(2, 1)));
+        assert!(!cells.contains(&p.cell_at(2, 0)) && !cells.contains(&p.cell_at(2, 2)));
+        // Without Z shapes, it takes an L over a full edge.
+        let routes = pattern_routes(&p, &nets, 1.0, false, false);
+        let (length, cells) = length_and_cells(&p, &routes[2]);
+        assert_eq!(length, 6);
+        assert!(!cells.contains(&p.cell_at(2, 1)));
     }
 
     #[test]

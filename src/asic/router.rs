@@ -1,7 +1,7 @@
 //! The flow: nets routed on the plane by the negotiated-congestion engine, then given layers.
 
 use crate::cost::Cost;
-use crate::engine::{Engine, EngineOptions, IterationReport};
+use crate::engine::{Engine, EngineOptions, IterationReport, Outcome};
 use crate::id::{NetId, NodeId};
 use crate::net::{AccessPoint, Edge, Net, Route, Terminal};
 
@@ -9,6 +9,7 @@ use super::format::{Design, Segment};
 use super::layers::{self, LayerGrid, LayerNet, PlanarTree};
 use super::pattern;
 use super::planar::PlanarSpace;
+use super::rsmt;
 
 /// The most pins a net may have and still be routed, as the contests allow.
 pub const MAX_PINS: usize = 1000;
@@ -25,11 +26,37 @@ pub struct AsicOptions {
     /// How many nets the engine routes at a time against the same usage, which does change
     /// results: see [the engine](crate::engine#batches-and-threads). The default is 32.
     pub batch_size: u32,
-    /// The most iterations of negotiation on the plane. The default is 100.
+    /// The most iterations of negotiation on the plane, over all its
+    /// [restarts](Self::restarts). The default is 400.
     pub max_iterations: u32,
-    /// Whether to start every net from a pattern route, L shapes along a spanning tree of its
-    /// pins, so that the engine only routes again those that overflow. The default is true.
+    /// How many iterations negotiation may go on without taking the overflow on the plane 1%
+    /// below the least it has had, before it stalls, or 0 to go on to
+    /// [`max_iterations`](Self::max_iterations). The default is 10.
+    ///
+    /// Negotiation that stalls starts again, if it has [restarts](Self::restarts) left, and
+    /// otherwise stops: a design that does not converge would spend most of its time on
+    /// iterations that change nothing.
+    pub stall_iterations: u32,
+    /// How many times negotiation that stalls starts again, from the best routes so far and
+    /// with the history it has learned, but with the present factor back at its start, so that
+    /// nets may share edges again for a while, and move where history now tells them to. The
+    /// default is 20. It gives up sooner if two passes in a row end without a new least
+    /// overflow.
+    ///
+    /// Negotiation stalls with a few edges one net over, which it moves around rather than
+    /// settles; starting again takes them down to a fraction each time, and is what makes the
+    /// hardest designs converge.
+    pub restarts: u32,
+    /// Whether to start every net from a pattern route, L or Z shapes along a Steiner tree of
+    /// its pins, so that the engine only routes again those that overflow. The default is
+    /// true.
     pub pattern: bool,
+    /// Whether pattern routes follow a rectilinear Steiner tree of each net's pins, by the
+    /// iterated 1-Steiner heuristic, rather than a minimum spanning tree. The default is true.
+    pub steiner: bool,
+    /// Whether pattern routes may take Z shapes, with two turns, where both L shapes are
+    /// dearer. The default is true.
+    pub z_shapes: bool,
     /// What a turn costs on the plane, on top of a step of 1, since it takes a via. The default
     /// is 1.
     pub bend_cost: f64,
@@ -39,9 +66,22 @@ pub struct AsicOptions {
     /// How many cells the box of a net grows by on every side after each iteration in which
     /// it holds an edge that overflows. The default is 5.
     pub box_growth: u32,
+    /// How many cells a box may grow by in all. The default is 40.
+    ///
+    /// Boxes that grow without end make the searches of late iterations cover the whole
+    /// design, and without making negotiation converge any sooner.
+    pub max_box_growth: u32,
+    /// Whether nets take their turns longest first, by the half perimeter of the box around
+    /// their pins, rather than in the order of the design, as NTHU-Route 2.0 has them, since
+    /// a long net has more ways round congestion than a short one. The default is true.
+    pub longest_first: bool,
     /// The engine's [`crowding`](EngineOptions::crowding): how much dearer an edge gets as it
-    /// fills up. The default is 1.
+    /// fills up. The default is 16.
     pub crowding: f64,
+    /// The engine's [`crowding_exponent`](EngineOptions::crowding_exponent): how late it gets
+    /// dearer. The default is 8, so that an edge 90% full costs 7.9 times as much as an empty
+    /// one, and a full one 17 times.
+    pub crowding_exponent: u32,
     /// The engine's [`first_present`](EngineOptions::first_present). The default is 0.5.
     pub first_present: f64,
     /// The engine's [`initial_present`](EngineOptions::initial_present). The default is 0.5.
@@ -51,6 +91,10 @@ pub struct AsicOptions {
     /// The engine's [`history_factor`](EngineOptions::history_factor), in cells of wire. The
     /// default is 1.
     pub history_factor: f64,
+    /// Whether, once the plane is free of overflow, nets longer than a Steiner tree of their
+    /// pins are routed again, each by its shortest way that overflows nothing, against the
+    /// others as they are, to take back the detours that crowding made. The default is true.
+    pub refine: bool,
     /// How many times to assign layers again to the nets on edges that overflow on their
     /// layer. The default is 4.
     pub layer_passes: u32,
@@ -61,16 +105,24 @@ impl Default for AsicOptions {
         AsicOptions {
             threads: 1,
             batch_size: 32,
-            max_iterations: 100,
+            max_iterations: 400,
+            stall_iterations: 10,
+            restarts: 20,
             pattern: true,
+            steiner: true,
+            z_shapes: true,
             bend_cost: 1.0,
             box_margin: Some(10),
             box_growth: 5,
-            crowding: 1.0,
+            max_box_growth: 40,
+            longest_first: true,
+            crowding: 16.0,
+            crowding_exponent: 8,
             first_present: 0.5,
             initial_present: 0.5,
             present_growth: 1.8,
             history_factor: 1.0,
+            refine: true,
             layer_passes: 4,
         }
     }
@@ -83,11 +135,26 @@ pub struct AsicRouting {
     pub routes: Vec<Vec<Segment>>,
     /// The nets routed, which are those with at most [`MAX_PINS`] pins in more than one cell.
     pub routed_nets: usize,
-    /// The engine's report of each iteration on the plane.
+    /// The engine's report of each iteration on the plane, with those after each
+    /// [restart](AsicOptions::restarts) numbered from 1 again, and last that of the
+    /// [refinement](AsicOptions::refine), if there was one.
     pub iterations: Vec<IterationReport>,
+    /// How many times negotiation [started again](AsicOptions::restarts).
+    pub restarts: u32,
+    /// How many nets the [refinement](AsicOptions::refine) routed again.
+    pub refined_nets: usize,
     /// Overflow left on the plane, in tracks, summed over edges.
     pub planar_overflow: u64,
 }
+
+/// How many passes of negotiation in a row may end without a new least overflow before it
+/// gives up, however many [restarts](AsicOptions::restarts) it has left.
+const FRUITLESS_RESTARTS: u32 = 2;
+
+/// What crowding is during the [refinement](AsicOptions::refine), with the same exponent:
+/// little, so that nets take the shortest ways they have, but enough that of two they take
+/// the emptier.
+const REFINE_CROWDING: u32 = 1;
 
 /// Routes every net of `design` that needs it: on the plane first, by the engine, then onto
 /// layers. See the [module documentation](super#the-flow).
@@ -149,30 +216,40 @@ pub fn route_design(design: &Design, options: &AsicOptions) -> AsicRouting {
         pins_by_net.push(cells);
         design_index.push(n);
     }
-
-    if let Some(margin) = options.box_margin {
-        // Nets are numbered by their place in the design, so the boxes are too.
-        let mut boxes = vec![[0, u32::MAX, 0, u32::MAX]; design.nets.len()];
-        for net in &engine_nets {
-            let mut b = [u32::MAX, 0, u32::MAX, 0];
-            for t in &net.terminals {
-                for a in t.access_points() {
-                    let (x, y) = plane.cell_xy(plane.cell_of(a.node));
-                    let (x, y) = (x as u32, y as u32);
-                    b = [b[0].min(x), b[1].max(x), b[2].min(y), b[3].max(y)];
-                }
-            }
-            boxes[net.id.index()] = b;
+    // The box around each net's pins, by its number, which is its place in the design.
+    let mut boxes = vec![[0, u32::MAX, 0, u32::MAX]; design.nets.len()];
+    for net in &engine_nets {
+        let mut b = [u32::MAX, 0, u32::MAX, 0];
+        for cell in terminal_cells(net, &plane) {
+            let (x, y) = plane.cell_xy(cell);
+            let (x, y) = (x as u32, y as u32);
+            b = [b[0].min(x), b[1].max(x), b[2].min(y), b[3].max(y)];
         }
+        boxes[net.id.index()] = b;
+    }
+    if options.longest_first {
+        let half_perimeter = |k: usize| {
+            let b = boxes[engine_nets[k].id.index()];
+            (b[1] - b[0]) + (b[3] - b[2])
+        };
+        let mut order: Vec<usize> = (0..engine_nets.len()).collect();
+        order.sort_by_key(|&k| (core::cmp::Reverse(half_perimeter(k)), k));
+        engine_nets = order.iter().map(|&k| engine_nets[k].clone()).collect();
+        pins_by_net = order.iter().map(|&k| pins_by_net[k].clone()).collect();
+        design_index = order.iter().map(|&k| design_index[k]).collect();
+    }
+    if let Some(margin) = options.box_margin {
         plane.set_boxes(&boxes);
         for net in &engine_nets {
             plane.grow_box(net.id, margin);
         }
     }
+
     let engine_options = EngineOptions {
         max_iterations: options.max_iterations,
         batch_size: options.batch_size,
         crowding: Cost::new(options.crowding).unwrap_or(Cost::ZERO),
+        crowding_exponent: options.crowding_exponent,
         history_factor: Cost::new(options.history_factor).unwrap_or(Cost::ONE),
         first_present: Cost::new(options.first_present).unwrap_or(Cost::ONE),
         initial_present: Cost::new(options.initial_present).unwrap_or(Cost::ONE),
@@ -184,15 +261,15 @@ pub fn route_design(design: &Design, options: &AsicOptions) -> AsicRouting {
     if options.pattern {
         let cells: Vec<Vec<usize>> = engine_nets
             .iter()
-            .map(|net| {
-                net.terminals
-                    .iter()
-                    .filter_map(|t| t.access_points().first())
-                    .map(|a| plane.cell_of(a.node))
-                    .collect()
-            })
+            .map(|net| terminal_cells(net, &plane).collect())
             .collect();
-        let patterns = pattern::pattern_routes(&plane, &cells, options.bend_cost);
+        let patterns = pattern::pattern_routes(
+            &plane,
+            &cells,
+            options.bend_cost,
+            options.steiner,
+            options.z_shapes,
+        );
         let seeds =
             engine_nets
                 .iter()
@@ -206,23 +283,134 @@ pub fn route_design(design: &Design, options: &AsicOptions) -> AsicRouting {
             .seed_routes(seeds)
             .unwrap_or_else(|e| unreachable!("seeds come before the first iteration: {e}"));
     }
-    while engine.step_parallel(options.threads).is_some() {
-        // Nets that end an iteration on an edge that overflows may look further next time.
-        if options.box_margin.is_some() && options.box_growth > 0 {
-            let mut grow: Vec<NetId> = engine
-                .overused()
-                .iter()
-                .flat_map(|r| r.nets.iter().copied())
-                .collect();
-            grow.sort_unstable();
-            grow.dedup();
-            for net in grow {
-                plane.grow_box(net, options.box_growth);
+    let mut grown = vec![0u32; design.nets.len()];
+    let mut reports: Vec<IterationReport> = Vec::new();
+    let mut best: Option<(u64, Outcome<NodeId, NodeId>)> = None;
+    let mut restarts = 0;
+    // Passes in a row that ended without a new least overflow.
+    let mut fruitless = 0;
+    loop {
+        let (mut least, mut least_at) = (u64::MAX, 0);
+        let mut stalled = false;
+        while let Some(report) = engine.step_parallel(options.threads) {
+            if report.total_overuse.saturating_mul(100) < least.saturating_mul(99) {
+                (least, least_at) = (report.total_overuse, report.iteration);
+            }
+            if options.stall_iterations > 0
+                && report.iteration >= least_at + options.stall_iterations
+            {
+                stalled = true;
+                break;
+            }
+            // Nets that end an iteration on an edge that overflows may look further next time.
+            if options.box_margin.is_some() && options.box_growth > 0 {
+                let mut grow: Vec<NetId> = engine
+                    .overused()
+                    .iter()
+                    .flat_map(|r| r.nets.iter().copied())
+                    .collect();
+                grow.sort_unstable();
+                grow.dedup();
+                for net in grow {
+                    let left = options.max_box_growth.saturating_sub(grown[net.index()]);
+                    let by = options.box_growth.min(left);
+                    if by > 0 {
+                        grown[net.index()] += by;
+                        plane.grow_box(net, by);
+                    }
+                }
             }
         }
+        reports.extend_from_slice(engine.reports());
+        let outcome = engine.outcome();
+        let overuse = outcome
+            .overused
+            .iter()
+            .map(|r| u64::from(r.occupancy.saturating_sub(r.capacity)))
+            .sum();
+        if best.as_ref().is_none_or(|(least, _)| overuse < *least) {
+            best = Some((overuse, outcome));
+            fruitless = 0;
+        } else {
+            fruitless += 1;
+        }
+        let budget = options.max_iterations.saturating_sub(reports.len() as u32);
+        let Some((overuse, from)) = best.as_ref() else {
+            unreachable!("set above")
+        };
+        if !stalled
+            || *overuse == 0
+            || restarts >= options.restarts
+            || fruitless >= FRUITLESS_RESTARTS
+            || budget == 0
+        {
+            break;
+        }
+        // Negotiation again from the best routes so far, with the history it has learned and
+        // the present factor back where it starts.
+        restarts += 1;
+        let history = engine.history();
+        engine = Engine::new(
+            &plane,
+            &engine_nets,
+            EngineOptions {
+                max_iterations: budget,
+                ..engine_options
+            },
+        )
+        .unwrap_or_else(|e| unreachable!("nets have distinct numbers: {e}"));
+        engine
+            .seed_routes(from.routes.routes().map(|(id, route)| (id, route.clone())))
+            .unwrap_or_else(|e| unreachable!("seeds come before the first iteration: {e}"));
+        engine
+            .seed_history(history)
+            .unwrap_or_else(|e| unreachable!("history comes before the first iteration: {e}"));
     }
-    let reports = engine.reports().to_vec();
-    let outcome = engine.outcome();
+    drop(engine);
+    let Some((_, mut outcome)) = best else {
+        unreachable!("set in the first pass")
+    };
+    let mut refined_nets = 0;
+    if options.refine && outcome.overused.is_empty() {
+        let refine_options = EngineOptions {
+            max_iterations: 1,
+            batch_size: options.batch_size,
+            // Nothing a net could save on length is worth an overflow.
+            first_present: Cost::from(1000),
+            crowding: Cost::from(REFINE_CROWDING),
+            crowding_exponent: options.crowding_exponent,
+            ..EngineOptions::default()
+        };
+        let mut again = Engine::new(&plane, &engine_nets, refine_options)
+            .unwrap_or_else(|e| unreachable!("nets have distinct numbers: {e}"));
+        let detoured: Vec<NetId> = engine_nets
+            .iter()
+            .filter(|net| {
+                outcome
+                    .routes
+                    .route(net.id)
+                    .is_some_and(|route| planar_length(&plane, route) > steiner_length(net, &plane))
+            })
+            .map(|net| net.id)
+            .collect();
+        again
+            .seed_routes(
+                outcome
+                    .routes
+                    .routes()
+                    .map(|(id, route)| (id, route.clone())),
+            )
+            .unwrap_or_else(|e| unreachable!("seeds come before the first iteration: {e}"));
+        refined_nets = again.rip_up(detoured);
+        while again.step_parallel(options.threads).is_some() {}
+        let refined = again.outcome();
+        // Only the nets routed again move, each to a way that overflows nothing, so this
+        // holds; but a result with overflow is never traded for this one.
+        if refined.overused.is_empty() {
+            reports.extend_from_slice(again.reports());
+            outcome = refined;
+        }
+    }
     let planar_overflow = outcome
         .overused
         .iter()
@@ -243,12 +431,13 @@ pub fn route_design(design: &Design, options: &AsicOptions) -> AsicRouting {
         nets.push(LayerNet { tree, width });
     }
     // Nets with the least wire per pin first: their vias are at their pins, and they have
-    // the least length to win back what going up a layer costs there.
+    // the least length to win back what going up a layer costs there. Ties go by place in
+    // the design.
     let mut order: Vec<usize> = (0..nets.len()).collect();
     order.sort_by_key(|&k| {
         let t = &nets[k].tree;
         let pins = t.pins.iter().filter(|p| p.is_some()).count().max(1);
-        (t.cells.len() * 100 / pins, k)
+        (t.cells.len() * 100 / pins, design_index[k])
     });
     let mut grid = LayerGrid::new(design, &capacities, &plane);
     layers::assign(&mut grid, &plane, &mut nets, &order, options.layer_passes);
@@ -261,8 +450,48 @@ pub fn route_design(design: &Design, options: &AsicOptions) -> AsicRouting {
         routes,
         routed_nets: engine_nets.len(),
         iterations: reports,
+        restarts,
+        refined_nets,
         planar_overflow,
     }
+}
+
+/// The cells of a net's terminals, the driver's first.
+fn terminal_cells<'a>(
+    net: &'a Net<NodeId>,
+    plane: &'a PlanarSpace,
+) -> impl Iterator<Item = usize> + 'a {
+    net.terminals
+        .iter()
+        .filter_map(|t| t.access_points().first())
+        .map(|a| plane.cell_of(a.node))
+}
+
+/// How many edges between cells a route on the plane crosses.
+fn planar_length(plane: &PlanarSpace, route: &Route<NodeId>) -> u64 {
+    route
+        .edges()
+        .iter()
+        .filter(|e| plane.cell_of(e.from) != plane.cell_of(e.to))
+        .count() as u64
+}
+
+/// The length of a rectilinear Steiner tree of a net's terminals, as pattern routes have it.
+fn steiner_length(net: &Net<NodeId>, plane: &PlanarSpace) -> u64 {
+    let points: Vec<(u32, u32)> = terminal_cells(net, plane)
+        .map(|c| {
+            let (x, y) = plane.cell_xy(c);
+            (x as u32, y as u32)
+        })
+        .collect();
+    let (points, edges) = rsmt::steiner_tree(&points);
+    edges
+        .iter()
+        .map(|&(a, b)| {
+            let (p, q) = (points[a], points[b]);
+            u64::from(p.0.abs_diff(q.0)) + u64::from(p.1.abs_diff(q.1))
+        })
+        .sum()
 }
 
 /// The tree of cells of a route on the plane, rooted at the cell of its root, with the span of

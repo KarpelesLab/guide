@@ -4,8 +4,10 @@
 //! Each net is assigned exactly by dynamic programming over its tree, as in COLA (Lee and Wang,
 //! 2008): the cost of a node's subtree is worked out for each layer of the edge into it, and
 //! the vias at a cell span every layer that its edges and pins are on. An edge whose layer is
-//! full costs far more than any number of vias, so nets go up a layer before they overflow one.
-//! Nets go one at a time, each against the usage of those before, and the nets on edges that
+//! full costs far more than any number of vias, so nets go up a layer before they overflow one,
+//! and one nearly full a twentieth of a via, rising with the square of its use, so that of two
+//! layers that take as many vias a net goes on the emptier, which leaves room on the lower
+//! layers for the nets after it. Nets go one at a time, each against the usage of those before, and the nets on edges that
 //! still overflow are then assigned again a few times, with the price of those edges raised
 //! each time, as negotiation does.
 
@@ -17,6 +19,10 @@ use super::planar::PlanarSpace;
 const VIA: u64 = 1_000;
 /// What a unit of overflow costs: more than any number of vias a net could take to avoid it.
 const OVERFLOW: u64 = 1_000_000;
+/// What a full edge on a layer costs, against [`VIA`], with less for one less full in
+/// proportion to the square of its use, so that of two layers that take as many vias, a net
+/// goes on the emptier one, and leaves room on a layer for the nets after it.
+const CROWDING: u64 = VIA / 20;
 
 /// A net's tree on the plane, as nodes with parents, ready for layers.
 #[derive(Clone, Debug, Default)]
@@ -98,7 +104,13 @@ impl LayerGrid {
         let i = layer * self.edges + e;
         let after = self.used[i] + width;
         let over = after.saturating_sub(self.capacity[i].max(self.used[i]));
-        u64::from(over) * OVERFLOW + self.history[i]
+        let crowding = if over == 0 && self.capacity[i] > 0 {
+            let (after, capacity) = (u64::from(after), u64::from(self.capacity[i]));
+            CROWDING * after * after / (capacity * capacity)
+        } else {
+            0
+        };
+        u64::from(over) * OVERFLOW + self.history[i] + crowding
     }
 
     fn add(&mut self, layer: usize, e: usize, width: i64) {

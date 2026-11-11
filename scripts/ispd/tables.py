@@ -111,15 +111,15 @@ def ratio(ours, published):
 
 
 def ispd08(runs):
-    print("| Benchmark | TOF | MOF | WL | Wire | Vias | Iterations | Wall s | CPU s |")
-    print("| --- " * 9 + "|")
+    print("| Benchmark | TOF | MOF | WL | Wire | Vias | Iterations | Restarts | Wall s | CPU s |")
+    print("| --- " * 10 + "|")
     for name in ISPD08:
         if name not in runs:
             continue
         r = runs[name]
         print(f"| {name} | {r['tof']} | {r['mof']} | {sep(r['wl'])} | {sep(r['wire'])} "
-              f"| {sep(r['vias'])} | {r['iterations']} | {float(r['time']):.0f} "
-              f"| {float(r['cpu']):.0f} |")
+              f"| {sep(r['vias'])} | {r['iterations']} | {r.get('restarts', '')} "
+              f"| {float(r['time']):.0f} | {float(r['cpu']):.0f} |")
     print()
     print("| Benchmark | TOF: guide | NTHU-Route (contest) | Best of contest | SGR | FastRoute 4.1 "
           "| WL / NTHU-Route | WL / SGR | WL / FastRoute 4.1 | Seconds: guide, NTHU-Route, SGR |")

@@ -27,11 +27,11 @@ pub struct AsicOptions {
     /// results: see [the engine](crate::engine#batches-and-threads). The default is 32.
     pub batch_size: u32,
     /// The most iterations of negotiation on the plane, over all its
-    /// [restarts](Self::restarts). The default is 400.
+    /// [restarts](Self::restarts). The default is 500.
     pub max_iterations: u32,
     /// How many iterations negotiation may go on without taking the overflow on the plane 1%
     /// below the least it has had, before it stalls, or 0 to go on to
-    /// [`max_iterations`](Self::max_iterations). The default is 10.
+    /// [`max_iterations`](Self::max_iterations). The default is 15.
     ///
     /// Negotiation that stalls starts again, if it has [restarts](Self::restarts) left, and
     /// otherwise stops: a design that does not converge would spend most of its time on
@@ -105,8 +105,8 @@ impl Default for AsicOptions {
         AsicOptions {
             threads: 1,
             batch_size: 32,
-            max_iterations: 400,
-            stall_iterations: 10,
+            max_iterations: 500,
+            stall_iterations: 15,
             restarts: 20,
             pattern: true,
             steiner: true,

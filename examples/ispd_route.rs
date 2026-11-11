@@ -18,8 +18,8 @@
 //! | `--via-cost N` | Wirelength per layer a via spans: 1 in 2008, 3 in 2007 | 1 |
 //! | `--threads N` | `AsicOptions::threads` | 1 |
 //! | `--batch N` | `AsicOptions::batch_size` | 32 |
-//! | `--max-iterations N` | `AsicOptions::max_iterations` | 400 |
-//! | `--stall N` | `AsicOptions::stall_iterations` | 10 |
+//! | `--max-iterations N` | `AsicOptions::max_iterations` | 500 |
+//! | `--stall N` | `AsicOptions::stall_iterations` | 15 |
 //! | `--restarts N` | `AsicOptions::restarts` | 20 |
 //! | `--layer-passes N` | `AsicOptions::layer_passes` | 4 |
 //! | `--box-margin N` | `AsicOptions::box_margin`, -1 for none | 10 |

@@ -23,8 +23,9 @@
 //! up their histories and their overuses. See [`EngineOptions`] for the schedule.
 //!
 //! [`crowding`](EngineOptions::crowding), off by default, adds to the second factor a term for
-//! how full each resource would be, so that nets also keep away from what is nearly full, as
-//! global routers do on grids with many tracks to an edge.
+//! how full each resource would be, to the power of
+//! [`crowding_exponent`](EngineOptions::crowding_exponent), so that nets also keep away from
+//! what is nearly full, as global routers do on grids with many tracks to an edge.
 //!
 //! The formula is additive in history, unlike the multiplicative form that some routers
 //! use, because a zero-cost step has to be able to get dearer: multiplying a base of zero
@@ -737,6 +738,14 @@ pub struct EngineOptions<'c> {
     /// do, and a resource of many tracks that is full is dearer than one that is half full. A
     /// resource of capacity 0 adds nothing here: its overuse is priced already.
     pub crowding: Cost,
+    /// The power of how full a resource would be that [`crowding`](EngineOptions::crowding)
+    /// prices. The default is 2, the square.
+    ///
+    /// A higher power keeps the price low until a resource is nearly full and then raises it
+    /// steeply, as the congestion functions of global routers such as NTHU-Route 2.0, whose
+    /// penalty is the fifth power, and NCTU-GR 2.0, which uses a logistic curve, do. 0 counts
+    /// as 1.
+    pub crowding_exponent: u32,
 }
 
 impl Default for EngineOptions<'_> {
@@ -760,6 +769,7 @@ impl Default for EngineOptions<'_> {
             give_up_factor: 0.0,
             give_up_overused: 100,
             crowding: Cost::ZERO,
+            crowding_exponent: 2,
         }
     }
 }
@@ -1478,6 +1488,45 @@ impl<S: RoutingSpace> ResourceTable<S> {
     }
 }
 
+/// [`EngineOptions::crowding`] and [`EngineOptions::crowding_exponent`].
+#[derive(Clone, Copy, Debug)]
+struct Crowding {
+    factor: Cost,
+    exponent: u32,
+}
+
+impl Crowding {
+    #[cfg(test)]
+    const OFF: Crowding = Crowding {
+        factor: Cost::ZERO,
+        exponent: 2,
+    };
+
+    fn of(options: &EngineOptions<'_>) -> Crowding {
+        Crowding {
+            factor: options.crowding,
+            exponent: options.crowding_exponent.max(1),
+        }
+    }
+
+    /// `full` to the power, by multiplication alone, which every platform does the same.
+    #[inline]
+    fn power(self, full: f64) -> f64 {
+        if self.exponent == 2 {
+            return full * full;
+        }
+        let (mut result, mut base, mut n) = (1.0, full, self.exponent);
+        while n > 0 {
+            if n & 1 == 1 {
+                result *= base;
+            }
+            base *= base;
+            n >>= 1;
+        }
+        result
+    }
+}
+
 /// A space whose steps cost what the negotiation currently says they do.
 ///
 /// Everything else goes straight to the space inside. This exists for one search at a time,
@@ -1487,7 +1536,7 @@ struct Priced<'a, S: RoutingSpace> {
     table: &'a ResourceTable<S>,
     present: Cost,
     /// [`EngineOptions::crowding`].
-    crowding: Cost,
+    crowding: Crowding,
     /// What the current net already holds. Using these again takes nothing from anyone.
     held: &'a FastSet<S::Resource>,
     /// A buffer for the space's answers. It is here because expansion only gets `&self`, and
@@ -1585,7 +1634,7 @@ impl<S: RoutingSpace> Priced<'_, S> {
 
         let mut history = Cost::ZERO;
         let mut overuse = 0u32;
-        let crowded = self.crowding > Cost::ZERO;
+        let crowded = self.crowding.factor > Cost::ZERO;
         let mut fill = 0.0;
         for &resource in resources.iter() {
             if !self.held.is_empty() && self.held.contains(&resource) {
@@ -1612,7 +1661,7 @@ impl<S: RoutingSpace> Priced<'_, S> {
             overuse = overuse.saturating_add(overuse_with_one_more(others, capacity));
             if crowded && capacity > 0 {
                 let full = f64::from(others.saturating_add(1).min(capacity)) / f64::from(capacity);
-                fill += full * full;
+                fill += self.crowding.power(full);
             }
         }
 
@@ -1620,7 +1669,7 @@ impl<S: RoutingSpace> Priced<'_, S> {
             return base;
         }
         let crowding = if crowded {
-            self.crowding * Cost::new(fill).unwrap_or(Cost::ZERO)
+            self.crowding.factor * Cost::new(fill).unwrap_or(Cost::ZERO)
         } else {
             Cost::ZERO
         };
@@ -2063,7 +2112,7 @@ struct RouteContext<'a, S: RoutingSpace> {
     space: &'a S,
     table: &'a ResourceTable<S>,
     present: Cost,
-    crowding: Cost,
+    crowding: Crowding,
     cancel: Option<&'a AtomicBool>,
     timing: Option<RouteTiming<'a, S>>,
     bound_weight: f64,
@@ -2313,7 +2362,7 @@ fn route_in_batch<S: RoutingSpace>(
     let mut dead_roots = state.dead_roots.clone();
     let criticality = context.route.timing.map_or(&[][..], |t| t.of_net(index));
     let net = &context.nets[index];
-    let kept = if context.route.incremental {
+    let kept = if context.route.incremental && !state.ripped {
         let step_delays = context.route.timing.map(|timing| timing.step_delays);
         kept_part(
             context.route.space,
@@ -2403,6 +2452,8 @@ struct NetState<N, R> {
     /// What is left of a [seed](Engine::seed_routes) that does not reach every terminal, which
     /// the net grows from when it is first routed, and holds until then.
     seed: Option<Box<FixedPart<N, R>>>,
+    /// Whether [`Engine::rip_up`] has the net routed again, whole, at its next turn.
+    ripped: bool,
 }
 
 impl<N, R> NetState<N, R> {
@@ -2861,6 +2912,7 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
                 no_path: has_terminal_outside(space, net),
                 fixed: None,
                 seed: None,
+                ripped: false,
             })
             .collect();
         Ok(Engine {
@@ -3375,6 +3427,7 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
     /// Puts a batch route into the table.
     fn commit(&mut self, index: usize, routed: BatchRoute<S::Node, S::Resource>) {
         let state = &mut self.states[index];
+        state.ripped = false;
         self.table.release(&state.held);
         state.held.clear();
         state.dead_roots = routed.dead_roots;
@@ -3429,7 +3482,7 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
                 space: self.space,
                 table: &self.table,
                 present: self.present,
-                crowding: self.options.crowding,
+                crowding: Crowding::of(&self.options),
                 cancel: self.options.cancel,
                 timing: self.timing.as_ref().map(TimingState::route_timing),
                 bound_weight: self.options.bound_weight,
@@ -3642,6 +3695,37 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
         self.collect_overused()
     }
 
+    /// Has nets routed again, whole, at their next turn, whether or not they hold an overused
+    /// resource, and returns how many were not already to be.
+    ///
+    /// This is for a caller that knows better than overuse alone which nets should move, such
+    /// as one that [seeds](Engine::seed_routes) a legal result and has the nets that took
+    /// detours routed again, to take back what they can now that the rest have settled. Each
+    /// is routed again once, in its turn in the next iteration, as a net that holds an overused
+    /// resource is, and seeing the others as they are then. Called between iterations, that is
+    /// the next one. Nets that are not in the run, have a fixed route, need no routing or
+    /// cannot be routed are left out.
+    pub fn rip_up(&mut self, nets: impl IntoIterator<Item = NetId>) -> usize {
+        let mut wanted: Vec<NetId> = nets.into_iter().collect();
+        if wanted.is_empty() {
+            return 0;
+        }
+        wanted.sort_unstable();
+        wanted.dedup();
+        let mut count = 0;
+        for (index, net) in self.nets.iter().enumerate() {
+            if wanted.binary_search(&net.id).is_err() {
+                continue;
+            }
+            let state = &mut self.states[index];
+            if net.needs_routing() && !state.no_path && !state.is_fixed() && !state.ripped {
+                state.ripped = true;
+                count += 1;
+            }
+        }
+        count
+    }
+
     /// Returns the best result so far, which the engine keeps.
     pub fn outcome(&self) -> Outcome<S::Node, S::Resource> {
         let stop = self.stop.unwrap_or(StopReason::NotFinished);
@@ -3710,7 +3794,7 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
         if !self.nets[index].needs_routing() || state.no_path || state.is_fixed() {
             return false;
         }
-        if state.route.is_none() || self.options.reroute_all {
+        if state.route.is_none() || self.options.reroute_all || state.ripped {
             return true;
         }
         if self.first_legal.is_some()
@@ -3738,7 +3822,7 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
     fn reroute(&mut self, index: usize) -> Result<(), Interrupt> {
         let net = &self.nets[index];
         // Before the net lets go, so that it counts towards what is overused.
-        let kept = if self.incremental() {
+        let kept = if self.incremental() && !self.states[index].ripped {
             let step_delays = self.timing.as_ref().map(|timing| timing.step_delays);
             kept_part(
                 self.space,
@@ -3751,6 +3835,7 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
             None
         };
         let state = &mut self.states[index];
+        state.ripped = false;
         self.table.release(&state.held);
         // A net routed for the first time grows from its seed, if it has one.
         let seed = state.seed.take();
@@ -3760,7 +3845,7 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
             space: self.space,
             table: &self.table,
             present: self.present,
-            crowding: self.options.crowding,
+            crowding: Crowding::of(&self.options),
             cancel: self.options.cancel,
             timing: self.timing.as_ref().map(TimingState::route_timing),
             bound_weight: self.options.bound_weight,
@@ -4062,7 +4147,7 @@ where
             space: self.space,
             nets: self.nets,
             present: self.present,
-            crowding: self.options.crowding,
+            crowding: Crowding::of(&self.options),
             cancel: self.options.cancel,
             bound_weight: self.options.bound_weight,
             incremental: self.incremental(),
@@ -4179,7 +4264,7 @@ struct IterationContext<'a, S: RoutingSpace> {
     space: &'a S,
     nets: &'a [Net<S::Node>],
     present: Cost,
-    crowding: Cost,
+    crowding: Crowding,
     cancel: Option<&'a AtomicBool>,
     bound_weight: f64,
     incremental: bool,
@@ -5560,6 +5645,38 @@ mod tests {
     // Stepping.
 
     #[test]
+    fn ripped_up_nets_are_routed_again_at_their_next_turn() {
+        // Nets 0 and 1 share a terminal, which stays overused for ever; net 2 is far away.
+        let grid = Grid::new(4, 4, 1).unwrap();
+        let at = |x, y| grid.node_at(x, y, 0).unwrap().0;
+        let nets = vec![
+            net(0, &[at(0, 0), at(1, 0)]),
+            net(1, &[at(0, 0), at(0, 1)]),
+            net(2, &[at(3, 3), at(3, 1)]),
+        ];
+        let limited = EngineOptions {
+            max_iterations: 3,
+            ..options()
+        };
+        let mut plain = Engine::new(&grid, &nets, limited).unwrap();
+        let mut ripped = Engine::new(&grid, &nets, limited).unwrap();
+        plain.step().unwrap();
+        ripped.step().unwrap();
+
+        // Unknown nets are left out, and a net is counted once.
+        assert_eq!(ripped.rip_up([NetId(2), NetId(2), NetId(9)]), 1);
+        let (a, b) = (plain.step().unwrap(), ripped.step().unwrap());
+        assert_eq!(b.nets_rerouted, a.nets_rerouted + 1);
+        // Once only.
+        let (a, b) = (plain.step().unwrap(), ripped.step().unwrap());
+        assert_eq!(b.nets_rerouted, a.nets_rerouted);
+        assert_eq!(
+            plain.outcome().routes.route(NetId(2)),
+            ripped.outcome().routes.route(NetId(2))
+        );
+    }
+
+    #[test]
     fn stepping_matches_running_and_reports_each_iteration() {
         let grid = Grid::new(8, 8, 2).unwrap();
         let at = |x, y| grid.node_at(x, y, 0).unwrap().0;
@@ -5677,12 +5794,15 @@ mod tests {
         let bus = table.intern(&space, BUS);
         let held = FastSet::default();
         let buffer = RefCell::new(Vec::new());
-        let price = |table: &ResourceTable<BusSpace>, crowding: u32| {
+        let price_with = |table: &ResourceTable<BusSpace>, crowding: u32, exponent: u32| {
             let priced = Priced {
                 inner: &space,
                 table,
                 present: Cost::from(10),
-                crowding: Cost::from(crowding),
+                crowding: Crowding {
+                    factor: Cost::from(crowding),
+                    exponent,
+                },
                 held: &held,
                 buffer: &buffer,
                 replacing: &FastSet::default(),
@@ -5690,13 +5810,17 @@ mod tests {
             };
             priced.price(Cost::ONE, &mut vec![BUS]).get()
         };
+        let price = |table: &ResourceTable<BusSpace>, crowding: u32| price_with(table, crowding, 2);
         // Off, a resource with room is priced at its base cost.
         assert_eq!(price(&table, 0), 1.0);
-        // Half full with this net: 1 + 4 * (1/2)^2.
+        // Half full with this net: 1 + 4 * (1/2)^2, or 1 + 4 * (1/2)^5 at the fifth power.
         assert_eq!(price(&table, 4), 2.0);
-        // Full with this net: 1 + 4.
+        assert_eq!(price_with(&table, 4, 5), 1.125);
+        assert_eq!(price_with(&table, 4, 1), 3.0);
+        // Full with this net: 1 + 4, whatever the power.
         table.states[bus].occupancy = 1;
         assert_eq!(price(&table, 4), 5.0);
+        assert_eq!(price_with(&table, 4, 7), 5.0);
         assert_eq!(price(&table, 0), 1.0);
         // Overused by 2, where fullness stops at 1: 1 + 10 * 2 + 4.
         table.states[bus].occupancy = 3;
@@ -5726,7 +5850,7 @@ mod tests {
             inner: &space,
             table: &table,
             present: Cost::from(10),
-            crowding: Cost::ZERO,
+            crowding: Crowding::OFF,
             held: &held,
             buffer: &buffer,
             replacing: &FastSet::default(),
@@ -5755,7 +5879,7 @@ mod tests {
             inner: &space,
             table: &table,
             present: Cost::from(10),
-            crowding: Cost::ZERO,
+            crowding: Crowding::OFF,
             held: &held,
             buffer: &buffer,
             replacing: &FastSet::default(),
@@ -5785,7 +5909,7 @@ mod tests {
             inner: &space,
             table: &table,
             present: Cost::from(10),
-            crowding: Cost::ZERO,
+            crowding: Crowding::OFF,
             held: &held,
             buffer: &buffer,
             replacing: &FastSet::default(),
@@ -5815,7 +5939,7 @@ mod tests {
                             inner: &space,
                             table: &table,
                             present: Cost::from(present),
-                            crowding: Cost::ZERO,
+                            crowding: Crowding::OFF,
                             held: &held,
                             buffer: &buffer,
                             replacing: &FastSet::default(),
@@ -5838,7 +5962,7 @@ mod tests {
             inner: space,
             table,
             present: Cost::from(present),
-            crowding: Cost::ZERO,
+            crowding: Crowding::OFF,
             held: &held,
             buffer: &buffer,
             replacing: &FastSet::default(),
@@ -5875,7 +5999,7 @@ mod tests {
             inner: &space,
             table: &table,
             present: Cost::from(10),
-            crowding: Cost::ZERO,
+            crowding: Crowding::OFF,
             held: &held,
             buffer: &buffer,
             replacing: &FastSet::default(),
@@ -5896,7 +6020,7 @@ mod tests {
             inner: &space,
             table: &table,
             present: Cost::from(10),
-            crowding: Cost::ZERO,
+            crowding: Crowding::OFF,
             held: &held,
             buffer: &buffer,
             replacing: &FastSet::default(),

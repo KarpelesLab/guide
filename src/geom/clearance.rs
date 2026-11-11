@@ -364,7 +364,9 @@ impl Ratio {
     }
 
     fn to_f64(self) -> f64 {
-        let num = self.num.hi as f64 * 2f64.powi(128) + self.num.lo as f64;
+        // 2^128, exactly, without `powi`, whose precision Rust leaves unspecified.
+        const TWO_128: f64 = (1u128 << 127) as f64 * 2.0;
+        let num = self.num.hi as f64 * TWO_128 + self.num.lo as f64;
         num / self.den as f64
     }
 }

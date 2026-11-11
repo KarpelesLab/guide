@@ -737,7 +737,9 @@ impl<'d> Model<'d> {
     /// Moves surface-mount parts to the other side while theirs is fuller than `fill` of its
     /// free room and the other side has room: parts of two pins first, smallest first.
     fn balance(&mut self, scale: (i64, i64), fill: f64) {
-        let cell = (self.raster.cell as f64).powi(2);
+        // A product, not `powi`, whose precision Rust leaves unspecified: a cell's area in
+        // square nanometres is exact either way, far below 2^53.
+        let cell = self.raster.cell as f64 * self.raster.cell as f64;
         let free = |g: &[bool]| g.iter().filter(|&&b| !b).count() as f64 * cell;
         let room = [
             free(&self.raster.front) * fill,

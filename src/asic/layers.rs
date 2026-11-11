@@ -469,6 +469,32 @@ mod tests {
     use crate::asic::format::read_design;
 
     #[test]
+    fn of_two_layers_that_take_as_many_vias_a_net_goes_on_the_emptier() {
+        // Rows on layers 0 and 2, two tracks each; pins on layer 1, a via from either.
+        let text = "grid 2 1 3\nvertical capacity 0 4 0\nhorizontal capacity 4 0 4\n\
+                    minimum width 1 1 1\nminimum spacing 1 1 1\nvia spacing 1 1 1\n0 0 10 10\n\
+                    num net 0\n";
+        let design = read_design(text.as_bytes()).unwrap();
+        let caps = design.capacities();
+        let plane = PlanarSpace::new(&caps, |_, c| c / 2);
+        let mut grid = LayerGrid::new(&design, &caps, &plane);
+        let net = || LayerNet {
+            tree: PlanarTree {
+                cells: vec![0, 1],
+                parent: vec![u32::MAX, 0],
+                pins: vec![Some((1, 1)), Some((1, 1))],
+                layer: Vec::new(),
+            },
+            width: vec![2, 2, 2],
+        };
+        let mut nets = vec![net(), net()];
+        assign(&mut grid, &plane, &mut nets, &[0, 1], 2);
+        // The first takes the lower; the second, which would fill it, the other.
+        assert_eq!(nets[0].tree.layer[1], 0);
+        assert_eq!(nets[1].tree.layer[1], 2);
+    }
+
+    #[test]
     fn a_bend_takes_one_via_and_pins_reach_their_layer() {
         let text = "grid 3 3 2\nvertical capacity 0 10\nhorizontal capacity 10 0\n\
                     minimum width 1 1\nminimum spacing 1 1\nvia spacing 1 1\n0 0 10 10\n\

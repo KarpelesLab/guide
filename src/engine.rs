@@ -730,9 +730,10 @@ pub struct EngineOptions<'c> {
     /// A price on resources as they fill up, before they are overused. The default is 0, which
     /// leaves prices as the [module documentation](self#the-negotiation) has them.
     ///
-    /// Above 0, the factor on a step's base and history cost gains this times the square of
-    /// how full each resource it consumes would be with the net added, as a fraction of its
-    /// capacity of at most 1, so that a step into a resource left with no room costs `1 +
+    /// Above 0, the factor on a step's base and history cost gains this times the square, or
+    /// the [`crowding_exponent`](EngineOptions::crowding_exponent)th power, of how full each
+    /// resource it consumes would be with the net added, as a fraction of its capacity of at
+    /// most 1, so that a step into a resource left with no room costs `1 +
     /// crowding` times as much even before it is overused. Nets then keep away from what is
     /// nearly full while there is room elsewhere, as global routers' congestion costs have them
     /// do, and a resource of many tracks that is full is dearer than one that is half full. A

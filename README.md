@@ -106,6 +106,8 @@ tools handle what comes before and after.
 | [Domains](docs/domains.md) | What each target domain requires and how it maps onto the core |
 | [Algorithms](docs/algorithms.md) | Candidate algorithms, where each applies, and references |
 | [Benchmarks](docs/benchmarks.md) | Measured results, against VPR, KiCad and Freerouting |
+| [API review](docs/api-review.md) | The public API's inventory, what was made consistent, and what is left before 1.0 |
+| [Stability](docs/stability.md) | Draft semver and determinism policy, awaiting a decision |
 
 ## Development
 

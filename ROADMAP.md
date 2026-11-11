@@ -458,7 +458,12 @@ the first routing on the small boards.
   ([README](README.md#command-line-tool)). Left: a time limit or cancellation for PCB routing,
   the placers and ASIC routing, which have no cancel flag yet; Ctrl-C handling, which needs a
   signal handler std doesn't have; and progress within a run, not only between its phases.
-- API review and stabilization.
+- API review and stabilization. **Started:** the [review](docs/api-review.md) of all 405 public
+  items, with the consistent fixes made (option and result types `#[non_exhaustive]`, `# Errors`
+  and `# Panics` everywhere, `missing_docs` denied, examples per domain, the feature each item
+  needs on docs.rs, errors that give their sources, and a test of the API's guarantees), and a
+  [draft semver and determinism policy](docs/stability.md). Left: the decisions both list,
+  including what determinism promises across versions.
 
 **Exit (1.0):** published benchmark results in at least three domains; a documented,
 stable public API; a semver policy that covers result determinism.

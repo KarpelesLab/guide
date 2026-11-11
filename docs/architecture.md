@@ -398,7 +398,9 @@ it is needed, it gets isolated in a small audited module and the lint relaxed th
 5. **What does determinism cover across versions?** Same-version reproducibility is a
    requirement. Stability across versions would freeze every algorithmic improvement,
    so the current intent is that it is not promised, and that a seed and version
-   together identify a result. Needs settling before 1.0.
+   together identify a result. Needs settling before 1.0: the
+   [draft stability policy](stability.md#across-versions-the-open-question) sets out four
+   options, from no promise to versioned behaviour, with their trade-offs.
 
 6. **Do search costs need `f32` storage?** cadlab's grid search uses `f32`, possibly to
    save memory on large boards. We start with `f64` and only add a narrower or generic

@@ -292,7 +292,14 @@ impl fmt::Display for PlaceError {
     }
 }
 
-impl std::error::Error for PlaceError {}
+impl std::error::Error for PlaceError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            PlaceError::Problem(e) => Some(e),
+            PlaceError::IllegalStart(_) | PlaceError::NoRoom(_) => None,
+        }
+    }
+}
 
 impl From<ProblemError> for PlaceError {
     fn from(error: ProblemError) -> PlaceError {

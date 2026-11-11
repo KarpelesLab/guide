@@ -519,7 +519,13 @@ impl fmt::Display for RouteError {
     }
 }
 
-impl std::error::Error for RouteError {}
+impl std::error::Error for RouteError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            RouteError::Geometry(e) => Some(e),
+        }
+    }
+}
 
 /// Routes a design. See the [module documentation](self).
 ///

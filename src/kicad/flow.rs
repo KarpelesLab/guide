@@ -185,7 +185,15 @@ impl fmt::Display for FlowError {
     }
 }
 
-impl std::error::Error for FlowError {}
+impl std::error::Error for FlowError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            FlowError::Read(e) => Some(e),
+            FlowError::Place(e) => Some(e),
+            FlowError::Route(e) => Some(e),
+        }
+    }
+}
 
 /// The safe automatic swap groups of a board's design, from [`placement_design`]: the two
 /// pins of resistors, capacitors, inductors and ferrite beads, as

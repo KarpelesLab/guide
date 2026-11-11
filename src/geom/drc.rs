@@ -334,7 +334,14 @@ impl fmt::Display for DrcError {
     }
 }
 
-impl std::error::Error for DrcError {}
+impl std::error::Error for DrcError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            DrcError::Geometry { error, .. } => Some(error),
+            _ => None,
+        }
+    }
+}
 
 /// Copper on the board: its shape, layers, net and own clearance.
 struct Copper {

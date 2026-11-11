@@ -12,6 +12,9 @@
 //! [`eco`] routes a routed board again after a change, keeping the copper the change leaves
 //! alone. [`swap`] exchanges the nets of equivalent pins where that shortens them.
 //!
+//! [`route`] has an example of a design built by hand; the `kicad` and `dsn` modules have
+//! examples of routing boards read from files.
+//!
 //! # How it routes
 //!
 //! 0. **Escapes.** Pads closer together than a track and its clearances, such as a BGA's or

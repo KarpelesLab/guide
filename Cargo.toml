@@ -3,7 +3,7 @@ name = "guide"
 version = "0.0.1"
 edition = "2024"
 rust-version = "1.95"
-description = "Placement and routing engine for PCBs, FPGAs and other constrained connection problems (early scaffold: no routing yet)."
+description = "Placement and routing engine for PCBs, FPGAs, ASIC global routing, multi-agent path finding and other constrained connection problems."
 repository = "https://github.com/KarpelesLab/guide"
 license = "MIT"
 readme = "README.md"
@@ -14,6 +14,8 @@ exclude = [".github", "testdata", "scripts"]
 
 [package.metadata.docs.rs]
 all-features = true
+# Marks each feature-gated item with the feature it needs (`doc_cfg`, nightly only).
+rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 # FPGA routing problems: importing device graphs and designs from VTR.

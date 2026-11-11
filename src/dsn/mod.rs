@@ -9,6 +9,23 @@
 //! tracks and vias in that model to a session, a `.ses` file, in the form KiCad's "Import
 //! Specctra Session" accepts.
 //!
+//! Routing a design into a session, as `guide dsn route` does in place of Freerouting:
+//!
+//! ```no_run
+//! use guide::dsn::{self, Session};
+//! use guide::pcb::{self, Design, RouteOptions};
+//!
+//! let read = dsn::read(&std::fs::read_to_string("board.dsn")?)?;
+//! // The wiring already in the file stays, as fixed copper.
+//! let design = Design::from_dsn(&read);
+//! let routed = pcb::route(&design, &RouteOptions::default())?;
+//! println!("{} nets left unrouted", routed.unrouted.len());
+//! let layers = &read.rules.spec().layers;
+//! let session = Session::new("board.dsn", layers, &read.nets, &routed.tracks, &routed.vias);
+//! std::fs::write("board.ses", dsn::write_session(&session)?)?;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
 //! # What is read
 //!
 //! - **The parser section**: the quote character and whether quoted strings hold spaces,

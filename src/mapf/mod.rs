@@ -13,7 +13,7 @@
 //! [`solve`] hands it to [`crate::engine`], which negotiates the conflicts away as PathFinder
 //! does on an FPGA. Agents are nets, and each net has two terminals, its start at time 0 and
 //! its goal. This is what MAPF-LNS2 (Li et al., AAAI 2022) calls soft conflicts: an agent may
-//! collide at a price, and the price rises until nobody does.
+//! collide at a price, and the price rises until nobody does. [`solve`] has an example.
 //!
 //! # Staying on the goal
 //!

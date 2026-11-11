@@ -48,6 +48,26 @@
 //! is listed in [`KicadBoard::warnings`], never dropped in silence. See there for what that
 //! can be.
 //!
+//! ```no_run
+//! use guide::geom::drc;
+//! use guide::kicad::{self, FlowOptions};
+//!
+//! let pcb = std::fs::read_to_string("board.kicad_pcb")?;
+//! let project = std::fs::read_to_string("board.kicad_pro").ok();
+//!
+//! // Check the board as KiCad's DRC would.
+//! let board = kicad::read(&pcb, project.as_deref())?;
+//! for violation in drc::check(&board.board, &board.rules)? {
+//!     println!("{violation:?}");
+//! }
+//!
+//! // Place it, route it, and write it back for KiCad.
+//! let done = kicad::place_and_route(&pcb, project.as_deref(), &FlowOptions::default())?;
+//! println!("{} nets left unrouted", done.routed.unrouted.len());
+//! std::fs::write("placed-and-routed.kicad_pcb", &done.text)?;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
 //! The reader was checked against `kicad-cli pcb drc` from KiCad 10.0.3 on nine real
 //! boards, finding by finding: `docs/benchmarks.md` in the repository has the results, and
 //! every difference, each explained.

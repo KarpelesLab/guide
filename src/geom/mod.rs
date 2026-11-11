@@ -6,6 +6,20 @@
 //! force `guide` and its users to upgrade together. A private module is the only place that
 //! names it, and a test keeps it that way.
 //!
+//! ```
+//! use guide::geom::{Point, Shape};
+//!
+//! // A via of 0.6 mm, and a track of 0.25 mm whose centreline passes 0.5 mm from its centre:
+//! // 0.5 mm less 0.3 and 0.125 leaves a gap of exactly 75 µm.
+//! let via = Shape::circle(Point::new(0, 0), 600_000)?;
+//! let (a, b) = (Point::new(-1_000_000, 500_000), Point::new(1_000_000, 500_000));
+//! let track = Shape::track(a, b, 250_000)?;
+//! assert!(via.violates(&track, 100_000)?);
+//! assert!(!via.violates(&track, 75_000)?);
+//! assert!(!via.touches(&track));
+//! # Ok::<(), guide::geom::GeomError>(())
+//! ```
+//!
 //! # Coordinates
 //!
 //! [`Point`]s are `i64` database units, nanometres on a PCB, with Y up as in polyclip and

@@ -14,6 +14,9 @@
 //! says are congested. [`CongestionGrid`] is one, filled from a placement by RUDY or by a
 //! router from what it found.
 //!
+//! [`PlacementProblem`] has an example of a problem built and annealed, and [`Annealer`] one
+//! of stepping the annealer.
+//!
 //! # Placers
 //!
 //! - [`Annealer`] is simulated annealing after VPR: moves and swaps within a range limit that

@@ -261,6 +261,20 @@ pub struct Annealer<'a, C> {
     held_rotations: Vec<bool>,
 }
 
+/// Shows where the run is, as the routing engine's does, and leaves out the tables.
+impl<C> core::fmt::Debug for Annealer<'_, C> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Annealer")
+            .field("items", &self.problem.items().len())
+            .field("cost", &self.total)
+            .field("temperature", &self.temperature)
+            .field("temperatures", &self.temperatures)
+            .field("moves", &self.moves)
+            .field("stop", &self.stop)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<'a, C: CostTerm> Annealer<'a, C> {
     /// Prepares to anneal from `start`, which has to be legal.
     ///

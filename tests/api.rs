@@ -51,7 +51,17 @@ fn core_types_are_send_and_sync() {
     shared::<place::Placement>();
     shared::<place::AnnealOptions<'static>>();
     shared::<place::PlaceOutcome>();
+    shared::<place::Annealer<'static, place::Wirelength>>();
     shared::<rng::Rng>();
+}
+
+#[test]
+fn state_machines_are_debug() {
+    use guide::*;
+    fn debug<T: core::fmt::Debug>() {}
+    debug::<engine::Engine<'static, space::grid::Grid>>();
+    debug::<place::Annealer<'static, place::Wirelength>>();
+    debug::<search::Search<space::grid::Grid>>();
 }
 
 #[test]

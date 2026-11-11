@@ -150,6 +150,11 @@ fn pair_base(name: &str) -> Option<String> {
 /// aren't read, nor are a `track_width`'s `max` and a `diff_pair_gap`'s `max`, which
 /// KiCad's DRC checks.
 ///
+/// # Errors
+///
+/// [`KicadError`] only if the text is not S-expressions. Rules it can't use are skipped
+/// with a warning, as above.
+///
 /// ```
 /// # let pcb = r#"(kicad_pcb (version 20240108) (generator test)
 /// #   (layers (0 "F.Cu" signal) (31 "B.Cu" signal))

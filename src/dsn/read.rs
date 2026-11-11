@@ -17,9 +17,12 @@ use crate::units::{normalize, rotate_y_up, scaled};
 
 /// Reads a design.
 ///
-/// Fails only if the text is not an S-expression, is not a design (`(pcb ...)`), has no
-/// layers, or holds rules that [`Rules`] rejects. Items it can't make sense of are skipped
-/// with a [warning](DsnBoard::warnings).
+/// Items it can't make sense of are skipped with a [warning](DsnBoard::warnings).
+///
+/// # Errors
+///
+/// [`DsnError`] only if the text is not an S-expression, is not a design (`(pcb ...)`), has
+/// no layers, or holds rules that [`Rules`] rejects.
 ///
 /// ```
 /// use guide::geom::drc::{self, Item};

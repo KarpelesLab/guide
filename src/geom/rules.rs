@@ -433,6 +433,11 @@ fn check_unique<'a>(
 
 impl Rules {
     /// Validates a spec.
+    ///
+    /// # Errors
+    ///
+    /// [`RuleError`] for a spec with no layers or more than [`MAX_LAYERS`], or a value,
+    /// name, net or layer that its variants describe as wrong.
     pub fn new(spec: RuleSpec) -> Result<Rules, RuleError> {
         let n = spec.layers.len();
         if n == 0 || n > MAX_LAYERS {

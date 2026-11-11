@@ -85,7 +85,11 @@ pub struct Terminal<N> {
 }
 
 impl<N> Terminal<N> {
-    /// Creates a terminal, or fails if `access_points` is empty.
+    /// Creates a terminal.
+    ///
+    /// # Errors
+    ///
+    /// [`EmptyTerminal`] if `access_points` is empty.
     pub fn new(access_points: Vec<AccessPoint<N>>) -> Result<Self, EmptyTerminal> {
         if access_points.is_empty() {
             Err(EmptyTerminal)
@@ -301,6 +305,11 @@ impl<N: Copy + Eq + Hash> Route<N> {
     ///
     /// This takes time linear in the sizes of the path and the tree. It assumes that the
     /// route is a tree, and will not turn one that is not into one.
+    ///
+    /// # Errors
+    ///
+    /// [`PathError`] for an empty path, a path that repeats a node, or one that doesn't
+    /// start on a tree that has nodes. The route is left unchanged.
     ///
     /// # Examples
     ///

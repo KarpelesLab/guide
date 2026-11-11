@@ -81,8 +81,11 @@ impl<'a> Session<'a> {
 /// holds closely enough, as every real one does.
 ///
 /// Tracks and vias with no net, or with the net named `""`, are written in the net `""`.
-/// Fails if a name holds a `"`, which a session can't quote, or if an item names a layer or
-/// net that isn't given, or an arc can't be approximated.
+///
+/// # Errors
+///
+/// [`DsnError`] if a name holds a `"`, which a session can't quote, if an item names a layer
+/// or net that isn't given, or if an arc can't be approximated.
 ///
 /// ```
 /// use guide::dsn::{Session, write_session};

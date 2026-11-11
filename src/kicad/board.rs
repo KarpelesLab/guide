@@ -43,9 +43,12 @@ fn add(a: Vec2, b: Vec2) -> Vec2 {
 /// where this joins any that touch, so the two can differ for copper that crosses with no
 /// pad between. Each change is counted in the [warnings](KicadBoard::warnings).
 ///
-/// Fails only if the text is not an S-expression, is not a board, or holds rules that
-/// [`Rules`] rejects. Items it can't make sense of are skipped with a
-/// [warning](KicadBoard::warnings).
+/// Items it can't make sense of are skipped with a [warning](KicadBoard::warnings).
+///
+/// # Errors
+///
+/// [`KicadError`] only if the text is not an S-expression, is not a board, or holds rules
+/// that [`Rules`] rejects, or if `project` is not JSON.
 ///
 /// ```
 /// use guide::geom::drc::{self, Violation};

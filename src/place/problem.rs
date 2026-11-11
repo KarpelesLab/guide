@@ -124,12 +124,14 @@ impl Item {
     }
 
     /// Sets the kind of site the item needs. Ignored in free space.
+    #[must_use]
     pub fn kind(mut self, kind: u32) -> Item {
         self.kind = kind;
         self
     }
 
     /// Sets the outline, relative to the item's origin, unrotated. Ignored on sites.
+    #[must_use]
     pub fn outline(mut self, outline: Rect) -> Item {
         self.outline = outline;
         self
@@ -137,6 +139,7 @@ impl Item {
 
     /// Sets the outline to a `width` by `height` rectangle whose lower left corner is the
     /// origin.
+    #[must_use]
     pub fn size(self, width: i64, height: i64) -> Item {
         self.outline(Rect::with_size(0, 0, width, height))
     }
@@ -144,6 +147,7 @@ impl Item {
     /// Sets the rotations a placer may choose from, in millidegrees. Each has to be a
     /// multiple of 90 degrees. The first is the one used for an item in a macro, which
     /// doesn't rotate. An empty list means 0 only.
+    #[must_use]
     pub fn rotations(mut self, rotations: &[i32]) -> Item {
         self.rotations = if rotations.is_empty() {
             vec![0]
@@ -154,18 +158,21 @@ impl Item {
     }
 
     /// Limits the item to a region: its origin on sites, or its whole outline in free space.
+    #[must_use]
     pub fn region(mut self, region: RegionId) -> Item {
         self.region = Some(region);
         self
     }
 
     /// Fixes the item on a site.
+    #[must_use]
     pub fn fixed_at_site(mut self, site: SiteId) -> Item {
         self.fixed = Some(Fixed::Site(site));
         self
     }
 
     /// Fixes the item at an origin and rotation in free space.
+    #[must_use]
     pub fn fixed_at(mut self, origin: Point, rotation: i32) -> Item {
         self.fixed = Some(Fixed::At { origin, rotation });
         self
@@ -396,6 +403,10 @@ impl PlacementProblem {
     }
 
     /// One item.
+    ///
+    /// # Panics
+    ///
+    /// If `item` is not one of the problem's.
     pub fn item(&self, item: ItemId) -> &Item {
         &self.items[item.index()]
     }
@@ -406,6 +417,10 @@ impl PlacementProblem {
     }
 
     /// A net's pins.
+    ///
+    /// # Panics
+    ///
+    /// If `net` is not one of the problem's.
     pub fn net_pins(&self, net: NetId) -> &[Pin] {
         let start = self.net_starts[net.index()] as usize;
         let end = self.net_starts[net.index() + 1] as usize;
@@ -413,6 +428,10 @@ impl PlacementProblem {
     }
 
     /// A net's weight.
+    ///
+    /// # Panics
+    ///
+    /// If `net` is not one of the problem's.
     pub fn net_weight(&self, net: NetId) -> u32 {
         self.net_weights[net.index()]
     }
@@ -439,12 +458,20 @@ impl PlacementProblem {
     }
 
     /// Where a pin is, for the item's place and rotation in `placement`.
+    ///
+    /// # Panics
+    ///
+    /// If the pin's item is not one of the placement's.
     pub fn pin_position(&self, placement: &Placement, pin: Pin) -> Point {
         let item = pin.item.index();
         placement.origins[item].offset(rotate(pin.offset, placement.rotations[item]))
     }
 
     /// The bounding box of a net's pins, or `None` for a net without pins.
+    ///
+    /// # Panics
+    ///
+    /// If `net` is not one of the problem's, or a pin's item is not one of the placement's.
     pub fn net_box(&self, placement: &Placement, net: NetId) -> Option<Rect> {
         let mut pins = self.net_pins(net).iter();
         let first = Rect::point(self.pin_position(placement, *pins.next()?));
@@ -468,6 +495,10 @@ impl PlacementProblem {
     }
 
     /// The outline an item would have with its origin at `origin`, rotated by `rotation`.
+    ///
+    /// # Panics
+    ///
+    /// If `item` is not one of the problem's.
     pub fn outline_at(&self, item: ItemId, origin: Point, rotation: i32) -> Rect {
         rotate_rect(&self.items[item.index()].outline, rotation).translate(origin)
     }
@@ -488,6 +519,13 @@ impl PlacementProblem {
 
     /// Checks that the problem is well formed, and that there are enough sites for every
     /// kind of item.
+    ///
+    /// # Errors
+    ///
+    /// The first [`ProblemError`] found: a reference to an item, site or region that doesn't
+    /// exist, a free space with no area or pitch, a rotation that isn't a quarter turn, an
+    /// item fixed where it can't be, a bad macro, two fixed items on one site, or a kind of
+    /// item with too few sites.
     pub fn validate(&self) -> Result<(), ProblemError> {
         let items = self.items.len();
         if self.pins.iter().any(|pin| pin.item.index() >= items) {
@@ -609,16 +647,28 @@ impl Placement {
     }
 
     /// The item's origin.
+    ///
+    /// # Panics
+    ///
+    /// If `item` is not one of the placement's.
     pub fn origin(&self, item: ItemId) -> Point {
         self.origins[item.index()]
     }
 
     /// The item's rotation, in millidegrees.
+    ///
+    /// # Panics
+    ///
+    /// If `item` is not one of the placement's.
     pub fn rotation(&self, item: ItemId) -> i32 {
         self.rotations[item.index()]
     }
 
     /// The item's site, on a problem laid out in sites.
+    ///
+    /// # Panics
+    ///
+    /// If `item` is not one of the placement's.
     pub fn site(&self, item: ItemId) -> Option<SiteId> {
         self.sites[item.index()]
     }
@@ -627,13 +677,17 @@ impl Placement {
     ///
     /// # Panics
     ///
-    /// If the site isn't one of the problem's.
+    /// If the site isn't one of the problem's, or `item` not one of the placement's.
     pub fn set_site(&mut self, problem: &PlacementProblem, item: ItemId, site: SiteId) {
         self.origins[item.index()] = problem.sites()[site.index()].at;
         self.sites[item.index()] = Some(site);
     }
 
     /// Puts an item at an origin and rotation, for free space.
+    ///
+    /// # Panics
+    ///
+    /// If `item` is not one of the placement's.
     pub fn set_origin(&mut self, item: ItemId, origin: Point, rotation: i32) {
         self.origins[item.index()] = origin;
         self.rotations[item.index()] = rotation;

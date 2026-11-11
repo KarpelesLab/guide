@@ -84,12 +84,14 @@ impl PrimitiveModel {
     }
 
     /// Makes a port clocked: an input captures paths, and an output launches them.
+    #[must_use]
     pub fn with_clocked(mut self, port: &str) -> PrimitiveModel {
         self.clocked.insert(port.to_owned());
         self
     }
 
     /// Adds a path from an input port to an output port, VPR's `combinational_sink_ports`.
+    #[must_use]
     pub fn with_path(mut self, input: &str, output: &str) -> PrimitiveModel {
         self.paths.insert((input.to_owned(), output.to_owned()));
         self

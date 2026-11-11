@@ -26,7 +26,9 @@ impl Shape {
     /// answer is, and may be `true` as well when the gap is above `clearance` by up to
     /// twice the arc's error bound.
     ///
-    /// Returns an error for a negative `clearance`, or one beyond
+    /// # Errors
+    ///
+    /// [`GeomError::InvalidDimension`] for a negative `clearance`, or one beyond
     /// [`MAX_COORD`](super::MAX_COORD).
     pub fn violates(&self, other: &Shape, clearance: i64) -> Result<bool, GeomError> {
         let m = threshold(self, other, clearance)?;

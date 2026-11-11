@@ -617,7 +617,9 @@ impl ShapeIndex {
     /// Replaces the contents of `out` with the entries that `shape` is closer to than
     /// `clearance`, as [`Shape::violates`] decides, ordered by identifier.
     ///
-    /// Returns an error, leaving `out` empty, for a clearance that `violates` would reject.
+    /// # Errors
+    ///
+    /// The [`GeomError`] that `violates` would give for `clearance`, leaving `out` empty.
     pub fn within(
         &self,
         shape: &Shape,

@@ -38,7 +38,11 @@ impl Point {
         Point { x, y }
     }
 
-    /// Creates a point, or returns an error if it is beyond [`MAX_COORD`].
+    /// Creates a point, checking its range.
+    ///
+    /// # Errors
+    ///
+    /// [`GeomError::CoordinateOutOfRange`] if it is beyond [`MAX_COORD`].
     pub const fn checked(x: i64, y: i64) -> Result<Point, GeomError> {
         let p = Point { x, y };
         if p.in_range() {
@@ -112,6 +116,7 @@ impl Rect {
 
     /// The smallest rectangle holding both.
     #[inline]
+    #[must_use]
     pub fn union(&self, other: &Rect) -> Rect {
         Rect {
             min: Point::new(self.min.x.min(other.min.x), self.min.y.min(other.min.y)),
@@ -121,6 +126,7 @@ impl Rect {
 
     /// The rectangle grown by `d` on every side. Saturates rather than overflowing.
     #[inline]
+    #[must_use]
     pub fn expand(&self, d: i64) -> Rect {
         Rect {
             min: Point::new(self.min.x.saturating_sub(d), self.min.y.saturating_sub(d)),

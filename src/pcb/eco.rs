@@ -59,6 +59,7 @@ impl Change {
     }
 
     /// The same change, of a routing that left these nets unrouted.
+    #[must_use]
     pub fn after(mut self, unrouted: &[NetId]) -> Change {
         self.unrouted = unrouted.to_vec();
         self
@@ -382,6 +383,11 @@ const WIDEN: i64 = 2_000_000;
 /// it before the change, as [`Routed::tracks`] and [`Routed::vias`] do. The lattice's pitch is
 /// the whole design's, as [`route`](super::route) takes it, unless `options` sets one.
 ///
+/// # Errors
+///
+/// [`RouteError`] as [`route`](super::route) gives it, and for old copper whose geometry is
+/// invalid.
+///
 /// ```
 /// use guide::geom::drc::{self, Pad};
 /// use guide::geom::{LayerId, LayerSet, Point, Rect, RuleSpec, Rules, Shape};
@@ -546,6 +552,10 @@ fn route_kept(
 /// The thermal reliefs that the zones' fills join to their pads by a single spoke, routed as
 /// `tracks` and `vias`: each as the pad, by position in the board's pads, and the layer. KiCad
 /// reports them as `starved_thermal`, wanting two spokes at least.
+///
+/// # Errors
+///
+/// [`RouteError::Geometry`] if an item's geometry is invalid.
 pub fn starved_reliefs(
     design: &Design,
     tracks: &[Track],
@@ -564,6 +574,10 @@ pub fn starved_reliefs(
 /// routed again as by [`reroute`], and the zones are filled again without the obstacles.
 /// Nets that this leaves unrouted are routed again without them. Returns `None` if no relief
 /// is starved, or none has a place for a spoke that rerouting would free.
+///
+/// # Errors
+///
+/// [`RouteError`] as [`reroute`] gives it.
 pub fn relieve(
     design: &Design,
     tracks: &[Track],

@@ -405,6 +405,12 @@ fn same_net(a: Option<NetId>, b: Option<NetId>) -> bool {
 /// Checks a board against the rules, and returns every violation, sorted by
 /// [kind and items](Violation).
 ///
+/// # Errors
+///
+/// [`DrcError`] for an item whose geometry is invalid, that is on a layer the rules' stack
+/// doesn't have, or whose own clearance is out of range, or for a board whose
+/// `clearance_slack` is: violations are what is found on a board that can be checked.
+///
 /// ```
 /// use guide::geom::drc::{self, Board, Item, Track, Violation};
 /// use guide::geom::{LayerId, Point, RuleSpec, Rules};

@@ -204,6 +204,7 @@ pub struct Design {
 impl Design {
     /// The same design with no tracks, vias or zones' fills: only pads, keepouts, the edge
     /// and the zones' outlines in [`zones`](Design::zones).
+    #[must_use]
     pub fn without_routing(&self) -> Design {
         let mut design = self.clone();
         design.board.tracks.clear();
@@ -517,6 +518,13 @@ impl fmt::Display for RouteError {
 impl std::error::Error for RouteError {}
 
 /// Routes a design. See the [module documentation](self).
+///
+/// Nets that can't be routed are not errors: they are left in [`Routed::unrouted`].
+///
+/// # Errors
+///
+/// [`RouteError::Geometry`] if an item of the design, or a shape the router derives from
+/// one, has invalid geometry, such as a coordinate beyond [`MAX_COORD`](crate::geom::MAX_COORD).
 ///
 /// ```
 /// use guide::geom::drc::{self, Pad};

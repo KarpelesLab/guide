@@ -392,6 +392,10 @@ where
 /// [`LoopError`] if a placement doesn't resolve to the device's nets, the engine refuses them,
 /// or `start` is not a legal placement of `problem`.
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::missing_panics_doc,
+    reason = "the loop routes at least once, so there is always a best round"
+)]
 pub fn place_route_loop(
     device: &RrGraph,
     netlist: &PackedNetlist,

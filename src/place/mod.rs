@@ -88,11 +88,13 @@ impl Point {
     }
 
     /// Adds two points as vectors, saturating at the ends of `i64`.
+    #[must_use]
     pub const fn offset(self, by: Point) -> Point {
         Point::new(self.x.saturating_add(by.x), self.y.saturating_add(by.y))
     }
 
     /// Subtracts `other` as a vector, saturating at the ends of `i64`.
+    #[must_use]
     pub const fn minus(self, other: Point) -> Point {
         Point::new(
             self.x.saturating_sub(other.x),
@@ -181,6 +183,7 @@ impl Rect {
     }
 
     /// The rectangle moved by `by`.
+    #[must_use]
     pub const fn translate(&self, by: Point) -> Rect {
         Rect {
             min: self.min.offset(by),
@@ -189,6 +192,7 @@ impl Rect {
     }
 
     /// The smallest rectangle holding both.
+    #[must_use]
     pub fn union(&self, other: &Rect) -> Rect {
         Rect {
             min: Point::new(self.min.x.min(other.min.x), self.min.y.min(other.min.y)),
@@ -197,6 +201,7 @@ impl Rect {
     }
 
     /// The smallest rectangle holding this one and `point`.
+    #[must_use]
     pub fn including(&self, point: Point) -> Rect {
         self.union(&Rect::point(point))
     }

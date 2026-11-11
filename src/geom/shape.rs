@@ -57,6 +57,11 @@ impl Shape {
     }
 
     /// A filled circle, such as a via or a round pad or hole. Exact.
+    ///
+    /// # Errors
+    ///
+    /// [`GeomError::CoordinateOutOfRange`] for a center beyond [`MAX_COORD`], and
+    /// [`GeomError::InvalidDimension`] for a diameter that is not positive or is beyond it.
     pub fn circle(center: Point, diameter: i64) -> Result<Shape, GeomError> {
         center.check()?;
         let diameter = check_dimension("circle diameter", diameter)?;
@@ -65,6 +70,11 @@ impl Shape {
 
     /// A track with round ends, or an oblong pad or slot: every point within `width / 2` of
     /// the segment from `a` to `b`, which may be one point. Exact.
+    ///
+    /// # Errors
+    ///
+    /// [`GeomError::CoordinateOutOfRange`] for an end beyond [`MAX_COORD`], and
+    /// [`GeomError::InvalidDimension`] for a width that is not positive or is beyond it.
     pub fn track(a: Point, b: Point, width: i64) -> Result<Shape, GeomError> {
         a.check()?;
         b.check()?;
@@ -82,6 +92,12 @@ impl Shape {
     ///
     /// Collinear points make a straight track, still treated as approximate. If `start`
     /// equals `end`, this is a full circle with `mid` diametrically opposite.
+    ///
+    /// # Errors
+    ///
+    /// [`GeomError::CoordinateOutOfRange`] for a point beyond [`MAX_COORD`],
+    /// [`GeomError::InvalidDimension`] for a width or tolerance that is not positive or is
+    /// beyond it, and [`GeomError::InvalidArc`] for an arc that can't be approximated.
     pub fn arc_track(
         start: Point,
         mid: Point,
@@ -102,12 +118,21 @@ impl Shape {
 
     /// A filled polygon with holes, in any orientation. Exact.
     ///
-    /// Rejected unless every ring is simple and the holes are properly nested.
+    /// # Errors
+    ///
+    /// [`GeomError::CoordinateOutOfRange`] for a vertex beyond [`MAX_COORD`], and
+    /// [`GeomError::InvalidPolygon`] unless every ring is simple and the holes are properly
+    /// nested.
     pub fn polygon(outer: &[Point], holes: &[&[Point]]) -> Result<Shape, GeomError> {
         Shape::rounded_polygon(outer, holes, 0)
     }
 
     /// A polygon grown by `radius`, which rounds its convex corners. Exact.
+    ///
+    /// # Errors
+    ///
+    /// As [`polygon`](Shape::polygon), and [`GeomError::InvalidDimension`] for a negative
+    /// `radius` or one beyond [`MAX_COORD`].
     pub fn rounded_polygon(
         outer: &[Point],
         holes: &[&[Point]],
@@ -134,6 +159,11 @@ impl Shape {
     /// is exact where rings only meet along shared edges and at their vertices, as those
     /// do. Where edges cross between vertices, the crossing is rounded to the nearest
     /// integer point, which moves the edges through it by up to `sqrt(2)/2`.
+    ///
+    /// # Errors
+    ///
+    /// [`GeomError::CoordinateOutOfRange`] for a vertex beyond [`MAX_COORD`], and
+    /// [`GeomError::InvalidPolygon`] for rings that can't be resolved into polygons.
     ///
     /// ```
     /// use guide::geom::{Point, Shape};
@@ -164,12 +194,22 @@ impl Shape {
     }
 
     /// A filled rectangle, whose sides must have positive length. Exact.
+    ///
+    /// # Errors
+    ///
+    /// As [`round_rect`](Shape::round_rect).
     pub fn rect(rect: Rect) -> Result<Shape, GeomError> {
         Shape::round_rect(rect, 0)
     }
 
     /// A rectangle with corners rounded to `radius`, at most half its shorter side. Exact,
     /// as it is a smaller rectangle grown by `radius`.
+    ///
+    /// # Errors
+    ///
+    /// [`GeomError::CoordinateOutOfRange`] for a corner beyond [`MAX_COORD`], and
+    /// [`GeomError::InvalidDimension`] for a side that is not positive or is beyond it, or for
+    /// a negative `radius` or one above half the shorter side.
     pub fn round_rect(rect: Rect, radius: i64) -> Result<Shape, GeomError> {
         let (min, max) = (rect.min().check()?, rect.max().check()?);
         let (w, h) = (max.x - min.x, max.y - min.y);

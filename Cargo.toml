@@ -37,7 +37,15 @@ cli = ["fpga", "kicad", "dsn", "mapf", "asic"]
 
 [lints.rust]
 unsafe_code = "forbid"
-missing_docs = "warn"
+# Every public item is documented; docs/api-review.md explains the lints chosen.
+missing_docs = "deny"
+
+# A few of clippy's pedantic lints, those about the public API's documentation and
+# use: the rest of the group is too noisy to be worth turning on whole.
+[lints.clippy]
+missing_errors_doc = "warn"
+missing_panics_doc = "warn"
+return_self_not_must_use = "warn"
 
 [dependencies]
 # Exact integer polygon geometry. Kept out of the public API: see src/geom/poly.rs.

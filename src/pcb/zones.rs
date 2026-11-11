@@ -178,6 +178,10 @@ fn same_net(a: Option<NetId>, b: Option<NetId>) -> bool {
 ///
 /// Zones are filled from the highest priority down, and each on each of its layers, so the
 /// result is in that order: by priority, then position, then layer, then piece.
+///
+/// # Errors
+///
+/// [`GeomError`] if a zone's outline, or an item of the board, has invalid geometry.
 pub fn fill_zones(board: &Board, design: &Design) -> Result<Vec<Fill>, GeomError> {
     Ok(fill_all(board, design)?.0)
 }

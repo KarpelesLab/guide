@@ -347,8 +347,8 @@ fn assign_net(grid: &LayerGrid, plane: &PlanarSpace, net: &mut LayerNet, scratch
         .extend((0..n).map(|v| (counts[v], counts[v])));
     scratch.child_list.clear();
     scratch.child_list.resize(n.saturating_sub(1), 0);
-    for v in 1..n {
-        let p = t.parent[v] as usize;
+    for (v, &parent) in t.parent.iter().enumerate().take(n).skip(1) {
+        let p = parent as usize;
         let slot = &mut scratch.children[p].1;
         scratch.child_list[*slot as usize] = v as u32;
         *slot += 1;

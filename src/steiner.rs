@@ -1123,8 +1123,13 @@ impl<'a, S: RoutingSpace> Router<'a, S> {
         // Terminals still on the tree, but only at a dearer access point, also get another
         // chance, as they can come out better by extending the tree.
         let mut lost = Vec::new();
-        for terminal in 1..self.net.terminals.len() {
-            let holders = &shape.holders[terminal];
+        for (terminal, holders) in shape
+            .holders
+            .iter()
+            .enumerate()
+            .take(self.net.terminals.len())
+            .skip(1)
+        {
             let before = holders.iter().map(|&(_, cost)| cost).min();
             let after = holders
                 .iter()

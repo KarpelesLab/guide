@@ -1156,9 +1156,14 @@ impl<'p, 't> Weigher<'p, 't> {
         let places = &problem.problem;
         let mut criticality = vec![0.0; state.arcs.len()];
         let mut timing_total = 0.0;
-        for net in 0..places.net_count() {
+        for (net, &start) in problem
+            .pin_start
+            .iter()
+            .enumerate()
+            .take(places.net_count())
+        {
             let pins = places.net_pins(NetId(net as u32));
-            let start = problem.pin_start[net] as usize;
+            let start = start as usize;
             let driver = places.pin_position(placement, pins[0]);
             for (k, &pin) in pins.iter().enumerate().skip(1) {
                 if let Some(arc) = state.arcs[start + k] {

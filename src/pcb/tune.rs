@@ -419,8 +419,7 @@ impl<'a> Tuner<'a> {
             let Some((d, total)) = steps_of(tp) else {
                 continue;
             };
-            for j in 0..self.tracks.len() {
-                let tn = &self.tracks[j];
+            for (j, tn) in self.tracks.iter().enumerate() {
                 if tn.net != Some(neg) || tn.layer != tp.layer {
                     continue;
                 }

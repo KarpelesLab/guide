@@ -38,7 +38,7 @@ use crate::cost::Cost;
 use crate::geom::drc::{Track, Via};
 use crate::geom::{LayerId, LayerSet, Point, Rect, Shape};
 use crate::id::{NetId, NodeId};
-use crate::search::{Search, SearchLimits, SearchOutcome, Source, Target};
+use crate::search::{Search, SearchOutcome, Source, Target};
 use crate::space::{DenseSlots, FastMap, InternedSlots, RoutingSpace, Step};
 
 /// How far apart the two nets' pads at an end may be, for the pair to be routed side by
@@ -207,6 +207,8 @@ struct PairSpace<'a> {
     vias: RefCell<FastMap<(i64, i64, u8), Verdict>>,
     /// With a penalty, other nets' routes may be crossed at that price, to be ripped up.
     rip: Option<RipUp<'a>>,
+    /// The run the search is part of, which hears of every node.
+    run: Option<&'a super::control::Run<'a>>,
 }
 
 impl PairSpace<'_> {
@@ -318,6 +320,9 @@ impl RoutingSpace for PairSpace<'_> {
     }
 
     fn expand(&self, _net: NetId, from: PNode, out: &mut Vec<Step<PNode>>) {
+        if let Some(run) = self.run {
+            run.tick();
+        }
         let p = from.point();
         let here = self.unchecked(p);
         // Into the second end, from anywhere near it.
@@ -706,7 +711,9 @@ fn attempt(
         steps: RefCell::new(FastMap::default()),
         vias: RefCell::new(FastMap::default()),
         rip: rip.as_ref().map(|r| r.rip),
+        run: world.run(),
     };
+    let run = world.run();
     let mut search = Search::new(&space);
     let sources: Vec<PNode> = on(pa, na)
         .iter()
@@ -737,15 +744,16 @@ fn attempt(
         nets.0,
         sources.into_iter().map(Source::new),
         targets.into_iter().map(Target::new),
-        SearchLimits {
-            max_expansions: params.max_expansions,
-            cancel: None,
-        },
+        super::control::limits(run, params.max_expansions),
     );
-    let SearchOutcome::Found(found) = outcome else {
-        return None;
+    let path: Option<Vec<PNode>> = match outcome {
+        SearchOutcome::Found(found) => Some(found.path.to_vec()),
+        _ => None,
     };
-    let path: Vec<PNode> = found.path.to_vec();
+    if let Some(run) = run {
+        run.charge(search.stats().expanded);
+    }
+    let path = path?;
     drop(search);
     drop(space);
 

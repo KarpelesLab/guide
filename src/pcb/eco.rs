@@ -27,7 +27,7 @@
 use std::collections::BTreeSet;
 
 use super::router;
-use super::{Design, RouteError, RouteOptions, Routed};
+use super::{CopperKind, Design, RouteError, RouteOptions, Routed, RunControl};
 use crate::geom::drc::{self, Item, Track, Via, Violation};
 use crate::geom::{LayerSet, Rect, Shape};
 use crate::id::NetId;
@@ -443,6 +443,35 @@ pub fn reroute(
     change: &Change,
     options: &RouteOptions,
 ) -> Result<Rerouted, RouteError> {
+    reroute_with(
+        design,
+        tracks,
+        vias,
+        change,
+        options,
+        &RunControl::default(),
+    )
+}
+
+/// Routes a board again after a change as [`reroute`] does, under a caller's control, as
+/// [`route_with`](super::route_with) routes one: a flag and a deadline that stop it, and a
+/// callback that hears of its progress, which starts again with each attempt.
+///
+/// [`RouteOptions::work_budget`] is for all the attempts together. A run that is stopped
+/// returns the best attempt so far, which the one that was stopped may be, with
+/// [`Routed::stopped`] set; the copper kept is in it whatever was routed.
+///
+/// # Errors
+///
+/// As [`reroute`].
+pub fn reroute_with(
+    design: &Design,
+    tracks: &[Track],
+    vias: &[Via],
+    change: &Change,
+    options: &RouteOptions,
+    control: &RunControl<'_>,
+) -> Result<Rerouted, RouteError> {
     let mut options = *options;
     options.pitch = Some(router::pitch(design, &options));
     let mut old = Old::new(design, tracks, vias);
@@ -454,7 +483,10 @@ pub fn reroute(
     }
     old.rip_violations()?;
     old.rip_orphans();
-    let mut best = route_kept(design, &old, &options)?;
+    let mut best = route_kept(design, &old, &options, control)?;
+    // What the attempts spend comes out of one budget.
+    let mut spent = best.routed.stats.work;
+    let mut stopped = best.routed.stopped;
     // A net that was unrouted before is not widened around: if it still finds no way, it is
     // left as it was.
     let ours = |r: &Rerouted| -> Vec<NetId> {
@@ -467,7 +499,7 @@ pub fn reroute(
     };
     let mut left = ours(&best);
     let mut widened = 0;
-    while !left.is_empty() && widened < WIDENINGS {
+    while !left.is_empty() && widened < WIDENINGS && stopped.is_none() {
         widened += 1;
         let reach = WIDEN << (widened - 1);
         for net in left {
@@ -484,7 +516,11 @@ pub fn reroute(
         }
         old.rip_violations()?;
         old.rip_orphans();
-        let attempt = route_kept(design, &old, &options)?;
+        let mut attempt_options = options;
+        attempt_options.work_budget = options.work_budget.map(|b| b.saturating_sub(spent));
+        let attempt = route_kept(design, &old, &attempt_options, control)?;
+        spent = spent.saturating_add(attempt.routed.stats.work);
+        stopped = attempt.routed.stopped;
         left = ours(&attempt);
         let (s, t) = (&attempt.routed.stats, &best.routed.stats);
         if s.connected > t.connected
@@ -493,6 +529,8 @@ pub fn reroute(
             best = Rerouted { widened, ..attempt };
         }
     }
+    best.routed.stats.work = spent;
+    best.routed.stopped = stopped;
     Ok(best)
 }
 
@@ -501,6 +539,7 @@ fn route_kept(
     design: &Design,
     old: &Old<'_>,
     options: &RouteOptions,
+    control: &RunControl<'_>,
 ) -> Result<Rerouted, RouteError> {
     let (kept_tracks, kept_vias) = old.kept();
     let mut fixed = design.clone();
@@ -517,20 +556,28 @@ fn route_kept(
         let net = NetId(i as u32);
         spec.route = spec.route && (old.ripped.contains(&net) || open.binary_search(&net).is_ok());
     }
-    let routed = super::route(&fixed, options)?;
+    let routed = super::route_with(&fixed, options, control)?;
     let mut all = Routed {
         tracks: kept_tracks.clone(),
         vias: kept_vias.clone(),
         fills: routed.fills,
         unrouted: Vec::new(),
         stats: routed.stats,
+        stopped: routed.stopped,
+        // Pads are in the same order in `fixed` as in the design, so these hold for it.
+        open: routed.open,
+        track_kinds: vec![CopperKind::Kept; kept_tracks.len()],
+        via_kinds: vec![CopperKind::Kept; kept_vias.len()],
     };
     all.tracks.extend(routed.tracks);
     all.vias.extend(routed.vias);
+    all.track_kinds.extend(routed.track_kinds);
+    all.via_kinds.extend(routed.via_kinds);
     let board = all.board(design);
     let (nets, done, needed, made, broken) = router::connectivity(design, &board);
     let s = &mut all.stats;
     (s.nets, s.routed, s.connections, s.connected) = (nets, done, needed, made);
+    s.islands = (needed, made);
     s.after_cleanup = measure(&all.tracks, &all.vias);
     all.unrouted = broken;
     let mut rerouted: Vec<NetId> = fixed

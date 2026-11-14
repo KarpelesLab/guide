@@ -209,6 +209,10 @@ pub(crate) fn plan(design: &Design, world: &mut World<'_>, pitch: i64) -> Vec<Es
         // By pad, the region it is trapped in.
         let mut region_of: FastMap<usize, usize> = FastMap::default();
         for &i in cluster {
+            // A run that has to stop does without escapes: none is placed yet.
+            if world.run().is_some_and(super::control::Run::poll) {
+                return Vec::new();
+            }
             let pad = &pads[i];
             let Some((net, spec)) = routed(pad.net) else {
                 continue;
@@ -303,6 +307,10 @@ pub(crate) fn plan(design: &Design, world: &mut World<'_>, pitch: i64) -> Vec<Es
         });
     }
     loop {
+        // A run that has to stop keeps the escapes placed so far.
+        if world.run().is_some_and(super::control::Run::poll) {
+            break;
+        }
         // The places still free, for each region left.
         for r in regions.iter_mut().filter(|r| !r.done) {
             let (net, (d, drill), width) = (r.net, r.via, r.width);
@@ -326,7 +334,12 @@ pub(crate) fn plan(design: &Design, world: &mut World<'_>, pitch: i64) -> Vec<Es
         // The place that leaves the most to the neighbour it leaves the least, then takes
         // the fewest from all of them, then is nearest its pad.
         let mut best: Option<((usize, usize, i128), usize)> = None;
+        let mut stopped = false;
         for (k, c) in regions[r].candidates.iter().enumerate() {
+            if world.run().is_some_and(super::control::Run::poll) {
+                stopped = true;
+                break;
+            }
             let mut least = usize::MAX;
             let mut taken = 0;
             for &q in &neighbours {
@@ -342,6 +355,9 @@ pub(crate) fn plan(design: &Design, world: &mut World<'_>, pitch: i64) -> Vec<Es
             if best.as_ref().is_none_or(|(b, _)| key < *b) {
                 best = Some((key, k));
             }
+        }
+        if stopped {
+            break;
         }
         let Some((_, k)) = best else { break };
         let region = &mut regions[r];
@@ -508,6 +524,10 @@ fn candidates(
         let b = pad.shape.bbox().expand(diameter);
         let mut x = b.min().x;
         while x <= b.max().x {
+            // A run that has to stop looks no further: its escapes are given up.
+            if world.run().is_some_and(super::control::Run::poll) {
+                return Vec::new();
+            }
             let mut y = b.min().y;
             while y <= b.max().y {
                 let at = Point::new(x, y);

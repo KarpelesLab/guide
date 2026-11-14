@@ -11,6 +11,7 @@
 
 use core::cell::RefCell;
 
+use super::control::Run;
 use crate::geom::drc::{self, Board};
 use crate::geom::{EntryId, GeomError, LayerId, LayerSet, Point, Rules, Shape, ShapeIndex};
 use crate::id::NetId;
@@ -105,6 +106,8 @@ pub(crate) struct World<'r> {
     /// By net, the layers its tracks may be on, as a mask, and for nets past the end.
     track_layers: Vec<u64>,
     run_layers: u64,
+    /// The run that searches in this world belong to, for its budget and its stop flag.
+    run: Option<&'r Run<'r>>,
 }
 
 /// Where the planes of nets are, by tile of a grid and layer, and what crossing another
@@ -158,6 +161,7 @@ impl<'r> World<'r> {
             restricted: false,
             track_layers: Vec::new(),
             run_layers: u64::MAX,
+            run: None,
         };
         let nets = board
             .pads
@@ -345,6 +349,16 @@ impl<'r> World<'r> {
             .get(net.index())
             .unwrap_or(&self.run_layers);
         mask >> layer & 1 != 0
+    }
+
+    /// Makes searches in this world part of a run.
+    pub(crate) fn set_run(&mut self, run: &'r Run<'r>) {
+        self.run = Some(run);
+    }
+
+    /// The run that searches in this world belong to, if any.
+    pub(crate) fn run(&self) -> Option<&'r Run<'r>> {
+        self.run
     }
 
     /// Sets where the planes are.

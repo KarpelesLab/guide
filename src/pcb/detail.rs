@@ -10,11 +10,12 @@
 
 use core::cell::RefCell;
 
+use super::control::{self, Run};
 use super::world::{Verdict, World};
 use crate::cost::Cost;
 use crate::geom::{LayerId, LayerSet, Point, Rect, Shape, SpatialIndex};
 use crate::id::{NetId, NodeId};
-use crate::search::{Search, SearchLimits, SearchOutcome, Source, Target};
+use crate::search::{Search, SearchOutcome, Source, Target};
 use crate::space::{DenseSlots, FastMap, InternedSlots, RoutingSpace, Step};
 
 /// A point on a layer.
@@ -268,6 +269,8 @@ pub(crate) struct DetailSpace<'a> {
     keep_off: Vec<Point>,
     /// By terminal, whether the net's tree has reached it yet.
     reached: Vec<bool>,
+    /// The run the search is part of, which hears of every node.
+    run: Option<&'a Run<'a>>,
 }
 
 impl<'a> DetailSpace<'a> {
@@ -290,6 +293,7 @@ impl<'a> DetailSpace<'a> {
             near: RefCell::new(Vec::new()),
             keep_off: Vec::new(),
             reached: vec![false; ctx.terminals],
+            run: world.run(),
         }
     }
 
@@ -432,6 +436,9 @@ impl RoutingSpace for DetailSpace<'_> {
     }
 
     fn expand(&self, _net: NetId, from: DNode, out: &mut Vec<Step<DNode>>) {
+        if let Some(run) = self.run {
+            run.tick();
+        }
         let p = from.point();
         // A pad's centre connects its layers.
         if let Some(&i) = self.ctx.centers.get(&(p, from.l)) {
@@ -531,6 +538,8 @@ pub(crate) struct Tree {
     pub(crate) expanded: u64,
     /// The terminals a [partial](Params::partial) route gave up on.
     pub(crate) missing: Vec<usize>,
+    /// Whether a search for one of those ran out of nodes, rather than of places to go.
+    pub(crate) out_of_budget: bool,
 }
 
 /// Why a net could not be routed.
@@ -589,6 +598,12 @@ pub(crate) fn route_net(
     rip: Option<RipUp<'_>>,
 ) -> Result<Tree, (Failure, u64)> {
     let mut space = DetailSpace::new(world, ctx, cache, params, corridor, rip);
+    let run = world.run();
+    let charge = |expanded: u64| {
+        if let Some(run) = run {
+            run.charge(expanded);
+        }
+    };
     let mut search = Search::new(&space);
     let mut back = Search::new(&space);
     let mut retries = 0;
@@ -638,13 +653,11 @@ pub(crate) fn route_net(
                     ctx.net,
                     ctx.terminal_nodes(t).into_iter().map(Source::new),
                     sources.iter().map(|&n| Target::new(n)),
-                    SearchLimits {
-                        max_expansions: params.precheck,
-                        cancel: None,
-                    },
+                    control::limits(run, params.precheck),
                 );
                 let open = outcome != SearchOutcome::Unreachable;
                 tree.expanded += back.stats().expanded;
+                charge(back.stats().expanded);
                 if open {
                     shut_in = false;
                     break;
@@ -654,14 +667,14 @@ pub(crate) fn route_net(
                 return Err((Failure::NoPath, tree.expanded));
             }
         }
-        let limits = SearchLimits {
-            max_expansions: if stub.is_some() {
+        let limits = control::limits(
+            run,
+            if stub.is_some() {
                 budget.min(params.max_expansions / PARTIAL_SHARE)
             } else {
                 budget
             },
-            cancel: None,
-        };
+        );
         let outcome = search.find_path_with(
             &space,
             ctx.net,
@@ -676,6 +689,7 @@ pub(crate) fn route_net(
         };
         let expanded = search.stats().expanded;
         tree.expanded += expanded;
+        charge(expanded);
         budget = budget.saturating_sub(expanded);
         // A partial route searches from each terminal left to the tree on its own, with a
         // budget of its own, and gives up on those it doesn't reach.
@@ -690,16 +704,20 @@ pub(crate) fn route_net(
                     ctx.net,
                     ctx.terminal_nodes(t).into_iter().map(Source::new),
                     sources.iter().map(|&n| Target::new(n)),
-                    SearchLimits {
-                        max_expansions: params.max_expansions / PARTIAL_SHARE,
-                        cancel: None,
-                    },
+                    control::limits(run, params.max_expansions / PARTIAL_SHARE),
                 );
-                let found = match outcome {
-                    SearchOutcome::Found(found) => Some(found.path.to_vec()),
-                    _ => None,
+                let (found, why) = match outcome {
+                    SearchOutcome::Found(found) => (Some(found.path.to_vec()), Failure::NoPath),
+                    SearchOutcome::Unreachable => (None, Failure::NoPath),
+                    SearchOutcome::LimitReached | SearchOutcome::Cancelled => {
+                        (None, Failure::Budget)
+                    }
                 };
                 tree.expanded += back.stats().expanded;
+                charge(back.stats().expanded);
+                if found.is_none() && why == Failure::Budget {
+                    tree.out_of_budget = true;
+                }
                 if let Some(found) = found {
                     path = Ok(found);
                     break;

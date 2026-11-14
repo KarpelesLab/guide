@@ -20,14 +20,22 @@ pub(crate) fn run(
     options: &RouteOptions,
 ) -> u64 {
     let mut expanded = 0;
+    // A run that has to stop leaves the nets not yet cleaned up as they are.
+    let stopped = |world: &World<'_>| world.run().is_some_and(super::control::Run::poll);
     for (job, slot) in jobs.iter().zip(copper.iter_mut()) {
         let Some(c) = slot else { continue };
+        if stopped(world) {
+            break;
+        }
         if !c.vias.is_empty() {
             expanded += fewer_vias(world, job, c, params, options);
         }
     }
     for (job, slot) in jobs.iter().zip(copper.iter_mut()) {
         let Some(c) = slot else { continue };
+        if stopped(world) {
+            break;
+        }
         drop_idle_vias(c, &job.ctx);
         pull_tight(world, &job.ctx, c);
         c.place(world, &job.ctx);

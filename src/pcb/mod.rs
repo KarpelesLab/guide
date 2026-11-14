@@ -108,13 +108,32 @@
 //! - **The edge**, [`edges`]: an outline and its cutouts as [`Design::outline`] takes
 //!   them.
 //!
+//! # Stopping a run, and what is left open
+//!
+//! A run can be bounded in three ways, and returns what it has routed until then, legal as
+//! any result, with [`Routed::stopped`] saying why it stopped:
+//! [`RouteOptions::work_budget`], a number of search nodes for the whole run, which gives
+//! the same result on any machine; and through [`route_with`]'s [`RunControl`], a deadline
+//! and a cancel flag, whose results depend on the moment. A stopped run skips what is left
+//! of escapes, routing, cleanup, the coupling of pairs, the joining of zones' pieces and
+//! meanders, and fills the zones around what it has; nets that rip-up had taken out and not
+//! yet routed again are left out. Its [`Routed::unrouted`] and the nets and connections of
+//! its [`Stats`] are counted on the board it returns. [`RunControl::progress`] hears of the
+//! run as it goes.
+//!
+//! Whatever the run leaves apart is in [`Routed::open`], connection by connection, in the
+//! sense of a ratsnest: the pieces a net's pads are left in, less one, each with a pad on
+//! either side, by position in the design's pads, and the best-known [`Cause`].
+//!
 //! # Determinism
 //!
 //! Everything is in a fixed order: nets by length and identifier, steps by direction, and
 //! the only hash maps are keyed lookups whose order never matters. Costs are sums of
-//! lengths in a fixed order. No thread is used.
+//! lengths in a fixed order. No thread is used, so there is no thread count to be
+//! independent of.
 
 mod cleanup;
+mod control;
 mod detail;
 pub mod eco;
 mod escape;
@@ -124,6 +143,7 @@ mod measure;
 mod pairs;
 pub mod place;
 mod planes;
+mod report;
 mod router;
 pub mod swap;
 mod tune;
@@ -138,7 +158,9 @@ use crate::geom::{GeomError, LayerId, LayerSet, Rules, Shape};
 use crate::id::NetId;
 
 pub use crate::geom::drc::MaskOpening;
+pub use control::{Phase, Progress, RunControl, Stopped};
 pub use measure::{coupling, net_length};
+pub use report::{Blocker, Cause, CopperKind, DesignItem, Endpoint, OpenConnection};
 #[cfg(feature = "kicad")]
 pub(crate) use router::connectivity;
 pub use verify::unconnected;
@@ -490,6 +512,11 @@ pub struct RouteOptions {
     /// Each net may narrow them further, [`NetSpec::layers`]. Vias go through every layer
     /// all the same, and fixed copper is as it is.
     pub layers: Option<LayerSet>,
+    /// How many search nodes the whole run may expand, in the unit of [`Stats::work`], or
+    /// `None`, the default, for no limit. A run that spends it stops and returns what it has
+    /// routed, with [`Routed::stopped`] set: the same result for the same budget, on any
+    /// machine. Zone fills, cleanup's shortcuts and meanders cost nothing in this unit.
+    pub work_budget: Option<u64>,
 }
 
 impl Default for RouteOptions {
@@ -514,11 +541,16 @@ impl Default for RouteOptions {
             vias_in_pads: true,
             plane_coverage: 0.0,
             layers: None,
+            work_budget: None,
         }
     }
 }
 
 /// What a run did, for measuring it.
+///
+/// Nets and connections are the router's own count of what it set out to do, unless the
+/// design has zones that nets connect to, or the run was [stopped](Routed::stopped): they
+/// are then counted on the board that is returned, as [`islands`](Stats::islands) always is.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 #[non_exhaustive]
 pub struct Stats {
@@ -526,7 +558,9 @@ pub struct Stats {
     pub nets: usize,
     /// Of those, the nets routed.
     pub routed: usize,
-    /// Connections needed, the number of terminals less one for each net.
+    /// Connections needed, the number of terminals less one for each net. A terminal is a
+    /// group of pads that fixed copper, or a zone's planned fill, joins already; see
+    /// [`islands`](Stats::islands) for the count that leaves fills out.
     pub connections: usize,
     /// Of those, the connections made, by routed nets.
     pub connected: usize,
@@ -555,6 +589,16 @@ pub struct Stats {
     pub stubs: usize,
     /// Nets whose copper and zones are still in pieces, after the last attempt to join them.
     pub planes_broken: usize,
+    /// Work spent: the nodes expanded by every search of the run, those of pairs, stubs
+    /// and joins included, which [`expanded`](Stats::expanded) leaves out. The unit of
+    /// [`RouteOptions::work_budget`].
+    pub work: u64,
+    /// Connections as a host counts them, and of those, the connections made: for each net
+    /// routed, the pieces that the design's own copper leaves its pads in (its tracks, vias
+    /// and filled zones in [`Design::board`], not the fills planned for
+    /// [`Design::zones`]), less one, and how many fewer pieces the result leaves, through
+    /// its tracks, vias and fills. What is not made is listed in [`Routed::open`].
+    pub islands: (usize, usize),
 }
 
 /// The result of [`route`].
@@ -571,9 +615,20 @@ pub struct Routed {
     /// The nets that could not be routed, in order. Nothing of theirs is in the result, but
     /// for a net with zones, which keeps what joins it to them, though they leave it in
     /// pieces, and a net of many pads, which keeps the pieces it was routed in.
+    /// [`open`](Routed::open) has what each of them is short of. In a run that was [stopped](Routed::stopped), these are the nets that
+    /// the board returned leaves in pieces.
     pub unrouted: Vec<NetId>,
     /// Measurements.
     pub stats: Stats,
+    /// Why the run stopped before it was done, if it did: what is here is then what was
+    /// routed until then.
+    pub stopped: Option<Stopped>,
+    /// The connections left open, by net and then by the position of the pad they end at.
+    pub open: Vec<OpenConnection>,
+    /// What each of [`tracks`](Routed::tracks) is, in the same order.
+    pub track_kinds: Vec<CopperKind>,
+    /// What each of [`vias`](Routed::vias) is, in the same order.
+    pub via_kinds: Vec<CopperKind>,
 }
 
 impl Routed {
@@ -669,9 +724,76 @@ impl std::error::Error for RouteError {
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub fn route(design: &Design, options: &RouteOptions) -> Result<Routed, RouteError> {
-    router::run(design, options)
+    router::run(design, options, &RunControl::default())
 }
 
+/// Routes a design as [`route`] does, under a caller's control: a flag and a deadline that
+/// stop it, and a callback that hears of its progress. See [`RunControl`].
+///
+/// A run that is stopped is not an error: it returns what it has routed until then, legal
+/// as any result, with [`Routed::stopped`] saying why and [`Routed::open`] what is left.
+/// Left to finish, it returns exactly what [`route`] does.
+///
+/// # Errors
+///
+/// As [`route`].
+///
+/// ```
+/// use std::cell::Cell;
+/// use std::sync::atomic::{AtomicBool, Ordering};
+/// use guide::geom::drc::{self, Pad};
+/// use guide::geom::{LayerId, LayerSet, Point, RuleSpec, Rules, Shape};
+/// use guide::id::NetId;
+/// use guide::pcb::{self, Design, NetSpec, RouteOptions, RunControl, Stopped};
+///
+/// let rules = Rules::new(RuleSpec::new(&["F.Cu"], 200_000, 200_000))?;
+/// let top = LayerSet::EMPTY.with(LayerId(0));
+/// let pad = |x: i64, net| {
+///     Pad::new(Shape::circle(Point::new(x, 0), 600_000).unwrap(), top, Some(NetId(net)))
+/// };
+/// let mut design = Design {
+///     board: drc::Board::default(),
+///     rules,
+///     outline: Vec::new(),
+///     edge_clearance: 0,
+///     obstacles: Vec::new(),
+///     pairs: Vec::new(),
+///     lengths: Vec::new(),
+///     zones: Default::default(),
+///     nets: vec![NetSpec::new(200_000, None); 2],
+/// };
+/// design.board.pads = vec![pad(0, 1), pad(5_000_000, 1)];
+///
+/// // A flag set before the run starts: nothing is routed, and the result says so.
+/// let cancel = AtomicBool::new(true);
+/// let calls = Cell::new(0);
+/// let heard = |_: &pcb::Progress| calls.set(calls.get() + 1);
+/// let mut control = RunControl::default();
+/// control.cancel = Some(&cancel);
+/// control.progress = Some(&heard);
+/// let routed = pcb::route_with(&design, &RouteOptions::default(), &control)?;
+/// assert_eq!(routed.stopped, Some(Stopped::Cancelled));
+/// assert!(routed.tracks.is_empty());
+/// assert_eq!((routed.open.len(), routed.open[0].from.pad, routed.open[0].to.pad), (1, Some(0), Some(1)));
+/// assert!(calls.get() > 0);
+///
+/// // Left alone, it routes as `route` does.
+/// cancel.store(false, Ordering::Relaxed);
+/// let routed = pcb::route_with(&design, &RouteOptions::default(), &control)?;
+/// assert_eq!(routed.stopped, None);
+/// assert!(routed.open.is_empty());
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub fn route_with(
+    design: &Design,
+    options: &RouteOptions,
+    control: &RunControl<'_>,
+) -> Result<Routed, RouteError> {
+    router::run(design, options, control)
+}
+
+#[cfg(test)]
+mod control_tests;
 #[cfg(test)]
 mod model_tests;
 #[cfg(test)]

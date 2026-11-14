@@ -385,11 +385,12 @@ pub(crate) struct GlobalResult {
 }
 
 /// Routes the nets over the tiles. Each net is a list of terminals, each a list of pads'
-/// positions and layers.
+/// positions and layers. A `cancel` flag set ends it with what it has.
 pub(crate) fn route(
     space: &GlobalSpace,
     nets: &[(NetId, Vec<TerminalPads>)],
     max_iterations: u32,
+    cancel: Option<&core::sync::atomic::AtomicBool>,
 ) -> GlobalResult {
     let engine_nets: Vec<Net<NodeId>> = nets
         .iter()
@@ -404,6 +405,7 @@ pub(crate) fn route(
     let options = EngineOptions {
         max_iterations,
         history_factor: Cost::new(space.tile_mm()).unwrap_or(Cost::ONE),
+        cancel,
         ..EngineOptions::default()
     };
     let Ok(outcome) = engine::route(space, &engine_nets, options) else {

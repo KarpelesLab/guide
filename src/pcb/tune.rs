@@ -880,6 +880,19 @@ pub(crate) fn run(
             })
             .count(),
     );
+    // A track is what it was, unless a meander took its place: the pieces of one are
+    // added past the tracks there were, but for the first, which takes the track's place.
+    let mut kinds = Vec::with_capacity(tuner.tracks.len());
+    for (i, t) in tuner.tracks.iter().enumerate() {
+        if t.start == t.end {
+            continue;
+        }
+        kinds.push(match (routed.tracks.get(i), routed.track_kinds.get(i)) {
+            (Some(old), Some(&kind)) if old == t => kind,
+            _ => super::CopperKind::Meander,
+        });
+    }
+    routed.track_kinds = kinds;
     tuner.tracks.retain(|t| t.start != t.end);
     routed.tracks = tuner.tracks;
     Ok(())

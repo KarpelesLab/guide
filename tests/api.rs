@@ -114,8 +114,11 @@ fn pcb() {
     shared::<drc::Board>();
     shared::<pcb::Design>();
     shared::<pcb::Routed>();
+    shared::<pcb::OpenConnection>();
+    shared::<pcb::Progress>();
     shared::<place::PlacementDesign>();
     options::<pcb::RouteOptions>();
+    options::<pcb::RunControl<'_>>();
     options::<place::PlaceOptions>();
 }
 

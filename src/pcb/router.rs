@@ -1080,7 +1080,7 @@ fn route_all<'a>(
                 (j.ctx.net, terms)
             })
             .collect();
-        let result = global::route(&space, &nets, 30, run.cancel());
+        let result = global::route(&space, &nets, 30, run);
         stats.global_overused = result.overused;
         let margin = options.corridor_margin as usize;
         for (job, route) in jobs.iter_mut().zip(result.routes) {

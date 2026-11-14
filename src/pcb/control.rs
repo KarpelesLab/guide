@@ -211,9 +211,21 @@ impl<'a> Run<'a> {
         self.why.get()
     }
 
-    /// The caller's flag, for what takes one of its own, such as global routing.
-    pub(crate) fn cancel(&self) -> Option<&'a AtomicBool> {
-        self.control.cancel
+    /// The flag that is set once the run has to stop, for what takes a flag of its own,
+    /// such as global routing.
+    pub(crate) fn flag(&self) -> &AtomicBool {
+        &self.stop
+    }
+
+    /// One node of a search that the budget doesn't count, as global routing's: looks at
+    /// the clock and the caller's flag every [`POLL_INTERVAL`].
+    #[inline]
+    pub(crate) fn glance(&self) {
+        let t = self.ticks.get().wrapping_add(1);
+        self.ticks.set(t);
+        if t.is_multiple_of(POLL_INTERVAL) {
+            self.poll();
+        }
     }
 
     /// Work charged so far.

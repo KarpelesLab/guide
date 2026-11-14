@@ -6,6 +6,7 @@
 //! measured against the fixed copper with the board's most common track width and
 //! clearance, by sampling: a sample point is free if a track's end there would be legal.
 
+use super::control::Run;
 use super::detail::{Corridor, NM};
 use super::world::{Verdict, World};
 use crate::cost::Cost;
@@ -384,13 +385,56 @@ pub(crate) struct GlobalResult {
     pub(crate) overused: usize,
 }
 
+/// The tiles as a run sees them: the same space, with a look at the run's clock and flag
+/// every so many nodes, so that a run can be stopped in global routing too.
+struct Watched<'a> {
+    space: &'a GlobalSpace,
+    run: &'a Run<'a>,
+}
+
+impl RoutingSpace for Watched<'_> {
+    type Node = NodeId;
+    type Resource = NodeId;
+    type Slots = DenseSlots<NodeId>;
+    type ResourceSlots = DenseSlots<NodeId>;
+
+    fn new_slots(&self) -> Self::Slots {
+        self.space.new_slots()
+    }
+
+    fn new_resource_slots(&self) -> Self::ResourceSlots {
+        self.space.new_resource_slots()
+    }
+
+    fn contains(&self, node: NodeId) -> bool {
+        self.space.contains(node)
+    }
+
+    fn expand(&self, net: NetId, from: NodeId, out: &mut Vec<Step<NodeId>>) {
+        self.run.glance();
+        self.space.expand(net, from, out);
+    }
+
+    fn lower_bound(&self, net: NetId, from: NodeId, to: NodeId) -> Cost {
+        self.space.lower_bound(net, from, to)
+    }
+
+    fn resources(&self, net: NetId, from: NodeId, to: NodeId, out: &mut Vec<NodeId>) {
+        self.space.resources(net, from, to, out);
+    }
+
+    fn capacity(&self, resource: NodeId) -> u32 {
+        self.space.capacity(resource)
+    }
+}
+
 /// Routes the nets over the tiles. Each net is a list of terminals, each a list of pads'
-/// positions and layers. A `cancel` flag set ends it with what it has.
+/// positions and layers. A `run` that has to stop ends it with what it has.
 pub(crate) fn route(
     space: &GlobalSpace,
     nets: &[(NetId, Vec<TerminalPads>)],
     max_iterations: u32,
-    cancel: Option<&core::sync::atomic::AtomicBool>,
+    run: &Run<'_>,
 ) -> GlobalResult {
     let engine_nets: Vec<Net<NodeId>> = nets
         .iter()
@@ -405,10 +449,11 @@ pub(crate) fn route(
     let options = EngineOptions {
         max_iterations,
         history_factor: Cost::new(space.tile_mm()).unwrap_or(Cost::ONE),
-        cancel,
+        cancel: Some(run.flag()),
         ..EngineOptions::default()
     };
-    let Ok(outcome) = engine::route(space, &engine_nets, options) else {
+    let watched = Watched { space, run };
+    let Ok(outcome) = engine::route(&watched, &engine_nets, options) else {
         return GlobalResult {
             routes: vec![None; nets.len()],
             overused: 0,

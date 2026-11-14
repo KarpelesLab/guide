@@ -417,6 +417,7 @@ const WIDEN: i64 = 2_000_000;
 ///         route: true,
 ///         track_width: 200_000,
 ///         via: Some(ViaSize { diameter: 600_000, drill: 300_000 }),
+///         layers: None,
 ///     }; 3],
 /// };
 /// design.board.pads = vec![
@@ -762,6 +763,7 @@ mod tests {
                         diameter: 600_000,
                         drill: 300_000,
                     }),
+                    layers: None,
                 };
                 5
             ],

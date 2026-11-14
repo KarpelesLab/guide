@@ -48,6 +48,7 @@ pub(super) fn design(layers: usize, pads: Vec<Pad>, nets: usize) -> Design {
             diameter: 600_000,
             drill: 300_000,
         }),
+        layers: None,
     };
     Design {
         board: Board {

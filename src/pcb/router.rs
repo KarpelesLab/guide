@@ -484,7 +484,7 @@ pub(crate) fn run(design: &Design, options: &RouteOptions) -> Result<Routed, Rou
                     &design.obstacles,
                 )
                 .map_err(RouteError::Geometry)?;
-                world.configure(options);
+                world.configure(design, options);
                 let is_plane = plane_zones(design, options)?;
                 let mut joined = Joined {
                     tracks: &mut routed.tracks,
@@ -820,7 +820,7 @@ fn route_all(design: &Design, options: &RouteOptions) -> Result<Routed, RouteErr
             &design.obstacles,
         )
         .map_err(RouteError::Geometry)?;
-        world.configure(options);
+        world.configure(design, options);
         Ok::<_, RouteError>(world)
     };
 

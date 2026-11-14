@@ -415,3 +415,72 @@ fn a_keepout_lets_the_nets_it_excepts_through() {
     let routed = route_checked(&d, &RouteOptions::default());
     assert_eq!(routed.unrouted, [NetId(1), NetId(2)]);
 }
+
+/// Whether every track of a net is on one of these layers.
+fn tracks_on(routed: &Routed, net: u32, layers: LayerSet) -> bool {
+    let mut of_net = routed.tracks.iter().filter(|t| t.net == Some(NetId(net)));
+    of_net.all(|t| layers.contains(t.layer))
+}
+
+#[test]
+fn a_run_and_a_net_keep_tracks_to_their_layers() {
+    // Two nets that cross on a board too tight to go round a pad, as in
+    // `crossing_nets_take_a_via_on_two_layers`.
+    let mut d = design(
+        2,
+        vec![
+            smd(0, 5 * MM, 1),
+            smd(10 * MM, 5 * MM, 1),
+            smd(5 * MM, 0, 2),
+            smd(5 * MM, 10 * MM, 2),
+        ],
+        3,
+    );
+    d.outline = outline(Rect::new(
+        Point::new(-600_000, -600_000),
+        Point::new(10_600_000, 10_600_000),
+    ));
+    let top = LayerSet::EMPTY.with(LayerId(0));
+    // Kept to the top, the run is as on one layer: a net is left.
+    let options = RouteOptions {
+        layers: Some(top),
+        ..RouteOptions::default()
+    };
+    let routed = route_checked(&d, &options);
+    assert_eq!(routed.unrouted.len(), 1);
+    assert!(routed.tracks.iter().all(|t| t.layer == LayerId(0)));
+    // With the second net alone kept to the top, the first is the one that changes layers.
+    d.nets[2].layers = Some(top);
+    let routed = route_checked(&d, &RouteOptions::default());
+    assert!(routed.unrouted.is_empty());
+    assert!(tracks_on(&routed, 2, top));
+    assert!(!tracks_on(&routed, 1, top));
+    assert!(routed.vias.iter().all(|v| v.net == Some(NetId(1))));
+    // And the other way round.
+    d.nets[2].layers = None;
+    d.nets[1].layers = Some(top);
+    let routed = route_checked(&d, &RouteOptions::default());
+    assert!(routed.unrouted.is_empty());
+    assert!(tracks_on(&routed, 1, top));
+    assert!(!tracks_on(&routed, 2, top));
+}
+
+#[test]
+fn a_net_kept_to_an_inner_layer_leaves_its_pads_through_vias_in_them() {
+    let mut d = design(4, vec![smd(0, 0, 1), smd(10 * MM, 0, 1)], 2);
+    let inner = LayerSet::EMPTY.with(LayerId(2));
+    d.nets[1].layers = Some(inner);
+    let routed = route_checked(&d, &RouteOptions::default());
+    assert!(routed.unrouted.is_empty());
+    assert!(!routed.tracks.is_empty());
+    assert!(tracks_on(&routed, 1, inner));
+    assert_eq!(routed.vias.len(), 2);
+    assert_eq!(vias_in_pads(&d, &routed), 2);
+    // With no via in a pad, no track may leave the pads, and the net is left.
+    let options = RouteOptions {
+        vias_in_pads: false,
+        ..RouteOptions::default()
+    };
+    let routed = route_checked(&d, &options);
+    assert_eq!(routed.unrouted, [NetId(1)]);
+}

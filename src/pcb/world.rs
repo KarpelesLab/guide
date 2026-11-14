@@ -94,6 +94,11 @@ pub(crate) struct World<'r> {
     vias_in_pads: bool,
     /// The nets that keepouts except, by the number in [`Kind::Keepout`] less one.
     excepts: Vec<Vec<NetId>>,
+    /// Whether any net's tracks are kept off some layer.
+    restricted: bool,
+    /// By net, the layers its tracks may be on, as a mask, and for nets past the end.
+    track_layers: Vec<u64>,
+    run_layers: u64,
 }
 
 /// Where the planes of nets are, by tile of a grid and layer, and what crossing another
@@ -143,6 +148,9 @@ impl<'r> World<'r> {
             planes: None,
             vias_in_pads: true,
             excepts: Vec::new(),
+            restricted: false,
+            track_layers: Vec::new(),
+            run_layers: u64::MAX,
         };
         let nets = board
             .pads
@@ -260,9 +268,29 @@ impl<'r> World<'r> {
             .unwrap_or_else(|| self.rules.clearance(net, layer))
     }
 
-    /// What a run's options ask of every query: whether vias may be in pads.
-    pub(crate) fn configure(&mut self, options: &super::RouteOptions) {
+    /// What a run asks of every query: whether vias may be in pads, and the layers that
+    /// each net's tracks may be on.
+    pub(crate) fn configure(&mut self, design: &super::Design, options: &super::RouteOptions) {
         self.vias_in_pads = options.vias_in_pads;
+        let all = self.rules.layers().0;
+        self.run_layers = options.layers.map_or(all, |l| l.0);
+        self.track_layers = design
+            .nets
+            .iter()
+            .map(|n| self.run_layers & n.layers.map_or(all, |l| l.0))
+            .collect();
+        self.restricted =
+            self.run_layers & all != all || self.track_layers.iter().any(|&mask| mask & all != all);
+    }
+
+    /// Whether tracks of `net` may be on a layer.
+    #[inline]
+    fn on_layer(&self, net: NetId, layer: usize) -> bool {
+        let mask = self
+            .track_layers
+            .get(net.index())
+            .unwrap_or(&self.run_layers);
+        mask >> layer & 1 != 0
     }
 
     /// Sets where the planes are.
@@ -404,6 +432,9 @@ impl<'r> World<'r> {
         let Some(index) = self.layers.get(l) else {
             return Verdict::Blocked;
         };
+        if self.restricted && !self.on_layer(net, l) {
+            return Verdict::Blocked;
+        }
         let mut near = self.scratch.borrow_mut();
         index.query(&shape.bbox().expand(self.reach), &mut near);
         let mut verdict = Verdict::Free;
@@ -450,6 +481,9 @@ impl<'r> World<'r> {
         let Some(index) = self.layers.get(l) else {
             return Verdict::Blocked;
         };
+        if self.restricted && !(self.on_layer(nets.0, l) && self.on_layer(nets.1, l)) {
+            return Verdict::Blocked;
+        }
         let mut verdict = Verdict::Free;
         let mut near = self.scratch.borrow_mut();
         index.query(&shape.bbox().expand(self.reach), &mut near);

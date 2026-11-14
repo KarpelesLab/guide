@@ -110,7 +110,7 @@ mod zones;
 use core::fmt;
 
 use crate::geom::drc::{Board, Track, Via};
-use crate::geom::{GeomError, LayerId, Rules, Shape};
+use crate::geom::{GeomError, LayerId, LayerSet, Rules, Shape};
 use crate::id::NetId;
 
 pub use crate::geom::drc::MaskOpening;
@@ -139,6 +139,22 @@ pub struct NetSpec {
     pub track_width: i64,
     /// Its vias, or `None` to keep it on the layers of its pads.
     pub via: Option<ViaSize>,
+    /// The layers its tracks may be on, of those that [`RouteOptions::layers`] leaves, or
+    /// `None` for all of them. Its vias go through every layer all the same, and a pad of
+    /// its on none of these layers is reached by a via in the pad, or not at all.
+    pub layers: Option<LayerSet>,
+}
+
+impl NetSpec {
+    /// A net to route, at this track width and with these vias, on any layer.
+    pub fn new(track_width: i64, via: Option<ViaSize>) -> NetSpec {
+        NetSpec {
+            route: true,
+            track_width,
+            via,
+            layers: None,
+        }
+    }
 }
 
 /// The two nets of a differential pair, routed side by side at a constant gap.
@@ -256,6 +272,7 @@ impl Design {
                     diameter: n.via_diameter,
                     drill: n.via_drill,
                 }),
+                layers: None,
             })
             .collect();
         Design {
@@ -301,6 +318,7 @@ impl Design {
                         diameter: v.diameter(),
                         drill: v.drill,
                     }),
+                    layers: None,
                 }
             })
             .collect();
@@ -322,7 +340,7 @@ impl Design {
             .map(|p| CopperZone {
                 outline: p.outline.clone(),
                 holes: Vec::new(),
-                layers: crate::geom::LayerSet::EMPTY.with(p.layer),
+                layers: LayerSet::EMPTY.with(p.layer),
                 net: p.net,
                 priority: 0,
                 clearance: spec.clearance.max(ZONE_DEFAULTS.0),
@@ -423,6 +441,10 @@ pub struct RouteOptions {
     /// of and which joins the pads it touches, and the net is routed as tracks between the
     /// rest. A zone that [says](CopperZone::plane) which it is doesn't count, either way.
     pub plane_coverage: f64,
+    /// The layers that tracks may be routed on, or `None` for every layer of the stack.
+    /// Each net may narrow them further, [`NetSpec::layers`]. Vias go through every layer
+    /// all the same, and fixed copper is as it is.
+    pub layers: Option<LayerSet>,
 }
 
 impl Default for RouteOptions {
@@ -446,6 +468,7 @@ impl Default for RouteOptions {
             plane_cost: 1.0,
             vias_in_pads: true,
             plane_coverage: 0.0,
+            layers: None,
         }
     }
 }
@@ -584,6 +607,7 @@ impl std::error::Error for RouteError {
 ///         route: true,
 ///         track_width: 200_000,
 ///         via: Some(ViaSize { diameter: 600_000, drill: 300_000 }),
+///         layers: None,
 ///     }; 3],
 /// };
 /// // Two nets that cross: one of them takes vias.

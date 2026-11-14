@@ -2742,6 +2742,160 @@ that cross routes `stm32-2l` and `fine-4l` took 12 to 14 and 17 to 20 s, as nets
 other up far more, and with none on them the six boards took 51 s at 1.5 and 47 s at 1.2
 against 40 s at 1, with 11% and 5% more vias.
 
+## PCB routing after the release candidate
+
+What was fixed and added after [the change above](#pcb-routing-searched-from-both-ends),
+against it: the regressions it left, a stopped run, vias kept out of pads on parts of fine
+pitch, and rip-up of nets of very many pads
+([what and why](architecture.md#decisions)). Measured on 2026-11-14, one thread, on the
+same machine, which other work shared: times moved by a fifth between runs of the same
+build, and results did not move.
+
+### How
+
+```text
+GUIDE_ROUTE=1 cargo test --release --features kicad curated_boards_route -- --nocapture
+GUIDE_ROUTE=1 GUIDE_APART=0 cargo test --release --features kicad curated_pairs -- --nocapture
+guide pcb route --strip --no-planes REV10a.kicad_pcb
+```
+
+and through cadlab, as above, with its adapter for this API (its branch `guide-adopt`):
+`CADLAB_BENCH_ROUTER=guide CADLAB_BENCH_BUDGET_MS=60000 route_bench --corpus <board>` for its
+corpus, with a budget of 60 s that most of the boards run out of, and `route_bench <board>`
+for its generated boards, both with vias kept out of pads. Before is the commit of the
+section above, `6908301`. After, cadlab's adapter also sets `RunControl::fill_on_stop` to
+false, as it fills zones itself.
+
+### Results
+
+The curated boards. Connections, vias after cleanup, track in millimetres and seconds, each
+before → after:
+
+| Board | Connections | Vias | Track, mm | Seconds |
+| --- | --- | --- | --- | --- |
+| `GB-BRK-LINK-A` | 8/8 → 8/8 | 0 → 0 | 93 → 93 | 0.06 → 0.06 |
+| `TS4231-BOB` | 13/13 → 13/13 | 0 → 0 | 31 → 31 | 0.11 → 0.11 |
+| `lisn` | 60/60 → 60/60 | 7 → 7 | 144 → 144 | 0.47 → 0.46 |
+| `isi-channel` | 29/29 → 29/29 | 0 → 0 | 453 → 453 | 0.15 → 0.13 |
+| `placebo` | 50/50 → 50/50 | 9 → 9 | 293 → 293 | 0.39 → 0.35 |
+| `udb-s` | 33/33 → 33/33 | 6 → 12 | 144 → 157 | 0.57 → 0.63 |
+| `flea` | 79/79 → 79/79 | 47 → 47 | 1611 → 1611 | 1.77 → 1.71 |
+| `GB-LIVE32` | 197/197 → 197/197 | 202 → 189 | 2225 → 2273 | 8.3 → 6.4 |
+| `nk3-nrf-mini` | 82/83 → 82/83 | 61 → 55 | 241 → 257 | 6.6 → 6.3 |
+| `lpddr4-testbed` | 344/344 → 344/344 | 235 → 232 | 654 → 657 | 13.1 → 11.9 |
+| `ddr5-testbed` | 255/255 → 255/255 | 164 → 161 | 857 → 865 | 39.9 → 33.2 |
+| All | 1150/1151 → 1150/1151 | 731 → 712 | 6746 → 6834 | 71.4 → 61.2 |
+
+`drc::check` finds nothing on any of them. `udb-s`'s six more vias and 13 mm are its USB pair,
+side by side again for 42% of its 32.4 mm (52% of 28.1 mm before the change above); without them the
+boards have 25 vias fewer, where that change had added 42: cleanup's search for a route with
+fewer vias now has 100,000 nodes for each of a net's first four connections, which saves 13
+on `GB-LIVE32` and 6 on `nk3-nrf-mini`, and no more was found to save without the time of
+the nets of many pads going up. With their pairs and lengths (`curated_pairs`), the six
+boards route as complete as without, `udb-s`'s pair is coupled, and all eleven length
+constraints are met, `ddr5-testbed`'s second group included, whose net 0.43 mm short now
+gets two meanders of the lowest height between its neighbours.
+
+cadlab's generated boards, with no via in a pad, all complete before and after. Vias, track
+and seconds:
+
+| Board | Connections | Vias | Track, mm | Seconds |
+| --- | --- | --- | --- | --- |
+| `attiny-2l` | 22 | 0 → 0 | 128 → 128 | 0.02 → 0.02 |
+| `soic24-2l` | 184 | 159 → 159 | 2070 → 2070 | 1.3 → 1.2 |
+| `stm32-2l` | 109 | 101 → 105 | 1109 → 1243 | 15.1 → 9.3 |
+| `stm32-4l` | 109 | 55 → 46 | 949 → 986 | 1.5 → 1.5 |
+| `qfp-qfn-4l` | 155 | 185 → 162 | 1933 → 1955 | 8.1 → 7.6 |
+| `fine-4l` | 100 | 109 → 109 | 959 → 959 | 6.5 → 5.3 |
+| `bga144-4l` | 141 | 233 → 215 | 2517 → 2512 | 36.1 → 35.3 |
+
+46 vias fewer of 842. `stm32-2l` and `bga144-4l` still spend most of their time on the finer
+lattice: 6 of 9 s for the 6 nets the first pass leaves on the one, 13 of 35 s for 3 nets on
+the other.
+
+cadlab's corpus with a budget of 60 s, vias kept out of pads. Connections as cadlab counts
+them after its fanout check, those left open, vias, and the seconds the run took to come
+back:
+
+| Board | Layers | Connections | Open | Vias | Seconds |
+| --- | --- | --- | --- | --- | --- |
+| `buspirate-flash-sop` | 2 | 47 | 0 → 0 | 7 → 7 | 2.3 → 2.3 |
+| `buspirate-rs232` | 2 | 43 | 0 → 0 | 6 → 6 | 1.6 → 1.6 |
+| `lumenpnp-ringlight` | 2 | 37 | 0 → 0 | 1 → 1 | 0.9 → 0.9 |
+| `nrfmicro` | 2 | 85 | 13 → 13 | 33 → 33 | 8.9 → 8.3 |
+| `sweep-v2.2` | 2 | 48 | 6 → 6 | 44 → 44 | 57.1 → 49.7 |
+| `corne-cherry` | 2 | 432 → 434 | 91 → 63 | 289 → 438 | 13.2 → 48.1 |
+| `tinytapeout-demo` | 4 | 368 | 121 → 56 | 291 → 473 | 54.1 → 49.9 |
+| `buspirate5-rev10` | 4 | 533 → 473 | 160 → 24 | 316 → 482 | 53.0 → 49.4 |
+| `lumenpnp-mobo` | 4 | 529 → 517 | 71 → 56 | 518 → 438 | 65.6 → 51.6 |
+| `cynthion` | 4 | 728 | 82 → 63 | 513 → 528 | 60.0 → 51.8 |
+| `glasgow-revC3` | 4 | 748 → 746 | 346 → 83 | 267 → 405 | 49.5 → 49.1 |
+| `glasgow-revD1` | 6 | 1748 → 1608 | 791 → 659 | 635 → 736 | 66.8 → 50.8 |
+| All | | | 1681 → 1023 | | |
+
+No run has an error of cadlab's check before or after, but for `corne-cherry` before, where
+the escapes of `right/D+` and `right/D-` lay on one line: two regions' ways out of a cluster
+were each found before either was placed. Where the open connections went:
+
+- *Neck-down* is `tinytapeout-demo`'s 65, measured with it off and on, and most of
+  `glasgow-revC3`'s 263: their nets' class widths do not clear the pads beside their own on
+  the 0.4 and 0.5 mm parts, and they are now routed at the widest width that does. Both
+  boards then run out of the 60 s.
+- *The routes kept for a stopped run*, with the nets that rip-up had out when the budget
+  ended as they were before it took them out, are most of the rest, on the boards that run
+  out of their budget: `buspirate5-rev10`, `cynthion`, `lumenpnp-mobo` and `glasgow-revD1`.
+  The two were not measured apart on these.
+- `corne-cherry` has 28 fewer open, and takes most of its budget where it gave up after
+  13 s: the nets that now leave their pads are routed, and rip each other up.
+- A run now comes back when its budget ends: `lumenpnp-mobo` and `glasgow-revD1` were 6 and
+  7 s late, filling zones.
+
+Rip-up by branches, for a net of 32 terminals or more with no plane, on `buspirate5-rev10`
+routed by `guide pcb route --strip --no-planes`, which routes its three supply nets of 62,
+70 and 169 pads as tracks: 193 s and 114 million nodes before, 135 s and 72 million after,
+complete both times, with 433 and 406 vias. With its planes, the default, its supply nets
+are stubs to them, which are still taken out whole, and the board routes as before.
+
+### What was tried and not kept
+
+- *Branches of smaller nets, and of nets with planes.* At 8 terminals `nrfmicro` went from
+  13 open connections to 28: its ground of 24 pads was cut sixteen times, then taken out
+  whole and left with no way back to its first pad. Cutting the stubs of nets with planes
+  lost `ddr5-testbed` one to three of its 255 connections in each of seven variants: in the
+  first pass or only after, with the dead ends kept or pruned, counted towards the limit of
+  rip-ups or not, at 4, 8 or 16 cuts, and with the last rip-up whole, which alone kept all
+  255 without pairs first and lost three with.
+- *More nodes for cleanup's search on every net.* 100,000 nodes for each of up to 16
+  connections saved 52 vias more on `lpddr4-testbed`, with 116 mm more track, in 32 s where
+  it takes 12.
+- *A smaller budget for searches that cross nothing, in the passes on the finer lattice.* An
+  eighth: `stm32-2l` 9 → 13 s, `bga144-4l` 35 → 43 s. A thirty-second: 9 → 6 s and 35 → 32 s.
+  Complete each time, and no trend to choose by.
+- *The last fill of the joining of zones' pieces as the result's.* It is the same fill only
+  when every zone keeps its islands, which none of cadlab's does.
+
+### What this does not show
+
+- No fanout: a pad that leaves its footprint but is walled in by its neighbours' routes
+  still has no via beside it planned before routing. Of the 1023 connections open, most are
+  on `glasgow-revD1`, which runs out of its budget with two fifths unrouted, and on parts of
+  fine pitch on the other boards.
+- Where the time of a board with large zones goes: on `lumenpnp-mobo` with a budget of
+  300 s, 142 to 160 s for both of cadlab's runs, of which about 105 s are between the end of
+  cleanup and the result, filling zones and joining their pieces, and planning on them
+  before routing, 4 to 17 s a fill.
+- Fixed zones in parts changed nothing that was measured: `lumenpnp-mobo` took 161 s without
+  and 160 s with, with the same result, and `GlobalSpace` is built in under 0.1 s in both of
+  its runs either way. The 125 s that `GlobalSpace::measure` took on that board with
+  cadlab's adapter for 0.0.2, which gave its fills as fixed zones, were not reproduced with
+  its adapter for this API, so what the parts save on such input is not shown here.
+- `lumenpnp-mobo` has two nets that the router takes for routed and cadlab's check finds in
+  two pieces, before and after: not looked into.
+- cadlab counts three vias of `corne-cherry` and of `lumenpnp-mobo` in the boxes of pads with
+  no hole, before and after, with vias kept out of pads: its count is by a pad's box, and the
+  router's rule by its copper.
+- The results of the other sections were not measured again.
+
 ## PCB differential pairs and lengths
 
 Differential pairs routed side by side, and nets meandered to their lengths, by `pcb::route`

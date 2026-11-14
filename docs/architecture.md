@@ -329,6 +329,41 @@ searching it whole, doubled the time of the boards that need the finer pass. Res
 chaotic as before: whether the first pass leaves a net for the finer one decides most of a
 board's time.
 
+**What rip-up takes out, what a stopped run keeps, and what a net is routed at.** Measured
+after the above ([results](benchmarks.md#pcb-routing-after-the-release-candidate)):
+
+- *Branches of a net of very many pads.* In the passes on the finer lattice, a net of 32
+  terminals or more with no plane, crossed by another, loses only the copper that the other's
+  route is in the way of, cut back to the nearest joint (`NetCopper::free_in`, `prune`), and
+  is completed from the pieces that leaves, each a terminal (`NetCopper::pieces`). It may lose
+  branches eight times in a pass before it is taken out whole. Everything narrower lost
+  connections: at 8 terminals, `nrfmicro`'s ground of 24 pads, cut sixteen times and then
+  with no way back, took 15 connections with it; nets with planes, whose routes are stubs
+  that come back after the nets that crossed them, lost one to three on `ddr5-testbed` when
+  cut, in the first pass or after, counted as rip-ups or not, with dead ends kept or pruned.
+  Taking a net out whole is also what reorders it behind the nets that needed its room.
+- *The best routes so far.* Before a route takes others out, the routes of every net are
+  kept if none kept before made more connections, and a run that is stopped goes back to
+  them if it has fewer: more work never leaves fewer connections.
+  `RunControl::fill_on_stop`, off, has a run stopped by the clock or the flag return without
+  filling its zones, which took up to 19 s past the deadline.
+- *Neck-down.* A net whose width does not leave one of its pads, straight from its centre in
+  any of the eight directions, is routed at the widest width that does, not under the rules'
+  least, as one width for the net (`RouteOptions::neck_down`). A width only near the pads
+  would need a second width in the search.
+- *A pair's ends.* A pair whose nets have two pads each at an end is tried between its four
+  best choices of ends, in place of the farthest alone.
+- *Meanders* go down to the lowest height a meander can be, not to an eighth of the highest.
+- *Fixed zones in parts.* A fill given as fixed copper is kept as parts of 48 vertices at
+  most, each a nanometre larger all round. No board measured shows a gain from it.
+
+Tried and not kept: a smaller budget for the searches that cross nothing in the passes on
+the finer lattice (an eighth made `stm32-2l` slower, 9 to 13 s, a thirty-second faster, 9 to
+6 s: no trend); the last fill of zones' joining kept as the result's, which only applies
+when every zone keeps its islands. What still costs most on a board with large zones is
+filling them: once to plan, once for each round of joining their pieces, and once at the
+end, 10 to 17 s each on `lumenpnp-mobo`.
+
 **Differential pairs are routed side by side last, in place of their nets' routes.** Routing
 pairs first, before anything else, as fixed copper, coupled `udb-s`'s USB pair a little better,
 60% of its length side by side in place of 50%, but cost other nets their room: `GB-LIVE32`

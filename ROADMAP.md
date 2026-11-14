@@ -245,9 +245,12 @@ Each item is independently useful, and they can land in any order.
   layers a run's and a net's tracks may be on (`RouteOptions::layers`, `NetSpec::layers`); pad
   stacks (`drc::Pad::stack`); net ties (`drc::Board::ties`); and a clearance and a track width
   inside an area (`RuleSpec::areas`), of which routing applies the clearance. Not measured on
-  real boards yet. Not yet: tracks routed at an area's width or necked down near pads, and
-  several via sizes for a net, which the search, with one width and one via for each net,
-  has no place for.
+  real boards yet. A net too wide to leave one of its pads is routed narrower, at one width
+  for the whole net (`RouteOptions::neck_down`). Not yet: tracks routed at an area's width,
+  or narrower only near pads, and several via sizes for a net, which the search, with one
+  width and one via for each net, has no place for; nor a fanout planned for a whole
+  footprint, which is what the pads that are still shut in with vias kept out of pads need
+  ([benchmarks](docs/benchmarks.md#pcb-routing-after-the-release-candidate)).
 - Net topology constraints (daisy chain, star, T). Not needed by the DRAM boards, whose
   signals are all point to point.
 - Direct KiCad board-file reading for routing, and writing routes back. Reading for

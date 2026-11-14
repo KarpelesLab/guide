@@ -148,6 +148,28 @@ pub struct Zones {
     pub fills: Vec<Fill>,
 }
 
+impl Zones {
+    /// Sets what the pad at position `pad` in [`Board::pads`] says, whatever the pads
+    /// before it say: [`pads`](Zones::pads) grows as it must, with pads that say nothing.
+    ///
+    /// ```
+    /// use guide::pcb::{PadConnection, ZoneConnection, Zones};
+    ///
+    /// let mut zones = Zones::default();
+    /// let solid = PadConnection { connection: Some(ZoneConnection::Solid), ..Default::default() };
+    /// zones.set_pad(3, solid);
+    /// assert_eq!(zones.pads.len(), 4);
+    /// assert_eq!(zones.pads[3], solid);
+    /// assert_eq!(zones.pads[0], PadConnection::default());
+    /// ```
+    pub fn set_pad(&mut self, pad: usize, says: PadConnection) {
+        if self.pads.len() <= pad {
+            self.pads.resize(pad + 1, PadConnection::default());
+        }
+        self.pads[pad] = says;
+    }
+}
+
 /// A piece of a zone's fill: connected copper on one layer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Fill {

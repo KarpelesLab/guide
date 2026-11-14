@@ -84,6 +84,30 @@
 //! `docs/architecture.md` has why it is built this way, with the measurements, and
 //! `docs/benchmarks.md` has results on real boards.
 //!
+//! # What a board may say
+//!
+//! Beyond pads, nets and rules, for a host with a board model of its own. Each is off or
+//! empty by default, and routing is then as it is without.
+//!
+//! - **No via in a pad**, [`RouteOptions::vias_in_pads`]: vias keep out of pads with no
+//!   hole, and escapes are dog-bones.
+//! - **Zones that the host fills**, [`Zones::fills`]: routing plans on the host's copper
+//!   rather than on a fill of its own, which may differ from it.
+//!   [`Shape::rings`](crate::geom::Shape::rings) reads a fill back.
+//! - **Zones that are not planes**, [`CopperZone::plane`] and
+//!   [`RouteOptions::plane_coverage`]: small pours are copper as they are filled, and their
+//!   nets are routed as tracks.
+//! - **Keepouts that except nets**, [`Keepout::except`](crate::geom::drc::Keepout::except).
+//! - **Layers**, [`RouteOptions::layers`] and [`NetSpec::layers`]: where tracks may be.
+//! - **Pad stacks**, [`Pad::stack`](crate::geom::drc::Pad::stack): other copper on other
+//!   layers, one pad.
+//! - **Net ties**, [`Board::ties`](crate::geom::drc::Board::ties): items at which nets may
+//!   touch.
+//! - **Rules by area**, [`RuleSpec::areas`](crate::geom::RuleSpec::areas): a clearance
+//!   inside an area, as between the pads of a part of fine pitch.
+//! - **The edge**, [`edges`]: an outline and its cutouts as [`Design::outline`] takes
+//!   them.
+//!
 //! # Determinism
 //!
 //! Everything is in a fixed order: nets by length and identifier, steps by direction, and
@@ -322,17 +346,8 @@ impl Design {
                 }
             })
             .collect();
-        let mut outline = Vec::new();
-        for ring in &board.boundary {
-            for (i, &a) in ring.iter().enumerate() {
-                let b = ring[(i + 1) % ring.len()];
-                if a != b
-                    && let Ok(edge) = Shape::track(a, b, 1)
-                {
-                    outline.push(edge);
-                }
-            }
-        }
+        let rings: Vec<&[crate::geom::Point]> = board.boundary.iter().map(Vec::as_slice).collect();
+        let outline = edges(&rings);
         let zones = board
             .planes
             .iter()
@@ -369,6 +384,36 @@ impl Design {
             },
         }
     }
+}
+
+/// A board's edge as [`Design::outline`] takes it, from its outline and its cutouts as
+/// rings of points, in any orientation, the last point joined to the first: each side as a
+/// line one unit wide, which copper keeps [`Design::edge_clearance`] from. Sides of no
+/// length, and points out of range, are left out.
+///
+/// ```
+/// use guide::geom::Point;
+/// use guide::pcb;
+///
+/// let board = [Point::new(0, 0), Point::new(50_000_000, 0), Point::new(50_000_000, 30_000_000),
+///              Point::new(0, 30_000_000)];
+/// let slot = [Point::new(10_000_000, 10_000_000), Point::new(20_000_000, 10_000_000),
+///             Point::new(20_000_000, 12_000_000), Point::new(10_000_000, 12_000_000)];
+/// assert_eq!(pcb::edges(&[&board, &slot]).len(), 8);
+/// ```
+pub fn edges(rings: &[&[crate::geom::Point]]) -> Vec<Shape> {
+    let mut outline = Vec::new();
+    for ring in rings {
+        for (i, &a) in ring.iter().enumerate() {
+            let b = ring[(i + 1) % ring.len()];
+            if a != b
+                && let Ok(edge) = Shape::track(a, b, 1)
+            {
+                outline.push(edge);
+            }
+        }
+    }
+    outline
 }
 
 /// What [`route`] may do.

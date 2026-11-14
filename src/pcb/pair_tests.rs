@@ -246,3 +246,18 @@ fn a_pair_first_from_one_layer_to_another_runs_side_by_side() {
     let f = coupled(&r);
     assert!(f > 0.7, "coupled {f}");
 }
+
+#[test]
+fn a_pair_s_tracks_are_at_its_gap_to_within_a_few_nanometres() {
+    // The check, in `route_checked`, has them no closer than the gap; and they are no more
+    // than 4 nm further apart where they run side by side, but for their corners.
+    for (x, y) in [(20 * MM, 15 * MM), (20 * MM, 0), (3 * MM, 18 * MM)] {
+        let d = pair_design(2, x, y);
+        let r = route_checked(&d, &RouteOptions::default());
+        assert_eq!(r.stats.pairs, (1, 1));
+        let wide = coupling(&r.tracks, NetId(1), NetId(2), 200_000, 1000);
+        let tight = coupling(&r.tracks, NetId(1), NetId(2), 200_002, 2);
+        assert!(wide.0 > 0.0);
+        assert!(tight.0 >= wide.0 * 0.99, "{tight:?} of {wide:?}");
+    }
+}

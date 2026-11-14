@@ -586,8 +586,10 @@ fn route_pair_locked(
         })
         .collect();
     let width = widths.iter().copied().max()?;
-    // A few nanometres more than the gap, against rounding.
-    let half = (width + gap + 1) / 2 + 8;
+    // A nanometre more than half the spacing, against rounding: each track's corners are
+    // rounded to the nanometre, which moves its edge by 0.71 nm at most, so the two are
+    // never closer than the gap, and no more than 3 nm further apart.
+    let half = (width + gap + 1) / 2 + 1;
     // Mitred corners of 45° stand out by 8% of the half spacing on the outside.
     let footprint = 2 * half + width + (half + 9) / 10;
     let vias = pc.via.zip(nc.via).filter(|_| layers > 1);

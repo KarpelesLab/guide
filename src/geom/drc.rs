@@ -149,6 +149,53 @@ pub struct MaskOpening {
     pub net: Option<NetId>,
 }
 
+/// Where nets may touch: a net tie, such as the footprint that joins an analog ground to
+/// a digital one at one point.
+///
+/// Copper of any of its [nets](NetTie::nets) may touch its [items](NetTie::items), and
+/// come as close to them as it likes: the check reports no short, clearance or hole
+/// clearance between one of the items and copper of one of the nets, nor a solder mask
+/// bridge in the opening of one of its pads, and routes of the nets may end on the items
+/// and cross them. The nets stay two nets: each still has to connect its own pads.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NetTie {
+    /// The nets that may touch, two or more.
+    pub nets: Vec<NetId>,
+    /// The items at which they may: the tie's pads, and the copper that joins them, a
+    /// [zone](Item::Zone) or a track, of one of the nets or of none. Items that the board
+    /// doesn't have are ignored, as are keepouts.
+    pub items: Vec<Item>,
+}
+
+/// By item, the nets that may touch it, from a board's ties.
+pub(crate) fn tied_nets(board: &Board) -> BTreeMap<Item, Vec<NetId>> {
+    let mut map: BTreeMap<Item, Vec<NetId>> = BTreeMap::new();
+    for tie in &board.ties {
+        for &item in &tie.items {
+            let nets = map.entry(item).or_default();
+            for &n in &tie.nets {
+                if !nets.contains(&n) {
+                    nets.push(n);
+                }
+            }
+        }
+    }
+    map
+}
+
+/// Whether a tie lets two pieces of copper touch: one is an item of a tie, and the other
+/// of one of its nets.
+fn tied(
+    ties: &BTreeMap<Item, Vec<NetId>>,
+    a: (Item, Option<NetId>),
+    b: (Item, Option<NetId>),
+) -> bool {
+    let lets = |item: Item, net: Option<NetId>| {
+        net.is_some_and(|n| ties.get(&item).is_some_and(|nets| nets.contains(&n)))
+    };
+    !ties.is_empty() && (lets(a.0, b.1) || lets(b.0, a.1))
+}
+
 /// Everything a check looks at.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Board {
@@ -170,6 +217,8 @@ pub struct Board {
     /// pass. Zero, the default, makes every check exact; [`KICAD_CLEARANCE_SLACK`] is
     /// what KiCad allows. Touching copper is a short whatever this is.
     pub clearance_slack: i64,
+    /// The net ties: where copper of different nets may touch.
+    pub ties: Vec<NetTie>,
 }
 
 /// The shortfall KiCad's DRC lets a clearance have, in nanometres: a gap 500 nm short of
@@ -191,6 +240,7 @@ impl Default for Board {
             masks: Vec::new(),
             arc_tolerance: DEFAULT_ARC_TOLERANCE,
             clearance_slack: 0,
+            ties: Vec::new(),
         }
     }
 }
@@ -496,12 +546,15 @@ pub fn check(board: &Board, rules: &Rules) -> Result<Vec<Violation>, DrcError> {
     let mut out = Vec::new();
     single_items(board, rules, &mut out);
     let by_layer = layer_indexes(&copper, rules.layer_count());
-    let close = copper_pairs(&copper, &by_layer, rules, slack, &mut out)?;
+    let ties = tied_nets(board);
+    let close = copper_pairs(&copper, &by_layer, rules, slack, &ties, &mut out)?;
     let holes = holes(board, stack)?;
     hole_to_hole(&holes, rules, slack, &mut out)?;
-    hole_clearances(&holes, &copper, &by_layer, rules, slack, &close, &mut out)?;
+    hole_clearances(
+        &holes, &copper, &by_layer, rules, slack, &close, &ties, &mut out,
+    )?;
     keepouts(board, &copper, &by_layer, stack, &mut out);
-    mask_bridges(board, &copper, &by_layer, &mut out)?;
+    mask_bridges(board, &copper, &by_layer, &ties, &mut out)?;
     // Stable, so that equal keys keep the order they were found in, which is fixed too.
     out.sort_by_key(Violation::key);
     Ok(out)
@@ -641,6 +694,7 @@ fn copper_pairs(
     by_layer: &[(Vec<usize>, SpatialIndex)],
     rules: &Rules,
     slack: i64,
+    ties: &BTreeMap<Item, Vec<NetId>>,
     out: &mut Vec<Violation>,
 ) -> Result<BTreeSet<(Item, Item)>, DrcError> {
     // By pair, the first finding, which a short on a later layer replaces.
@@ -676,6 +730,9 @@ fn copper_pairs(
                     continue;
                 }
                 let b = &copper[j];
+                if tied(ties, (a.item, a.net), (b.item, b.net)) {
+                    continue;
+                }
                 let required = clearance(rules, (a.net, a.own), (b.net, b.own), layer);
                 // What the gap has to reach, which is all that a short needs checking
                 // under: touching copper is closer than any positive clearance.
@@ -795,6 +852,7 @@ fn hole_to_hole(
 
 /// Copper of other nets closer to holes than the hole clearance, leaving out pairs whose
 /// copper is `close` already.
+#[allow(clippy::too_many_arguments)]
 fn hole_clearances(
     holes: &[Hole],
     copper: &[Copper],
@@ -802,6 +860,7 @@ fn hole_clearances(
     rules: &Rules,
     slack: i64,
     close: &BTreeSet<(Item, Item)>,
+    ties: &BTreeMap<Item, Vec<NetId>>,
     out: &mut Vec<Violation>,
 ) -> Result<(), DrcError> {
     let reach = holes
@@ -826,6 +885,7 @@ fn hole_clearances(
                     || same_net(hole.net, c.net)
                     || found.contains_key(&c.item)
                     || close.contains(&pair)
+                    || tied(ties, (hole.item, hole.net), (c.item, c.net))
                 {
                     continue;
                 }
@@ -876,6 +936,7 @@ fn mask_bridges(
     board: &Board,
     copper: &[Copper],
     by_layer: &[(Vec<usize>, SpatialIndex)],
+    ties: &BTreeMap<Item, Vec<NetId>>,
     out: &mut Vec<Violation>,
 ) -> Result<(), DrcError> {
     // Pads' holes, which are bare in an opening where their pad has no copper, as a plain
@@ -918,10 +979,23 @@ fn mask_bridges(
                 inside.push((Item::Pad(i), pad.net));
             }
         }
+        // The opening of a pad of a tie lets in the tie's items and its nets' copper.
+        let tie: Option<&Vec<NetId>> = m.net.and_then(|net| {
+            inside
+                .iter()
+                .filter(|c| c.1 == Some(net))
+                .find_map(|c| ties.get(&c.0).filter(|nets| nets.contains(&net)))
+        });
+        let let_in = |c: &(Item, Option<NetId>)| {
+            tie.is_some_and(|nets| {
+                c.1.is_some_and(|n| nets.contains(&n))
+                    || ties.get(&c.0).is_some_and(|theirs| theirs == nets)
+            })
+        };
         let bridged: Vec<Item> = match m.net {
             Some(net) => inside
                 .iter()
-                .filter(|c| c.1 != Some(net))
+                .filter(|c| c.1 != Some(net) && !let_in(c))
                 .map(|c| c.0)
                 .collect(),
             // An opening of no net bridges what is in it, if it has copper of a net and of

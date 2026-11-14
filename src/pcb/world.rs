@@ -4,8 +4,8 @@
 //!
 //! The answers follow [`drc::check`] rule for rule, so that what is legal here passes the
 //! check: clearances between nets, with those of pairs of nets and of items of their own,
-//! hole clearances and hole-to-hole clearances, keepouts with the nets they except, the
-//! openings in the solder mask,
+//! hole clearances and hole-to-hole clearances, keepouts with the nets they except, net
+//! ties, the openings in the solder mask,
 //! and, which the check doesn't have, the clearance to the board's edge. An opening with no
 //! net keeps out every net's copper, stricter than the check.
 
@@ -54,6 +54,9 @@ struct Meta {
     /// Whether it is the copper of a pad with no hole, which vias stay out of where
     /// [`RouteOptions::vias_in_pads`](super::RouteOptions::vias_in_pads) is off.
     smd: bool,
+    /// For an item of a net tie, which of the world's lists of nets may touch it, counted
+    /// from one: zero is none.
+    tie: u32,
 }
 
 /// A handle on what one routed item added, to take it out again.
@@ -94,6 +97,9 @@ pub(crate) struct World<'r> {
     vias_in_pads: bool,
     /// The nets that keepouts except, by the number in [`Kind::Keepout`] less one.
     excepts: Vec<Vec<NetId>>,
+    /// The nets that may touch the items of net ties, by the number in [`Meta::tie`] less
+    /// one.
+    ties: Vec<Vec<NetId>>,
     /// Whether any net's tracks are kept off some layer.
     restricted: bool,
     /// By net, the layers its tracks may be on, as a mask, and for nets past the end.
@@ -148,6 +154,7 @@ impl<'r> World<'r> {
             planes: None,
             vias_in_pads: true,
             excepts: Vec::new(),
+            ties: Vec::new(),
             restricted: false,
             track_layers: Vec::new(),
             run_layers: u64::MAX,
@@ -175,8 +182,20 @@ impl<'r> World<'r> {
             owner: Owner::Fixed,
             clearance: 0,
             smd: false,
+            tie: 0,
         };
-        for t in &board.tracks {
+        // By item of a net tie, its list of nets among the world's.
+        let mut tie_of: Vec<(drc::Item, u32)> = Vec::new();
+        for (item, nets) in drc::tied_nets(board) {
+            world.ties.push(nets);
+            tie_of.push((item, world.ties.len() as u32));
+        }
+        let tie = |item: drc::Item| {
+            tie_of
+                .binary_search_by_key(&item, |t| t.0)
+                .map_or(0, |at| tie_of[at].1)
+        };
+        for (i, t) in board.tracks.iter().enumerate() {
             let shape = match t.mid {
                 None => Shape::track(t.start, t.end, t.width)?,
                 Some(mid) => Shape::arc_track(t.start, mid, t.end, t.width, board.arc_tolerance)?,
@@ -184,41 +203,63 @@ impl<'r> World<'r> {
             world.add(
                 LayerSet::EMPTY.with(t.layer),
                 shape,
-                fixed(Kind::Copper, t.net, None),
+                Meta {
+                    tie: tie(drc::Item::Track(i)),
+                    ..fixed(Kind::Copper, t.net, None)
+                },
             );
         }
-        for v in &board.vias {
+        for (i, v) in board.vias.iter().enumerate() {
+            let tie = tie(drc::Item::Via(i));
             world.add(
                 LayerSet::span(v.from, v.to),
                 Shape::circle(v.at, v.diameter)?,
-                fixed(Kind::Copper, v.net, None),
+                Meta {
+                    tie,
+                    ..fixed(Kind::Copper, v.net, None)
+                },
             );
             world.add(
                 all,
                 Shape::circle(v.at, v.drill)?,
-                fixed(Kind::Hole, v.net, None),
+                Meta {
+                    tie,
+                    ..fixed(Kind::Hole, v.net, None)
+                },
             );
         }
-        for p in &board.pads {
+        for (i, p) in board.pads.iter().enumerate() {
+            let tie = tie(drc::Item::Pad(i));
             for (layers, shape) in p.parts() {
                 world.add(
                     layers,
                     shape.clone(),
                     Meta {
                         smd: p.hole.is_none(),
+                        tie,
                         ..fixed(Kind::Copper, p.net, p.clearance)
                     },
                 );
             }
             if let Some(hole) = &p.hole {
-                world.add(all, hole.clone(), fixed(Kind::Hole, p.net, p.clearance));
+                world.add(
+                    all,
+                    hole.clone(),
+                    Meta {
+                        tie,
+                        ..fixed(Kind::Hole, p.net, p.clearance)
+                    },
+                );
             }
         }
-        for z in &board.zones {
+        for (i, z) in board.zones.iter().enumerate() {
             world.add(
                 LayerSet::EMPTY.with(z.layer),
                 z.shape.clone(),
-                fixed(Kind::Copper, z.net, z.clearance),
+                Meta {
+                    tie: tie(drc::Item::Zone(i)),
+                    ..fixed(Kind::Copper, z.net, z.clearance)
+                },
             );
         }
         for k in &board.keepouts {
@@ -242,10 +283,21 @@ impl<'r> World<'r> {
             let kind = Kind::Mask {
                 margin: m.margin.max(0),
             };
+            // The opening of a pad of a tie lets the tie's nets in, as the pad does.
+            let tie = m.net.map_or(0, |net| {
+                let pads = board.pads.iter().enumerate();
+                pads.filter(|(_, p)| p.net == Some(net) && p.copper_layers().contains(m.layer))
+                    .map(|(i, p)| (tie(drc::Item::Pad(i)), p))
+                    .find(|(t, p)| *t != 0 && p.parts().any(|(_, s)| s.touches(&m.shape)))
+                    .map_or(0, |(t, _)| t)
+            });
             world.add(
                 LayerSet::EMPTY.with(m.layer),
                 m.shape.clone(),
-                fixed(kind, m.net, None),
+                Meta {
+                    tie,
+                    ..fixed(kind, m.net, None)
+                },
             );
         }
         for (shape, layer) in obstacles {
@@ -364,6 +416,7 @@ impl<'r> World<'r> {
             owner: Owner::Routed(net),
             clearance: 0,
             smd: false,
+            tie: 0,
         };
         self.add(LayerSet::EMPTY.with(layer), shape, meta)
     }
@@ -381,6 +434,7 @@ impl<'r> World<'r> {
             owner: Owner::Fixed,
             clearance: 0,
             smd: false,
+            tie: 0,
         };
         self.add(layers, shape, meta)
     }
@@ -398,6 +452,7 @@ impl<'r> World<'r> {
                 owner,
                 clearance: 0,
                 smd: false,
+                tie: 0,
             };
             let hole_meta = Meta {
                 kind: Kind::Hole,
@@ -447,17 +502,22 @@ impl<'r> World<'r> {
             let hit = match meta.kind {
                 Kind::Copper => {
                     !same_net(Some(net), meta.net)
+                        && !self.tied(meta.tie, net)
                         && self.copper_hit(shape, other, (net, ours), meta, layer)
                 }
                 Kind::Hole => {
-                    !same_net(Some(net), meta.net) && self.hole_hit(shape, other, None, meta.own)
+                    !same_net(Some(net), meta.net)
+                        && !self.tied(meta.tie, net)
+                        && self.hole_hit(shape, other, None, meta.own)
                 }
                 Kind::Keepout { tracks, except, .. } => {
                     tracks && !self.excepted(except, net) && shape.touches(other)
                 }
                 Kind::Edge => self.edge_hit(shape, other),
                 Kind::Mask { margin } => {
-                    !same_net(Some(net), meta.net) && violates(shape, other, margin + MASK_GUARD)
+                    !same_net(Some(net), meta.net)
+                        && !self.tied(meta.tie, net)
+                        && violates(shape, other, margin + MASK_GUARD)
                 }
             };
             if hit && !self.note(meta, &mut verdict, &mut routed) {
@@ -497,6 +557,10 @@ impl<'r> World<'r> {
         for &id in near.iter() {
             let meta = self.meta[l][id.slot() as usize];
             let Some(other) = index.get(id) else { continue };
+            // An item of a tie of both nets is in neither track's way.
+            if meta.tie != 0 && self.tied(meta.tie, nets.0) && self.tied(meta.tie, nets.1) {
+                continue;
+            }
             let hit = match meta.kind {
                 Kind::Copper => {
                     let required = if ours(&meta) {
@@ -551,7 +615,7 @@ impl<'r> World<'r> {
             for &id in near.iter() {
                 let meta = self.meta[l][id.slot() as usize];
                 let Some(other) = index.get(id) else { continue };
-                let other_net = !same_net(Some(net), meta.net);
+                let other_net = !same_net(Some(net), meta.net) && !self.tied(meta.tie, net);
                 let hit = match meta.kind {
                     Kind::Copper => {
                         (other_net
@@ -595,6 +659,12 @@ impl<'r> World<'r> {
             self.meta[0][id.slot() as usize].kind == Kind::Edge
                 && index.get(id).is_some_and(|e| shape.touches(e))
         })
+    }
+
+    /// Whether a net tie's list of nets, by its number, holds `net`.
+    #[inline]
+    fn tied(&self, tie: u32, net: NetId) -> bool {
+        tie != 0 && self.ties[tie as usize - 1].contains(&net)
     }
 
     /// Whether a keepout's list of excepted nets, by its number, holds `net`.

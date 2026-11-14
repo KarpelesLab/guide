@@ -5,10 +5,10 @@
 use super::tests::{MM, design, outline, route_checked, smd};
 use super::zone_tests::{check_fills, plane_board, zone};
 use super::{
-    CopperZone, Design, Fill, Islands, RouteOptions, Routed, ZoneConnection, fill_zones,
-    unconnected,
+    CopperZone, Design, Fill, Islands, MaskOpening, RouteOptions, Routed, ZoneConnection,
+    fill_zones, unconnected,
 };
-use crate::geom::drc::{self, Item, Keepout, Pad, Track, Via, Violation};
+use crate::geom::drc::{self, Item, Keepout, NetTie, Pad, Track, Via, Violation};
 use crate::geom::{LayerId, LayerSet, Point, Rect, Shape};
 use crate::id::NetId;
 
@@ -617,4 +617,111 @@ fn a_zone_joins_a_pad_s_stack_by_its_copper_on_the_zone_s_layer() {
     d.zones.zones[0].layers = LayerSet::EMPTY.with(LayerId(0));
     let fills = fill_zones(&d.board, &d).unwrap();
     assert!(!filled(&fills, diagonal(MM), diagonal(MM)));
+}
+
+/// A net tie on one layer: a pad of net 1 and a pad of net 2 a millimetre apart, joined by
+/// copper of net 1 over both, with an opening in the mask over each pad, and a pad of each
+/// net further out to route to.
+fn tie_board() -> Design {
+    let mut d = design(
+        1,
+        vec![
+            smd(0, 0, 1),
+            smd(MM, 0, 2),
+            smd(-5 * MM, 0, 1),
+            smd(6 * MM, 0, 2),
+        ],
+        3,
+    );
+    d.board.zones.push(drc::Zone {
+        shape: Shape::rect(Rect::new(
+            Point::new(-100_000, -150_000),
+            Point::new(MM + 100_000, 150_000),
+        ))
+        .unwrap(),
+        layer: LayerId(0),
+        net: Some(NetId(1)),
+        clearance: None,
+    });
+    for (pad, net) in [(0, 1), (1, 2)] {
+        d.board.masks.push(MaskOpening {
+            shape: d.board.pads[pad].shape.clone(),
+            layer: LayerId(0),
+            margin: 50_000,
+            net: Some(NetId(net)),
+        });
+    }
+    d
+}
+
+#[test]
+fn a_net_tie_lets_its_nets_touch_at_its_items() {
+    let mut d = tie_board();
+    // Without the tie, the copper between the pads shorts the second net's pad, and is
+    // bare in its opening; and no track of the second net may end on that pad.
+    let found = drc::check(&d.board, &d.rules).unwrap();
+    assert!(found.iter().any(|v| matches!(
+        v,
+        Violation::Short {
+            a: Item::Pad(1),
+            b: Item::Zone(0),
+            ..
+        }
+    )));
+    assert!(
+        found
+            .iter()
+            .any(|v| matches!(v, Violation::MaskBridge { opening: 1, .. }))
+    );
+    let routed = super::route(&d, &RouteOptions::default()).unwrap();
+    assert_eq!(routed.unrouted, [NetId(2)]);
+
+    d.board.ties.push(NetTie {
+        nets: vec![NetId(1), NetId(2)],
+        items: vec![Item::Pad(0), Item::Pad(1), Item::Zone(0)],
+    });
+    assert!(drc::check(&d.board, &d.rules).unwrap().is_empty());
+    let routed = route_checked(&d, &RouteOptions::default());
+    assert!(routed.unrouted.is_empty());
+    assert!(length_of(&routed, 1) >= 5 * MM - 1 && length_of(&routed, 2) >= 5 * MM - 1);
+
+    // The tie is for its nets alone: a track of a third net on its copper is a short.
+    let mut board = routed.board(&d);
+    board.tracks.push(Track {
+        start: Point::new(500_000, -MM),
+        end: Point::new(500_000, MM),
+        mid: None,
+        width: 200_000,
+        layer: LayerId(0),
+        net: Some(NetId(3)),
+    });
+    let found = drc::check(&board, &d.rules).unwrap();
+    assert!(
+        found.iter().any(|v| matches!(
+            v,
+            Violation::Short {
+                b: Item::Zone(0),
+                ..
+            }
+        )),
+        "{found:?}"
+    );
+    // And away from its items, its two nets keep their clearance.
+    let mut board = d.board.clone();
+    let track = |y: i64, net: u32| Track {
+        start: Point::new(-5 * MM, y),
+        end: Point::new(5 * MM, y),
+        mid: None,
+        width: 200_000,
+        layer: LayerId(0),
+        net: Some(NetId(net)),
+    };
+    board
+        .tracks
+        .extend([track(3 * MM, 1), track(3 * MM + 300_000, 2)]);
+    let found = drc::check(&board, &d.rules).unwrap();
+    assert!(
+        matches!(found[..], [Violation::Clearance { .. }]),
+        "{found:?}"
+    );
 }

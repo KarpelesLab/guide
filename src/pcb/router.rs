@@ -543,7 +543,7 @@ pub(crate) fn run(
     let run = Run::new(control, options.work_budget);
     run.phase(Phase::Prepare);
     run.poll();
-    let (mut routed, mut failed) = route_all(design, options, &run)?;
+    let (mut routed, mut failed, mut counted) = route_all(design, options, &run)?;
     if options.tune_lengths && !design.lengths.is_empty() && !run.poll() {
         run.phase(Phase::Lengths);
         tune::run(design, &mut routed, options).map_err(RouteError::Geometry)?;
@@ -551,6 +551,8 @@ pub(crate) fn run(
         // joined up again as after routing.
         if routed.stats.meanders > 0.0 && !design.zones.zones.is_empty() {
             run.phase(Phase::Zones);
+            // The fill from before the meanders is of a board that is no more.
+            counted = None;
             if options.planes && design.zones.zones.iter().any(|z| z.net.is_some()) {
                 let board = with_routes(design, &routed.tracks, &routed.vias);
                 let mut world = World::new(
@@ -574,7 +576,7 @@ pub(crate) fn run(
                     unrouted: &mut routed.unrouted,
                     unjoined: &mut unjoined,
                 };
-                join_planes(
+                counted = join_planes(
                     design,
                     &mut world,
                     &mut joined,
@@ -586,14 +588,21 @@ pub(crate) fn run(
                     failed.entry(net).or_insert(Failure::NoPath);
                 }
             }
-            routed.fills =
-                zones::fill_zones(&with_routes(design, &routed.tracks, &routed.vias), design)
-                    .map_err(RouteError::Geometry)?;
+            if options.fills {
+                routed.fills =
+                    zones::fill_zones(&with_routes(design, &routed.tracks, &routed.vias), design)
+                        .map_err(RouteError::Geometry)?;
+            }
         }
     }
-    // What the result leaves apart, counted on the board as it is now.
+    // What the result leaves apart, counted on the board as it is now: with its fills, or
+    // if it was not to have any, with those that the joining of zones' pieces ended on.
     run.phase(Phase::Report);
-    let board = routed.board(design);
+    let mut board = routed.board(design);
+    if !options.fills {
+        let fills = counted.iter().flatten();
+        board.zones.extend(fills.map(|f| f.to_zone(design)));
+    }
     let survey = report::survey(design, &board);
     let stopped = run.stopped().is_some();
     if stopped || (options.planes && !design.zones.zones.is_empty()) {
@@ -718,7 +727,8 @@ struct Joined<'a> {
 /// Fills the zones around everything routed, and joins up the pieces of their nets that
 /// the fills leave apart, a few times at most; what can't be joined is unrouted. Islands
 /// are kept until the end, as a plane that nothing reaches yet is still one to reach, and
-/// they join nothing.
+/// they join nothing. Returns the fill it ended on, around all that it added, if it was not
+/// stopped in the middle of one.
 fn join_planes(
     design: &Design,
     world: &mut World<'_>,
@@ -726,7 +736,7 @@ fn join_planes(
     pitch: i64,
     options: &RouteOptions,
     is_plane: &[bool],
-) -> Result<(), RouteError> {
+) -> Result<Option<Vec<Fill>>, RouteError> {
     let keeping = keep_islands(design);
     let plane_net = |net: NetId| {
         let mut zones = design.zones.zones.iter().zip(is_plane);
@@ -789,10 +799,10 @@ fn join_planes(
             out.unrouted.extend(left);
             out.unrouted.sort_unstable();
             out.unrouted.dedup();
-            break;
+            return Ok(Some(all));
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 /// The fills of a net that its stubs and grouping take as connected before routing: its
@@ -940,12 +950,13 @@ fn keep_islands(design: &Design) -> Design {
 const REPAIRS: usize = 3;
 
 /// Routes everything but meanders. Returns, with the result, how the last search of each
-/// net that failed ended, for the nets left open.
+/// net that failed ended, for the nets left open, and the fill that the joining of zones'
+/// pieces ended on, if it was made.
 fn route_all<'a>(
     design: &'a Design,
     options: &RouteOptions,
     run: &'a Run<'a>,
-) -> Result<(Routed, BTreeMap<NetId, Failure>), RouteError> {
+) -> Result<(Routed, BTreeMap<NetId, Failure>, Option<Vec<Fill>>), RouteError> {
     let original = design;
     let rules = &design.rules;
     let world_of = |design: &Design| {
@@ -1760,6 +1771,7 @@ fn route_all<'a>(
     // kept until the end, as a plane that nothing reaches yet is still one to reach, and
     // they join nothing.
     let mut unjoined = Vec::new();
+    let mut counted = None;
     if planes_on && !run.poll() {
         run.phase(Phase::Zones);
         let mut joined = Joined {
@@ -1771,7 +1783,7 @@ fn route_all<'a>(
             unrouted: &mut unrouted,
             unjoined: &mut unjoined,
         };
-        join_planes(
+        counted = join_planes(
             original,
             &mut world,
             &mut joined,
@@ -1781,7 +1793,7 @@ fn route_all<'a>(
         )?;
     }
     let mut fills = Vec::new();
-    if !original.zones.zones.is_empty() && !run.no_fill() {
+    if !original.zones.zones.is_empty() && options.fills && !run.no_fill() {
         run.phase(Phase::Zones);
         let board = with_routes(original, &tracks, &vias);
         fills = zones::fill_zones_until(&board, original, &|| run.no_fill())
@@ -1808,7 +1820,7 @@ fn route_all<'a>(
         track_kinds,
         via_kinds,
     };
-    Ok((routed, failed))
+    Ok((routed, failed, counted))
 }
 
 /// The routes of every net at some point of rip-up, and how many connections they made.

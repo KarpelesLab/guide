@@ -287,3 +287,34 @@ fn a_plane_left_in_pieces_is_unrouted_with_a_cause() {
         routed.open.len()
     );
 }
+
+#[test]
+fn without_fills_the_result_has_none_and_counts_on_the_last_one_made() {
+    // A host that fills its zones itself asks for no fills: the routes are the same, the
+    // nets joined through their plane are counted as connected all the same, and what is
+    // open is what is open with the fills.
+    let d = plane_board();
+    let with = route_checked(&d, &RouteOptions::default());
+    let options = RouteOptions {
+        fills: false,
+        ..RouteOptions::default()
+    };
+    let without = super::route(&d, &options).unwrap();
+    assert!(without.fills.is_empty());
+    assert_eq!(without.tracks, with.tracks);
+    assert_eq!(without.vias, with.vias);
+    assert_eq!(without.unrouted, with.unrouted);
+    assert_eq!(without.open, with.open);
+    assert_eq!(
+        (without.stats.connections, without.stats.connected),
+        (with.stats.connections, with.stats.connected)
+    );
+    // And a plane that is cut is said to be, with no fill made for the result.
+    let cut = pour_in_the_way(6);
+    let with = route_checked(&cut, &RouteOptions::default());
+    let without = super::route(&cut, &options).unwrap();
+    assert!(without.fills.is_empty());
+    assert_eq!(without.unrouted, with.unrouted);
+    assert_eq!(without.open, with.open);
+    assert!(!without.open.is_empty());
+}

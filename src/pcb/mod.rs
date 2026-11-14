@@ -96,7 +96,9 @@
 //!   hole, and escapes are dog-bones.
 //! - **Zones that the host fills**, [`Zones::fills`]: routing plans on the host's copper
 //!   rather than on a fill of its own, which may differ from it.
-//!   [`Shape::rings`](crate::geom::Shape::rings) reads a fill back.
+//!   [`Shape::rings`](crate::geom::Shape::rings) reads a fill back. A host that fills
+//!   its zones again around the routes in any case turns [`RouteOptions::fills`] off, and
+//!   the result's last fill is not made.
 //! - **Zones that are not planes**, [`CopperZone::plane`] and
 //!   [`RouteOptions::plane_coverage`]: small pours are copper as they are filled, and their
 //!   nets are routed as tracks.
@@ -540,6 +542,13 @@ pub struct RouteOptions {
     /// the pads of a part of fine pitch is routed, narrower, rather than not at all.
     /// [`Stats::necked`] counts such nets.
     pub neck_down: bool,
+    /// Whether the result has the zones' [fills](Routed::fills). The default is true. A
+    /// host that fills its zones itself, around the routes, sets this to false: the fill
+    /// around everything, seconds on a large board, is then not made, the result has no
+    /// fills, and its nets and connections are counted on the fill that the joining of
+    /// zones' pieces ended on, which is that one but for the islands, pieces that join
+    /// nothing.
+    pub fills: bool,
     /// A seed for another order of the nets, or `None`, the default, for shortest first.
     /// With a seed, each net's length counts for between three quarters and five quarters
     /// of itself in that order, by a factor drawn from the seed and the net's number: the
@@ -572,6 +581,7 @@ impl Default for RouteOptions {
             work_budget: None,
             keep_partial: false,
             neck_down: true,
+            fills: true,
             seed: None,
         }
     }

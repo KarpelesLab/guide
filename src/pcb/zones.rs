@@ -429,6 +429,58 @@ fn fill_all(
     Ok((out, ctx.starved.into_inner()))
 }
 
+/// How many vertices the parts of a fill have at most, for [`Parts`].
+const FILL_PART: usize = 48;
+
+/// A fill of many edges as parts of a few each, which together cover it and reach a
+/// nanometre past it at most ([`Shape::parts`]), by their boxes: what is not within a
+/// clearance of any part is not within it of the fill, which most of what is near a fill
+/// is not, and measuring to a part costs its few edges where measuring to the fill costs
+/// all of its thousands. What a part is close to is still measured against the fill, which
+/// is exact.
+struct Parts {
+    parts: Vec<Shape>,
+    index: SpatialIndex,
+    near: core::cell::RefCell<Vec<crate::geom::EntryId>>,
+}
+
+impl Parts {
+    /// The parts of a shape, or none for a shape of few edges, which is then always
+    /// measured to whole.
+    fn of(shape: &Shape) -> Option<Parts> {
+        let parts = shape.parts(FILL_PART)?;
+        let index = SpatialIndex::bulk_load(parts.iter().map(Shape::bbox));
+        Some(Parts {
+            parts,
+            index,
+            near: core::cell::RefCell::new(Vec::new()),
+        })
+    }
+}
+
+/// Whether a shape may be closer to the fill than a clearance, or touch it for a clearance
+/// of zero: `false` only if it certainly is not.
+trait MayBeClose {
+    fn may_be_close(&self, other: &Shape, clearance: i64) -> bool;
+}
+
+impl MayBeClose for Option<Parts> {
+    fn may_be_close(&self, other: &Shape, clearance: i64) -> bool {
+        let Some(p) = self else { return true };
+        let mut near = p.near.borrow_mut();
+        p.index
+            .query(&other.bbox().expand(clearance.max(0) + 2), &mut near);
+        near.iter().any(|id| {
+            let part = &p.parts[id.slot() as usize];
+            if clearance > 0 {
+                part.violates(other, clearance).unwrap_or(true)
+            } else {
+                part.touches(other)
+            }
+        })
+    }
+}
+
 /// A zone's outline less its holes.
 fn outline_area(zone: &CopperZone) -> Result<Area, GeomError> {
     let outline = Area::from_rings(&[&zone.outline])?;
@@ -654,7 +706,14 @@ impl Ctx<'_> {
         let Some(bbox) = piece.bbox() else {
             return false;
         };
-        let shapes = piece.shapes();
+        let shapes: Vec<(Shape, Option<Parts>)> = piece
+            .shapes()
+            .into_iter()
+            .map(|s| {
+                let parts = Parts::of(&s);
+                (s, parts)
+            })
+            .collect();
         let (on, index) = &self.by_layer[usize::from(layer.0)];
         let mut near = Vec::new();
         index.query(&bbox, &mut near);
@@ -668,7 +727,9 @@ impl Ctx<'_> {
             {
                 return false;
             }
-            shapes.iter().any(|s| s.touches(&c.shape))
+            shapes
+                .iter()
+                .any(|(s, parts)| parts.may_be_close(&c.shape, 0) && s.touches(&c.shape))
         })
     }
 
@@ -707,6 +768,7 @@ impl Ctx<'_> {
         let mut near = Vec::new();
         for g in given {
             let near_box = g.bbox().expand(reach);
+            let parts = Parts::of(g);
             index.query(&near_box, &mut near);
             for id in &near {
                 let i = on[id.slot() as usize];
@@ -716,7 +778,7 @@ impl Ctx<'_> {
                 }
                 let clearance = drc::clearance(rules, (zone.net, None), (c.net, c.own), layer)
                     .max(zone.clearance);
-                if close(g, &c.shape, clearance) {
+                if parts.may_be_close(&c.shape, clearance) && close(g, &c.shape, clearance) {
                     copper.push((i, clearance));
                 }
             }
@@ -729,7 +791,7 @@ impl Ctx<'_> {
                 }
                 let floor = spec.hole_clearance;
                 let clearance = h.own.map_or(floor, |o| o.max(floor));
-                if close(g, &h.shape, clearance) {
+                if parts.may_be_close(&h.shape, clearance) && close(g, &h.shape, clearance) {
                     holes.push((i, clearance));
                 }
             }

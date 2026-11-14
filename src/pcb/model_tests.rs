@@ -900,3 +900,62 @@ fn a_net_too_wide_to_leave_its_pad_is_routed_narrower() {
     assert_eq!(routed.stats.necked, 8);
     assert!(routed.tracks.iter().all(|t| t.width == 200_000));
 }
+
+#[test]
+fn a_host_s_fill_of_many_edges_is_measured_as_one_of_few() {
+    // A fill with a comb of 60 teeth along its top, which is measured to by its parts: as
+    // given while nothing is closer than its clearance, cut around what is, and the same
+    // either way as the fill of four edges that has no parts.
+    let mut comb = vec![Point::new(0, 0), Point::new(12 * MM, 0)];
+    for i in (0..60).rev() {
+        let x = i * 200_000;
+        comb.push(Point::new(x + 200_000, 10 * MM));
+        comb.push(Point::new(x + 100_000, 10 * MM + 100_000));
+    }
+    comb.push(Point::new(0, 10 * MM));
+    let host = Shape::polygon(&comb, &[]).unwrap();
+    assert!(host.rings().unwrap()[0].len() > 100);
+    // A pad of another net just clear of the teeth, one of the fill's own net on it, and
+    // one far away.
+    let pads = vec![
+        smd(3 * MM, 10 * MM + 100_000 + 300_000 + 300_000, 2),
+        smd(6 * MM, 5 * MM, 1),
+        smd(20 * MM, 20 * MM, 2),
+    ];
+    let mut d = design(2, pads, 3);
+    let mut z = zone(1, 0, 15 * MM);
+    z.islands = Islands::Remove;
+    z.connection = ZoneConnection::Solid;
+    d.zones.zones.push(z);
+    d.zones.fills.push(Fill {
+        zone: 0,
+        layer: LayerId(0),
+        shape: host.clone(),
+    });
+    // The pad is a clearance away, to the nanometre: as given, and kept, as its net's pad
+    // touches it.
+    assert_eq!(fill_zones(&d.board, &d).unwrap(), d.zones.fills);
+    // A nanometre closer, the fill is cut around it.
+    let mut closer = d.clone();
+    closer.board.pads[0] = smd(3 * MM, 10 * MM + 100_000 + 300_000 + 300_000 - 1, 2);
+    let fills = fill_zones(&closer.board, &closer).unwrap();
+    assert_ne!(fills, closer.zones.fills);
+    check_fills(&closer, &closer.board, &fills);
+    assert!(filled(&fills, 6 * MM, 5 * MM));
+    assert!(!filled(&fills, 3 * MM, 10 * MM + 50_000));
+    // A track of another net across it cuts it in two, and the half with no pad of its
+    // net goes.
+    let mut board = d.board.clone();
+    board.tracks.push(Track {
+        start: Point::new(8 * MM, -MM),
+        end: Point::new(8 * MM, 11 * MM),
+        mid: None,
+        width: 200_000,
+        layer: LayerId(0),
+        net: Some(NetId(2)),
+    });
+    let fills = fill_zones(&board, &d).unwrap();
+    check_fills(&d, &board, &fills);
+    assert!(filled(&fills, 6 * MM, 5 * MM));
+    assert!(!filled(&fills, 10 * MM, 5 * MM));
+}

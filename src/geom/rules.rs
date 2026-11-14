@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use super::shape::Shape;
 use super::types::MAX_COORD;
 use crate::cost::Cost;
 use crate::id::NetId;
@@ -138,6 +139,28 @@ pub struct NetClass {
     pub via: Option<ViaId>,
 }
 
+/// Rules of their own inside an area of the board, such as the courtyard of a part of fine
+/// pitch, whose pads are closer together than the board's clearance.
+///
+/// Copper is in the area if it touches its [shape](RuleArea::shape) on one of its
+/// [layers](RuleArea::layers): the whole of a track that enters it, as KiCad takes an item
+/// that intersects an area. Its clearance is between two pieces of copper that are both in
+/// it, in place of whatever else applies to them, their own clearances included, though
+/// not below [`RuleSpec::min_clearance`]; its track width is for tracks in it. Where
+/// several areas apply, the first in [`RuleSpec::areas`] does.
+///
+/// The [check](super::drc::check) applies both. PCB routing applies the clearance, to each
+/// piece of track as it is laid, and still routes every track at its net's width.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuleArea {
+    /// The area.
+    pub shape: Shape,
+    /// The layers it applies on.
+    pub layers: LayerSet,
+    /// The width and the clearance inside it. `None` leaves a value as it is outside.
+    pub overrides: Overrides,
+}
+
 /// Everything [`Rules`] are made from, as plain data.
 ///
 /// All distances are in database units. [`RuleSpec::new`] gives the minimal set, with no
@@ -178,6 +201,8 @@ pub struct RuleSpec {
     /// Each pair at most once, in either order. KiCad uses this for the two nets of a
     /// differential pair, kept apart by their class's gap.
     pub pairs: Vec<(NetId, NetId, i64)>,
+    /// Areas with a width and a clearance of their own.
+    pub areas: Vec<RuleArea>,
 }
 
 impl RuleSpec {
@@ -197,6 +222,7 @@ impl RuleSpec {
             min_clearance: 0,
             hole_clearance: 0,
             pairs: Vec::new(),
+            areas: Vec::new(),
         }
     }
 }
@@ -509,9 +535,13 @@ impl Rules {
                 return Err(RuleError::InvalidPair { a, b });
             }
         }
+        for (i, area) in spec.areas.iter().enumerate() {
+            check_overrides(&format!("area {i}"), &area.overrides)?;
+        }
         let clearances = [spec.clearance, spec.min_clearance]
             .into_iter()
             .chain(spec.pairs.iter().map(|p| p.2))
+            .chain(spec.areas.iter().filter_map(|a| a.overrides.clearance))
             .chain(board_layers.iter().filter_map(|o| o.clearance))
             .chain(spec.classes.iter().filter_map(|c| c.overrides.clearance))
             .chain(class_layers.iter().flatten().filter_map(|o| o.clearance));
@@ -603,6 +633,38 @@ impl Rules {
             return None;
         }
         self.pairs.get(&(a.min(b), a.max(b))).copied()
+    }
+
+    /// The clearance between two pieces of copper on `layer` that an [area](RuleArea) both
+    /// are in gives them, in place of any other, if one does.
+    pub fn area_clearance(&self, layer: LayerId, a: &Shape, b: &Shape) -> Option<i64> {
+        self.spec
+            .areas
+            .iter()
+            .filter(|area| area.layers.contains(layer))
+            .find_map(|area| {
+                let clearance = area.overrides.clearance?;
+                let bbox = area.shape.bbox();
+                (bbox.intersects(&a.bbox())
+                    && bbox.intersects(&b.bbox())
+                    && area.shape.touches(a)
+                    && area.shape.touches(b))
+                .then_some(clearance.max(self.spec.min_clearance))
+            })
+    }
+
+    /// The width that a track on `layer` must have at least, if an [area](RuleArea) that
+    /// it is in gives one.
+    pub fn area_track_width(&self, layer: LayerId, track: &Shape) -> Option<i64> {
+        self.spec
+            .areas
+            .iter()
+            .filter(|area| area.layers.contains(layer))
+            .find_map(|area| {
+                let width = area.overrides.track_width?;
+                (area.shape.bbox().intersects(&track.bbox()) && area.shape.touches(track))
+                    .then_some(width)
+            })
     }
 
     /// The largest clearance anything may need.

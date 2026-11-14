@@ -9,7 +9,7 @@ use super::{
     fill_zones, unconnected,
 };
 use crate::geom::drc::{self, Item, Keepout, NetTie, Pad, Track, Via, Violation};
-use crate::geom::{LayerId, LayerSet, Point, Rect, Shape};
+use crate::geom::{LayerId, LayerSet, Overrides, Point, Rect, RuleArea, Rules, Shape};
 use crate::id::NetId;
 
 /// The vias of a result that touch a pad with no hole.
@@ -722,6 +722,126 @@ fn a_net_tie_lets_its_nets_touch_at_its_items() {
     let found = drc::check(&board, &d.rules).unwrap();
     assert!(
         matches!(found[..], [Violation::Clearance { .. }]),
+        "{found:?}"
+    );
+}
+
+/// Three pads of three nets 0.15 mm apart, as a part of fine pitch has them, each with a pad
+/// of its net 5 mm above.
+fn fine_pitch() -> Design {
+    let narrow = |x: i64, net: u32| Pad {
+        shape: Shape::rect(Rect::new(
+            Point::new(x - 125_000, -300_000),
+            Point::new(x + 125_000, 300_000),
+        ))
+        .unwrap(),
+        ..smd(x, 0, net)
+    };
+    design(
+        1,
+        vec![
+            narrow(-400_000, 1),
+            narrow(0, 2),
+            narrow(400_000, 3),
+            smd(-2 * MM, 5 * MM, 1),
+            smd(0, 5 * MM, 2),
+            smd(2 * MM, 5 * MM, 3),
+        ],
+        4,
+    )
+}
+
+/// The rules of `design` with an area round the part, of a clearance of 0.15 mm and a
+/// track width of 0.1 mm.
+fn with_area(d: &mut Design) {
+    let mut spec = d.rules.spec().clone();
+    spec.areas.push(RuleArea {
+        shape: Shape::rect(Rect::new(
+            Point::new(-MM, -500_000),
+            Point::new(MM, 800_000),
+        ))
+        .unwrap(),
+        layers: LayerSet::first(1),
+        overrides: Overrides {
+            track_width: Some(100_000),
+            clearance: Some(150_000),
+        },
+    });
+    d.rules = Rules::new(spec).unwrap();
+}
+
+#[test]
+fn an_area_has_a_clearance_and_a_width_of_its_own() {
+    let mut d = fine_pitch();
+    // By the board's clearance of 0.2 mm, the pads are too close, and the middle one has
+    // no way out between its neighbours.
+    let found = drc::check(&d.board, &d.rules).unwrap();
+    assert_eq!(found.len(), 2, "{found:?}");
+    let routed = super::route(&d, &RouteOptions::default()).unwrap();
+    assert_eq!(routed.unrouted, [NetId(2)]);
+
+    with_area(&mut d);
+    assert_eq!(d.rules.max_clearance(), 200_000);
+    assert!(drc::check(&d.board, &d.rules).unwrap().is_empty());
+    let routed = route_checked(&d, &RouteOptions::default());
+    assert!(routed.unrouted.is_empty());
+
+    // Outside the area, the board's rules hold: two tracks 0.15 mm apart, and one of
+    // 0.1 mm, are reported there and not in it.
+    let track = |x: i64, y: i64, width: i64, net: u32| Track {
+        start: Point::new(x, y),
+        end: Point::new(x + 400_000, y),
+        mid: None,
+        width,
+        layer: LayerId(0),
+        net: Some(NetId(net)),
+    };
+    let mut board = drc::Board {
+        tracks: vec![
+            track(-200_000, 500_000, 200_000, 1),
+            track(-200_000, 150_000, 200_000, 2),
+            track(-200_000, -200_000, 100_000, 3),
+        ],
+        ..drc::Board::default()
+    };
+    assert!(drc::check(&board, &d.rules).unwrap().is_empty());
+    for t in &mut board.tracks {
+        t.start.y += 10 * MM;
+        t.end.y += 10 * MM;
+    }
+    let found = drc::check(&board, &d.rules).unwrap();
+    assert!(
+        matches!(
+            found[..],
+            [
+                Violation::Clearance {
+                    a: Item::Track(0),
+                    b: Item::Track(1),
+                    required: 200_000,
+                    ..
+                },
+                Violation::TrackWidth {
+                    track: 2,
+                    required: 150_000
+                }
+            ]
+        ),
+        "{found:?}"
+    );
+    // And between copper in the area and copper outside it.
+    board.tracks[0].start.y = 600_000;
+    board.tracks[0].end.y = 600_000;
+    board.tracks[1].start.y = 950_000;
+    board.tracks[1].end.y = 950_000;
+    let found = drc::check(&board, &d.rules).unwrap();
+    assert!(
+        found.iter().any(|v| matches!(
+            v,
+            Violation::Clearance {
+                required: 200_000,
+                ..
+            }
+        )),
         "{found:?}"
     );
 }

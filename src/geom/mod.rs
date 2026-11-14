@@ -98,8 +98,8 @@ pub use index::{EntryId, ShapeIndex, SpatialIndex};
 pub(crate) use poly::fractured;
 pub(crate) use poly::{ArcSide, Area};
 pub use rules::{
-    ClassId, LayerId, LayerSet, MAX_LAYERS, NetClass, Overrides, RuleError, RuleSpec, Rules,
-    ViaDef, ViaId,
+    ClassId, LayerId, LayerSet, MAX_LAYERS, NetClass, Overrides, RuleArea, RuleError, RuleSpec,
+    Rules, ViaDef, ViaId,
 };
 pub use shape::{DEFAULT_ARC_TOLERANCE, Shape};
 pub use types::{GeomError, MAX_COORD, Point, Rect};

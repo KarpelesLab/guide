@@ -455,6 +455,10 @@ struct Copper {
 /// Hole clearances work the same way, with
 /// [`hole_clearance`](super::RuleSpec::hole_clearance) for both the rule and the floor.
 ///
+/// Between two pieces of copper that are both in an [area](super::RuleArea) with a
+/// clearance of its own, that clearance applies instead, which this function, knowing no
+/// shapes, doesn't give: [`Rules::area_clearance`] does.
+///
 /// ```
 /// use guide::geom::drc::clearance;
 /// use guide::geom::{LayerId, RuleSpec, Rules};
@@ -639,7 +643,16 @@ fn copper(board: &Board, stack: LayerSet) -> Result<Vec<Copper>, DrcError> {
 /// Rules about one item at a time.
 fn single_items(board: &Board, rules: &Rules, out: &mut Vec<Violation>) {
     for (i, t) in board.tracks.iter().enumerate() {
-        let required = rules.track_width(t.net, t.layer);
+        let mut required = rules.track_width(t.net, t.layer);
+        if !rules.spec().areas.is_empty() {
+            let shape = match t.mid {
+                None => Shape::track(t.start, t.end, t.width),
+                Some(mid) => Shape::arc_track(t.start, mid, t.end, t.width, board.arc_tolerance),
+            };
+            if let Some(width) = shape.ok().and_then(|s| rules.area_track_width(t.layer, &s)) {
+                required = width;
+            }
+        }
         if t.width < required {
             out.push(Violation::TrackWidth { track: i, required });
         }
@@ -734,6 +747,9 @@ fn copper_pairs(
                     continue;
                 }
                 let required = clearance(rules, (a.net, a.own), (b.net, b.own), layer);
+                let required = rules
+                    .area_clearance(layer, &a.shape, &b.shape)
+                    .unwrap_or(required);
                 // What the gap has to reach, which is all that a short needs checking
                 // under: touching copper is closer than any positive clearance.
                 let limit = (required - slack).max(0);

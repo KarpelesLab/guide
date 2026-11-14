@@ -715,6 +715,11 @@ impl<'r> World<'r> {
                 layer
             )
         );
+        // Both in an area with a clearance of its own, that one applies.
+        let required = self
+            .rules
+            .area_clearance(layer, shape, other)
+            .unwrap_or(required);
         violates(shape, other, required)
     }
 

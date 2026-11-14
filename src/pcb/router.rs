@@ -1172,6 +1172,7 @@ fn route_all<'a>(
         };
     // A second pass, on a finer lattice, for the nets the first leaves unrouted, or routed in
     // part, with every net that can be ripped up again.
+    let mut best: Option<Best> = None;
     'passes: for pass in 0..=FINE_PASSES {
         if run.poll() {
             break;
@@ -1346,6 +1347,21 @@ fn route_all<'a>(
             let mut cut: Vec<(usize, NetCopper)> = Vec::new();
             if let Some(t) = tree.as_ref().filter(|_| crossed) {
                 let (victims, at) = detail::victims(&world, ctx, t);
+                // Taking nets out leaves fewer connections made until they are routed
+                // again: the routes as they are now are kept, if none before made more,
+                // for a run that is stopped before then.
+                let made = made_by(&jobs, &copper, &apart);
+                if !victims.is_empty() && best.as_ref().is_none_or(|b| made > b.made) {
+                    best = Some(Best {
+                        made,
+                        copper: copper
+                            .iter()
+                            .map(|c| c.as_ref().map(NetCopper::detached))
+                            .collect(),
+                        missing: missing.clone(),
+                        apart: apart.clone(),
+                    });
+                }
                 for p in at {
                     if let Some(tile) = history.grid.tile_of(p) {
                         history.cost[tile] += HISTORY_STEP;
@@ -1447,6 +1463,10 @@ fn route_all<'a>(
             // The pairs this net moved are routed again side by side around it, moving
             // other nets in their way in turn, but not pairs, nor this net. A pair that finds
             // no way goes back where it was, and this net is routed again around it.
+            // Routes kept from before a pair moved are of a board that is no more.
+            if !displaced.is_empty() {
+                best = None;
+            }
             for i in displaced {
                 let pair = &design.pairs[i];
                 let net = job.ctx.net;
@@ -1526,6 +1546,24 @@ fn route_all<'a>(
                 }
             }
         }
+    }
+    // A run that was stopped while nets were out goes back to the routes that made the
+    // most connections, if what it has now makes fewer.
+    if run.stopped().is_some()
+        && let Some(b) = best.take()
+        && b.made > made_by(&jobs, &copper, &apart)
+    {
+        for c in copper.iter_mut().flatten() {
+            c.unplace(&mut world);
+        }
+        copper = b.copper;
+        for (job, c) in jobs.iter().zip(copper.iter_mut()) {
+            if let Some(c) = c {
+                c.place(&mut world, &job.ctx);
+            }
+        }
+        missing = b.missing;
+        apart = b.apart;
     }
     // A net ripped up and then not routed again is unrouted too.
     // A plane net's pieces are joined after routing, if they can be, so it isn't unrouted
@@ -1702,6 +1740,23 @@ fn route_all<'a>(
         via_kinds,
     };
     Ok((routed, failed))
+}
+
+/// The routes of every net at some point of rip-up, and how many connections they made.
+struct Best {
+    made: usize,
+    copper: Vec<Option<NetCopper>>,
+    missing: Vec<Vec<usize>>,
+    apart: Vec<usize>,
+}
+
+/// How many connections the nets' copper makes: for each net with any, its terminals less
+/// the pieces it is in.
+fn made_by(jobs: &[Job], copper: &[Option<NetCopper>], apart: &[usize]) -> usize {
+    (0..jobs.len())
+        .filter(|&j| copper[j].is_some())
+        .map(|j| jobs[j].ctx.terminals - 1 - apart[j])
+        .sum()
 }
 
 /// A job's span as a seed orders it: between three quarters and five quarters of itself, by

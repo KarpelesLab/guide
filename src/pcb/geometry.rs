@@ -417,6 +417,15 @@ impl NetCopper {
         self.merge(ctx);
     }
 
+    /// The same tracks and vias, as copper that is not in the world.
+    pub(crate) fn detached(&self) -> NetCopper {
+        NetCopper {
+            segs: self.segs.clone(),
+            vias: self.vias.clone(),
+            placed: Vec::new(),
+        }
+    }
+
     /// Whether there is no copper.
     pub(crate) fn is_empty(&self) -> bool {
         self.segs.is_empty() && self.vias.is_empty()

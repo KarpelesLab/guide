@@ -447,3 +447,46 @@ fn a_reroute_tags_what_it_kept_and_stops_as_a_route_does() {
             .is_empty()
     );
 }
+
+/// Nets across and down on one layer and a second layer too narrow for all of them: they
+/// are in each other's way, and rip-up takes them out again and again.
+fn crowded() -> Design {
+    let mut d = weave();
+    // The second layer only in a band through the middle.
+    let band = |a: Point, b: Point| Keepout {
+        shape: Shape::rect(Rect::new(a, b)).unwrap(),
+        layers: LayerSet::EMPTY.with(LayerId(1)),
+        tracks: true,
+        vias: true,
+        pads: false,
+        except: Vec::new(),
+    };
+    d.board.keepouts.extend([
+        band(Point::new(-MM, -MM), Point::new(15 * MM, 5 * MM)),
+        band(Point::new(-MM, 9 * MM), Point::new(15 * MM, 15 * MM)),
+    ]);
+    d
+}
+
+#[test]
+fn a_stopped_run_keeps_the_most_connections_it_had() {
+    let d = crowded();
+    let whole = route(&d, &RouteOptions::default()).unwrap();
+    assert!(whole.stats.rip_ups > 0, "nothing was ripped up");
+    let mut options = RouteOptions::default();
+    let mut most = 0;
+    for step in 0..=64 {
+        options.work_budget = Some(whole.stats.work * step / 64);
+        let r = route(&d, &options).unwrap();
+        check(&d, &r);
+        // More work never leaves fewer connections: the nets that rip-up had out when
+        // the budget ran out are as they were before it took them out.
+        assert!(
+            r.stats.connected >= most,
+            "{} connections with {:?}, {most} with less",
+            r.stats.connected,
+            options.work_budget
+        );
+        most = r.stats.connected;
+    }
+}

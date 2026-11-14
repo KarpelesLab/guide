@@ -777,7 +777,11 @@ fn an_area_has_a_clearance_and_a_width_of_its_own() {
     // no way out between its neighbours.
     let found = drc::check(&d.board, &d.rules).unwrap();
     assert_eq!(found.len(), 2, "{found:?}");
-    let routed = super::route(&d, &RouteOptions::default()).unwrap();
+    let wide = RouteOptions {
+        neck_down: false,
+        ..RouteOptions::default()
+    };
+    let routed = super::route(&d, &wide).unwrap();
     assert_eq!(routed.unrouted, [NetId(2)]);
 
     with_area(&mut d);
@@ -844,4 +848,55 @@ fn an_area_has_a_clearance_and_a_width_of_its_own() {
         )),
         "{found:?}"
     );
+}
+
+/// A row of pads 0.2 mm wide at a pitch of 0.4 mm, as a QFN's, each of a net with a pad
+/// 3 mm out, whose tracks are 0.25 mm wide where the rules ask for 0.1 mm at least.
+fn fine_row() -> Design {
+    let pin = |x: i64, net: u32| Pad {
+        shape: Shape::rect(Rect::new(
+            Point::new(x - 100_000, -400_000),
+            Point::new(x + 100_000, 400_000),
+        ))
+        .unwrap(),
+        ..smd(x, 0, net)
+    };
+    let mut pads = Vec::new();
+    for k in 0..8u32 {
+        let x = i64::from(k) * 400_000;
+        pads.push(pin(x, k + 1));
+        pads.push(smd(i64::from(k) * 1_500_000 - 4 * MM, 4 * MM, k + 1));
+    }
+    let mut d = design(1, pads, 9);
+    d.rules = Rules::new(crate::geom::RuleSpec::new(&["F.Cu"], 100_000, 200_000)).unwrap();
+    for n in &mut d.nets {
+        n.track_width = 250_000;
+        n.via = None;
+    }
+    d.outline = outline(Rect::new(
+        Point::new(-6 * MM, -3 * MM),
+        Point::new(9 * MM, 6 * MM),
+    ));
+    d
+}
+
+#[test]
+fn a_net_too_wide_to_leave_its_pad_is_routed_narrower() {
+    let d = fine_row();
+    // 0.25 mm between pads 0.2 mm apart from it on either side leaves 0.175 mm, where
+    // 0.2 mm is asked: no net gets out of the row.
+    let wide = route_checked(
+        &d,
+        &RouteOptions {
+            neck_down: false,
+            ..RouteOptions::default()
+        },
+    );
+    assert_eq!(wide.stats.necked, 0);
+    assert!(wide.unrouted.len() >= 6, "{:?}", wide.unrouted);
+    // At 0.2 mm they do, and no narrower than that, nor than the rules' 0.1 mm.
+    let routed = route_checked(&d, &RouteOptions::default());
+    assert!(routed.unrouted.is_empty(), "{:?}", routed.unrouted);
+    assert_eq!(routed.stats.necked, 8);
+    assert!(routed.tracks.iter().all(|t| t.width == 200_000));
 }

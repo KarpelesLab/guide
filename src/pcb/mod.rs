@@ -143,6 +143,7 @@ mod escape;
 mod geometry;
 mod global;
 mod measure;
+mod neck;
 mod pairs;
 pub mod place;
 mod planes;
@@ -526,6 +527,15 @@ pub struct RouteOptions {
     /// passes on the finer lattice then complete it from that copper. The default is false:
     /// such a net of 16 terminals or fewer has nothing in the result.
     pub keep_partial: bool,
+    /// Whether a net whose tracks are too wide to leave one of its pads is routed narrower:
+    /// at the widest width at which a straight track does leave every such pad, past the
+    /// pads beside it and everything else that is fixed, and never under the least width
+    /// the rules allow, [`Rules::track_width`](crate::geom::Rules::track_width). The net
+    /// has that width everywhere. The default is true: [`NetSpec::track_width`] is then
+    /// the width a net is routed at where it can be, as a net class's is, and a net between
+    /// the pads of a part of fine pitch is routed, narrower, rather than not at all.
+    /// [`Stats::necked`] counts such nets.
+    pub neck_down: bool,
     /// A seed for another order of the nets, or `None`, the default, for shortest first.
     /// With a seed, each net's length counts for between three quarters and five quarters
     /// of itself in that order, by a factor drawn from the seed and the net's number: the
@@ -557,6 +567,7 @@ impl Default for RouteOptions {
             layers: None,
             work_budget: None,
             keep_partial: false,
+            neck_down: true,
             seed: None,
         }
     }
@@ -586,6 +597,9 @@ pub struct Stats {
     pub rip_ups: usize,
     /// How many nets the first pass left unrouted, for the second.
     pub fine_pass: usize,
+    /// How many nets are routed narrower than their own width, so as to leave their pads:
+    /// see [`RouteOptions::neck_down`].
+    pub necked: usize,
     /// Nodes expanded by detailed searches, cleanup included.
     pub expanded: u64,
     /// Resources that global routing left overused.

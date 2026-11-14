@@ -11,6 +11,7 @@ use super::detail::{
 use super::escape;
 use super::geometry::NetCopper;
 use super::global::{self, GlobalSpace, Probe, TerminalPads};
+use super::neck;
 use super::pairs;
 use super::planes;
 use super::report::{self, Known};
@@ -924,6 +925,27 @@ fn route_all<'a>(
     };
 
     let pitch = pitch(design, options);
+    // Nets too wide to leave their pads are routed narrower, from here on.
+    let narrow = if options.neck_down && !run.poll() {
+        let world = world_of(design)?;
+        neck::plan(design, &world)
+    } else {
+        Vec::new()
+    };
+    let necked_nets = narrow.iter().flatten().count();
+    let with_necks;
+    let design = if necked_nets == 0 {
+        design
+    } else {
+        let mut d = design.clone();
+        for (spec, width) in d.nets.iter_mut().zip(&narrow) {
+            if let Some(w) = *width {
+                spec.track_width = w;
+            }
+        }
+        with_necks = d;
+        &with_necks
+    };
     // Zones that are not planes are copper as they are filled before anything is routed.
     let planes_on = options.planes && design.zones.zones.iter().any(|z| z.net.is_some());
     let is_plane = if planes_on {
@@ -1066,6 +1088,7 @@ fn route_all<'a>(
     let mut stats = Stats {
         nets: jobs.len(),
         connections: jobs.iter().map(|j| j.ctx.terminals - 1).sum(),
+        necked: necked_nets,
         ..Stats::default()
     };
     let has_job = |net: NetId| jobs.iter().any(|j| j.ctx.net == net);

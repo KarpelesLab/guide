@@ -1003,3 +1003,54 @@ fn a_host_s_fill_of_many_edges_is_measured_as_one_of_few() {
         assert_eq!(piece.holds(p), piece.area.contains_point(p), "{p:?}");
     }
 }
+
+#[test]
+fn a_passage_only_as_wide_as_a_track_is_found_between_two_pads() {
+    // A row of pads of other nets across the board, 0.6 mm apart: a track of 0.2 mm and
+    // its clearances of 0.2 mm, to the nanometre. Net 1 has a pad on either side, where
+    // no line of its lattice, nor of the finer one, is in the middle of a gap: the gaps
+    // are gates, with lattices of their own.
+    let mut pads = vec![smd(4_437_000, -3 * MM, 1), smd(4_437_000, 3 * MM, 1)];
+    for k in 0..9 {
+        pads.push(smd(k * 1_200_000, 0, 2 + k as u32));
+    }
+    let mut d = design(1, pads, 11);
+    d.outline = outline(Rect::new(
+        Point::new(-400_000, -5 * MM),
+        Point::new(10 * MM, 5 * MM),
+    ));
+    let pitch = super::router::pitch(&d, &RouteOptions::default());
+    assert_eq!(pitch, 200_000);
+    for fine in [pitch, pitch / 2] {
+        for k in 0..8 {
+            assert_ne!((600_000 + k * 1_200_000 - 4_437_000) % fine, 0);
+        }
+    }
+    let gates = super::gates::Gates::plan(&d, pitch);
+    assert_eq!(gates.len(), 8);
+    // In a run with a budget, which this one does not spend.
+    let options = RouteOptions {
+        work_budget: Some(100_000_000),
+        ..RouteOptions::default()
+    };
+    let routed = route_checked(&d, &options);
+    assert_eq!(routed.stopped, None);
+    assert!(routed.unrouted.is_empty(), "{:?}", routed.open);
+    // Through the middle of a gap.
+    let through = routed.tracks.iter().any(|t| {
+        t.start.x == t.end.x
+            && (t.start.x - 600_000) % 1_200_000 == 0
+            && t.start.y.min(t.end.y) < -300_000
+            && t.start.y.max(t.end.y) > 300_000
+    });
+    assert!(through, "{:?}", routed.tracks);
+    // The first pass, on the lattice of the pitch, does without them: it is the finer
+    // passes that look for what is left. And so does a run with no budget, in any pass.
+    let coarse = RouteOptions {
+        fine_pass: false,
+        ..options
+    };
+    assert_eq!(route_checked(&d, &coarse).unrouted, [NetId(1)]);
+    let whole = route_checked(&d, &RouteOptions::default());
+    assert_eq!(whole.unrouted, [NetId(1)]);
+}

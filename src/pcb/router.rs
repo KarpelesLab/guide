@@ -9,6 +9,7 @@ use super::detail::{
     self, Corridor, Failure, History, NetCtx, NetRun, Params, RipUp, StepCache, TermPad,
 };
 use super::escape;
+use super::gates::Gates;
 use super::geometry::NetCopper;
 use super::global::{self, GlobalSpace, Probe, TerminalPads};
 use super::neck;
@@ -1189,6 +1190,12 @@ fn route_all<'a>(
     // Pairs routed first are routes of their nets in the world, locked until the passes on
     // the finer lattice, where the nets left may move them, and they are routed again.
     let mut world = world_of(before_pairs)?;
+    // The passages only as wide as a track, between the pads and the escapes' vias, for
+    // the passes on the finer lattice of a run with a budget: one with none is as it was,
+    // where on a board whose pairs are routed first they cost a net its route.
+    if run.bounded() {
+        world.set_gates(Gates::plan(before_pairs, pitch).finer_than(pitch));
+    }
     let mut pair_copper: Vec<Option<pairs::Undo>> = Vec::new();
     let mut pair_of: BTreeMap<NetId, usize> = BTreeMap::new();
     for (i, r) in pairs_first.routes.iter().enumerate() {

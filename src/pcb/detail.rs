@@ -247,7 +247,7 @@ const BLOCK: i64 = 8;
 /// Numbers for the nodes of a net's searches, as they are first met: nodes of the net's own
 /// lattice by block of [`BLOCK`] by [`BLOCK`] on a layer, so that a node's neighbours are
 /// found beside it rather than each by a hash of its own, and the few nodes off the lattice,
-/// on those of pads, one by one.
+/// on those of pads and gates, one by one.
 #[derive(Debug, Default)]
 struct NodeIndex {
     /// The lattice, once the first search has said which it is: a pitch of zero is none yet.
@@ -470,6 +470,10 @@ pub(crate) struct DetailSpace<'a> {
     tree_groups: Vec<Rect>,
     /// The run the search is part of, which hears of every node.
     run: Option<&'a Run<'a>>,
+    /// The gates' anchors of the net's width of passage, as bits, and those near the node
+    /// that is being expanded.
+    class: u32,
+    anchors: RefCell<Vec<Point>>,
     /// What the node that is being expanded has learnt of its steps, for the cache.
     fresh: core::cell::Cell<u32>,
 }
@@ -504,6 +508,10 @@ impl<'a> DetailSpace<'a> {
             tree_grid: FastMap::default(),
             tree_groups: Vec::new(),
             run: world.run(),
+            class: ctx.widths.first().map_or(0, |&w| {
+                world.gates().class(world.need(ctx.net, w), params.pitch)
+            }),
+            anchors: RefCell::new(Vec::new()),
             fresh: core::cell::Cell::new(0),
         }
     }
@@ -795,8 +803,15 @@ impl<'a> RoutingSpace for DetailSpace<'a> {
         // The lattice goes on from here if it is the net's own, or that of a pad nearby.
         // Anywhere else, a pad's lattice has only the way back onto the net's: a net of
         // many pads would otherwise be searched for over the board once for each of them.
+        // Or that of a gate nearby, a passage that only a lattice of its own goes through.
+        let mut anchors = self.anchors.borrow_mut();
+        anchors.clear();
+        self.world.gates().near(p, from.l, self.class, &mut anchors);
         let main = on(self.ctx.origin);
-        if main || found.iter().any(|&i| on(self.ctx.pads[i as usize].center)) {
+        if main
+            || found.iter().any(|&i| on(self.ctx.pads[i as usize].center))
+            || anchors.iter().any(|&a| on(a))
+        {
             let id = self.cache.id(from);
             let bits = self.cache.bits(id);
             self.fresh.set(0);
@@ -842,6 +857,17 @@ impl<'a> RoutingSpace for DetailSpace<'a> {
             }
         }
         drop(found);
+        // Onto the lattice of a gate nearby.
+        for &a in anchors.iter() {
+            if on(a) {
+                continue;
+            }
+            let m = Point::new(near(p.x, a.x), near(p.y, a.y));
+            if m != p && !out.iter().any(|s| s.to.l == from.l && s.to.point() == m) {
+                self.track_step(from, m, out, false, None);
+            }
+        }
+        drop(anchors);
         // Straight onto the tree, from less than a pitch away on another lattice.
         if self.to_tree {
             let (cx, cy) = (p.x.div_euclid(pitch), p.y.div_euclid(pitch));
@@ -1521,7 +1547,7 @@ mod tests {
             node(10 - 100 * 1000, -20 + 100 * 77, 0),
             node(10 + 100 * 7, -20, 0),
             node(10 + 100 * 8, -20, 0),
-            // Off the lattice, as on a pad's.
+            // Off the lattice, as on a pad's or a gate's.
             node(15, -20, 0),
             node(10, -21, 0),
             node(0, 0, u8::MAX),

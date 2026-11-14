@@ -59,7 +59,13 @@
 //!    on a lattice of half the pitch, in which a route may also go to a pad's centre on a
 //!    layer the pad isn't on, for a via in it; a net routed in part is completed there from
 //!    the copper it has, and a search that crosses others' routes has four times the
-//!    budget.
+//!    budget. There, in a run with a work budget or a deadline, the passages between two
+//!    pads or vias that are only as wide as a
+//!    track and its clearances, or less than a pitch more, are *gates*: each has a lattice
+//!    of its own through its middle, which routes move onto and along near it as they do
+//!    near their own pads, and where two gates cross, as between four balls of an array,
+//!    one lattice goes through both. A lattice that starts at a pad's centre has a line
+//!    in such a place by chance alone.
 //! 4. **Cleanup**: nets with vias are rerouted with dearer vias, kept only if they lose
 //!    vias; then each run of tracks between pads, vias and branches is pulled tight, by
 //!    replacing runs with straight or 45° shortcuts where those are legal.
@@ -169,6 +175,7 @@ mod control;
 mod detail;
 pub mod eco;
 mod escape;
+mod gates;
 mod geometry;
 mod global;
 mod measure;

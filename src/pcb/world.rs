@@ -12,6 +12,7 @@
 use core::cell::RefCell;
 
 use super::control::Run;
+use super::gates::Gates;
 use crate::geom::drc::{self, Board};
 use crate::geom::{EntryId, GeomError, LayerId, LayerSet, Point, Rules, Shape, ShapeIndex};
 use crate::id::NetId;
@@ -111,6 +112,9 @@ pub(crate) struct World<'r> {
     run_layers: u64,
     /// The run that searches in this world belong to, for its budget and its stop flag.
     run: Option<&'r Run<'r>>,
+    /// The passages only as wide as a track, which searches look for on lattices of their
+    /// own.
+    gates: Gates,
 }
 
 /// Where the planes of nets are, by tile of a grid and layer, and what crossing another
@@ -165,6 +169,7 @@ impl<'r> World<'r> {
             track_layers: Vec::new(),
             run_layers: u64::MAX,
             run: None,
+            gates: Gates::default(),
         };
         let nets = board
             .pads
@@ -367,6 +372,22 @@ impl<'r> World<'r> {
     /// The run that searches in this world belong to, if any.
     pub(crate) fn run(&self) -> Option<&'r Run<'r>> {
         self.run
+    }
+
+    /// Sets where the gates are.
+    pub(crate) fn set_gates(&mut self, gates: Gates) {
+        self.gates = gates;
+    }
+
+    /// Where the gates are.
+    pub(crate) fn gates(&self) -> &Gates {
+        &self.gates
+    }
+
+    /// What a passage has to be wide for a track of `net` of `width`: as
+    /// [`need_of`](super::gates::need_of).
+    pub(crate) fn need(&self, net: NetId, width: i64) -> i64 {
+        width + 2 * self.clearance(Some(net), LayerId(0))
     }
 
     /// Sets where the planes are.

@@ -65,6 +65,11 @@ struct Candidate {
 /// Pads of one net trapped in a cluster, that one via gets out of.
 struct Region {
     net: NetId,
+    /// The pad it was found from, the layers that pad is on, and the box that a way out
+    /// of its cluster leaves.
+    pad: usize,
+    on: LayerSet,
+    out: Rect,
     /// The only way out, if no via fits but a track gets out: on a layer, from a pad.
     path: Option<(Vec<Point>, LayerId)>,
     width: i64,
@@ -257,6 +262,9 @@ pub(crate) fn plan(design: &Design, world: &mut World<'_>, pitch: i64) -> Vec<Es
             region_of.insert(i, at);
             regions.push(Region {
                 net,
+                pad: i,
+                on,
+                out,
                 path,
                 width,
                 via: (via.diameter, via.drill),
@@ -272,9 +280,27 @@ pub(crate) fn plan(design: &Design, world: &mut World<'_>, pitch: i64) -> Vec<Es
     // the only one.
     for r in regions.iter_mut().filter(|r| r.candidates.is_empty()) {
         r.done = true;
-        let Some((path, layer)) = r.path.take() else {
+        let Some((mut path, mut layer)) = r.path.take() else {
             continue;
         };
+        // Each way out was found before any was placed, and two regions' may be the same
+        // channel: one that an earlier region's tracks have taken since is searched for
+        // again, round them, and a region with none left gets no escape.
+        let free = |world: &World<'_>, path: &[Point], layer: LayerId| {
+            path.windows(2).all(|w| {
+                Shape::track(w[0], w[1], width_of(r.net, layer))
+                    .is_ok_and(|s| world.track(r.net, layer, &s, None) == Verdict::Free)
+            })
+        };
+        if !free(world, &path, layer) {
+            match flood(
+                world, r.net, r.pad, design, r.on, pitch, &r.out, false, &width_of,
+            ) {
+                Flood::Out(again, l) if !again.is_empty() => (path, layer) = (again, l),
+                _ => continue,
+            }
+        }
+        let width = width_of(r.net, layer);
         let mut tracks: Vec<Track> = Vec::new();
         for w in path.windows(2) {
             let (a, b) = (w[0], w[1]);
@@ -290,7 +316,7 @@ pub(crate) fn plan(design: &Design, world: &mut World<'_>, pitch: i64) -> Vec<Es
                 start: a,
                 end: b,
                 mid: None,
-                width: r.width,
+                width,
                 layer,
                 net: Some(r.net),
             });

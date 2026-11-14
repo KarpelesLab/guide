@@ -426,6 +426,61 @@ fn pads_trapped_in_an_area_array_escape_through_vias() {
 }
 
 #[test]
+fn two_pads_whose_only_way_out_is_one_channel_do_not_both_take_it() {
+    // A ring of pads 0.4 mm apart, which no track passes between, around two pads of two
+    // nets, with one gap in it of 0.8 mm: one track's worth. No via fits, so each pad's
+    // escape is its way out through the gap, and the two ways are the same.
+    let mut pads = vec![smd(MM, 3 * MM, 1), smd(MM, 2 * MM, 2)];
+    pads.push(smd(12 * MM, 3 * MM, 1));
+    pads.push(smd(12 * MM, 2 * MM, 2));
+    let mut lone = 2;
+    let ring = |pads: &mut Vec<Pad>, lone: &mut u32, x: i64, y: i64| {
+        *lone += 1;
+        pads.push(smd(x, y, *lone));
+    };
+    for k in 0..7 {
+        ring(&mut pads, &mut lone, k * MM, 0);
+        ring(&mut pads, &mut lone, k * MM, 6 * MM);
+        if (1..6).contains(&k) {
+            ring(&mut pads, &mut lone, 0, k * MM);
+            if !(2..=4).contains(&k) {
+                ring(&mut pads, &mut lone, 6 * MM, k * MM);
+            }
+        }
+    }
+    // The gap, between two longer pads.
+    for (y0, y1) in [(1_700_000, 2_600_000), (3_400_000, 4_300_000)] {
+        lone += 1;
+        pads.push(Pad {
+            shape: Shape::rect(Rect::new(
+                Point::new(5_700_000, y0),
+                Point::new(6_300_000, y1),
+            ))
+            .unwrap(),
+            ..smd(6 * MM, y0, lone)
+        });
+    }
+    let mut d = design(2, pads, lone as usize + 1);
+    for n in &mut d.nets {
+        n.via = Some(ViaSize {
+            diameter: 8 * MM,
+            drill: 300_000,
+        });
+    }
+    d.outline = outline(Rect::new(
+        Point::new(-2 * MM, -2 * MM),
+        Point::new(14 * MM, 8 * MM),
+    ));
+    let options = RouteOptions {
+        vias_in_pads: false,
+        ..RouteOptions::default()
+    };
+    // Checked for shorts: one of the two gets out, and the other stays in.
+    let routed = route_checked(&d, &options);
+    assert_eq!(routed.unrouted.len(), 1, "{:?}", routed.unrouted);
+}
+
+#[test]
 fn a_pad_whose_centre_is_blocked_is_reached_where_it_has_room() {
     let mut d = design(1, vec![smd(0, 0, 1), smd(5 * MM, 0, 1)], 2);
     // Copper of no net, as text can be, over the left edge of the first pad, too near its

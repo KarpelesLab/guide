@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.3](https://github.com/KarpelesLab/guide/compare/v0.0.2...v0.0.3) - 2026-11-14
+
+### Added
+
+- *(pcb)* RunControl::fill_on_stop, for a run back within a second of its deadline
+- *(pcb)* a net too wide to leave its pads is routed narrower
+- *(cli)* pcb route and dsn route take --no-vias-in-pads
+- *(pcb)* a deadline or a cancel flag stops global routing too
+- *(cli)* pcb route and dsn route take a time limit, a work budget and a seed
+- *(pcb)* a seed for another order of the nets
+- *(pcb)* a routing error names the track or via at fault
+- *(pcb)* a net that cannot be routed whole keeps its tree, with keep_partial
+- *(pcb)* run control for routing, and the connections a run leaves open
+- *(pcb)* pcb::edges, a board's edge from its outline, and Zones::set_pad
+- *(geom)* [**breaking**] RuleSpec::areas, a clearance and a track width inside an area
+- *(geom)* [**breaking**] net ties, the items at which nets may touch
+- *(geom)* [**breaking**] Pad::stack, a pad's other shapes on other layers
+- *(pcb)* [**breaking**] the layers that a run's and a net's tracks may be on
+- *(geom)* [**breaking**] Keepout::except, the nets that a keepout lets in
+- *(pcb)* [**breaking**] zones that are planes or fixed copper, by zone and by how much of its net a zone covers
+- *(pcb)* [**breaking**] zones filled by the host, and a zone's number of spokes and their direction
+- *(geom)* Shape::rings and Shape::outline, to read a shape back
+- *(pcb)* RouteOptions::vias_in_pads, to keep vias out of pads with no hole
+
+### Fixed
+
+- *(pcb)* a region's way out of its cluster is checked again when it is placed
+- *(pcb)* a stopped run goes back to the routes that made the most connections
+- *(pcb)* a pair's other ends tried when the first can't be coupled
+- *(pcb)* meanders as low as fit, where a net is short of its length
+- *(pcb)* a pair's tracks 2 nm over its gap, not 16
+
+### Other
+
+- PCB routing after the release candidate, measured, and what was not kept
+- *(kicad)* GUIDE_VIAS_IN_PADS=0 routes the curated boards with vias kept out of pads
+- *(pcb)* a fixed zone of many edges goes into the world as parts of a few
+- *(pcb)* rip-up takes only the branches in the way out of a net of very many pads
+- *(pcb)* cleanup's search for fewer vias goes further for nets of few pads
+- PCB routing searched from both ends, measured, and what was not kept
+- *(pcb)* a node budget for cleanup's routes with fewer vias
+- *(pcb)* one tree through a net's searches, looked at from both ends
+- how PCB routing is stopped, and which commands take which limits
+- the roadmap, with what a host's board may say
+- loops clippy 1.100 flags as needless_range_loop
+
 ## [0.0.2](https://github.com/KarpelesLab/guide/compare/v0.0.1...v0.0.2) - 2026-11-11
 
 ### Added

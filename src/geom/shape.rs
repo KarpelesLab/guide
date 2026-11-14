@@ -1,6 +1,6 @@
 //! Shapes: a core, measured by polyclip, plus a radius.
 
-use super::poly::Core;
+use super::poly::{ArcSide, Area, Core};
 use super::types::{GeomError, MAX_COORD, Point, Rect};
 
 /// The default arc tolerance, in database units: 100 nm on a PCB, a fifth of the 0.5 µm by
@@ -254,6 +254,57 @@ impl Shape {
                 .collect(),
             None => vec![self.clone()],
         }
+    }
+
+    /// The rings of a polygon with no radius, as [`polygon`](Shape::polygon) and
+    /// [`region`](Shape::region) make, and as zones' fills are: the outline first, then
+    /// its holes, each without its first vertex repeated at the end. Exact. `None` for any
+    /// other shape, which [`outline`](Shape::outline) gives as polygons.
+    ///
+    /// ```
+    /// use guide::geom::{Point, Shape};
+    ///
+    /// let square = [Point::new(0, 0), Point::new(10, 0), Point::new(10, 10), Point::new(0, 10)];
+    /// let hole = [Point::new(4, 4), Point::new(6, 4), Point::new(6, 6), Point::new(4, 6)];
+    /// let shape = Shape::polygon(&square, &[&hole])?;
+    /// let rings = shape.rings().unwrap();
+    /// assert_eq!(rings.len(), 2);
+    /// let holes: Vec<&[Point]> = rings[1..].iter().map(Vec::as_slice).collect();
+    /// assert_eq!(Shape::polygon(&rings[0], &holes)?, shape);
+    /// assert!(Shape::circle(Point::new(0, 0), 4)?.rings().is_none());
+    /// # Ok::<(), guide::geom::GeomError>(())
+    /// ```
+    pub fn rings(&self) -> Option<Vec<Vec<Point>>> {
+        if self.radius2 != 0 {
+            return None;
+        }
+        self.core.rings()
+    }
+
+    /// Any shape as polygons: its connected pieces, each as its outline and then its holes.
+    /// Round parts, a circle, a track's ends or a grown polygon's corners, become polygons
+    /// that hold the true shape and reach at most `tolerance` beyond it, plus a unit for the
+    /// rounding of their vertices; a polygon with no radius comes out as it is.
+    ///
+    /// # Errors
+    ///
+    /// [`GeomError::InvalidPolygon`] if the shape can't be turned into polygons.
+    ///
+    /// ```
+    /// use guide::geom::{Point, Shape};
+    ///
+    /// let via = Shape::circle(Point::new(0, 0), 600_000)?;
+    /// let polygons = via.outline(1000)?;
+    /// assert_eq!(polygons.len(), 1);
+    /// // No vertex is inside the circle, and none further out than the tolerance.
+    /// for p in &polygons[0][0] {
+    ///     let r = ((p.x * p.x + p.y * p.y) as f64).sqrt();
+    ///     assert!((299_999.0..=301_002.0).contains(&r), "{r}");
+    /// }
+    /// # Ok::<(), guide::geom::GeomError>(())
+    /// ```
+    pub fn outline(&self, tolerance: i64) -> Result<Vec<Vec<Vec<Point>>>, GeomError> {
+        Ok(Area::of_shape(self, 0, tolerance, ArcSide::Outside)?.rings())
     }
 
     /// Whether distances to this shape are exact. Only arcs' are not.

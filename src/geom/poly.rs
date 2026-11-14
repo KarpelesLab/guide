@@ -149,6 +149,14 @@ impl Core {
         }
     }
 
+    /// A polygon's rings, the outline first and then its holes. `None` for other cores.
+    pub(crate) fn rings(&self) -> Option<Vec<Vec<Point>>> {
+        match self {
+            Core::Polygon(p) => Some(polygon_rings(p)),
+            _ => None,
+        }
+    }
+
     /// Whether this is a polygon, which has an inside.
     pub(crate) fn is_polygon(&self) -> bool {
         matches!(self, Core::Polygon(_))
@@ -240,6 +248,14 @@ fn arc_tol(tolerance: i64, side: ArcSide) -> ArcTol {
         ArcSide::Inside => Side::Inside,
     };
     ArcTol::new(tolerance.max(1), side)
+}
+
+/// A polygon's rings, the outline first and then its holes.
+fn polygon_rings(p: &Polygon) -> Vec<Vec<Point>> {
+    core::iter::once(&p.outer)
+        .chain(&p.holes)
+        .map(|r| r.0.iter().copied().map(from_poly).collect())
+        .collect()
 }
 
 fn geometry_error(e: polyclip::Error) -> GeomError {
@@ -429,6 +445,11 @@ impl Area {
             .iter()
             .map(|p| super::shape::Shape::new(Core::Polygon(p.clone()), 0, 0))
             .collect()
+    }
+
+    /// The pieces as rings, each piece's outline first and then its holes.
+    pub(crate) fn rings(&self) -> Vec<Vec<Vec<Point>>> {
+        self.polygons.iter().map(polygon_rings).collect()
     }
 
     /// Whether a point is inside, or on the boundary.

@@ -1511,7 +1511,7 @@ fn route_all<'a>(
                         // makes room for one net, and the whole of it for all those that
                         // wait, which go before it comes back.
                         let terminals = jobs[k].ctx.terminals;
-                        if loses_branches(pass, terminals, hurried && plane_net(v), cuts[k]) {
+                        if loses_branches(pass, terminals, plane_net(v), hurried, cuts[k]) {
                             cuts[k] += 1;
                             cut.push((k, c));
                         } else {
@@ -1872,18 +1872,18 @@ fn route_all<'a>(
 
 /// Whether a net in the way of another loses only its branches in the way, rather than
 /// being taken out whole: a net of [`BRANCH_TERMINALS`] or more, cut `cuts` times in this
-/// pass so far. In the passes on the finer lattice, [`BRANCH_CUTS`] times. With `plane`,
-/// for a net with a plane in a run with a budget, in any pass: it is stubs to its plane,
-/// each on its own, and may lose them a time for each [`PLANE_CUTS`] of its terminals, if
-/// that is more. A run with no budget takes such a net out whole, which finds its stubs
-/// other places altogether, and on a crowded board that made one more connection.
-fn loses_branches(pass: usize, terminals: usize, plane: bool, cuts: u32) -> bool {
-    let most = if plane {
-        BRANCH_CUTS.max(terminals as u32 / PLANE_CUTS)
-    } else if pass > 0 {
-        BRANCH_CUTS
-    } else {
-        0
+/// pass so far. Without a plane, in the passes on the finer lattice, [`BRANCH_CUTS`] times.
+/// With one, only in a run with a budget, `hurried`, and then in any pass: it is stubs to
+/// its plane, each on its own, and may lose them a time for each [`PLANE_CUTS`] of its
+/// terminals, if that is more. A run with no budget takes a net with a plane out whole,
+/// which finds its stubs other places altogether, and on a crowded board that made one
+/// more connection.
+fn loses_branches(pass: usize, terminals: usize, plane: bool, hurried: bool, cuts: u32) -> bool {
+    let most = match (plane, hurried) {
+        (true, true) => BRANCH_CUTS.max(terminals as u32 / PLANE_CUTS),
+        (true, false) => 0,
+        (false, _) if pass > 0 => BRANCH_CUTS,
+        (false, _) => 0,
     };
     terminals >= BRANCH_TERMINALS && cuts < most
 }
@@ -2121,20 +2121,37 @@ mod tests {
     use super::{BRANCH_CUTS, BRANCH_TERMINALS, loses_branches};
 
     #[test]
-    fn a_net_with_a_plane_loses_only_the_stubs_in_the_way_in_any_pass() {
+    fn a_net_with_a_plane_loses_only_the_stubs_in_the_way_in_a_run_with_a_budget() {
         // A ground of 584 pads, as stubs to its plane: in the first pass too, and far more
         // often than a net without a plane, before it is taken out whole.
-        assert!(loses_branches(0, 584, true, 0));
-        assert!(loses_branches(0, 584, true, 100));
-        assert!(!loses_branches(0, 584, true, 146));
-        assert!(loses_branches(1, 584, true, 0));
+        assert!(loses_branches(0, 584, true, true, 0));
+        assert!(loses_branches(0, 584, true, true, 100));
+        assert!(!loses_branches(0, 584, true, true, 146));
+        assert!(loses_branches(1, 584, true, true, 0));
         // A small one is taken out whole, as it is quick to route again.
-        assert!(!loses_branches(0, BRANCH_TERMINALS - 1, true, 0));
-        assert!(loses_branches(0, BRANCH_TERMINALS, true, BRANCH_CUTS - 1));
-        assert!(!loses_branches(0, BRANCH_TERMINALS, true, BRANCH_CUTS));
-        // Without a plane, only on the finer lattice, a few times.
-        assert!(!loses_branches(0, 584, false, 0));
-        assert!(loses_branches(1, 584, false, BRANCH_CUTS - 1));
-        assert!(!loses_branches(1, 584, false, BRANCH_CUTS));
+        assert!(!loses_branches(0, BRANCH_TERMINALS - 1, true, true, 0));
+        assert!(loses_branches(
+            0,
+            BRANCH_TERMINALS,
+            true,
+            true,
+            BRANCH_CUTS - 1
+        ));
+        assert!(!loses_branches(
+            0,
+            BRANCH_TERMINALS,
+            true,
+            true,
+            BRANCH_CUTS
+        ));
+        // With no budget it is taken out whole, in any pass.
+        assert!(!loses_branches(0, 584, true, false, 0));
+        assert!(!loses_branches(1, 584, true, false, 0));
+        // Without a plane, only on the finer lattice, a few times, budget or none.
+        for hurried in [false, true] {
+            assert!(!loses_branches(0, 584, false, hurried, 0));
+            assert!(loses_branches(1, 584, false, hurried, BRANCH_CUTS - 1));
+            assert!(!loses_branches(1, 584, false, hurried, BRANCH_CUTS));
+        }
     }
 }

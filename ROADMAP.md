@@ -246,11 +246,19 @@ Each item is independently useful, and they can land in any order.
   stacks (`drc::Pad::stack`); net ties (`drc::Board::ties`); and a clearance and a track width
   inside an area (`RuleSpec::areas`), of which routing applies the clearance. Not measured on
   real boards yet. A net too wide to leave one of its pads is routed narrower, at one width
-  for the whole net (`RouteOptions::neck_down`). Not yet: tracks routed at an area's width,
-  or narrower only near pads, and several via sizes for a net, which the search, with one
-  width and one via for each net, has no place for; nor a fanout planned for a whole
-  footprint, which is what the pads that are still shut in with vias kept out of pads need
-  ([benchmarks](docs/benchmarks.md#pcb-routing-after-the-release-candidate)).
+  for the whole net (`RouteOptions::neck_down`). A pad trapped in its footprint gets its
+  dog-bone with a smaller via where its net's own fits nowhere near
+  (`RouteOptions::fanout_via`), a host that fills its zones again has no last fill made
+  (`RouteOptions::fills`), a narrow pour between a few pads is copper and no plane, and a
+  run with a budget or a deadline routes for the most connections soonest, which cut the
+  connections that a budget of 60 s leaves open on cadlab's corpus from 1025 to 728
+  ([benchmarks](docs/benchmarks.md#pcb-routing-with-a-budget)). Not yet: tracks routed at an
+  area's width, or narrower only near pads, and several via sizes for a net beyond its
+  escapes, which the search, with one width and one via for each net, has no place for; a
+  line of the lattice midway between two pads or two vias, without which a way as wide as
+  a track and its clearances is found by chance; nor a fanout planned for a whole
+  footprint: dog-bones for every ball inside an area array were tried, and made the boards
+  with BGAs slower to no gain while their ways out are not on the lattice.
 - Net topology constraints (daisy chain, star, T). Not needed by the DRAM boards, whose
   signals are all point to point.
 - Direct KiCad board-file reading for routing, and writing routes back. Reading for

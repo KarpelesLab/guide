@@ -357,6 +357,42 @@ after the above ([results](benchmarks.md#pcb-routing-after-the-release-candidate
 - *Fixed zones in parts.* A fill given as fixed copper is kept as parts of 48 vertices at
   most, each a nanometre larger all round. No board measured shows a gain from it.
 
+**What a run with a budget does otherwise, and what a pour is.** Measured after the above
+([results](benchmarks.md#pcb-routing-with-a-budget)):
+
+- *A run with a work budget or a deadline routes for the most connections soonest.* In its
+  first pass a net that finds no way in its corridor waits until every net has had its turn
+  before it is searched for over the board and takes others out (`Wait`), and a net with a
+  plane and 32 terminals or more that is in another's way loses its stubs in the way, not
+  all of them, once for every four of its terminals (`loses_branches`). A board of six
+  layers cut at 60 s went from 659 connections open to 399. A run with neither is as it
+  was, and differs from one with a budget that is never spent: on the crowded curated
+  boards the wait cost a connection and a quarter more vias on one, and the stubs a
+  connection on another, as they had before. The two aims are not one order of work.
+- *A pour is copper.* A zone of a net of four pads or fewer, 32 pitches of the lattice wide
+  or less, is not a plane unless it says so: its fill is fixed copper, as
+  `CopperZone::plane` false makes any. As planes, such pours joined their pads, so that the
+  net had nothing to route, were cut by the routes of the pins beside them, and left their
+  pads apart with no way back. By the number of pads alone, a ground of four pads under a
+  whole board was copper to go around.
+- *A net with zones left in pieces has a cause.* What the joining of zones' pieces could
+  not join was searched for, and is `Cause::NoPath` or `Cause::Enclosed`: `Cause::Unknown`
+  read as a net that the router took for routed.
+- *A host's fill is measured to by its parts*, as a fixed zone is in the world: what is not
+  within a clearance of a part of 48 vertices, a nanometre larger all round, is not within
+  it of the fill, and only the rest is measured against the fill, which keeps the result
+  exact. 9 s of a budget of 60 on the largest board, before anything was routed.
+- *`RouteOptions::fills`*, off, for a host that fills again: the fill around everything is
+  not made, and the connections are counted on the last fill of the joining of zones'
+  pieces, which differs from it by its islands alone, which join nothing.
+- *`RouteOptions::fanout_via`*: a trapped pad that its net's via fits nowhere near gets its
+  dog-bone with a smaller one.
+
+Tried and not kept there: a pour's net as tracks; any zone of a net of few pads as a pour;
+dog-bones planned for every ball inside an area array, which made two boards with BGAs slower
+to no gain, as the ways between the vias are no more on the lattice than those between the
+balls.
+
 Tried and not kept: a smaller budget for the searches that cross nothing in the passes on
 the finer lattice (an eighth made `stm32-2l` slower, 9 to 13 s, a thirty-second faster, 9 to
 6 s: no trend); the last fill of zones' joining kept as the result's, which only applies

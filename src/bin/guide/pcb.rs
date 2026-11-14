@@ -76,6 +76,10 @@ fn route_opts() -> Vec<Opt> {
             "keep-partial",
             "A net that can't be routed whole keeps the tree it can be routed as",
         ),
+        Opt::flag(
+            "no-vias-in-pads",
+            "Keep vias out of pads without a hole: a pad that needs one gets it beside it",
+        ),
     ]
 }
 
@@ -137,6 +141,7 @@ fn route_options(m: &Matches) -> Result<RouteOptions, Failure> {
     o.cleanup = !m.flag("no-cleanup");
     o.work_budget = m.number("work-budget")?;
     o.keep_partial = m.flag("keep-partial");
+    o.vias_in_pads = !m.flag("no-vias-in-pads");
     Ok(o)
 }
 

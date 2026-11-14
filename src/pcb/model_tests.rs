@@ -973,4 +973,33 @@ fn a_host_s_fill_of_many_edges_is_measured_as_one_of_few() {
     check_fills(&d, &board, &fills);
     assert!(filled(&fills, 6 * MM, 5 * MM));
     assert!(!filled(&fills, 10 * MM, 5 * MM));
+    // A via of another net in the middle of it, far from every edge, is in one of its
+    // parts: the fill is cut around it.
+    let mut board = d.board.clone();
+    board.vias.push(Via {
+        at: Point::new(3 * MM, 5 * MM),
+        drill: 300_000,
+        diameter: 600_000,
+        from: LayerId(0),
+        to: LayerId(1),
+        net: Some(NetId(2)),
+    });
+    let fills = fill_zones(&board, &d).unwrap();
+    check_fills(&d, &board, &fills);
+    assert!(!filled(&fills, 3 * MM, 5 * MM));
+    assert!(!filled(&fills, 3 * MM + 400_000, 5 * MM));
+    assert!(filled(&fills, 6 * MM, 5 * MM));
+    // And a piece of fill of many edges says where it is by its parts, as its area does.
+    let piece = &super::planes::pieces_by_net(&d, &d.zones.fills)[0].1[0];
+    for (x, y) in [
+        (6 * MM, 5 * MM),
+        (100_000, 100_000),
+        (150_000, 10 * MM + 50_000),
+        (200_000, 10 * MM + 50_000),
+        (13 * MM, 5 * MM),
+        (6 * MM, 11 * MM),
+    ] {
+        let p = Point::new(x, y);
+        assert_eq!(piece.holds(p), piece.area.contains_point(p), "{p:?}");
+    }
 }

@@ -54,6 +54,24 @@ pub(crate) struct Piece {
     pub(crate) layer: LayerId,
     pub(crate) bbox: Rect,
     pub(crate) size: i128,
+    /// The shape in parts of few edges, if it has many, made when a point is first asked
+    /// about.
+    parts: core::cell::OnceCell<Option<super::zones::Parts>>,
+}
+
+impl Piece {
+    /// Whether a point is in the piece, to a nanometre: by its parts if it has many edges,
+    /// as the fill of a plane has thousands, and a net of hundreds of pads asks about
+    /// tens of places beside each.
+    pub(crate) fn holds(&self, p: Point) -> bool {
+        match self
+            .parts
+            .get_or_init(|| super::zones::Parts::of(&self.shape))
+        {
+            Some(parts) => parts.holds(p),
+            None => self.area.contains_point(p),
+        }
+    }
 }
 
 /// The pieces of fill of each net, by net.
@@ -72,6 +90,7 @@ pub(crate) fn pieces_by_net(design: &Design, fills: &[Fill]) -> Vec<(NetId, Vec<
             shape: f.shape.clone(),
             area,
             layer: f.layer,
+            parts: core::cell::OnceCell::new(),
         };
         match out.iter_mut().find(|(n, _)| *n == net) {
             Some((_, list)) => list.push(piece),
@@ -318,10 +337,7 @@ pub(crate) fn sites(
         for &(_, i, j) in &offsets {
             let q = Point::new(center.x + i * pitch, center.y + j * pitch);
             let r = Rect::new(q, q);
-            let Some(t) = targets
-                .iter()
-                .find(|t| t.bbox.intersects(&r) && t.area.contains_point(q))
-            else {
+            let Some(t) = targets.iter().find(|t| t.bbox.intersects(&r) && t.holds(q)) else {
                 continue;
             };
             if sites.iter().any(|s| s.center == q) {

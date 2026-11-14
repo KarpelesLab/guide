@@ -440,7 +440,7 @@ const FILL_PART: usize = 48;
 /// is not, and measuring to a part costs its few edges where measuring to the fill costs
 /// all of its thousands. What a part is close to is still measured against the fill, which
 /// is exact.
-struct Parts {
+pub(crate) struct Parts {
     parts: Vec<Shape>,
     index: SpatialIndex,
     near: core::cell::RefCell<Vec<crate::geom::EntryId>>,
@@ -449,7 +449,7 @@ struct Parts {
 impl Parts {
     /// The parts of a shape, or none for a shape of few edges, which is then always
     /// measured to whole.
-    fn of(shape: &Shape) -> Option<Parts> {
+    pub(crate) fn of(shape: &Shape) -> Option<Parts> {
         let parts = shape.parts(FILL_PART)?;
         let index = SpatialIndex::bulk_load(parts.iter().map(Shape::bbox));
         Some(Parts {
@@ -457,6 +457,19 @@ impl Parts {
             index,
             near: core::cell::RefCell::new(Vec::new()),
         })
+    }
+}
+
+impl Parts {
+    /// Whether a point is in the fill, or within a nanometre of it.
+    pub(crate) fn holds(&self, p: Point) -> bool {
+        let Ok(dot) = Shape::circle(p, 2) else {
+            return false;
+        };
+        let mut near = self.near.borrow_mut();
+        self.index.query(&Rect::new(p, p).expand(2), &mut near);
+        near.iter()
+            .any(|id| self.parts[id.slot() as usize].touches(&dot))
     }
 }
 
@@ -708,6 +721,29 @@ impl Ctx<'_> {
         let Some(bbox) = piece.bbox() else {
             return false;
         };
+        let (on, index) = &self.by_layer[usize::from(layer.0)];
+        let mut near = Vec::new();
+        index.query(&bbox, &mut near);
+        let joins = |c: &Copper| {
+            same_net(zone.net, c.net)
+                && !matches!(c.kind, Kind::Pad(p) if self.connection(zone, p).0 == ZoneConnection::None)
+        };
+        // Copper whose middle is in the piece touches it, which a plane's own vias say at
+        // once, with no need of its parts.
+        let inside = near.iter().any(|id| {
+            let c = &self.copper[on[id.slot() as usize]];
+            let b = c.shape.bbox();
+            let mid = Point::new(
+                b.min().x + (b.max().x - b.min().x) / 2,
+                b.min().y + (b.max().y - b.min().y) / 2,
+            );
+            joins(c)
+                && Shape::circle(mid, 2).is_ok_and(|dot| c.shape.touches(&dot))
+                && piece.contains_point(mid)
+        });
+        if inside {
+            return true;
+        }
         let shapes: Vec<(Shape, Option<Parts>)> = piece
             .shapes()
             .into_iter()
@@ -716,17 +752,9 @@ impl Ctx<'_> {
                 (s, parts)
             })
             .collect();
-        let (on, index) = &self.by_layer[usize::from(layer.0)];
-        let mut near = Vec::new();
-        index.query(&bbox, &mut near);
         near.iter().any(|id| {
             let c = &self.copper[on[id.slot() as usize]];
-            if !same_net(zone.net, c.net) {
-                return false;
-            }
-            if let Kind::Pad(p) = c.kind
-                && self.connection(zone, p).0 == ZoneConnection::None
-            {
+            if !joins(c) {
                 return false;
             }
             shapes
@@ -771,6 +799,14 @@ impl Ctx<'_> {
         for g in given {
             let near_box = g.bbox().expand(reach);
             let parts = Parts::of(g);
+            // A fill of many edges is measured to by its parts, which cover it and reach a
+            // nanometre past it at most: what is closer to a part than two nanometres less
+            // than the clearance is closer to the fill than the clearance, as a via in the
+            // middle of a plane is, and only what is within those two nanometres is
+            // measured against the fill, every edge of it.
+            let close = |a: &Shape, b: &Shape, clearance: i64| {
+                (clearance > 2 && parts.may_be_close(b, clearance - 2)) || close(a, b, clearance)
+            };
             index.query(&near_box, &mut near);
             for id in &near {
                 let i = on[id.slot() as usize];

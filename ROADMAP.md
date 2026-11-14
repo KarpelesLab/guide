@@ -232,9 +232,22 @@ Each item is independently useful, and they can land in any order.
   ground and power nets through their zones, with KiCad's DRC clean, of guide's fills and of
   KiCad's own refill; `GB-LIVE32` in 24 s rather than 34, with 2283 mm of track, against 2705
   and 2315 by hand, and 165 vias against 142 and 140
-  ([results](docs/benchmarks.md#pcb-zones-and-planes)). Not yet: hatched fills, zones' own
-  thermal spoke counts and fillets, and planes split between nets on one layer, which are
-  filled as any zones.
+  ([results](docs/benchmarks.md#pcb-zones-and-planes)). A zone sets how many spokes its
+  reliefs have and where the first points. Not yet: hatched fills, fillets, and planes split
+  between nets on one layer, which are filled as any zones.
+- What a host's board says beyond pads and nets, for a program that drives `pcb::route` with
+  a board model of its own. Done, each off or empty by default, which routes as before: no
+  via in a pad with no hole (`RouteOptions::vias_in_pads`); zones filled by the host
+  (`Zones::fills`), which routing plans on in place of its own fill, and `Shape::rings` and
+  `Shape::outline` to read any shape back; zones that are planes or fixed copper, by zone
+  (`CopperZone::plane`) or by how much of its net a zone covers
+  (`RouteOptions::plane_coverage`); keepouts that except nets (`drc::Keepout::except`); the
+  layers a run's and a net's tracks may be on (`RouteOptions::layers`, `NetSpec::layers`); pad
+  stacks (`drc::Pad::stack`); net ties (`drc::Board::ties`); and a clearance and a track width
+  inside an area (`RuleSpec::areas`), of which routing applies the clearance. Not measured on
+  real boards yet. Not yet: tracks routed at an area's width or necked down near pads, and
+  several via sizes for a net, which the search, with one width and one via for each net,
+  has no place for.
 - Net topology constraints (daisy chain, star, T). Not needed by the DRAM boards, whose
   signals are all point to point.
 - Direct KiCad board-file reading for routing, and writing routes back. Reading for

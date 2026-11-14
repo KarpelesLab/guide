@@ -106,11 +106,15 @@ impl Row {
 }
 
 /// The options to route with: the defaults, but for `GUIDE_PLANES=0`, which routes nets
-/// with zones as any others, and `GUIDE_PLANE_COST`, for measuring them.
+/// with zones as any others, `GUIDE_PLANE_COST`, for measuring them, and
+/// `GUIDE_VIAS_IN_PADS=0`, which keeps vias out of pads.
 fn options() -> RouteOptions {
     let mut options = RouteOptions::default();
     if std::env::var("GUIDE_PLANES").is_ok_and(|v| v == "0") {
         options.planes = false;
+    }
+    if std::env::var("GUIDE_VIAS_IN_PADS").is_ok_and(|v| v == "0") {
+        options.vias_in_pads = false;
     }
     if let Some(cost) = std::env::var("GUIDE_PLANE_COST")
         .ok()

@@ -964,14 +964,17 @@ fn keep_islands(design: &Design) -> Design {
 /// How many times zones are filled again and their nets' pieces joined after routing.
 const REPAIRS: usize = 3;
 
-/// Routes everything but meanders. Returns, with the result, how the last search of each
-/// net that failed ended, for the nets left open, and the fill that the joining of zones'
-/// pieces ended on, if it was made.
+/// What [`route_all`] returns: the result, how the last search of each net that failed
+/// ended, for the nets left open, and the fill that the joining of zones' pieces ended on,
+/// if it was made.
+type Outcome = (Routed, BTreeMap<NetId, Failure>, Option<Vec<Fill>>);
+
+/// Routes everything but meanders.
 fn route_all<'a>(
     design: &'a Design,
     options: &RouteOptions,
     run: &'a Run<'a>,
-) -> Result<(Routed, BTreeMap<NetId, Failure>, Option<Vec<Fill>>), RouteError> {
+) -> Result<Outcome, RouteError> {
     let original = design;
     let rules = &design.rules;
     let world_of = |design: &Design| {

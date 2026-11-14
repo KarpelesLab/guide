@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.5](https://github.com/KarpelesLab/guide/compare/v0.0.4...v0.0.5) - 2026-11-14
+
+### Added
+
+- *(pcb)* a passage as wide as a track between two pads has a lattice of its own
+- *(pcb)* a budget is shared out between routing, cleanup and the joining of zones
+
+### Other
+
+- PCB routing in parts, measured, and what was not kept
+- *(pcb)* the nodes of a net's searches are numbered by block of its lattice
+- *(pcb)* a fill of many edges is asked about by its parts
+
 ## [0.0.4](https://github.com/KarpelesLab/guide/compare/v0.0.3...v0.0.4) - 2026-11-14
 
 ### Added

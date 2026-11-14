@@ -354,6 +354,43 @@ fn an_error_names_the_item_at_fault() {
 }
 
 #[test]
+fn a_seed_gives_another_order_and_the_same_one_every_time() {
+    // On one layer, one of two nets that cross is routed: which depends on the order.
+    let mut d = design(
+        1,
+        vec![
+            smd(0, 5 * MM, 1),
+            smd(10 * MM, 5 * MM, 1),
+            smd(5 * MM, 0, 2),
+            smd(5 * MM, 10 * MM, 2),
+        ],
+        3,
+    );
+    d.outline = outline(Rect::new(
+        Point::new(-600_000, -600_000),
+        Point::new(10_600_000, 10_600_000),
+    ));
+    let mut options = RouteOptions {
+        rip_ups: 0,
+        ..RouteOptions::default()
+    };
+    let plain = route_checked(&d, &options);
+    let mut others = 0;
+    for seed in 0..16 {
+        options.seed = Some(seed);
+        let seeded = route_checked(&d, &options);
+        check(&d, &seeded);
+        same(&seeded, &route(&d, &options).unwrap());
+        assert_eq!(seeded.unrouted.len(), 1);
+        others += usize::from(seeded.unrouted != plain.unrouted);
+    }
+    assert!(
+        others > 0 && others < 16,
+        "{others} of 16 seeds changed the order"
+    );
+}
+
+#[test]
 fn a_reroute_tags_what_it_kept_and_stops_as_a_route_does() {
     use super::eco::{self, Change};
     let d = weave();

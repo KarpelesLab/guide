@@ -132,7 +132,8 @@
 //! Everything is in a fixed order: nets by length and identifier, steps by direction, and
 //! the only hash maps are keyed lookups whose order never matters. Costs are sums of
 //! lengths in a fixed order. No thread is used, so there is no thread count to be
-//! independent of.
+//! independent of. [`RouteOptions::seed`] gives another order of nets, the same for the
+//! same seed, for a second attempt.
 
 mod cleanup;
 mod control;
@@ -525,6 +526,11 @@ pub struct RouteOptions {
     /// passes on the finer lattice then complete it from that copper. The default is false:
     /// such a net of 16 terminals or fewer has nothing in the result.
     pub keep_partial: bool,
+    /// A seed for another order of the nets, or `None`, the default, for shortest first.
+    /// With a seed, each net's length counts for between three quarters and five quarters
+    /// of itself in that order, by a factor drawn from the seed and the net's number: the
+    /// same seed gives the same result, and another seed a second attempt.
+    pub seed: Option<u64>,
 }
 
 impl Default for RouteOptions {
@@ -551,6 +557,7 @@ impl Default for RouteOptions {
             layers: None,
             work_budget: None,
             keep_partial: false,
+            seed: None,
         }
     }
 }

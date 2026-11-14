@@ -1029,7 +1029,10 @@ fn route_all<'a>(
     let mut pair_rips = vec![0u32; pair_copper.len()];
     let pair_nets = pairs_first.nets(design);
     let mut jobs = jobs(terminal_design, &world, pitch, &plane_pieces);
-    jobs.sort_by_key(|j| (j.span, j.ctx.net));
+    match options.seed {
+        None => jobs.sort_by_key(|j| (j.span, j.ctx.net)),
+        Some(seed) => jobs.sort_by_key(|j| (seeded_span(seed, j), j.ctx.net)),
+    }
     run.totals(jobs.len(), jobs.iter().map(|j| j.ctx.terminals - 1).sum());
     let mut stats = Stats {
         nets: jobs.len(),
@@ -1632,6 +1635,18 @@ fn route_all<'a>(
         via_kinds,
     };
     Ok((routed, failed))
+}
+
+/// A job's span as a seed orders it: between three quarters and five quarters of itself, by
+/// a factor drawn from the seed and the net's number.
+fn seeded_span(seed: u64, job: &Job) -> i128 {
+    // SplitMix64's finalizer, on the seed and the net.
+    let mut z = seed ^ u64::from(job.ctx.net.0).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    i128::from(job.span) * i128::from(768 + z % 513)
 }
 
 /// How far from a pad the place for a via that [`keep_exits`] keeps for it may be.

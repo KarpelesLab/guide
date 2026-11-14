@@ -1546,6 +1546,7 @@ impl Reader {
                 .and_then(|f| length(f, "thermal_bridge_width"))
                 .unwrap_or(0),
             islands,
+            ..CopperZone::default()
         })
     }
 

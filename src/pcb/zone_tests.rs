@@ -10,7 +10,7 @@ use crate::geom::{Area, LayerId, LayerSet, Point, Rect};
 use crate::id::NetId;
 
 /// A square zone on `layer`, of net `net`, from `0` to `size` on each side.
-fn zone(net: u32, layer: u8, size: i64) -> CopperZone {
+pub(super) fn zone(net: u32, layer: u8, size: i64) -> CopperZone {
     CopperZone {
         outline: vec![
             Point::new(0, 0),
@@ -28,6 +28,7 @@ fn zone(net: u32, layer: u8, size: i64) -> CopperZone {
         thermal_gap: 400_000,
         spoke_width: 300_000,
         islands: Islands::Remove,
+        ..CopperZone::default()
     }
 }
 
@@ -42,7 +43,7 @@ fn area_mm2(design: &Design, fills: &[super::Fill]) -> f64 {
 
 /// Checks a design's board with its fills: no violation, and the fills of each net touch
 /// its pads.
-fn check_fills(design: &Design, board: &Board, fills: &[super::Fill]) -> Board {
+pub(super) fn check_fills(design: &Design, board: &Board, fills: &[super::Fill]) -> Board {
     let mut b = board.clone();
     b.zones.extend(fills.iter().map(|f| f.to_zone(design)));
     let found = drc::check(&b, &design.rules).unwrap();
@@ -137,7 +138,7 @@ fn higher_priority_zones_of_other_nets_are_kept_clear_of() {
 }
 
 /// Four pads of a net with a plane on an inner layer, and of another crossing it.
-fn plane_board() -> Design {
+pub(super) fn plane_board() -> Design {
     let mut d = design(
         4,
         vec![

@@ -331,6 +331,7 @@ impl Design {
                 thermal_gap: ZONE_DEFAULTS.2,
                 spoke_width: ZONE_DEFAULTS.3,
                 islands: Islands::Remove,
+                ..CopperZone::default()
             })
             .collect();
         Design {
@@ -346,6 +347,7 @@ impl Design {
                 zones,
                 pads: Vec::new(),
                 keepouts: Vec::new(),
+                fills: Vec::new(),
             },
         }
     }
@@ -486,7 +488,8 @@ pub struct Routed {
     pub tracks: Vec<Track>,
     /// The through vias added.
     pub vias: Vec<Via>,
-    /// The zones' fills, around everything else.
+    /// The zones' fills, around everything else. Those of a zone that the host
+    /// [filled](Zones::fills) are the host's, less what the routes need.
     pub fills: Vec<Fill>,
     /// The nets that could not be routed, in order. Nothing of theirs is in the result, but
     /// for a net with zones, which keeps what joins it to them, though they leave it in

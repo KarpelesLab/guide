@@ -5,7 +5,8 @@
 //! every hole of another net grown by the hole clearance, the board's edge grown by the edge
 //! clearance, solder mask openings of other nets, keepouts of copper pours, and the fills of
 //! zones of other nets with a higher priority. Pads of its own net join it as each says:
-//! solidly, through a thermal relief of four spokes across a gap, or not at all. What is
+//! solidly, through a thermal relief of spokes across a gap, four unless the zone says
+//! otherwise, or not at all. What is
 //! narrower than the zone's minimum width is taken away, and so are islands that nothing of
 //! the net touches, unless the zone keeps them.
 //!
@@ -14,6 +15,10 @@
 //! true ones, on the side of the obstacle, and for the rounding of new vertices, which a
 //! margin of a few nanometres over every clearance makes up for, so that a fill never comes
 //! closer to anything than the rules let it.
+//!
+//! A host that fills its zones itself gives its fills, [`Zones::fills`], and they are taken
+//! as they are, less what copper they don't keep clear of needs: so that routing plans on
+//! the copper the board will have, not on a fill of its own that differs from it.
 
 use core::cmp::Reverse;
 
@@ -50,7 +55,10 @@ pub enum Islands {
 }
 
 /// A copper zone: an outline to fill on some layers, with copper of its net.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// [`Default`] is an empty zone with no layers, to complete with `..Default::default()` the
+/// fields that a zone doesn't set, as new ones come.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CopperZone {
     /// The outline, a ring in either orientation.
     pub outline: Vec<Point>,
@@ -76,6 +84,13 @@ pub struct CopperZone {
     pub spoke_width: i64,
     /// What it does with islands.
     pub islands: Islands,
+    /// How many spokes its thermal reliefs have, evenly spaced from the first: 1, 2, 3, 4, 6
+    /// or 8. Zero, as any other number, is four.
+    pub spokes: u8,
+    /// The direction of the first spoke of its reliefs, as a vector of any length, for pads
+    /// that give none of their own, [`PadConnection::spoke_direction`]. `None` is along the X
+    /// axis.
+    pub spoke_direction: Option<(i64, i64)>,
 }
 
 /// What one pad says of how zones join it, in place of the zones' own settings.
@@ -93,7 +108,8 @@ pub struct PadConnection {
     /// right angles from it. `None` is along the X axis.
     pub spoke_direction: Option<(i64, i64)>,
     /// How far the pad reaches from its anchor along its first and third spokes, and along
-    /// its second and fourth, if not as far as its box reaches.
+    /// its second and fourth, if not as far as its box reaches. With
+    /// [spokes](CopperZone::spokes) that are neither four nor two, its box is what counts.
     pub spoke_reach: Option<(i64, i64)>,
 }
 
@@ -107,6 +123,22 @@ pub struct Zones {
     pub pads: Vec<PadConnection>,
     /// Areas that no zone is filled into, on their layers.
     pub keepouts: Vec<(Shape, LayerSet)>,
+    /// Fills that the host made, for the zones it fills itself: the copper of a
+    /// [zone](Fill::zone) on a [layer](Fill::layer) of its, as polygons, in any number of
+    /// pieces. A zone with any is not filled from its outline, which may then be empty:
+    /// its fills are these, on each of its layers, and a layer with none has no fill.
+    /// Routing plans on them as on fills of its own, so that a net is joined to the copper
+    /// that the board will have.
+    ///
+    /// They are taken to keep clear of the board as the host gave it. Where copper of
+    /// another net comes closer to one than the clearance between them, as a route through
+    /// it does, the copper's clearance is cut out of it, what the cut leaves narrower than
+    /// the zone's [minimum width](CopperZone::min_width) goes, and the zone's
+    /// [islands](CopperZone::islands) go as it says: an estimate of what the host's next
+    /// fill will be, on the side of less copper. [`Routed::fills`](super::Routed::fills) has
+    /// them so, and a host fills its zones again around the routes in any case. A fill that
+    /// nothing comes close to is returned as it was given.
+    pub fills: Vec<Fill>,
 }
 
 /// A piece of a zone's fill: connected copper on one layer.
@@ -299,6 +331,36 @@ fn fill_all(
     };
     for z in order {
         let zone = &zones[z];
+        if design.zones.fills.iter().any(|f| f.zone == z) {
+            for layer in LayerSet(zone.layers.0 & stack.0).iter() {
+                let given: Vec<&Shape> = design
+                    .zones
+                    .fills
+                    .iter()
+                    .filter(|f| f.zone == z && f.layer == layer)
+                    .map(|f| &f.shape)
+                    .collect();
+                let kept = ctx.host_fill(z, layer, &given)?;
+                let mut areas = Vec::with_capacity(kept.len());
+                for (area, shape) in kept {
+                    match shape {
+                        Some(shape) => out.push(Fill {
+                            zone: z,
+                            layer,
+                            shape,
+                        }),
+                        None => out.extend(area.shapes().into_iter().map(|shape| Fill {
+                            zone: z,
+                            layer,
+                            shape,
+                        })),
+                    }
+                    areas.push(area);
+                }
+                done.push((z, layer, Area::union_all(&areas)?));
+            }
+            continue;
+        }
         let outline = outline_area(zone)?;
         if outline.is_empty() {
             continue;
@@ -481,7 +543,7 @@ impl Ctx<'_> {
             let mut all = Vec::new();
             let mut owner = Vec::new();
             for (k, r) in reliefs.iter().enumerate() {
-                let made = self.spokes(r, zone.min_width)?;
+                let made = self.spokes(r, zone)?;
                 owner.extend(core::iter::repeat_n(k, made.len()));
                 all.extend(made);
             }
@@ -554,10 +616,126 @@ impl Ctx<'_> {
         })
     }
 
-    /// The four spokes of a pad's thermal relief, each from just behind the pad's anchor
-    /// out past its gap, with the point at its end that must be in the fill for it to be
-    /// kept: KiCad's `buildThermalSpokes`.
-    fn spokes(&self, r: &Relief, min_width: i64) -> Result<Vec<(Area, Point)>, GeomError> {
+    /// A zone's fill on a layer as the host gave it, in `given`'s pieces: each with its
+    /// shape, if it is as it was given. Where copper of another net is closer to a piece
+    /// than their clearance, the pieces are cut around it, lose what the cut leaves narrower
+    /// than the zone's minimum width, and come out as areas alone. Islands go as the zone
+    /// says.
+    fn host_fill(
+        &self,
+        z: usize,
+        layer: LayerId,
+        given: &[&Shape],
+    ) -> Result<Vec<(Area, Option<Shape>)>, GeomError> {
+        let design = self.design;
+        let rules = &design.rules;
+        let zone = &design.zones.zones[z];
+        let spec = rules.spec();
+        let grow = |shape: &Shape, by: i64| Area::of_shape(shape, by, TOLERANCE, ArcSide::Outside);
+        let close = |a: &Shape, b: &Shape, clearance: i64| {
+            if clearance > 0 {
+                a.violates(b, clearance).unwrap_or(true)
+            } else {
+                a.touches(b)
+            }
+        };
+        let reach = rules
+            .max_clearance()
+            .max(zone.clearance)
+            .max(spec.hole_clearance)
+            + self.copper.iter().filter_map(|c| c.own).fold(0, i64::max);
+        // The copper and holes of other nets that a piece doesn't keep clear of, each once.
+        let (on, index) = &self.by_layer[usize::from(layer.0)];
+        let mut copper: Vec<(usize, i64)> = Vec::new();
+        let mut holes: Vec<(usize, i64)> = Vec::new();
+        let mut near = Vec::new();
+        for g in given {
+            let near_box = g.bbox().expand(reach);
+            index.query(&near_box, &mut near);
+            for id in &near {
+                let i = on[id.slot() as usize];
+                let c = &self.copper[i];
+                if same_net(zone.net, c.net) {
+                    continue;
+                }
+                let clearance = drc::clearance(rules, (zone.net, None), (c.net, c.own), layer)
+                    .max(zone.clearance);
+                if close(g, &c.shape, clearance) {
+                    copper.push((i, clearance));
+                }
+            }
+            self.hole_index.query(&near_box, &mut near);
+            for id in &near {
+                let i = id.slot() as usize;
+                let h = &self.holes[i];
+                if same_net(zone.net, h.net) {
+                    continue;
+                }
+                let floor = spec.hole_clearance;
+                let clearance = h.own.map_or(floor, |o| o.max(floor));
+                if close(g, &h.shape, clearance) {
+                    holes.push((i, clearance));
+                }
+            }
+        }
+        copper.sort_unstable();
+        copper.dedup();
+        holes.sort_unstable();
+        holes.dedup();
+        let mut areas = Vec::with_capacity(given.len());
+        for g in given {
+            areas.push(Area::of_shape(g, 0, 1, ArcSide::Inside)?);
+        }
+        let mut pieces: Vec<(Area, Option<Shape>)> = Vec::new();
+        if copper.is_empty() && holes.is_empty() {
+            pieces.extend(
+                areas
+                    .into_iter()
+                    .zip(given)
+                    .map(|(a, g)| (a, Some((*g).clone()))),
+            );
+        } else {
+            let mut others = Vec::with_capacity(copper.len() + holes.len());
+            for &(i, clearance) in &copper {
+                others.push(grow(&self.copper[i].shape, clearance + MARGIN)?);
+            }
+            for &(i, clearance) in &holes {
+                others.push(grow(&self.holes[i].shape, clearance + MARGIN)?);
+            }
+            let whole = Area::union_all(&areas)?;
+            let left = whole.minus_all(&others)?;
+            // What the cut leaves too narrow goes, but not what the host kept as narrow,
+            // such as its spokes.
+            let d = zone.min_width / 2;
+            let thin = whole
+                .minus_all(&[whole.opening(d, TOLERANCE)?])?
+                .minus_all(&others)?;
+            let kept = Area::union_all(&[left.opening(d, TOLERANCE)?, thin])?;
+            // Less the dust that the cut leaves of what was narrow: pieces too small to
+            // hold a disc as wide as the minimum width, such as the tip of a corner.
+            let dust = 3 * i128::from(zone.min_width) * i128::from(zone.min_width);
+            pieces.extend(
+                kept.pieces()
+                    .into_iter()
+                    .filter(|a| 2 * a.area2() >= dust)
+                    .map(|a| (a, None)),
+            );
+        }
+        pieces.retain(|(piece, _)| match zone.islands {
+            Islands::Keep => true,
+            Islands::RemoveBelow(min) => {
+                piece.area2() >= 2 * min || self.touches_net(zone, layer, piece)
+            }
+            Islands::Remove => self.touches_net(zone, layer, piece),
+        });
+        Ok(pieces)
+    }
+
+    /// The spokes of a pad's thermal relief, four unless the zone says otherwise, each
+    /// from just behind the pad's anchor out past its gap, with the point at its end that
+    /// must be in the fill for it to be kept: KiCad's `buildThermalSpokes`.
+    fn spokes(&self, r: &Relief, zone: &CopperZone) -> Result<Vec<(Area, Point)>, GeomError> {
+        let min_width = zone.min_width;
         let pad = &self.board.pads[r.pad];
         let own = self
             .design
@@ -573,7 +751,10 @@ impl Ctx<'_> {
                 b.min().y + (b.max().y - b.min().y) / 2,
             )
         });
-        let (dx, dy) = own.spoke_direction.unwrap_or((1, 0));
+        let (dx, dy) = own
+            .spoke_direction
+            .or(zone.spoke_direction)
+            .unwrap_or((1, 0));
         let norm = ((dx as f64) * (dx as f64) + (dy as f64) * (dy as f64)).sqrt();
         if norm == 0.0 {
             return Ok(Vec::new());
@@ -585,9 +766,31 @@ impl Ctx<'_> {
             (b.max().x, b.max().y),
             (b.min().x, b.max().y),
         ];
-        let dirs = [(ux, uy), (-uy, ux), (-ux, -uy), (uy, -ux)];
+        // The cosine and sine of the angle from one spoke to the next, from square roots
+        // alone, which are the same on every platform.
+        let half = 0.5f64;
+        let turn = match zone.spokes {
+            1 => Some((1, (1.0, 0.0))),
+            2 => Some((2, (-1.0, 0.0))),
+            3 => Some((3, (-half, 0.75f64.sqrt()))),
+            6 => Some((6, (half, 0.75f64.sqrt()))),
+            8 => Some((8, (half.sqrt(), half.sqrt()))),
+            _ => None,
+        };
+        let dirs: Vec<(f64, f64)> = match turn {
+            None => vec![(ux, uy), (-uy, ux), (-ux, -uy), (uy, -ux)],
+            Some((count, (c, s))) => {
+                let mut dirs = vec![(ux, uy)];
+                for k in 1..count {
+                    let (vx, vy): (f64, f64) = dirs[k - 1];
+                    dirs.push((vx * c - vy * s, vx * s + vy * c));
+                }
+                dirs
+            }
+        };
         // How far the pad reaches along each spoke: as it says, or from its box.
-        let reach: Vec<f64> = match own.spoke_reach {
+        let reach: Vec<f64> = match own.spoke_reach.filter(|_| matches!(dirs.len(), 2 | 4)) {
+            Some((a, _)) if dirs.len() == 2 => vec![a as f64, a as f64],
             Some((a, b)) => vec![a as f64, b as f64, a as f64, b as f64],
             None => dirs
                 .iter()
@@ -606,7 +809,7 @@ impl Ctx<'_> {
             return Ok(Vec::new());
         }
         let half = (width / 2.0).floor();
-        let mut out = Vec::with_capacity(4);
+        let mut out = Vec::with_capacity(dirs.len());
         for (&(vx, vy), &extent) in dirs.iter().zip(&reach) {
             let length = extent + r.gap as f64 + (min_width / 2) as f64 + SPOKE_EPSILON as f64;
             let (nx, ny) = (-vy * half, vx * half);

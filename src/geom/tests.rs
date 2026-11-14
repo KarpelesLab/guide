@@ -2012,3 +2012,53 @@ fn regions_unfracture_outlines() {
         Err(GeomError::CoordinateOutOfRange { .. })
     ));
 }
+
+#[test]
+fn a_polygon_s_parts_cover_it_and_reach_a_nanometre_past_it_at_most() {
+    // A gear of 400 vertices with a hole, on no grid.
+    let ring = |r0: f64, r1: f64, n: usize| -> Vec<Point> {
+        (0..n)
+            .map(|i| {
+                let a = i as f64 / n as f64 * core::f64::consts::TAU;
+                let r = if i % 2 == 0 { r0 } else { r1 };
+                Point::new((r * a.cos()).round() as i64, (r * a.sin()).round() as i64)
+            })
+            .collect()
+    };
+    let (outer, hole) = (
+        ring(10_000_019.0, 8_700_003.0, 400),
+        ring(3_000_007.0, 2_500_001.0, 60),
+    );
+    let gear = Shape::polygon(&outer, &[&hole]).unwrap();
+    assert!(gear.parts(1000).is_none());
+    assert!(
+        Shape::circle(Point::new(0, 0), 50)
+            .unwrap()
+            .parts(4)
+            .is_none()
+    );
+    let parts = gear.parts(48).unwrap();
+    assert!(parts.len() > 8, "{}", parts.len());
+    // Probes all over its box, at a clearance: whatever is too close to the gear is too
+    // close to a part, and whatever is too close to a part is within 2 nm of being too
+    // close to the gear.
+    let mut seed = 0x2545_F491_4F6C_DD1Du64;
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed % 24_000_000) as i64 - 12_000_000
+    };
+    for _ in 0..4000 {
+        let probe = Shape::circle(Point::new(next(), next()), 200_000).unwrap();
+        for c in [0, 150_000] {
+            let whole = gear.violates(&probe, c).unwrap();
+            let any = parts.iter().any(|p| p.violates(&probe, c).unwrap());
+            assert!(!whole || any, "{probe:?} at {c}");
+            assert!(
+                !any || gear.violates(&probe, c + 2).unwrap(),
+                "{probe:?} at {c}"
+            );
+        }
+    }
+}

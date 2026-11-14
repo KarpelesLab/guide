@@ -43,6 +43,9 @@ pub(crate) enum Owner {
     Routed(NetId),
 }
 
+/// How many vertices the parts of a fixed zone have at most, as the world keeps it.
+const ZONE_PART: usize = 48;
+
 #[derive(Clone, Copy, Debug)]
 struct Meta {
     kind: Kind,
@@ -257,14 +260,19 @@ impl<'r> World<'r> {
             }
         }
         for (i, z) in board.zones.iter().enumerate() {
-            world.add(
-                LayerSet::EMPTY.with(z.layer),
-                z.shape.clone(),
-                Meta {
-                    tie: tie(drc::Item::Zone(i)),
-                    ..fixed(Kind::Copper, z.net, z.clearance)
-                },
-            );
+            let meta = Meta {
+                tie: tie(drc::Item::Zone(i)),
+                ..fixed(Kind::Copper, z.net, z.clearance)
+            };
+            // A fill of thousands of edges is in the way of every probe in its box, and
+            // each would measure to all of them: it goes in as parts of a few edges each.
+            let parts = z
+                .shape
+                .parts(ZONE_PART)
+                .unwrap_or_else(|| vec![z.shape.clone()]);
+            for part in parts {
+                world.add(LayerSet::EMPTY.with(z.layer), part, meta);
+            }
         }
         for k in &board.keepouts {
             let except = if k.except.is_empty() {

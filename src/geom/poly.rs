@@ -424,6 +424,49 @@ impl Area {
         Area { polygons }.and(self)
     }
 
+    /// How many vertices the polygons have between them.
+    pub(crate) fn vertices(&self) -> usize {
+        self.rings().iter().flatten().map(Vec::len).sum()
+    }
+
+    /// This area cut in two along the middle of its box, across its longer side, and each
+    /// half again, until a part has `most` vertices at most or is cut `depth` times: parts
+    /// that together are the same area, to within the rounding of the points where the
+    /// cuts cross its edges, each with a box of its own.
+    pub(crate) fn split(&self, most: usize, depth: u32) -> Result<Vec<Area>, GeomError> {
+        let Some(b) = self.bbox() else {
+            return Ok(Vec::new());
+        };
+        let (w, h) = (b.max().x - b.min().x, b.max().y - b.min().y);
+        if depth == 0 || self.vertices() <= most || w.max(h) < 2 {
+            return Ok(vec![self.clone()]);
+        }
+        let half = |lo: Point, hi: Point| {
+            Area::from_rings(&[&[lo, Point::new(hi.x, lo.y), hi, Point::new(lo.x, hi.y)]])
+        };
+        let (first, second) = if w >= h {
+            let mid = b.min().x + w / 2;
+            (
+                half(b.min(), Point::new(mid, b.max().y))?,
+                half(Point::new(mid, b.min().y), b.max())?,
+            )
+        } else {
+            let mid = b.min().y + h / 2;
+            (
+                half(b.min(), Point::new(b.max().x, mid))?,
+                half(Point::new(b.min().x, mid), b.max())?,
+            )
+        };
+        let mut out = Vec::new();
+        for part in [first, second] {
+            let part = self.and(&part)?;
+            if !part.is_empty() {
+                out.extend(part.split(most, depth - 1)?);
+            }
+        }
+        Ok(out)
+    }
+
     /// The connected pieces, each a polygon with its holes, in a fixed order.
     pub(crate) fn pieces(&self) -> Vec<Area> {
         self.polygons

@@ -256,6 +256,39 @@ impl Shape {
         }
     }
 
+    /// A polygon of more than `most` vertices as parts of `most` at most, or as few as
+    /// sixteen cuts in two leave, each a nanometre larger all round: together they cover
+    /// the shape, and reach no further than a nanometre past it, so that anything that
+    /// keeps a distance from every part keeps it from the shape. Each part has a box of its
+    /// own, which a spatial index can tell apart, and few edges to measure to. `None` for
+    /// a shape that is no polygon, or has no more vertices than that.
+    pub(crate) fn parts(&self, most: usize) -> Option<Vec<Shape>> {
+        if !self.core.is_polygon() {
+            return None;
+        }
+        let rings = self.core.rings()?;
+        if rings.iter().map(Vec::len).sum::<usize>() <= most {
+            return None;
+        }
+        // The outline less the holes, whichever way round each ring goes.
+        let outline = super::poly::Area::from_rings(&[&rings[0]]).ok()?;
+        let holes: Vec<&[Point]> = rings[1..].iter().map(Vec::as_slice).collect();
+        let area = if holes.is_empty() {
+            outline
+        } else {
+            let holes = super::poly::Area::from_rings(&holes).ok()?;
+            outline.minus_all(&[holes]).ok()?
+        };
+        let parts = area.split(most, 16).ok()?;
+        Some(
+            parts
+                .iter()
+                .flat_map(super::poly::Area::shapes)
+                .map(|s| Shape::new(s.core, self.radius2 + 2, self.error2))
+                .collect(),
+        )
+    }
+
     /// The rings of a polygon with no radius, as [`polygon`](Shape::polygon) and
     /// [`region`](Shape::region) make, and as zones' fills are: the outline first, then
     /// its holes, each without its first vertex repeated at the end. Exact. `None` for any

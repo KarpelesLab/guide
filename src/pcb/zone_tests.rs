@@ -318,3 +318,37 @@ fn without_fills_the_result_has_none_and_counts_on_the_last_one_made() {
     assert_eq!(without.open, with.open);
     assert!(!without.open.is_empty());
 }
+
+#[test]
+fn a_run_that_is_not_to_join_its_zones_routes_the_same_and_says_what_is_apart() {
+    // Nothing to join: the same routes, and the same count.
+    let d = plane_board();
+    let with = route_checked(&d, &RouteOptions::default());
+    let options = RouteOptions {
+        join: false,
+        ..RouteOptions::default()
+    };
+    let without = route_checked(&d, &options);
+    assert_eq!(without.tracks, with.tracks);
+    assert_eq!(without.vias, with.vias);
+    assert!(without.unrouted.is_empty());
+    // A plane that a route cuts in two is left so, and said to be.
+    let cut = pour_in_the_way(6);
+    let without = route_checked(&cut, &options);
+    assert!(!without.open.is_empty());
+    assert_eq!(without.stats.stubs, 0);
+    for o in &without.open {
+        assert!(without.unrouted.contains(&o.net));
+    }
+    // With neither joining nor fills, the count is on the fill that routing planned on:
+    // the nets joined through their plane are not among the unrouted.
+    let bare = RouteOptions {
+        join: false,
+        fills: false,
+        ..RouteOptions::default()
+    };
+    let routed = super::route(&d, &bare).unwrap();
+    assert!(routed.fills.is_empty());
+    assert!(routed.unrouted.is_empty(), "{:?}", routed.unrouted);
+    assert_eq!(routed.stats.connected, with.stats.connected);
+}

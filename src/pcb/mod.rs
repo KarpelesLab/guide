@@ -127,9 +127,19 @@
 //! and a cancel flag, whose results depend on the moment. A stopped run skips what is left
 //! of escapes, routing, cleanup, the coupling of pairs, the joining of zones' pieces and
 //! meanders, and fills the zones around what it has; nets that rip-up had taken out and not
-//! yet routed again are left out. Its [`Routed::unrouted`] and the nets and connections of
-//! its [`Stats`] are counted on the board it returns. [`RunControl::progress`] hears of the
-//! run as it goes.
+//! yet routed again are as they were before it took them out. Its [`Routed::unrouted`] and
+//! the nets and connections of its [`Stats`] are counted on the board it returns, and
+//! [`Routed::tried`] has the nets it got to. [`RunControl::progress`] hears of the run as
+//! it goes. Every phase looks at the deadline and the flag, the fills before routing
+//! among them, which are given up between two zones.
+//!
+//! A deadline and a budget are shared out, so that a run that routing would spend them on
+//! still joins its zones: routing ends when three quarters of the time that is left when
+//! it begins are spent, or nineteen twentieths of the work, cleanup has a third of what
+//! time is left then, and the joining of zones' pieces the rest, in which it starts no
+//! fill that it would not see the end of, by the time the last one took. A run whose
+//! routing or cleanup ended so is one that was stopped, and says so. Without zones to
+//! join, or with [`RouteOptions::join`] off, routing has that share too.
 //!
 //! A run with a work budget or a deadline routes for the most connections soonest, which
 //! one with neither does not, so that the two differ even if nothing stops the first. In
@@ -541,6 +551,8 @@ pub struct RouteOptions {
     /// `None`, the default, for no limit. A run that spends it stops and returns what it has
     /// routed, with [`Routed::stopped`] set: the same result for the same budget, on any
     /// machine. Zone fills, cleanup's shortcuts and meanders cost nothing in this unit. A
+    /// design with zones to [join](RouteOptions::join) keeps a twentieth of it for that,
+    /// which routing does not spend and joining may not need. A
     /// run with a budget routes [for the most connections soonest](self#stopping-a-run-and-what-is-left-open),
     /// so its result is not that of a run with none, however large the budget.
     pub work_budget: Option<u64>,
@@ -564,8 +576,18 @@ pub struct RouteOptions {
     /// around everything, seconds on a large board, is then not made, the result has no
     /// fills, and its nets and connections are counted on the fill that the joining of
     /// zones' pieces ended on, which is that one but for the islands, pieces that join
-    /// nothing.
+    /// nothing, or with no joining, on the fill that routing planned on.
     pub fills: bool,
+    /// Whether the nets with [planes](RouteOptions::planes) that the routes leave in pieces
+    /// are joined up after routing: the zones are filled around the routes, each piece gets
+    /// a stub or tracks to the largest, and the zones are filled again, a few times at
+    /// most. The default is true. It takes a fill of the zones or several, seconds each on
+    /// a large board, and a run with a deadline keeps a sixth of its time for it. A host
+    /// that fills its zones itself and routes again whatever its own fill leaves apart
+    /// sets this to false: routing then has the time, and
+    /// [`unrouted`](Routed::unrouted) is what the result's fills leave in pieces, or with
+    /// no [fills](RouteOptions::fills), what the fill that routing planned on does.
+    pub join: bool,
     /// A smaller via for the [escapes](self#how-it-routes) of fine-pitch footprints, such as
     /// the smallest the board's maker drills, or `None`, the default, for none. A pad
     /// trapped in its footprint that its net's own via fits nowhere near, as between the
@@ -605,6 +627,7 @@ impl Default for RouteOptions {
             keep_partial: false,
             neck_down: true,
             fills: true,
+            join: true,
             fanout_via: None,
             seed: None,
         }
@@ -698,6 +721,12 @@ pub struct Routed {
     pub track_kinds: Vec<CopperKind>,
     /// What each of [`vias`](Routed::vias) is, in the same order.
     pub via_kinds: Vec<CopperKind>,
+    /// The nets that had a search of their own in the run, in order: a net left open that
+    /// is here was looked for a way and not given one, or lost it to another net since,
+    /// and one that is not here was not got to before the run was
+    /// [stopped](Routed::stopped), or had nothing to route. Nets whose zones' pieces were
+    /// only to be joined after routing are not here for that.
+    pub tried: Vec<NetId>,
 }
 
 impl Routed {

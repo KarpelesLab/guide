@@ -120,7 +120,9 @@ pub enum Cause {
     NoPath,
     /// A search for the net ran out of nodes, [`RouteOptions::max_expansions`](super::RouteOptions::max_expansions).
     OutOfBudget,
-    /// The run was stopped before the net was routed, or routed again after a rip-up.
+    /// The run was stopped before the net was routed, or routed again after a rip-up: no
+    /// search for it ended with an answer. [`Routed::tried`](super::Routed::tried) says
+    /// whether it had one at all.
     Stopped,
     /// The router took the net as routed or had no say on it: a net with zones whose fills
     /// leave it in pieces, for one.
@@ -337,13 +339,11 @@ pub(crate) fn explain(
                 &mut (0..design.board.pads.len())
                     .filter(|p| design.board.pads[*p].net == Some(o.net) && !o.piece.contains(p)),
             );
-            let timed = matches!(known.stopped, Some(Stopped::Deadline | Stopped::Cancelled));
             let cause = if via.is_none() && piece & rest == 0 {
                 Cause::NoLayer
             } else {
                 match known.failed.get(&o.net) {
                     Some(Failure::Budget) => Cause::OutOfBudget,
-                    Some(Failure::NoPath) if timed => Cause::NoPath,
                     None if known.stopped.is_some() => Cause::Stopped,
                     failed => {
                         let items = items.get_or_insert_with(|| Items::new(design));

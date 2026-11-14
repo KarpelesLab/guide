@@ -141,8 +141,11 @@ pub struct RunControl<'a> {
     /// on a large board, and runs to its end, so a host that fills zones itself, or that
     /// needs the run back within a second of its deadline, sets this to false: such a run
     /// then has no [fills](super::Routed::fills), gives up a fill it is in the middle of,
-    /// and counts its connections on its tracks and vias alone, so that nets joined
-    /// through their zones are among its [`unrouted`](super::Routed::unrouted). A run
+    /// and counts its connections on the last fill it made: the one that the joining of
+    /// zones' pieces ended on, or the one that routing planned on, before anything was
+    /// routed, on which a net that routes have cut since still counts as joined. A run
+    /// stopped before any fill counts on its tracks and vias alone, and nets joined
+    /// through their zones are then among its [`unrouted`](super::Routed::unrouted). A run
     /// stopped by its work budget fills its zones in any case, as its result is the same
     /// on any machine.
     pub fill_on_stop: bool,
@@ -193,6 +196,18 @@ pub(crate) struct Run<'a> {
     last: Cell<Option<Instant>>,
     /// Whether it has a budget of work.
     budgeted: bool,
+    /// How long the fill that nets were planned on took, if one was made and timed.
+    fill_took: Cell<Option<Duration>>,
+    /// When the part of the run that is under way has to end, for the parts after it to
+    /// have their share of the deadline, and at how much work, for their share of the
+    /// budget.
+    part_until: Cell<Option<Instant>>,
+    part_work: Cell<u64>,
+    /// Whether that part has to end now.
+    paused: Cell<bool>,
+    /// What ended a part early, if anything did: the run is then one that was stopped, when
+    /// it ends.
+    cut: Cell<Option<Stopped>>,
 }
 
 impl<'a> Run<'a> {
@@ -208,6 +223,11 @@ impl<'a> Run<'a> {
             state: Cell::new(Progress::start()),
             last: Cell::new(None),
             budgeted: budget.is_some(),
+            fill_took: Cell::new(None),
+            part_until: Cell::new(None),
+            part_work: Cell::new(u64::MAX),
+            paused: Cell::new(false),
+            cut: Cell::new(None),
         };
         if budget == Some(0) {
             run.halt(Stopped::WorkBudget);
@@ -242,6 +262,85 @@ impl<'a> Run<'a> {
             && matches!(self.why.get(), Some(Stopped::Deadline | Stopped::Cancelled))
     }
 
+    /// Begins a part of the run that may have `share` of the time that the deadline leaves
+    /// now, and `work_share` of the work that the budget leaves, and no more: it
+    /// ends then, so that the parts after it have the rest. A share of 1,
+    /// or a run with neither, is a part with no end of its own.
+    pub(crate) fn part(&self, share: f64, work_share: f64) {
+        self.paused.set(false);
+        self.stop.store(self.why.get().is_some(), Ordering::Relaxed);
+        let whole = share >= 1.0 && work_share >= 1.0;
+        self.part_until
+            .set(self.control.deadline.filter(|_| !whole).map(|d| {
+                let now = Instant::now();
+                now + d.saturating_duration_since(now).mul_f64(share)
+            }));
+        self.part_work.set(if self.budgeted && !whole {
+            self.work
+                .get()
+                .saturating_add((self.left.get() as f64 * work_share) as u64)
+        } else {
+            u64::MAX
+        });
+        self.pause_if_due(false);
+    }
+
+    /// Ends the part under way if its share is spent, by work, or by the clock if `clock`.
+    fn pause_if_due(&self, clock: bool) {
+        if self.why.get().is_some() || self.paused.get() {
+            return;
+        }
+        let why = if self.work.get() >= self.part_work.get() {
+            Some(Stopped::WorkBudget)
+        } else if clock && self.part_until.get().is_some_and(|t| Instant::now() >= t) {
+            Some(Stopped::Deadline)
+        } else {
+            None
+        };
+        if why.is_some() {
+            self.paused.set(true);
+            self.cut.set(self.cut.get().or(why));
+            self.stop.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Whether the deadline, if there is one, leaves less than `needed`.
+    pub(crate) fn short_of(&self, needed: Duration) -> bool {
+        self.control
+            .deadline
+            .is_some_and(|d| d.saturating_duration_since(Instant::now()) < needed)
+    }
+
+    /// Notes how long a fill of the zones took, and says how long the last one did.
+    pub(crate) fn fill_took(&self, took: Option<Duration>) -> Option<Duration> {
+        if took.is_some() {
+            self.fill_took.set(took);
+        }
+        self.fill_took.get()
+    }
+
+    /// Stops the run as one whose deadline left no time for what it had still to do.
+    pub(crate) fn out_of_time(&self) {
+        self.halt(Stopped::Deadline);
+    }
+
+    /// Whether the run or the part of it under way has to end.
+    pub(crate) fn ending(&self) -> bool {
+        self.why.get().is_some() || self.paused.get()
+    }
+
+    /// Ends the run as one that was stopped, if a part of it was ended early: what that
+    /// part had not got to is left undone, as in a run stopped outright.
+    pub(crate) fn settle(&self) {
+        self.paused.set(false);
+        self.part_until.set(None);
+        self.part_work.set(u64::MAX);
+        match self.cut.get() {
+            Some(why) => self.halt(why),
+            None => self.stop.store(self.why.get().is_some(), Ordering::Relaxed),
+        }
+    }
+
     /// The flag that is set once the run has to stop, for what takes a flag of its own,
     /// such as global routing.
     pub(crate) fn flag(&self) -> &AtomicBool {
@@ -268,7 +367,8 @@ impl<'a> Run<'a> {
     /// left, and until the run stops.
     pub(crate) fn limits(&self, max: u64) -> SearchLimits<'_> {
         let mut limits = SearchLimits::NONE;
-        limits.max_expansions = max.min(self.left.get());
+        let part = self.part_work.get().saturating_sub(self.work.get());
+        limits.max_expansions = max.min(self.left.get()).min(part);
         limits.cancel = Some(&self.stop);
         limits
     }
@@ -282,6 +382,7 @@ impl<'a> Run<'a> {
         if left == 0 {
             self.halt(Stopped::WorkBudget);
         }
+        self.pause_if_due(false);
     }
 
     /// One node of a search: looks at the clock and the flag every [`POLL_INTERVAL`].
@@ -311,7 +412,8 @@ impl<'a> Run<'a> {
                 self.halt(Stopped::Deadline);
             }
         }
-        self.why.get().is_some()
+        self.pause_if_due(true);
+        self.ending()
     }
 
     fn tell(&self, always: bool) {

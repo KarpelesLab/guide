@@ -593,3 +593,122 @@ fn a_net_with_no_way_in_its_corridor_waits_for_the_others_in_the_first_pass() {
     assert_eq!(whole.unrouted.len(), 1);
     assert!(whole.stats.work > 12_000, "{}", whole.stats.work);
 }
+
+#[test]
+fn a_part_of_a_run_ends_at_its_share_and_the_run_is_then_one_that_was_stopped() {
+    use super::control::Run;
+    // Nine tenths of a budget of work for the first part, and the rest for the next.
+    let control = RunControl::default();
+    let run = Run::new(&control, Some(1000));
+    run.part(1.0, 0.9);
+    assert!(!run.poll());
+    assert_eq!(run.limits(u64::MAX).max_expansions, 900);
+    run.charge(900);
+    assert!(run.poll() && run.ending());
+    assert_eq!(run.stopped(), None);
+    run.part(1.0, 1.0);
+    assert!(!run.poll());
+    assert_eq!(run.limits(u64::MAX).max_expansions, 100);
+    run.charge(40);
+    run.settle();
+    assert_eq!(run.stopped(), Some(Stopped::WorkBudget));
+    assert_eq!(run.work(), 940);
+    // A part that ends before its share is spent cuts nothing short.
+    let run = Run::new(&control, Some(1000));
+    run.part(1.0, 0.9);
+    run.charge(10);
+    run.part(1.0, 1.0);
+    run.settle();
+    assert_eq!(run.stopped(), None);
+    assert!(!run.poll());
+    // A share of the time to a deadline: none of it ends the part at once, and the run
+    // goes on with the next until the deadline itself.
+    let control = RunControl {
+        deadline: Some(Instant::now() + Duration::from_secs(3600)),
+        ..RunControl::default()
+    };
+    let run = Run::new(&control, None);
+    run.part(0.0, 1.0);
+    assert!(run.poll());
+    assert_eq!(run.stopped(), None);
+    run.part(1.0, 1.0);
+    assert!(!run.poll());
+    assert!(!run.short_of(Duration::from_secs(60)));
+    assert!(run.short_of(Duration::from_secs(7200)));
+    run.settle();
+    assert_eq!(run.stopped(), Some(Stopped::Deadline));
+}
+
+#[test]
+fn a_result_says_which_nets_were_tried() {
+    let d = weave();
+    let whole = route(&d, &RouteOptions::default()).unwrap();
+    let all: Vec<NetId> = (1..=12).map(NetId).collect();
+    assert_eq!(whole.tried, all);
+    // A run stopped after three nets has tried those, and no more than the one it was at.
+    let cancel = AtomicBool::new(false);
+    let heard = |p: &Progress| {
+        if p.nets_routed >= 3 {
+            cancel.store(true, Ordering::Relaxed);
+        }
+    };
+    let control = RunControl {
+        cancel: Some(&cancel),
+        progress: Some(&heard),
+        progress_interval: Duration::ZERO,
+        ..RunControl::default()
+    };
+    let routed = route_with(&d, &RouteOptions::default(), &control).unwrap();
+    assert_eq!(routed.stats.routed, 3);
+    assert!((3..=4).contains(&routed.tried.len()), "{:?}", routed.tried);
+    assert!(routed.tried.windows(2).all(|w| w[0] < w[1]));
+    // The nets left open that are not among them were not looked at.
+    assert!(routed.unrouted.iter().any(|n| !routed.tried.contains(n)));
+}
+
+#[test]
+fn a_pad_shut_in_is_said_to_be_after_a_run_that_was_stopped_too() {
+    // The run is cancelled once routing is over, at the start of cleanup: the net that
+    // found no way has its pads looked at all the same.
+    let d = walled_in();
+    let cancel = AtomicBool::new(false);
+    let heard = |p: &Progress| {
+        if p.phase == Phase::Cleanup {
+            cancel.store(true, Ordering::Relaxed);
+        }
+    };
+    let control = RunControl {
+        cancel: Some(&cancel),
+        progress: Some(&heard),
+        progress_interval: Duration::ZERO,
+        ..RunControl::default()
+    };
+    let routed = route_with(&d, &RouteOptions::default(), &control).unwrap();
+    check(&d, &routed);
+    assert_eq!(routed.stopped, Some(Stopped::Cancelled));
+    assert_eq!(routed.tried, [NetId(1)]);
+    assert_eq!(routed.open.len(), 4);
+    assert!(matches!(routed.open[3].cause, Cause::Enclosed { .. }));
+    assert!(routed.open[..3].iter().all(|o| o.cause == Cause::NoPath));
+}
+
+#[test]
+fn a_run_stopped_while_it_plans_on_its_zones_comes_back_with_nothing() {
+    // The deadline is over before the zones are filled to tell the planes: the fill is
+    // given up, nothing is routed, and the run says that it was stopped.
+    let d = super::zone_tests::plane_board();
+    let options = RouteOptions {
+        plane_coverage: 0.25,
+        ..RouteOptions::default()
+    };
+    let control = RunControl {
+        deadline: Some(Instant::now()),
+        fill_on_stop: false,
+        ..RunControl::default()
+    };
+    let routed = route_with(&d, &options, &control).unwrap();
+    assert_eq!(routed.stopped, Some(Stopped::Deadline));
+    assert!(routed.tracks.is_empty() && routed.vias.is_empty() && routed.fills.is_empty());
+    assert!(routed.tried.is_empty());
+    assert!(!routed.open.is_empty());
+}

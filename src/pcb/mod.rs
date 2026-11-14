@@ -415,6 +415,14 @@ pub struct RouteOptions {
     /// the [escapes](self#how-it-routes) of fine-pitch footprints, and no route goes under a
     /// pad for a via in it.
     pub vias_in_pads: bool,
+    /// How much of the box of a net's pads its zones' fills must cover, on the layer where
+    /// they cover the most, for the net to plan on them as [planes](RouteOptions::planes):
+    /// 0.25 is a quarter of the box. The default is 0, which makes every zone a plane. A
+    /// net's zones that cover less, such as small pours round a few of its pads, are copper
+    /// of the net as they are filled before routing, which routes of other nets keep clear
+    /// of and which joins the pads it touches, and the net is routed as tracks between the
+    /// rest. A zone that [says](CopperZone::plane) which it is doesn't count, either way.
+    pub plane_coverage: f64,
 }
 
 impl Default for RouteOptions {
@@ -437,6 +445,7 @@ impl Default for RouteOptions {
             planes: true,
             plane_cost: 1.0,
             vias_in_pads: true,
+            plane_coverage: 0.0,
         }
     }
 }

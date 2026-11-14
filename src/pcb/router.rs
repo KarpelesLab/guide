@@ -485,6 +485,7 @@ pub(crate) fn run(design: &Design, options: &RouteOptions) -> Result<Routed, Rou
                 )
                 .map_err(RouteError::Geometry)?;
                 world.configure(options);
+                let is_plane = plane_zones(design, options)?;
                 let mut joined = Joined {
                     tracks: &mut routed.tracks,
                     vias: &mut routed.vias,
@@ -497,6 +498,7 @@ pub(crate) fn run(design: &Design, options: &RouteOptions) -> Result<Routed, Rou
                     &mut joined,
                     pitch(design, options),
                     options,
+                    &is_plane,
                 )?;
             }
             routed.fills =
@@ -622,8 +624,13 @@ fn join_planes(
     out: &mut Joined<'_>,
     pitch: i64,
     options: &RouteOptions,
+    is_plane: &[bool],
 ) -> Result<(), RouteError> {
     let keeping = keep_islands(design);
+    let plane_net = |net: NetId| {
+        let mut zones = design.zones.zones.iter().zip(is_plane);
+        zones.any(|(z, &plane)| plane && z.net == Some(net))
+    };
     for round in 0..=REPAIRS {
         let board = with_routes(design, out.tracks, out.vias);
         let all = zones::fill_zones(&board, &keeping).map_err(RouteError::Geometry)?;
@@ -631,6 +638,7 @@ fn join_planes(
         let mut left = Vec::new();
         for (net, pieces) in planes::pieces_by_net(design, &all) {
             if !design.nets.get(net.index()).is_some_and(|n| n.route)
+                || !plane_net(net)
                 || planes::pieces(&board, design, net, &pieces).with_pads() < 2
             {
                 continue;
@@ -672,11 +680,16 @@ fn join_planes(
 
 /// The fills of a net that its stubs and grouping take as connected before routing: its
 /// fills on inner layers, its planes, or if it has none, all of them.
-fn planned_fills(design: &Design, fills: &[Fill]) -> Vec<Fill> {
+fn planned_fills(design: &Design, fills: &[Fill], is_plane: &[bool]) -> Vec<Fill> {
     let layers = design.rules.layer_count();
     let net_of = |f: &Fill| design.zones.zones.get(f.zone).and_then(|z| z.net);
+    let fills: Vec<&Fill> = fills
+        .iter()
+        .filter(|f| is_plane.get(f.zone).copied().unwrap_or(true))
+        .collect();
     fills
         .iter()
+        .copied()
         .filter(|f| {
             let net = net_of(f);
             net.is_some()
@@ -687,6 +700,99 @@ fn planned_fills(design: &Design, fills: &[Fill]) -> Vec<Fill> {
         })
         .cloned()
         .collect()
+}
+
+/// By zone, whether its net plans on it as a plane: as the zone [says](super::CopperZone::plane),
+/// or if its net's fills cover enough of the box of the net's pads,
+/// [`RouteOptions::plane_coverage`], on the layer where they cover the most. With neither
+/// set, every zone is, and nothing is filled to find out.
+pub(crate) fn plane_zones(
+    design: &Design,
+    options: &RouteOptions,
+) -> Result<Vec<bool>, RouteError> {
+    let zones = &design.zones.zones;
+    let auto = options.plane_coverage > 0.0;
+    if !auto {
+        return Ok(zones.iter().map(|z| z.plane.unwrap_or(true)).collect());
+    }
+    let fills =
+        zones::fill_zones(&design.board, &keep_islands(design)).map_err(RouteError::Geometry)?;
+    let layers = design.rules.layer_count();
+    // By net, twice the area of its fills on each layer, and the box of its pads.
+    let mut area: BTreeMap<NetId, Vec<i128>> = BTreeMap::new();
+    for f in &fills {
+        // A zone that says which it is doesn't count.
+        let Some(net) = zones
+            .get(f.zone)
+            .filter(|z| z.plane.is_none())
+            .and_then(|z| z.net)
+        else {
+            continue;
+        };
+        if let Ok(a) = crate::geom::Area::of_shape(&f.shape, 0, 1, crate::geom::ArcSide::Inside)
+            && let Some(slot) = area
+                .entry(net)
+                .or_insert_with(|| vec![0; layers])
+                .get_mut(usize::from(f.layer.0))
+        {
+            *slot += a.area2();
+        }
+    }
+    let mut boxes: BTreeMap<NetId, Rect> = BTreeMap::new();
+    for p in &design.board.pads {
+        if let Some(net) = p.net {
+            let b = p.shape.bbox();
+            boxes
+                .entry(net)
+                .and_modify(|r| *r = r.union(&b))
+                .or_insert(b);
+        }
+    }
+    let covers = |net: NetId| {
+        let most = area
+            .get(&net)
+            .and_then(|a| a.iter().copied().max())
+            .unwrap_or(0);
+        match boxes.get(&net).map(Rect::area) {
+            Some(b) if b > 0 => most as f64 / 2.0 / b as f64 >= options.plane_coverage,
+            // A net with no pad has nothing to connect, and its zones change nothing.
+            _ => true,
+        }
+    };
+    Ok(zones
+        .iter()
+        .map(|z| z.plane.unwrap_or_else(|| z.net.is_none_or(covers)))
+        .collect())
+}
+
+/// The fills of the zones that are not planes, as the board has them before routing, as
+/// fixed copper of their nets: what routes of other nets keep clear of, and what joins the
+/// pads it touches.
+fn fixed_fills(
+    design: &Design,
+    is_plane: &[bool],
+) -> Result<Vec<crate::geom::drc::Zone>, RouteError> {
+    let fills = zones::fill_zones(&design.board, design).map_err(RouteError::Geometry)?;
+    let mut out = Vec::new();
+    for f in &fills {
+        let Some(zone) = design.zones.zones.get(f.zone) else {
+            continue;
+        };
+        if zone.net.is_none() || is_plane.get(f.zone).copied().unwrap_or(true) {
+            continue;
+        }
+        // The zone's own clearance, where it is more than its net's, so that the fill
+        // around the routes is the same.
+        let clearance =
+            Some(zone.clearance).filter(|&c| c > design.rules.clearance(zone.net, f.layer));
+        out.push(crate::geom::drc::Zone {
+            shape: f.shape.clone(),
+            layer: f.layer,
+            net: zone.net,
+            clearance,
+        });
+    }
+    Ok(out)
 }
 
 /// The same design, with zones that keep their islands.
@@ -719,6 +825,22 @@ fn route_all(design: &Design, options: &RouteOptions) -> Result<Routed, RouteErr
     };
 
     let pitch = pitch(design, options);
+    // Zones that are not planes are copper as they are filled before anything is routed.
+    let planes_on = options.planes && design.zones.zones.iter().any(|z| z.net.is_some());
+    let is_plane = if planes_on {
+        plane_zones(design, options)?
+    } else {
+        vec![true; design.zones.zones.len()]
+    };
+    let with_fixed;
+    let design = if is_plane.iter().all(|&p| p) {
+        design
+    } else {
+        let mut d = design.clone();
+        d.board.zones.extend(fixed_fills(design, &is_plane)?);
+        with_fixed = d;
+        &with_fixed
+    };
     // Escapes from fine-pitch footprints, which become fixed copper of their nets.
     let escapes = {
         let mut world = world_of(design)?;
@@ -782,12 +904,12 @@ fn route_all(design: &Design, options: &RouteOptions) -> Result<Routed, RouteErr
     };
     // Zones filled around the fixed copper, islands kept, which their nets' terminals
     // take as connected and reach with stubs.
-    let planes_on = options.planes && design.zones.zones.iter().any(|z| z.net.is_some());
+    let planes_on = planes_on && is_plane.iter().any(|&p| p);
     let mut planned: Vec<Fill> = Vec::new();
     if planes_on {
         let fills = zones::fill_zones(&design.board, &keep_islands(design))
             .map_err(RouteError::Geometry)?;
-        planned = planned_fills(design, &fills);
+        planned = planned_fills(design, &fills, &is_plane);
     }
     let plane_pieces = planes::pieces_by_net(design, &planned);
     // For grouping pads into terminals only: what the planned fills join is one terminal.
@@ -1322,7 +1444,14 @@ fn route_all(design: &Design, options: &RouteOptions) -> Result<Routed, RouteErr
             stats: &mut stats,
             unrouted: &mut unrouted,
         };
-        join_planes(original, &mut world, &mut joined, params.pitch, options)?;
+        join_planes(
+            original,
+            &mut world,
+            &mut joined,
+            params.pitch,
+            options,
+            &is_plane,
+        )?;
     }
     let mut fills = Vec::new();
     if !original.zones.zones.is_empty() {

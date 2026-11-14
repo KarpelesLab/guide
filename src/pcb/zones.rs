@@ -91,6 +91,13 @@ pub struct CopperZone {
     /// that give none of their own, [`PadConnection::spoke_direction`]. `None` is along the X
     /// axis.
     pub spoke_direction: Option<(i64, i64)>,
+    /// Whether its net plans on it as a plane, [`RouteOptions::planes`](super::RouteOptions::planes):
+    /// `Some(true)` always, `Some(false)` never, and `None` as
+    /// [`RouteOptions::plane_coverage`](super::RouteOptions::plane_coverage) decides for its
+    /// net. A zone that is not a plane is copper of its net as it is filled before routing:
+    /// routes of other nets keep clear of that fill, the pads it joins need no track between
+    /// them, and no stub is made to it.
+    pub plane: Option<bool>,
 }
 
 /// What one pad says of how zones join it, in place of the zones' own settings.

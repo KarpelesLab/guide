@@ -4,7 +4,10 @@
 
 use super::tests::{MM, design, route_checked, smd};
 use super::zone_tests::{check_fills, plane_board, zone};
-use super::{Design, Fill, Islands, RouteOptions, Routed, fill_zones, unconnected};
+use super::{
+    CopperZone, Design, Fill, Islands, RouteOptions, Routed, ZoneConnection, fill_zones,
+    unconnected,
+};
 use crate::geom::drc::{self, Pad, Track};
 use crate::geom::{LayerId, LayerSet, Point, Shape};
 use crate::id::NetId;
@@ -263,4 +266,99 @@ fn a_zone_sets_how_many_spokes_its_reliefs_have_and_where_the_first_is() {
         ..Default::default()
     });
     assert_eq!(spokes(&d), [false, false, true, false]);
+}
+
+/// On one layer: two pads of net 1 in a zone of theirs across the middle of the board, which
+/// joins them solidly, and two pads of net 2 on either side of it.
+fn wall_board() -> Design {
+    let mut d = design(
+        1,
+        vec![
+            smd(10 * MM, 0, 1),
+            smd(10 * MM, 10 * MM, 1),
+            smd(0, 5 * MM, 2),
+            smd(20 * MM, 5 * MM, 2),
+        ],
+        4,
+    );
+    d.zones.zones.push(CopperZone {
+        outline: ring(8 * MM, -2 * MM, 12 * MM, 12 * MM),
+        connection: ZoneConnection::Solid,
+        ..zone(1, 0, 0)
+    });
+    d
+}
+
+fn length_of(routed: &Routed, net: u32) -> i64 {
+    routed
+        .tracks
+        .iter()
+        .filter(|t| t.net == Some(NetId(net)))
+        .map(|t| {
+            let (dx, dy) = ((t.end.x - t.start.x) as f64, (t.end.y - t.start.y) as f64);
+            (dx * dx + dy * dy).sqrt() as i64
+        })
+        .sum()
+}
+
+#[test]
+fn a_zone_that_is_not_a_plane_is_copper_that_routes_keep_clear_of() {
+    let mut d = wall_board();
+    // As a plane, the zone gives way to the other net, which goes straight through it.
+    let through = super::route(&d, &RouteOptions::default()).unwrap();
+    assert!(length_of(&through, 2) < 21 * MM);
+
+    d.zones.zones[0].plane = Some(false);
+    let routed = route_checked(&d, &RouteOptions::default());
+    assert!(routed.unrouted.is_empty());
+    // The zone's pads need no track, and it is filled as before routing, in one piece.
+    assert_eq!(length_of(&routed, 1), 0);
+    assert_eq!(routed.stats.stubs, 0);
+    assert_eq!(routed.fills.len(), 1);
+    assert!(filled(&routed.fills, 10 * MM, -MM) && filled(&routed.fills, 10 * MM, 11 * MM));
+    // The other net goes round it.
+    assert!(length_of(&routed, 2) > 24 * MM, "{}", length_of(&routed, 2));
+    // One connection routed, and one that the zone makes.
+    assert_eq!(routed.stats.connections, 2);
+    assert_eq!(routed.stats.connected, 2);
+}
+
+#[test]
+fn zones_are_planes_by_how_much_of_their_nets_they_cover() {
+    use super::router::plane_zones;
+    let mut d = wall_board();
+    // A net across the board with a pour of a millimetre round one of its pads.
+    d.board.pads.push(smd(0, -20 * MM, 3));
+    d.board.pads.push(smd(30 * MM, -20 * MM, 3));
+    d.zones.zones.push(CopperZone {
+        outline: ring(-500_000, -20 * MM - 500_000, 500_000, -20 * MM + 500_000),
+        connection: ZoneConnection::Solid,
+        ..zone(3, 0, 0)
+    });
+    let planes = |d: &Design, coverage: f64| {
+        let options = RouteOptions {
+            plane_coverage: coverage,
+            ..RouteOptions::default()
+        };
+        plane_zones(d, &options).unwrap()
+    };
+    assert_eq!(planes(&d, 0.0), [true, true]);
+    assert_eq!(planes(&d, 0.25), [true, false]);
+    // A zone says so itself, whatever it covers.
+    d.zones.zones[1].plane = Some(true);
+    d.zones.zones[0].plane = Some(false);
+    assert_eq!(planes(&d, 0.25), [false, true]);
+    assert_eq!(planes(&d, 0.0), [false, true]);
+
+    // Routed so, the pour is copper of its net, and the net a track from one pad to the
+    // other, with no stub to the pour.
+    d.zones.zones[1].plane = None;
+    d.zones.zones[0].plane = None;
+    let options = RouteOptions {
+        plane_coverage: 0.25,
+        ..RouteOptions::default()
+    };
+    let routed = route_checked(&d, &options);
+    assert_eq!(routed.unrouted, [NetId(1)]);
+    assert!(length_of(&routed, 3) > 29 * MM);
 }

@@ -252,13 +252,19 @@ Each item is independently useful, and they can land in any order.
   (`RouteOptions::fills`), a narrow pour between a few pads is copper and no plane, and a
   run with a budget or a deadline routes for the most connections soonest, which cut the
   connections that a budget of 60 s leaves open on cadlab's corpus from 1025 to 728
-  ([benchmarks](docs/benchmarks.md#pcb-routing-with-a-budget)). Not yet: tracks routed at an
-  area's width, or narrower only near pads, and several via sizes for a net beyond its
-  escapes, which the search, with one width and one via for each net, has no place for; a
-  line of the lattice midway between two pads or two vias, without which a way as wide as
-  a track and its clearances is found by chance; nor a fanout planned for a whole
-  footprint: dog-bones for every ball inside an area array were tried, and made the boards
-  with BGAs slower to no gain while their ways out are not on the lattice.
+  ([benchmarks](docs/benchmarks.md#pcb-routing-with-a-budget)). A budget is shared out
+  between routing, cleanup and the joining of zones' pieces (`RouteOptions::join` turns the
+  last off), every phase ends with the deadline, a fill of many edges is asked about by
+  its parts, a net's search nodes are numbered by block, and a passage as wide as a track
+  and its clearances between two pads or vias has a lattice of its own in the passes on
+  the finer lattice of such a run ([benchmarks](docs/benchmarks.md#pcb-routing-in-parts)). Not yet:
+  tracks routed at an area's width, or narrower only near pads, and several via sizes for
+  a net beyond its escapes, which the search, with one width and one via for each net, has
+  no place for; a fanout planned for a whole footprint, as an area array needs, where
+  each ball that finds its way through a gate takes the one channel of another; rip-up
+  that settles, where two-layer boards with a part of fine pitch end with tens of pads
+  shut in by their neighbours' routes; and a search that costs less for each node, which
+  is where most of a budget of 60 s still goes.
 - Net topology constraints (daisy chain, star, T). Not needed by the DRAM boards, whose
   signals are all point to point.
 - Direct KiCad board-file reading for routing, and writing routes back. Reading for

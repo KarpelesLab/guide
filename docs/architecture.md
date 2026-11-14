@@ -400,6 +400,57 @@ when every zone keeps its islands. What still costs most on a board with large z
 filling them: once to plan, once for each round of joining their pieces, and once at the
 end, 10 to 17 s each on `lumenpnp-mobo`.
 
+**A budget is shared out between routing and what comes after, and gates have lattices of
+their own.** Measured after the above ([results](benchmarks.md#pcb-routing-in-parts)):
+
+- *Routing has a share of a deadline or a work budget, and cleanup and the joining of zones'
+  pieces the rest.* A run that its budget stopped in the middle of rip-up went back to its
+  best routes and returned: the stubs that join a plane's pieces, tens of connections for
+  seconds of work, were never made, and a host saw every pad of a cut plane open. Routing
+  now ends at three quarters of the time left when it begins, cleanup has a third of what
+  is left then, and joining the rest, where it starts no fill that it would not see the
+  end of. A run whose routing ended so says that it was stopped. `RouteOptions::join` turns
+  the joining off, and its share with it, for a host that fills its zones itself and
+  routes again what its own fill leaves apart.
+- *Every phase before routing ends with the deadline.* The fills that tell the planes and
+  that nets are planned on are given up between two zones, the places for a plane's stubs
+  are not looked for to the last pad, and the fill made to tell the planes by their
+  coverage is the one that nets are planned on, where nothing was added to the board in
+  between: one fill fewer before a run on a routed board.
+- *A fill of many edges is asked about by its parts.* A via in the middle of a host's fill
+  is in one of its parts, of a few edges, and so is within any clearance of the fill: only
+  what is within two nanometres of a clearance of a part is measured against the fill,
+  every edge of it, which keeps the answer exact. A piece of fill says where a point is the
+  same way, and a piece that copper of its net has its middle in touches that copper,
+  with no parts made.
+- *The nodes of a net's searches are numbered by block of its lattice.* A hash map from
+  node to number and another to the verdicts on its steps were a quarter of the time of a
+  search, a cache miss each, twice for every step: the nodes of the net's own lattice are
+  now numbered in blocks of 8 by 8 on a layer, a node's neighbours beside it, and the
+  verdicts are kept by number. The same nodes, the same order, the same routes.
+- *Gates.* A passage between two pads or vias that is as wide as a track and its
+  clearances, or less than a pitch more, has an anchor in its middle with a lattice of its
+  own, which routes move onto near it as they do onto a pad's; where a gate between two
+  items side by side meets one between two items one above the other, the anchor is where
+  their lines cross. The passes on the finer lattice of a run with a budget use them. The
+  first pass does not: with them in every search, the balls of `glasgow-revC3`'s array were no longer shut in,
+  and the board ended with more connections open, not fewer, as each of them then took
+  others' routes out for a channel of one track, and every node near an array cost several
+  steps more. And a run with no budget does not: `ddr5-testbed`, with its pairs routed
+  first, lost a connection of 255 to them.
+- *What is left open says more.* `Routed::tried` has the nets that had a search, a pad
+  that is shut in is said to be after a run that was stopped too, and a result with no fill
+  of its own is counted on the fill that routing planned on, so that a stopped run of a
+  host that fills its zones itself does not list every net with a zone as unrouted.
+
+Tried and not kept there: a weight on the bound of a net's searches, 1.5, which expanded
+more nodes, not fewer, as nodes were queued again, and with each node expanded once at most,
+fewer nodes of which more were new, for the same time and more vias; rip-up given up for a
+pass once it made no more connections for a million nodes, which took `glasgow-revD1` from
+344 connections open to 195 with a budget of 60 s and every other board the other way,
+`buspirate5-rev10` from 16 to 61; and a first pass with no rip-up until every net had had
+its turn, for all nets or for those that wait, which left more open on six or seven boards of nine.
+
 **Differential pairs are routed side by side last, in place of their nets' routes.** Routing
 pairs first, before anything else, as fixed copper, coupled `udb-s`'s USB pair a little better,
 60% of its length side by side in place of 50%, but cost other nets their room: `GB-LIVE32`

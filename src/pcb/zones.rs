@@ -92,9 +92,10 @@ pub struct CopperZone {
     /// axis.
     pub spoke_direction: Option<(i64, i64)>,
     /// Whether its net plans on it as a plane, [`RouteOptions::planes`](super::RouteOptions::planes):
-    /// `Some(true)` always, `Some(false)` never, and `None` as
-    /// [`RouteOptions::plane_coverage`](super::RouteOptions::plane_coverage) decides for its
-    /// net. A zone that is not a plane is copper of its net as it is filled before routing:
+    /// `Some(true)` always, `Some(false)` never, and `None` if its net has more than four
+    /// pads, and as [`RouteOptions::plane_coverage`](super::RouteOptions::plane_coverage)
+    /// then decides for its net: a pour between a few pads is their connection, and no
+    /// plane. A zone that is not a plane is copper of its net as it is filled before routing:
     /// routes of other nets keep clear of that fill, the pads it joins need no track between
     /// them, and no stub is made to it.
     pub plane: Option<bool>,

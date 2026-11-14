@@ -58,6 +58,12 @@ const BRANCH_TERMINALS: usize = 32;
 /// How many times in a pass a net may lose branches only, before it is taken out whole.
 const BRANCH_CUTS: u32 = 8;
 
+/// How many pads a net has at most for its zones not to be planes, unless they
+/// [say](super::CopperZone::plane) that they are: a pour between two or three pads is their
+/// connection, drawn as copper where a track would not do, and not a plane to cut through.
+/// Routes of other nets through it would leave its pads apart, and shut in.
+const POUR_PADS: usize = 4;
+
 /// How much finer the lattice of the second pass is.
 const FINE: i64 = 2;
 
@@ -537,7 +543,7 @@ pub(crate) fn run(
     let run = Run::new(control, options.work_budget);
     run.phase(Phase::Prepare);
     run.poll();
-    let (mut routed, failed) = route_all(design, options, &run)?;
+    let (mut routed, mut failed) = route_all(design, options, &run)?;
     if options.tune_lengths && !design.lengths.is_empty() && !run.poll() {
         run.phase(Phase::Lengths);
         tune::run(design, &mut routed, options).map_err(RouteError::Geometry)?;
@@ -558,6 +564,7 @@ pub(crate) fn run(
                 world.configure(design, options);
                 let is_plane = plane_zones(design, options)?;
                 world.set_run(&run);
+                let mut unjoined = Vec::new();
                 let mut joined = Joined {
                     tracks: &mut routed.tracks,
                     vias: &mut routed.vias,
@@ -565,6 +572,7 @@ pub(crate) fn run(
                     via_kinds: &mut routed.via_kinds,
                     stats: &mut routed.stats,
                     unrouted: &mut routed.unrouted,
+                    unjoined: &mut unjoined,
                 };
                 join_planes(
                     design,
@@ -574,6 +582,9 @@ pub(crate) fn run(
                     options,
                     &is_plane,
                 )?;
+                for net in unjoined {
+                    failed.entry(net).or_insert(Failure::NoPath);
+                }
             }
             routed.fills =
                 zones::fill_zones(&with_routes(design, &routed.tracks, &routed.vias), design)
@@ -700,6 +711,8 @@ struct Joined<'a> {
     via_kinds: &'a mut Vec<CopperKind>,
     stats: &'a mut Stats,
     unrouted: &'a mut Vec<NetId>,
+    /// The nets whose pieces no stub and no track joined.
+    unjoined: &'a mut Vec<NetId>,
 }
 
 /// Fills the zones around everything routed, and joins up the pieces of their nets that
@@ -769,6 +782,10 @@ fn join_planes(
         // What nothing more joins is left in pieces.
         if !added || round == REPAIRS || stopped {
             out.stats.planes_broken = left.len();
+            // The searches that would have joined them found no way, if they were made.
+            if !stopped {
+                out.unjoined.extend(left.iter().copied());
+            }
             out.unrouted.extend(left);
             out.unrouted.sort_unstable();
             out.unrouted.dedup();
@@ -803,17 +820,29 @@ fn planned_fills(design: &Design, fills: &[Fill], is_plane: &[bool]) -> Vec<Fill
 }
 
 /// By zone, whether its net plans on it as a plane: as the zone [says](super::CopperZone::plane),
-/// or if its net's fills cover enough of the box of the net's pads,
-/// [`RouteOptions::plane_coverage`], on the layer where they cover the most. With neither
-/// set, every zone is, and nothing is filled to find out.
+/// or if its net has more than [`POUR_PADS`] pads and its fills cover enough of the box of
+/// the net's pads, [`RouteOptions::plane_coverage`], on the layer where they cover the most.
+/// With no coverage set, nothing is filled to find out.
 pub(crate) fn plane_zones(
     design: &Design,
     options: &RouteOptions,
 ) -> Result<Vec<bool>, RouteError> {
     let zones = &design.zones.zones;
+    // A net of few pads has pours, not planes.
+    let mut pads = vec![0usize; design.nets.len()];
+    for p in &design.board.pads {
+        if let Some(slot) = p.net.and_then(|n| pads.get_mut(n.index())) {
+            *slot += 1;
+        }
+    }
+    let pour = |z: &super::CopperZone| {
+        z.net
+            .and_then(|n| pads.get(n.index()))
+            .is_some_and(|&n| n <= POUR_PADS)
+    };
     let auto = options.plane_coverage > 0.0;
     if !auto {
-        return Ok(zones.iter().map(|z| z.plane.unwrap_or(true)).collect());
+        return Ok(zones.iter().map(|z| z.plane.unwrap_or(!pour(z))).collect());
     }
     let fills =
         zones::fill_zones(&design.board, &keep_islands(design)).map_err(RouteError::Geometry)?;
@@ -861,7 +890,10 @@ pub(crate) fn plane_zones(
     };
     Ok(zones
         .iter()
-        .map(|z| z.plane.unwrap_or_else(|| z.net.is_none_or(covers)))
+        .map(|z| {
+            z.plane
+                .unwrap_or_else(|| !pour(z) && z.net.is_none_or(covers))
+        })
         .collect())
 }
 
@@ -1727,6 +1759,7 @@ fn route_all<'a>(
     // Zones filled around everything, and the pieces of their nets joined up. Islands are
     // kept until the end, as a plane that nothing reaches yet is still one to reach, and
     // they join nothing.
+    let mut unjoined = Vec::new();
     if planes_on && !run.poll() {
         run.phase(Phase::Zones);
         let mut joined = Joined {
@@ -1736,6 +1769,7 @@ fn route_all<'a>(
             via_kinds: &mut via_kinds,
             stats: &mut stats,
             unrouted: &mut unrouted,
+            unjoined: &mut unjoined,
         };
         join_planes(
             original,
@@ -1754,11 +1788,15 @@ fn route_all<'a>(
             .map_err(RouteError::Geometry)?
             .unwrap_or_default();
     }
-    let failed = jobs
+    let mut failed: BTreeMap<NetId, Failure> = jobs
         .iter()
         .zip(&failed)
         .filter_map(|(j, f)| f.map(|f| (j.ctx.net, f)))
         .collect();
+    // A net with zones that nothing joined up again was searched for too, to no end.
+    for net in unjoined {
+        failed.entry(net).or_insert(Failure::NoPath);
+    }
     let routed = Routed {
         tracks,
         vias,

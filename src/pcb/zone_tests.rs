@@ -217,3 +217,73 @@ fn plane_routing_is_deterministic() {
     assert_eq!(a.vias, b.vias);
     assert_eq!(a.fills, b.fills);
 }
+
+/// One layer, a pour of net 1 across the middle joining its pads at either end, and net 2
+/// with a pad above and one below it, whose only way is through the pour: no pad leaves room
+/// between it and the edge.
+fn pour_in_the_way(pads_of_pour: usize) -> Design {
+    let mut pads = vec![smd(5 * MM, MM / 2, 2), smd(5 * MM, 19 * MM / 2, 2)];
+    for i in 0..pads_of_pour {
+        let x = MM / 2 + 9 * MM * i as i64 / (pads_of_pour as i64 - 1);
+        pads.push(smd(x, 5 * MM, 1));
+    }
+    let mut d = design(1, pads, 3);
+    d.outline = outline(Rect::new(Point::new(0, 0), Point::new(10 * MM, 10 * MM)));
+    let mut pour = zone(1, 0, 10 * MM);
+    pour.outline = vec![
+        Point::new(0, 4 * MM),
+        Point::new(10 * MM, 4 * MM),
+        Point::new(10 * MM, 6 * MM),
+        Point::new(0, 6 * MM),
+    ];
+    pour.connection = ZoneConnection::Solid;
+    d.zones.zones.push(pour);
+    d
+}
+
+#[test]
+fn a_pour_that_joins_two_pads_is_not_cut_by_another_nets_route() {
+    // The pour is the two pads' only connection. A route of the other net through it
+    // would leave them apart with no way back, and the result would have taken them for
+    // joined: the pour of a net of so few pads is copper, not a plane, and the other net
+    // is the one left, with its cause.
+    let d = pour_in_the_way(2);
+    let routed = route_checked(&d, &RouteOptions::default());
+    assert_eq!(routed.unrouted, vec![NetId(2)]);
+    assert_eq!(routed.open.len(), 1);
+    assert_eq!(routed.open[0].net, NetId(2));
+    assert_ne!(routed.open[0].cause, super::Cause::Unknown);
+    // The pour joins its pads as it did, with no track.
+    assert!(routed.tracks.is_empty());
+    assert_eq!(routed.fills.len(), 1);
+    // A zone that says it is a plane is one, and gives way.
+    let mut plane = pour_in_the_way(2);
+    plane.zones.zones[0].plane = Some(true);
+    let routed = route_checked(&plane, &RouteOptions::default());
+    assert_eq!(routed.unrouted, vec![NetId(1)]);
+    assert_ne!(routed.open[0].cause, super::Cause::Unknown);
+    // On two layers both are routed.
+    let mut two = pour_in_the_way(2);
+    two.rules = super::tests::rules(2);
+    let routed = route_checked(&two, &RouteOptions::default());
+    assert!(routed.unrouted.is_empty(), "{:?}", routed.open);
+}
+
+#[test]
+fn a_plane_left_in_pieces_is_unrouted_with_a_cause() {
+    // A net of more pads plans on its pour, which the other net's route cuts in two, on
+    // the only layer: what the result leaves apart it says, and why.
+    let d = pour_in_the_way(6);
+    let routed = route_checked(&d, &RouteOptions::default());
+    let board = routed.board(&d);
+    assert_eq!(unconnected(&board, &d.rules), routed.unrouted);
+    assert!(!routed.open.is_empty());
+    for o in &routed.open {
+        assert!(routed.unrouted.contains(&o.net));
+        assert_ne!(o.cause, super::Cause::Unknown, "{o:?}");
+    }
+    assert_eq!(
+        routed.stats.connections - routed.stats.connected,
+        routed.open.len()
+    );
+}

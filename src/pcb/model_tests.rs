@@ -268,8 +268,9 @@ fn a_zone_sets_how_many_spokes_its_reliefs_have_and_where_the_first_is() {
     assert_eq!(spokes(&d), [false, false, true, false]);
 }
 
-/// On one layer: two pads of net 1 in a zone of theirs across the middle of the board, which
-/// joins them solidly, and two pads of net 2 on either side of it.
+/// On one layer: five pads of net 1 in a zone of theirs across the middle of the board, which
+/// joins them solidly, and two pads of net 2 on either side of it. Net 1 has more pads than
+/// a net whose zones are pours, and no planes.
 fn wall_board() -> Design {
     let mut d = design(
         1,
@@ -278,6 +279,9 @@ fn wall_board() -> Design {
             smd(10 * MM, 10 * MM, 1),
             smd(0, 5 * MM, 2),
             smd(20 * MM, 5 * MM, 2),
+            smd(10 * MM, -1_200_000, 1),
+            smd(10 * MM, 2 * MM, 1),
+            smd(10 * MM, 11_200_000, 1),
         ],
         4,
     );
@@ -318,9 +322,9 @@ fn a_zone_that_is_not_a_plane_is_copper_that_routes_keep_clear_of() {
     assert!(filled(&routed.fills, 10 * MM, -MM) && filled(&routed.fills, 10 * MM, 11 * MM));
     // The other net goes round it.
     assert!(length_of(&routed, 2) > 24 * MM, "{}", length_of(&routed, 2));
-    // One connection routed, and one that the zone makes.
-    assert_eq!(routed.stats.connections, 2);
-    assert_eq!(routed.stats.connected, 2);
+    // One connection routed, and four that the zone makes.
+    assert_eq!(routed.stats.connections, 5);
+    assert_eq!(routed.stats.connected, 5);
 }
 
 #[test]
@@ -342,6 +346,12 @@ fn zones_are_planes_by_how_much_of_their_nets_they_cover() {
         };
         plane_zones(d, &options).unwrap()
     };
+    assert_eq!(planes(&d, 0.25), [true, false]);
+    // Whatever it covers, the pour of a net of two pads is no plane, unless it says so.
+    assert_eq!(planes(&d, 0.0), [true, false]);
+    d.board
+        .pads
+        .extend((1..4).map(|k| smd(k * 5 * MM, -20 * MM, 3)));
     assert_eq!(planes(&d, 0.0), [true, true]);
     assert_eq!(planes(&d, 0.25), [true, false]);
     // A zone says so itself, whatever it covers.

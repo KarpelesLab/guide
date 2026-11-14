@@ -2608,6 +2608,140 @@ above rest on several boards moving the same way, never on one.
 - Times are of one thread. Most of the time left on the large boards goes into rip-up's
   searches, and into those that find no path.
 
+## PCB routing, searched from both ends
+
+Detailed routing after [a net's searches came to share one tree and to look at a connection
+from both ends](architecture.md#decisions), against the router before: at commit `9b71b0f`
+on the curated boards, and as released in 0.0.2 through cadlab, which is that router too.
+Measured on 2026-11-14, one thread, on the same machine as the rest, which other work shared:
+times moved by up to half between runs of the same build, and results did not move at all.
+The results after are the same with what `master` had gained by `6cca950`.
+Every routing result in the sections above and below was measured before this change, and
+none has been measured again: completion, vias and lengths there are those of the router
+before, and its times are several times these.
+
+### How
+
+```text
+GUIDE_ROUTE=1 cargo test --release --features kicad curated_boards_route -- --nocapture
+GUIDE_ROUTE=1 GUIDE_APART=0 cargo test --release --features kicad curated_pairs -- --nocapture
+```
+
+with the default options, zones and planes included, on the nine curated boards and the two
+DRAM boards. And through [cadlab](https://github.com/KarpelesLab/cadlab), which runs
+`pcb::route` as a second router: its seven generated boards and its corpus of open-source
+boards with their tracks and vias taken out, `CADLAB_BENCH_ROUTER=guide route_bench [--corpus]
+<board>`, where it keeps vias out of pads by a keepout over each pad, and counts what its own
+check finds open after filling the zones itself. cadlab's own router is beside them, from its
+`docs/ROUTER.md`, as are the corpus boards' results before.
+
+### Results
+
+The curated boards. Connections, then vias after cleanup, track in millimetres and seconds,
+each before → after:
+
+| Board | Connections | Vias | Track, mm | Seconds |
+| --- | --- | --- | --- | --- |
+| `GB-BRK-LINK-A` | 8/8 → 8/8 | 0 → 0 | 93 → 93 | 0.06 → 0.06 |
+| `TS4231-BOB` | 13/13 → 13/13 | 0 → 0 | 31 → 31 | 0.11 → 0.10 |
+| `lisn` | 60/60 → 60/60 | 7 → 7 | 144 → 144 | 0.44 → 0.44 |
+| `isi-channel` | 29/29 → 29/29 | 0 → 0 | 453 → 453 | 0.12 → 0.13 |
+| `placebo` | 50/50 → 50/50 | 9 → 9 | 292 → 293 | 0.38 → 0.35 |
+| `udb-s` | 33/33 → 33/33 | 11 → 6 | 149 → 144 | 1.18 → 0.49 |
+| `flea` | 79/79 → 79/79 | 52 → 47 | 1607 → 1611 | 4.66 → 1.61 |
+| `GB-LIVE32` | 197/197 → 197/197 | 165 → 202 | 2283 → 2225 | 24.3 → 6.3 |
+| `nk3-nrf-mini` | 82/83 → 82/83 | 55 → 61 | 249 → 241 | 18.0 → 5.8 |
+| `lpddr4-testbed` | 344/344 → 344/344 | 220 → 235 | 670 → 654 | 85.8 → 9.8 |
+| `ddr5-testbed` | 255/255 → 255/255 | 170 → 164 | 876 → 857 | 139.5 → 32.8 |
+| All | 1150/1151 → 1150/1151 | 689 → 731 | 6847 → 6746 | 274.6 → 58.0 |
+
+`drc::check` finds nothing on any of them, before or after. Completion is the same, in a fifth
+of the time, with 6% more vias, most of them `GB-LIVE32`'s, and 1.5% less track. With
+their pairs and lengths (`curated_pairs`, 333 s → 61 s), the five boards routed complete as
+before, but `udb-s`'s USB pair no longer finds room side by side where it did, and one of
+`ddr5-testbed`'s two matched groups has a net 0.43 mm short of the others where both were met.
+
+cadlab's generated boards, with no via in a pad. Open connections, vias, track and seconds,
+before → after, and its own router's seconds over three seeds:
+
+| Board | Connections | Open | Vias | Track, mm | Seconds | cadlab's router, s |
+| --- | --- | --- | --- | --- | --- | --- |
+| `attiny-2l` | 22 | 0 → 0 | 0 → 0 | 128 → 128 | 0.02 → 0.02 | 0.1 |
+| `soic24-2l` | 184 | 0 → 0 | 139 → 159 | 2146 → 2070 | 1.9 → 1.8 | 0.8 to 0.9 |
+| `stm32-2l` | 109 | 0 → 0 | 95 → 98 | 1140 → 1142 | 86.1 → 16.4 | 1.1 to 1.3 |
+| `stm32-4l` | 109 | 0 → 0 | 48 → 55 | 963 → 949 | 12.3 → 1.9 | 1.7 to 2.5 |
+| `qfp-qfn-4l` | 155 | 0 → 0 | 181 → 218 | 1830 → 1864 | 49.9 → 11.4 | 5.5 to 7.5 |
+| `fine-4l` | 100 | 0 → 0 | 100 → 109 | 972 → 959 | 139.5 → 7.9 | 1.8 to 2.1 |
+| `bga144-4l` | 141 | 14 → 0 | 177 → 232 | 2337 → 2516 | 129.0 → 42.4 | 8.8 to 11.5 |
+
+Every board is now complete, `bga144-4l` with the 14 connections it lacked. Five of the seven
+take at most four times what cadlab's router does; `stm32-2l` and `bga144-4l` are the two whose
+first pass leaves nets for the pass on the finer lattice, which is most of their time: with a
+window of 48 pitches in place of 24, or none, the first pass happens to leave none on
+`stm32-2l`, which then takes 3 s. Vias are 13% more over the six boards complete before.
+
+cadlab's corpus, each board one run. Open connections as cadlab counts them, vias, track and
+seconds; before is from cadlab's table, where a run was killed at 1200 s and the result is
+that of a longer one:
+
+| Board | Layers | Open | Vias | Track, mm | Seconds | cadlab's router: open, s |
+| --- | --- | --- | --- | --- | --- | --- |
+| `nrfmicro` | 2 | 15 → 9 | 49 → 53 | 461 → 460 | 69.5 → 8.7 | 0, 2 to 24 |
+| `buspirate-flash-sop` | 2 | 0 → 0 | 7 → 8 | 523 → 514 | 2.8 → 2.7 | 0, 0.5 to 1.5 |
+| `buspirate-rs232` | 2 | 0 → 0 | 6 → 6 | 358 → 358 | 0.5 → 0.5 | 0, 0.5 to 1.2 |
+| `lumenpnp-ringlight` | 2 | 0 → 0 | 1 → 1 | 208 → 211 | 0.7 → 1.2 | 0, 1.1 to 1.5 |
+| `sweep-v2.2` | 2 | 8 → 8 | 42 → 42 | 2195 → 2195 | 67.4 → 39.1 | 3, 57 to 96 |
+| `corne-cherry` | 2 | 95 → 96 | 243 → 275 | 3817 → 3764 | 270 → 20.5 | 2 to 5, 50 to 56 |
+| `lumenpnp-mobo` | 4 | 21 → 18 | 474 → 585 | 6485 → 6498 | 559 → 227 | 8 to 14, 45 to 74 |
+| `buspirate5-rev10` | 4 | 26 → 14 | 390 → 441 | 3209 → 3518 | 2351 → 228 | 1 to 4, 56 to 66 |
+| `cynthion` | 4 | 28 → 16 | 526 → 613 | 3545 → 3687 | 1560 → 202 | 30 to 34, 78 to 100 |
+| `tinytapeout-demo` | 4 | no result in 1200 s → 190 | 137 | 1449 | 27.2 | 10 to 25, 59 to 85 |
+
+The boards that took a quarter of an hour and more now take four minutes or less, with fewer
+connections open or as many on all but `corne-cherry`. The three largest still take two to
+four times what cadlab's router does, and this one is well behind it in completion on `corne-cherry`, `nrfmicro` and
+`tinytapeout-demo`, where vias kept out of pads leave pads with no way out that a router with
+fanout finds one for; `tinytapeout-demo` is given up on with half its connections open. The two
+glasgow boards were not run.
+
+### Where the time goes now
+
+- On `buspirate5-rev10`, 216 of 228 s are detailed routing, 142 million nodes, and four
+  fifths of that the pass on the finer lattice: its three supply nets of 62, 70 and 169 pads
+  are taken out whole and routed again about ten times each, 88 s between them, whenever a net
+  of two pads crosses one of their branches. Taking out only the branch crossed would be the
+  next thing to try.
+- On `lumenpnp-mobo`, 125 of 227 s are `GlobalSpace::measure` in the second of cadlab's runs,
+  which has cadlab's fills of the nets it routes again as fixed zones: each of its probes
+  measures to every edge of each fill, as does a step of another net's search near one. And 51 s of the first run are
+  zones filled four times. Neither is a search.
+- Whether the first pass leaves a net is still what decides a board's time, and it is as
+  chaotic as ever: over the variants tried, `stm32-2l` took from 1 to 16 s and `bga144-4l`
+  from 18 s up, complete each time.
+
+### What was tried and not kept
+
+All over six of the generated boards, without `attiny-2l`, and the eleven curated ones
+together, by connections left open, vias and seconds:
+
+| Variant | Open | Vias | Seconds, three at a time |
+| --- | --- | --- | --- |
+| As it is | 1 | 1602 | 145 |
+| A via's cost in the bound | 4 | 1436 | 144 |
+| A look's own path taken as the connection | 6 | 1603 | 163 |
+| No window for searches that cross routes | 4 | 1593 | 134 |
+| A window of 48 pitches | 4 | 1609 | 117 |
+| No glance before the first search | 1 | 1582 | 164 |
+| The corridor given up on after the looks | 5 | 1614 | 237 |
+
+The one connection open is `nk3-nrf-mini`'s `/LED_R`, as [above](#results-5). Weighting the
+bound, by 1.2, 1.5 and 2, and by 1 to 4 for searches that cross routes, was measured on the
+generated boards alone, on an earlier state of this change: searches in the corridor that
+find a path expand a quarter of the nodes at 1.5, but with a weight of 2 or 4 on the searches
+that cross routes `stm32-2l` and `fine-4l` took 12 to 14 and 17 to 20 s, as nets ripped each
+other up far more, and with none on them the six boards took 51 s at 1.5 and 47 s at 1.2
+against 40 s at 1, with 11% and 5% more vias.
+
 ## PCB differential pairs and lengths
 
 Differential pairs routed side by side, and nets meandered to their lengths, by `pcb::route`

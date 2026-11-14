@@ -253,8 +253,8 @@ This settles open questions 1 and 4, for M5, as `src/pcb` does it:
   along its free length, sampled against the fixed copper, and a tile's vias. Each net's
   global route, grown by a tile, is its corridor.
 - *Detailed routing* is a second `RoutingSpace`, of points on layers generated as a search
-  reaches them and kept in `InternedSlots`, searched one net at a time with
-  `search::Search` (not the engine), inside the net's corridor. It has no resources at all:
+  reaches them, in slots kept for as long as the net is searched for, searched one net at a
+  time with `search::Search` (not the engine), inside the net's corridor. It has no resources at all:
   every step is legal or not by exact clearance queries against a `ShapeIndex` of the fixed
   copper and the routes committed so far, by the same rules as `drc::check`. So conflicts
   between nets can't arise in a committed result. A net that finds no path is searched for
@@ -286,6 +286,48 @@ The measurements behind it, on the nine [curated boards](../testdata/kicad/READM
 - *Results are chaotic on the hard boards*, as with any sequential router: a small change of
   option moves `nk3-nrf-mini` between 23 and 28 of 30 nets. Conclusions above come from
   several boards agreeing, not from one.
+
+**A net's searches share one tree, and a connection is looked at from both ends.** Most of
+the time of detailed routing went into searches that could not succeed, and into searching
+again for what was already found. A terminal that other nets' routes shut in was found out by
+a search from the tree through the whole corridor, and then by a search of up to 50,000 nodes
+from it over the board; and the search that may cross routes then went everywhere it could
+reach before it crossed the one route in its way, since a crossing costs many times a path's
+length, and the bound, which is a length, has nothing to say about it. Each of the three
+routed the whole net from nothing. Now ([results](benchmarks.md#pcb-routing-searched-from-both-ends)):
+
+- *One tree.* A net is a `NetRun`, whose tree the search in the corridor, the one over the
+  board and the one that may cross routes grow in turn, each from what the last connected.
+- *Looks.* A connection is searched for in steps: a glance of 256 nodes from the terminals,
+  a search of 8,000 from the tree, a look of 2,000 from the terminals, a search of 64,000, a
+  look of 50,000, and only then the search with the net's budget. A look that ends shut in
+  ends the search. One that reaches the tree only says that the search from the tree will:
+  the path is still that search's, to the nearest terminal of all. Taking the look's own path,
+  to the first terminal, lost connections on `nk3-nrf-mini` and `ddr5-testbed`.
+- *Crossing from the side that is shut in.* Where routes may be crossed, the search is made
+  from a terminal that a look found shut in, towards the tree: the first route it crosses is
+  one that shuts it in. It ends at a node that stands for the whole tree, with a bound to the
+  nearest of the tree's runs, kept in a grid. It is kept within 24 pitches of the terminal and
+  the tree at first, and goes anywhere only if that finds nothing: without, `ddr5-testbed`
+  took 60 s in place of 36 and lost three connections. A terminal shut in by what may
+  not be crossed is found out the same way, in place of a search from the tree that runs
+  through its budget.
+- *One lattice away from pads.* A pad's lattice goes on only within the 8 pitches of the pad
+  from which routes move onto it. Anywhere else a route is on the lattice of the net's first
+  pad, with a step of less than a pitch between the two. A net of many pads used to be
+  searched for over the board once for each pad's lattice, by every search that found no path.
+- *Bounds kept.* Every node of the tree is a source of every search from it, and asked for its
+  bound to every terminal left, each time. The slots of a net's nodes are now kept from one
+  search to the next, so `Search::reuse_bounds` applies, as it does in the engine.
+
+Weighting the bound was tried again, from 1.2 to 2, and from 2 to 4 for the searches that
+cross routes: a search that finds a path expands a quarter of the nodes at 1.5, but nets then
+rip each other up more often, and the boards took longer between them than without. A via's cost in
+the bound, also tried again, saved a tenth of the vias over the boards and lost three
+connections on `ddr5-testbed`. Giving up on the corridor after the looks, in place of
+searching it whole, doubled the time of the boards that need the finer pass. Results are as
+chaotic as before: whether the first pass leaves a net for the finer one decides most of a
+board's time.
 
 **Differential pairs are routed side by side last, in place of their nets' routes.** Routing
 pairs first, before anything else, as fixed copper, coupled `udb-s`'s USB pair a little better,

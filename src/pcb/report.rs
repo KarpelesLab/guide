@@ -16,7 +16,7 @@ use super::detail::{DIRS, Failure};
 use super::planes;
 use super::router::{pad_center, terminals};
 use super::world::{Verdict, World};
-use super::{Design, Stopped};
+use super::{Design, RouteError, Stopped};
 use crate::geom::drc::{Board, Item, Track, Via, tied_nets};
 use crate::geom::{LayerId, LayerSet, Point, Rect, Shape, SpatialIndex};
 use crate::id::NetId;
@@ -141,6 +141,25 @@ pub struct OpenConnection {
     pub to: Endpoint,
     /// Why it is open.
     pub cause: Cause,
+}
+
+/// Checks the items of a design that a route builds shapes from, its tracks and vias, for
+/// an error that names the item. The others are shapes already.
+pub(crate) fn validate(design: &Design) -> Result<(), RouteError> {
+    let b = &design.board;
+    let fail = |item: DesignItem| move |error| RouteError::Item { item, error };
+    for (i, t) in b.tracks.iter().enumerate() {
+        match t.mid {
+            None => Shape::track(t.start, t.end, t.width),
+            Some(m) => Shape::arc_track(t.start, m, t.end, t.width, b.arc_tolerance),
+        }
+        .map_err(fail(DesignItem::Track(i)))?;
+    }
+    for (i, v) in b.vias.iter().enumerate() {
+        Shape::circle(v.at, v.diameter).map_err(fail(DesignItem::Via(i)))?;
+        Shape::circle(v.at, v.drill).map_err(fail(DesignItem::Via(i)))?;
+    }
+    Ok(())
 }
 
 /// A connection left open, before its cause is known.

@@ -659,14 +659,22 @@ impl Routed {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RouteError {
-    /// An item's geometry is invalid.
+    /// A zone's outline, or a shape the router derived, has invalid geometry.
     Geometry(GeomError),
+    /// A track or a via of the design has invalid geometry.
+    Item {
+        /// Which item.
+        item: DesignItem,
+        /// What is wrong with it.
+        error: GeomError,
+    },
 }
 
 impl fmt::Display for RouteError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             RouteError::Geometry(e) => write!(f, "invalid geometry: {e}"),
+            RouteError::Item { item, error } => write!(f, "invalid geometry of {item}: {error}"),
         }
     }
 }
@@ -674,7 +682,7 @@ impl fmt::Display for RouteError {
 impl std::error::Error for RouteError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            RouteError::Geometry(e) => Some(e),
+            RouteError::Geometry(e) | RouteError::Item { error: e, .. } => Some(e),
         }
     }
 }
@@ -685,8 +693,10 @@ impl std::error::Error for RouteError {
 ///
 /// # Errors
 ///
-/// [`RouteError::Geometry`] if an item of the design, or a shape the router derives from
-/// one, has invalid geometry, such as a coordinate beyond [`MAX_COORD`](crate::geom::MAX_COORD).
+/// [`RouteError::Item`] if a track or a via of the design has invalid geometry, such as a
+/// coordinate beyond [`MAX_COORD`](crate::geom::MAX_COORD) or a width of zero, with which
+/// item it is; [`RouteError::Geometry`] if a zone's outline, or a shape the router derives
+/// from the design, has.
 ///
 /// ```
 /// use guide::geom::drc::{self, Pad};

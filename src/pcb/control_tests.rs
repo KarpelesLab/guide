@@ -7,10 +7,10 @@ use std::time::{Duration, Instant};
 
 use super::tests::{MM, design, outline, route_checked, smd};
 use super::{
-    Blocker, Cause, CopperKind, Design, DesignItem, Phase, Progress, RouteOptions, Routed,
-    RunControl, Stopped, route, route_with, unconnected,
+    Blocker, Cause, CopperKind, Design, DesignItem, Phase, Progress, RouteError, RouteOptions,
+    Routed, RunControl, Stopped, route, route_with, unconnected,
 };
-use crate::geom::drc::{self, Keepout, Pad};
+use crate::geom::drc::{self, Keepout, Pad, Track};
 use crate::geom::{LayerId, LayerSet, Point, Rect, Shape};
 use crate::id::NetId;
 
@@ -324,6 +324,33 @@ fn open_connections_say_why() {
     let other = NetId(3 - open.net.0);
     assert!(routed.tracks.iter().all(|t| t.net == Some(other)));
     assert_eq!(open.cause, Cause::NoPath);
+}
+
+#[test]
+fn an_error_names_the_item_at_fault() {
+    let mut d = weave();
+    let track = |width| Track {
+        start: Point::new(0, 0),
+        end: Point::new(MM, 0),
+        mid: None,
+        width,
+        layer: LayerId(0),
+        net: None,
+    };
+    d.board.tracks = vec![track(100_000), track(0)];
+    let error = route(&d, &RouteOptions::default()).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            RouteError::Item {
+                item: DesignItem::Track(1),
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert!(error.to_string().contains("track 1"), "{error}");
+    assert!(std::error::Error::source(&error).is_some());
 }
 
 #[test]

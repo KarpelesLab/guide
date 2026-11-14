@@ -501,6 +501,7 @@ pub(crate) fn run(
     options: &RouteOptions,
     control: &RunControl<'_>,
 ) -> Result<Routed, RouteError> {
+    report::validate(design)?;
     let run = Run::new(control, options.work_budget);
     run.phase(Phase::Prepare);
     run.poll();

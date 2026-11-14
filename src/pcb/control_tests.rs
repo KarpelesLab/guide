@@ -234,6 +234,30 @@ fn progress_tells_of_each_phase_and_no_more_often_than_asked() {
 }
 
 #[test]
+fn a_net_that_cannot_be_routed_whole_keeps_its_tree_if_asked() {
+    let d = walled_in();
+    let lost = route_checked(&d, &RouteOptions::default());
+    let options = RouteOptions {
+        keep_partial: true,
+        ..RouteOptions::default()
+    };
+    let kept = route_checked(&d, &options);
+    check(&d, &kept);
+    assert_eq!(kept.unrouted, [NetId(1)]);
+    assert_eq!((lost.stats.islands, kept.stats.islands), ((4, 0), (4, 3)));
+    assert_eq!((kept.stats.connections, kept.stats.connected), (4, 3));
+    assert!(lost.tracks.is_empty() && !kept.tracks.is_empty());
+    // One connection is open: to the pad walled in, from its neighbour.
+    assert_eq!(kept.open.len(), 1);
+    let open = &kept.open[0];
+    assert_eq!(
+        (open.net, open.from.pad, open.to.pad),
+        (NetId(1), Some(3), Some(4))
+    );
+    assert_eq!(open.cause, lost.open[3].cause);
+}
+
+#[test]
 fn open_connections_say_why() {
     // A pad walled in: as the net is routed today it fails whole, and four connections
     // are open for the one pad, in the order of the pads they end at, each from the pad

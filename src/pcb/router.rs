@@ -1254,6 +1254,13 @@ fn route_all<'a>(
                     stubs: true,
                     ..params
                 });
+            } else if options.keep_partial && !partial.partial && ctx.terminals > 2 {
+                // And if asked, any net that can't be routed whole keeps what it reaches.
+                attempts.push(Params {
+                    partial: true,
+                    stubs: true,
+                    ..params
+                });
             }
             let mut displaced: Vec<usize> = Vec::new();
             for &partial in &attempts {
@@ -1315,6 +1322,15 @@ fn route_all<'a>(
                     }
                 }
             }
+            let partial = if options.keep_partial && !partial.partial && ctx.terminals > 2 {
+                Params {
+                    partial: true,
+                    stubs: true,
+                    ..params
+                }
+            } else {
+                partial
+            };
             if tree.is_none() && partial.partial && options.rip_ups == 0 {
                 let rip = RipUp {
                     penalty: None,

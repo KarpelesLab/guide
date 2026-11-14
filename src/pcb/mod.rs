@@ -123,7 +123,9 @@
 //!
 //! Whatever the run leaves apart is in [`Routed::open`], connection by connection, in the
 //! sense of a ratsnest: the pieces a net's pads are left in, less one, each with a pad on
-//! either side, by position in the design's pads, and the best-known [`Cause`].
+//! either side, by position in the design's pads, and the best-known [`Cause`]. With
+//! [`RouteOptions::keep_partial`], a net that can't be routed whole keeps the tree it could
+//! be routed as, so that one pad shut in costs one connection and not all the net's.
 //!
 //! # Determinism
 //!
@@ -517,6 +519,12 @@ pub struct RouteOptions {
     /// routed, with [`Routed::stopped`] set: the same result for the same budget, on any
     /// machine. Zone fills, cleanup's shortcuts and meanders cost nothing in this unit.
     pub work_budget: Option<u64>,
+    /// Whether a net that can't be routed whole keeps the tree it can be routed as: after
+    /// everything else has failed for it, it is searched for a terminal at a time and keeps
+    /// what it reaches, as nets with zones and nets of many pads do in any case, and the
+    /// passes on the finer lattice then complete it from that copper. The default is false:
+    /// such a net of 16 terminals or fewer has nothing in the result.
+    pub keep_partial: bool,
 }
 
 impl Default for RouteOptions {
@@ -542,6 +550,7 @@ impl Default for RouteOptions {
             plane_coverage: 0.0,
             layers: None,
             work_budget: None,
+            keep_partial: false,
         }
     }
 }
@@ -614,8 +623,9 @@ pub struct Routed {
     pub fills: Vec<Fill>,
     /// The nets that could not be routed, in order. Nothing of theirs is in the result, but
     /// for a net with zones, which keeps what joins it to them, though they leave it in
-    /// pieces, and a net of many pads, which keeps the pieces it was routed in.
-    /// [`open`](Routed::open) has what each of them is short of. In a run that was [stopped](Routed::stopped), these are the nets that
+    /// pieces, a net of many pads, which keeps the pieces it was routed in, and with
+    /// [`RouteOptions::keep_partial`], any net. [`open`](Routed::open) has what each of them
+    /// is short of. In a run that was [stopped](Routed::stopped), these are the nets that
     /// the board returned leaves in pieces.
     pub unrouted: Vec<NetId>,
     /// Measurements.

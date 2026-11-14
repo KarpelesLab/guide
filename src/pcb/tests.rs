@@ -426,6 +426,69 @@ fn pads_trapped_in_an_area_array_escape_through_vias() {
 }
 
 #[test]
+fn balls_that_the_net_s_via_fits_nowhere_near_fan_out_with_a_smaller_one() {
+    // The same grid at a pitch of 0.8 mm, with no via in a pad: between four balls there
+    // are 0.68 mm, which a via of 0.6 mm with 0.2 mm around it does not fit in, and one of
+    // 0.25 mm does.
+    let ball = |x: i64, y: i64, net: u32| Pad {
+        shape: Shape::circle(Point::new(x, y), 450_000).unwrap(),
+        ..smd(x, y, net)
+    };
+    let mut pads = Vec::new();
+    let mut net = 1;
+    let mut lone = 9;
+    for i in 0..5 {
+        for j in 0..5 {
+            let (x, y) = (i * 800_000, j * 800_000);
+            let ring = (1..=3).contains(&i) && (1..=3).contains(&j) && (i, j) != (2, 2);
+            if ring {
+                pads.push(ball(x, y, net));
+                pads.push(smd(10 * MM, i64::from(net) * 1_500_000 - 4 * MM, net));
+                net += 1;
+            } else {
+                lone += 1;
+                pads.push(ball(x, y, lone));
+            }
+        }
+    }
+    let d = design(2, pads, lone as usize + 1);
+    let without = RouteOptions {
+        vias_in_pads: false,
+        ..RouteOptions::default()
+    };
+    let routed = route_checked(&d, &without);
+    assert!(!routed.unrouted.is_empty());
+    let small = ViaSize {
+        diameter: 250_000,
+        drill: 100_000,
+    };
+    let with = RouteOptions {
+        fanout_via: Some(small),
+        ..without
+    };
+    let routed = route_checked(&d, &with);
+    assert!(routed.unrouted.is_empty(), "{:?}", routed.open);
+    // Each of the 8 has a dog-bone: the smaller via, clear of every ball, as an escape.
+    for n in 1..9 {
+        let escape = routed
+            .vias
+            .iter()
+            .zip(&routed.via_kinds)
+            .find(|(v, k)| v.net == Some(NetId(n)) && **k == super::CopperKind::Escape);
+        let (via, _) = escape.unwrap_or_else(|| panic!("net {n}"));
+        assert_eq!((via.diameter, via.drill), (small.diameter, small.drill));
+        let copper = Shape::circle(via.at, via.diameter).unwrap();
+        assert!(d.board.pads.iter().all(|p| !p.shape.touches(&copper)));
+    }
+    // A fan-out via no smaller than the net's own changes nothing.
+    let same = RouteOptions {
+        fanout_via: d.nets[1].via,
+        ..without
+    };
+    assert!(!route_checked(&d, &same).unrouted.is_empty());
+}
+
+#[test]
 fn two_pads_whose_only_way_out_is_one_channel_do_not_both_take_it() {
     // A ring of pads 0.4 mm apart, which no track passes between, around two pads of two
     // nets, with one gap in it of 0.8 mm: one track's worth. No via fits, so each pad's

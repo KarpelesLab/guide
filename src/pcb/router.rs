@@ -1020,7 +1020,7 @@ fn route_all<'a>(
     // Escapes from fine-pitch footprints, which become fixed copper of their nets.
     let escapes = {
         let mut world = world_of(design)?;
-        escape::plan(design, &mut world, pitch)
+        escape::plan(design, &mut world, pitch, options.fanout_via)
     };
     let with_escapes;
     let design = if escapes.is_empty() {

@@ -23,7 +23,9 @@
 //!    a fine grid so as to leave room for the others; one whose only way out is long, and
 //!    that no via fits by, is given that way. Both become fixed copper of their nets, which
 //!    the rest completes. A pad whose centre has no room for a track's end, as where text
-//!    is drawn up to it, is reached at the point nearest its centre that has.
+//!    is drawn up to it, is reached at the point nearest its centre that has. Where the
+//!    net's own via fits nowhere near a trapped pad, as between the balls of a BGA of 0.8 mm
+//!    pitch, the smaller one of [`RouteOptions::fanout_via`] is tried, if there is one.
 //!
 //!    **Planes.** The [zones](Design::zones) are filled around the fixed copper, and each
 //!    net with zones takes the pads that its largest fill joins, its fills on inner layers
@@ -99,6 +101,8 @@
 //!   [`Shape::rings`](crate::geom::Shape::rings) reads a fill back. A host that fills
 //!   its zones again around the routes in any case turns [`RouteOptions::fills`] off, and
 //!   the result's last fill is not made.
+//! - **A smaller via for fan-outs**, [`RouteOptions::fanout_via`]: the smallest the board
+//!   may have, for the dog-bones of the pads that a net's own via fits nowhere near.
 //! - **Zones that are not planes**, [`CopperZone::plane`] and
 //!   [`RouteOptions::plane_coverage`]: small pours are copper as they are filled, and their
 //!   nets are routed as tracks.
@@ -522,10 +526,11 @@ pub struct RouteOptions {
     /// they cover the most, for the net to plan on them as [planes](RouteOptions::planes):
     /// 0.25 is a quarter of the box. The default is 0, which makes every zone a plane but
     /// those of a net of four pads or fewer, which are pours between them whatever they
-    /// cover. A net's zones that cover less, such as small pours round a few of its pads, are copper
-    /// of the net as they are filled before routing, which routes of other nets keep clear
-    /// of and which joins the pads it touches, and the net is routed as tracks between the
-    /// rest. A zone that [says](CopperZone::plane) which it is doesn't count, either way.
+    /// cover. A net's zones that cover less, such as small pours round a few of its pads,
+    /// are copper of the net as they are filled before routing, which routes of other nets
+    /// keep clear of and which joins the pads it touches, and the net is routed as tracks
+    /// between the rest. A zone that [says](CopperZone::plane) which it is doesn't count,
+    /// either way.
     pub plane_coverage: f64,
     /// The layers that tracks may be routed on, or `None` for every layer of the stack.
     /// Each net may narrow them further, [`NetSpec::layers`]. Vias go through every layer
@@ -560,6 +565,12 @@ pub struct RouteOptions {
     /// zones' pieces ended on, which is that one but for the islands, pieces that join
     /// nothing.
     pub fills: bool,
+    /// A smaller via for the [escapes](self#how-it-routes) of fine-pitch footprints, such as
+    /// the smallest the board's maker drills, or `None`, the default, for none. A pad
+    /// trapped in its footprint that its net's own via fits nowhere near, as between the
+    /// balls of a BGA of 0.8 mm pitch, gets its dog-bone with this one, if it is smaller
+    /// and fits. Every other via of the net is its own, [`NetSpec::via`].
+    pub fanout_via: Option<ViaSize>,
     /// A seed for another order of the nets, or `None`, the default, for shortest first.
     /// With a seed, each net's length counts for between three quarters and five quarters
     /// of itself in that order, by a factor drawn from the seed and the net's number: the
@@ -593,6 +604,7 @@ impl Default for RouteOptions {
             keep_partial: false,
             neck_down: true,
             fills: true,
+            fanout_via: None,
             seed: None,
         }
     }

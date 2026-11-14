@@ -20,8 +20,8 @@
 
 use std::collections::VecDeque;
 
-use super::Design;
 use super::world::{Verdict, World};
+use super::{Design, ViaSize};
 use crate::geom::drc::{Track, Via};
 use crate::geom::{LayerId, LayerSet, Point, Rect, Shape, SpatialIndex};
 use crate::id::NetId;
@@ -124,7 +124,12 @@ fn joined(design: &Design, pad: usize) -> bool {
         })
 }
 
-pub(crate) fn plan(design: &Design, world: &mut World<'_>, pitch: i64) -> Vec<Escape> {
+pub(crate) fn plan(
+    design: &Design,
+    world: &mut World<'_>,
+    pitch: i64,
+    fanout: Option<ViaSize>,
+) -> Vec<Escape> {
     let rules = &design.rules;
     let layers = rules.layer_count();
     if layers < 2 {
@@ -235,15 +240,19 @@ pub(crate) fn plan(design: &Design, world: &mut World<'_>, pitch: i64) -> Vec<Es
             let width = width_of(net, on.iter().next().unwrap_or(LayerId(0)));
             let mut group = vec![i];
             group.extend(reached.iter().copied().filter(|&p| p != i));
-            let candidates = candidates(
-                world,
-                design,
-                net,
-                &group,
-                (via.diameter, via.drill),
-                pitch,
-                &width_of,
-            );
+            let mut via = (via.diameter, via.drill);
+            let mut candidates = candidates_of(world, design, net, &group, via, pitch, &width_of);
+            // Where the net's own via fits nowhere, as between the balls of a BGA of fine
+            // pitch, the smaller one for fan-outs is tried, if there is one.
+            if candidates.is_empty()
+                && let Some(small) = fanout.filter(|f| f.diameter < via.0 && f.drill <= via.1)
+            {
+                let small = (small.diameter, small.drill);
+                let found = candidates_of(world, design, net, &group, small, pitch, &width_of);
+                if !found.is_empty() {
+                    (via, candidates) = (small, found);
+                }
+            }
             // A pad with a long way out takes it if no via fits, and otherwise needs no
             // escape: routing finds the via if it is the better way. With no way out at
             // all, it is trapped.
@@ -267,7 +276,7 @@ pub(crate) fn plan(design: &Design, world: &mut World<'_>, pitch: i64) -> Vec<Es
                 out,
                 path,
                 width,
-                via: (via.diameter, via.drill),
+                via,
                 candidates,
                 bbox,
                 done: false,
@@ -530,7 +539,7 @@ fn flood(
 }
 
 /// The places for a via of `net` that a pad of `group` reaches, nearest a pad first.
-fn candidates(
+fn candidates_of(
     world: &World<'_>,
     design: &Design,
     net: NetId,

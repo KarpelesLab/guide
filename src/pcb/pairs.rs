@@ -421,10 +421,21 @@ impl RoutingSpace for PairSpace<'_> {
     }
 }
 
-/// The two ends of a pair: for each, a pad of either net, by position in its job's pads.
-fn ends(p: &NetCtx, n: &NetCtx) -> Option<[(usize, usize); 2]> {
+/// A choice of a pair's two ends: for each, a pad of either net.
+type Ends = [(usize, usize); 2];
+
+/// How many choices of a pair's ends are tried at most.
+pub(crate) const END_CHOICES: usize = 4;
+
+/// The choices of the two ends of a pair, the best first: for each end, a pad of either
+/// net, by position in its job's pads. The ends farthest apart come first, and among
+/// those as far apart, the ones whose pads are closest together. Where a net has two pads
+/// at an end, as a USB-C receptacle's two rows of pins, which of them the pair ends at
+/// decides whether its tracks arrive the right way round, so the next choice is tried when
+/// one can't be routed, or shuts the pads it leaves out in.
+fn ends(p: &NetCtx, n: &NetCtx) -> Vec<Ends> {
     if p.pads.len() > 64 || n.pads.len() > 64 {
-        return None;
+        return Vec::new();
     }
     let far = |a: Point, b: Point| {
         let (dx, dy) = ((a.x - b.x) as i128, (a.y - b.y) as i128);
@@ -436,7 +447,7 @@ fn ends(p: &NetCtx, n: &NetCtx) -> Option<[(usize, usize); 2]> {
         .flat_map(|i| (0..n.pads.len()).map(move |j| (i, j)))
         .filter(|&(i, j)| far(p.pads[i].center, n.pads[j].center) <= split)
         .collect();
-    let mut best: Option<(i128, [(usize, usize); 2])> = None;
+    let mut all: Vec<(i128, i128, Ends)> = Vec::new();
     for (k, &(i1, j1)) in couples.iter().enumerate() {
         for &(i2, j2) in &couples[k + 1..] {
             if p.pads[i1].terminal == p.pads[i2].terminal
@@ -448,12 +459,15 @@ fn ends(p: &NetCtx, n: &NetCtx) -> Option<[(usize, usize); 2]> {
                 mid(p.pads[i1].center, n.pads[j1].center),
                 mid(p.pads[i2].center, n.pads[j2].center),
             );
-            if best.is_none_or(|(b, _)| d > b) {
-                best = Some((d, [(i1, j1), (i2, j2)]));
-            }
+            let apart = far(p.pads[i1].center, n.pads[j1].center)
+                + far(p.pads[i2].center, n.pads[j2].center);
+            all.push((d, apart, [(i1, j1), (i2, j2)]));
         }
     }
-    best.map(|(_, e)| e)
+    // Stable, so that among equals the first found stays first, as it was the only one.
+    all.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    all.truncate(END_CHOICES);
+    all.into_iter().map(|(_, _, e)| e).collect()
 }
 
 /// The fewest pads an array has, such as a BGA's.
@@ -542,8 +556,10 @@ pub(crate) struct PairRip<'h, 'f> {
     pub(crate) take: &'f mut dyn FnMut(&mut World<'_>, &[NetId]),
 }
 
-/// Routes one pair side by side into `world`, from the jobs of its two nets, if it can.
+/// Routes one pair side by side into `world`, from the jobs of its two nets, if it can,
+/// between the ends of its `choice`th choice of them, of [`END_CHOICES`] at most.
 /// With `rip`, other nets' routes in its way are taken out.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn route_pair(
     design: &Design,
     world: &mut World<'_>,
@@ -551,6 +567,7 @@ pub(crate) fn route_pair(
     pj: &Job,
     nj: &Job,
     params: Params,
+    choice: usize,
     mut rip: Option<PairRip<'_, '_>>,
 ) -> Option<PairRoute> {
     // The pair's own copper is never in its way to be moved.
@@ -559,13 +576,14 @@ pub(crate) fn route_pair(
     for n in nets {
         world.set_locked(n, true);
     }
-    let route = route_pair_locked(design, world, pair, pj, nj, params, &mut rip);
+    let route = route_pair_locked(design, world, pair, pj, nj, params, choice, &mut rip);
     for (n, w) in nets.into_iter().zip(was) {
         world.set_locked(n, w);
     }
     route
 }
 
+#[allow(clippy::too_many_arguments)]
 fn route_pair_locked(
     design: &Design,
     world: &mut World<'_>,
@@ -573,6 +591,7 @@ fn route_pair_locked(
     pj: &Job,
     nj: &Job,
     params: Params,
+    choice: usize,
     rip: &mut Option<PairRip<'_, '_>>,
 ) -> Option<PairRoute> {
     let rules = &design.rules;
@@ -615,7 +634,7 @@ fn route_pair_locked(
     };
 
     // The ends, and how far from each the search goes unchecked.
-    let [(pa, na), (pb, nb)] = ends(pc, nc)?;
+    let [(pa, na), (pb, nb)] = ends(pc, nc).get(choice).copied()?;
     let ends_at = [(pa, na), (pb, nb)];
     // As cleanup does, with dearer vias: the pair replaces routes that cleanup has had.
     let params = Params {

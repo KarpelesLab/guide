@@ -261,3 +261,44 @@ fn a_pair_s_tracks_are_at_its_gap_to_within_a_few_nanometres() {
         assert!(tight.0 >= wide.0 * 0.99, "{tight:?} of {wide:?}");
     }
 }
+
+/// Two rows of a connector's pins, as a USB-C receptacle has for its data pair: each net on
+/// two pins, the nets alternating, and the pair's other end 20 mm away. `flip` has the far
+/// end's pins the other way round.
+fn two_row_design(flip: bool) -> Design {
+    let (a, b) = if flip { (2, 1) } else { (1, 2) };
+    let mut d = design(
+        2,
+        vec![
+            pin(0, 0, a),
+            pin(650_000, 0, b),
+            pin(20 * MM, 10 * MM, 1),
+            pin(20 * MM + 500_000, 10 * MM, 2),
+            pin(20 * MM + 1_000_000, 10 * MM, 1),
+            pin(20 * MM + 1_500_000, 10 * MM, 2),
+        ],
+        3,
+    );
+    d.pairs.push(DiffPair {
+        positive: NetId(1),
+        negative: NetId(2),
+        width: 200_000,
+        gap: 200_000,
+    });
+    d.outline = outline(Rect::new(
+        Point::new(-5 * MM, -5 * MM),
+        Point::new(26 * MM, 15 * MM),
+    ));
+    d
+}
+
+#[test]
+fn a_pair_with_two_pins_a_net_at_an_end_is_coupled_whichever_way_round_it_arrives() {
+    for flip in [false, true] {
+        let d = two_row_design(flip);
+        let r = route_checked(&d, &RouteOptions::default());
+        assert!(r.unrouted.is_empty(), "flip {flip}");
+        assert_eq!(r.stats.pairs, (1, 1), "flip {flip}");
+        assert!(coupled(&r) > 0.5, "flip {flip}: coupled {}", coupled(&r));
+    }
+}

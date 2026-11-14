@@ -410,15 +410,41 @@ fn couple_in_place(
     for c in &mut old {
         c.unplace(world);
     }
-    let Some(route) = pairs::route_pair(design, world, pair, &jobs[jp], &jobs[jn], params, None)
-    else {
-        restore(world, copper, old);
-        return None;
-    };
-    // The terminals the pair's ends leave out, joined to its copper or to each other.
+    // Each choice of the pair's ends in turn, until one is routed and leaves the terminals
+    // it doesn't end at a way to it.
+    for choice in 0..pairs::END_CHOICES {
+        let Some(route) = pairs::route_pair(
+            design, world, pair, &jobs[jp], &jobs[jn], params, choice, None,
+        ) else {
+            continue;
+        };
+        match join_rest(world, &route, [&jobs[jp].ctx, &jobs[jn].ctx], params) {
+            Some(rest) => {
+                copper[jp] = Some(NetCopper::default());
+                copper[jn] = Some(NetCopper::default());
+                for (k, c) in rest {
+                    copper[[jp, jn][k]] = Some(c);
+                }
+                return Some(route);
+            }
+            None => route.undo.undo(world),
+        }
+    }
+    restore(world, copper, old);
+    None
+}
+
+/// Joins the terminals that a pair's ends leave out to its copper, or to each other, for
+/// the positive and the negative net, and returns the copper that does, by which of the
+/// two it is for, placed in the world. If either net can't be, nothing is placed.
+fn join_rest(
+    world: &mut World<'_>,
+    route: &pairs::PairRoute,
+    nets: [&NetCtx; 2],
+    params: Params,
+) -> Option<Vec<(usize, NetCopper)>> {
     let mut rest: Vec<(usize, NetCopper)> = Vec::new();
-    for (k, j) in [jp, jn].into_iter().enumerate() {
-        let ctx = &jobs[j].ctx;
+    for (k, ctx) in nets.into_iter().enumerate() {
         let joined = route.terminals[k];
         if ctx.terminals <= 2 {
             continue;
@@ -462,24 +488,17 @@ fn couple_in_place(
             Ok(tree) => {
                 let mut c = NetCopper::from_tree(&others, &tree);
                 c.place(world, &others);
-                rest.push((j, c));
+                rest.push((k, c));
             }
             Err(_) => {
                 for (_, mut c) in rest {
                     c.unplace(world);
                 }
-                route.undo.undo(world);
-                restore(world, copper, old);
                 return None;
             }
         }
     }
-    copper[jp] = Some(NetCopper::default());
-    copper[jn] = Some(NetCopper::default());
-    for (j, c) in rest {
-        copper[j] = Some(c);
-    }
-    Some(route)
+    Some(rest)
 }
 
 /// The most common value, the smallest among equals.
@@ -1405,6 +1424,7 @@ fn route_all<'a>(
                         job(pair.positive)?,
                         job(pair.negative)?,
                         p,
+                        0,
                         Some(rip),
                     )
                 });
@@ -1714,7 +1734,9 @@ impl PairsFirst {
     ) -> Option<pairs::PairRoute> {
         let job = |net: NetId| self.jobs.iter().find(|j| j.ctx.net == net);
         let (p, n) = (job(pair.positive)?, job(pair.negative)?);
-        pairs::route_pair(design, world, pair, p, n, self.params?, None)
+        let params = self.params?;
+        (0..pairs::END_CHOICES)
+            .find_map(|choice| pairs::route_pair(design, world, pair, p, n, params, choice, None))
     }
 
     /// The nets of the pairs routed.

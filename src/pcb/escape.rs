@@ -215,7 +215,8 @@ pub(crate) fn plan(design: &Design, world: &mut World<'_>, pitch: i64) -> Vec<Es
             };
             let Some(via) = spec.via else { continue };
             let on = LayerSet(pad.layers.0 & all.0);
-            if on == all || region_of.contains_key(&i) || joined(design, i) {
+            let whole = LayerSet(pad.copper_layers().0 & all.0);
+            if whole == all || region_of.contains_key(&i) || joined(design, i) {
                 continue;
             }
             let near_way = flood(world, net, i, design, on, pitch, &out, true, &width_of);

@@ -917,6 +917,7 @@ impl Reader {
                     hole: Some(hole),
                     net,
                     clearance,
+                    stack: Vec::new(),
                 });
                 self.pads.push(source);
                 self.pad_zone(zone);
@@ -943,6 +944,7 @@ impl Reader {
                 hole: hole.take(),
                 net,
                 clearance,
+                stack: Vec::new(),
             });
             self.pads.push(source.clone());
             self.pad_zone(zone);

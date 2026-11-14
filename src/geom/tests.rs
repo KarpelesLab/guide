@@ -814,6 +814,7 @@ fn drc_reports_every_kind() {
         hole: None,
         net: Some(NetId(9)),
         clearance: None,
+        stack: Vec::new(),
     }];
     board.keepouts = vec![Keepout {
         shape: rect(9_000, -1000, 11_000, 1000),
@@ -934,6 +935,7 @@ fn drc_pairs_are_reported_once_on_the_first_layer() {
         hole: None,
         net: Some(NetId(1)),
         clearance: None,
+        stack: Vec::new(),
     }];
     board.tracks[0].start.y = 520;
     board.tracks[0].end.y = 520;
@@ -998,6 +1000,7 @@ fn drc_pairs_are_reported_once_on_the_first_layer() {
         hole: None,
         net: Some(NetId(2)),
         clearance: None,
+        stack: Vec::new(),
     }];
     board.pads.push(Pad {
         shape: rect(300, -100, 400, 100),
@@ -1005,6 +1008,7 @@ fn drc_pairs_are_reported_once_on_the_first_layer() {
         hole: None,
         net: Some(NetId(2)),
         clearance: None,
+        stack: Vec::new(),
     });
     let found = drc::check(&board, &rules).unwrap();
     assert!(
@@ -1070,6 +1074,7 @@ fn drc_keepouts_by_kind_and_boundary() {
         hole: None,
         net: Some(NetId(2)),
         clearance: None,
+        stack: Vec::new(),
     }];
     board.vias = vec![
         v(1301, 500, 300, 600, Some(3)),
@@ -1099,6 +1104,7 @@ fn drc_mask_bridges_of_a_pads_opening() {
         hole: None,
         net: Some(NetId(1)),
         clearance: None,
+        stack: Vec::new(),
     }];
     // The pad's opening reaches 500 past it on top.
     board.masks = vec![drc::MaskOpening {
@@ -1147,6 +1153,7 @@ fn drc_mask_bridges_of_an_opening_of_no_net() {
         hole: None,
         net: net.map(NetId),
         clearance: None,
+        stack: Vec::new(),
     };
     // One net, and copper of none, bridge nothing alone.
     board.pads = vec![pad(1000, Some(1)), pad(3000, Some(1))];
@@ -1175,6 +1182,7 @@ fn drc_mask_bridges_of_an_opening_of_no_net() {
             hole: Some(circle(6000, 6000, 500)),
             net: None,
             clearance: None,
+            stack: Vec::new(),
         },
     ];
     assert_eq!(bridges(&board), [Item::Pad(0)]);
@@ -1191,6 +1199,7 @@ fn drc_pad_holes_and_arcs() {
             hole: Some(circle(0, 0, 600)),
             net: Some(NetId(1)),
             clearance: None,
+            stack: Vec::new(),
         },
         Pad {
             shape: circle(5000, 0, 1000),
@@ -1198,6 +1207,7 @@ fn drc_pad_holes_and_arcs() {
             hole: Some(track((5000, -100), (5000, 100), 400)),
             net: Some(NetId(2)),
             clearance: None,
+            stack: Vec::new(),
         },
     ];
     // A via 249 from the round hole, and an arc track around the slotted pad.
@@ -1378,6 +1388,7 @@ proptest! {
             hole: None,
             net: n.map(NetId),
             clearance: None,
+            stack: Vec::new(),
         }).collect();
         let found = drc::check(&board, &rules).unwrap();
         let pairs: Vec<Violation> = found
@@ -1816,6 +1827,7 @@ fn drc_zones_and_own_clearances() {
         hole: None,
         net: Some(NetId(net)),
         clearance,
+        stack: Vec::new(),
     };
     let mut board = Board::default();
     // Pads 160 apart: within the classes' 200, but a pad's own 100 replaces it, raised to
@@ -1895,6 +1907,7 @@ fn drc_hole_clearance() {
         hole: Some(circle(0, 0, 1000)),
         net: None,
         clearance: None,
+        stack: Vec::new(),
     }];
     // A via whose copper is 300 from that track, and its hole 500: both are allowed.
     board.vias = vec![v(5000, 0, 400, 800, Some(2))];
@@ -1951,6 +1964,7 @@ fn drc_reports_a_track_over_a_hole_with_no_hole_clearance() {
         hole: Some(circle(0, 0, 1000)),
         net: None,
         clearance: None,
+        stack: Vec::new(),
     }];
     // Touching the hole is allowed, and crossing it is not.
     board.tracks = vec![t((-2000, 600), (2000, 600), 200, 0, Some(1))];

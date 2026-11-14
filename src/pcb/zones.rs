@@ -279,13 +279,15 @@ fn fill_all(
         });
     }
     for (i, p) in board.pads.iter().enumerate() {
-        copper.push(Copper {
-            shape: p.shape.clone(),
-            layers: p.layers,
-            net: p.net,
-            own: p.clearance,
-            kind: Kind::Pad(i),
-        });
+        for (layers, shape) in p.parts() {
+            copper.push(Copper {
+                shape: shape.clone(),
+                layers,
+                net: p.net,
+                own: p.clearance,
+                kind: Kind::Pad(i),
+            });
+        }
         if let Some(h) = &p.hole {
             holes.push(Hole {
                 shape: h.clone(),
@@ -408,9 +410,11 @@ struct Ctx<'a> {
     starved: core::cell::RefCell<Vec<(usize, LayerId)>>,
 }
 
-/// A thermal relief to build: the pad, its gap and its spokes' width.
-struct Relief {
+/// A thermal relief to build: the pad, its shape on the layer, its gap and its spokes'
+/// width.
+struct Relief<'a> {
     pad: usize,
+    shape: &'a Shape,
     gap: i64,
     width: i64,
 }
@@ -504,7 +508,12 @@ impl Ctx<'_> {
                     ZoneConnection::Thermal => {
                         own.push(grow(&c.shape, gap.max(0))?);
                         if width > 0 {
-                            reliefs.push(Relief { pad: p, gap, width });
+                            reliefs.push(Relief {
+                                pad: p,
+                                shape: &c.shape,
+                                gap,
+                                width,
+                            });
                         }
                     }
                 }
@@ -741,9 +750,8 @@ impl Ctx<'_> {
     /// The spokes of a pad's thermal relief, four unless the zone says otherwise, each
     /// from just behind the pad's anchor out past its gap, with the point at its end that
     /// must be in the fill for it to be kept: KiCad's `buildThermalSpokes`.
-    fn spokes(&self, r: &Relief, zone: &CopperZone) -> Result<Vec<(Area, Point)>, GeomError> {
+    fn spokes(&self, r: &Relief<'_>, zone: &CopperZone) -> Result<Vec<(Area, Point)>, GeomError> {
         let min_width = zone.min_width;
-        let pad = &self.board.pads[r.pad];
         let own = self
             .design
             .zones
@@ -751,7 +759,7 @@ impl Ctx<'_> {
             .get(r.pad)
             .copied()
             .unwrap_or_default();
-        let b: Rect = pad.shape.bbox();
+        let b: Rect = r.shape.bbox();
         let anchor = own.anchor.unwrap_or_else(|| {
             Point::new(
                 b.min().x + (b.max().x - b.min().x) / 2,

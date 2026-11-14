@@ -8,7 +8,7 @@ use super::{
     CopperZone, Design, Fill, Islands, RouteOptions, Routed, ZoneConnection, fill_zones,
     unconnected,
 };
-use crate::geom::drc::{self, Keepout, Pad, Track, Violation};
+use crate::geom::drc::{self, Item, Keepout, Pad, Track, Via, Violation};
 use crate::geom::{LayerId, LayerSet, Point, Rect, Shape};
 use crate::id::NetId;
 
@@ -483,4 +483,138 @@ fn a_net_kept_to_an_inner_layer_leaves_its_pads_through_vias_in_them() {
     };
     let routed = route_checked(&d, &options);
     assert_eq!(routed.unrouted, [NetId(1)]);
+}
+
+/// A through-hole pad at the origin of a board of four layers: 1.6 mm on the top, 0.9 mm on
+/// the layers below, round a hole of 0.6 mm.
+fn stacked(net: u32) -> Pad {
+    let at = Point::new(0, 0);
+    Pad {
+        hole: Some(Shape::circle(at, 600_000).unwrap()),
+        stack: vec![(
+            LayerSet::span(LayerId(1), LayerId(3)),
+            Shape::circle(at, 900_000).unwrap(),
+        )],
+        ..Pad::new(
+            Shape::circle(at, 1_600_000).unwrap(),
+            LayerSet::EMPTY.with(LayerId(0)),
+            Some(NetId(net)),
+        )
+    }
+}
+
+#[test]
+fn the_check_takes_a_pad_s_stack_layer_by_layer_and_reports_the_pad_once() {
+    let mut d = design(4, vec![stacked(1)], 3);
+    assert_eq!(d.board.pads[0].copper_layers(), LayerSet::first(4));
+    // A track of another net 0.2 mm from the pad's copper below the top, which is inside
+    // its copper on the top.
+    let track = |layer: u8| Track {
+        start: Point::new(-3 * MM, 750_000),
+        end: Point::new(3 * MM, 750_000),
+        mid: None,
+        width: 200_000,
+        layer: LayerId(layer),
+        net: Some(NetId(2)),
+    };
+    d.board.tracks.push(track(1));
+    assert!(drc::check(&d.board, &d.rules).unwrap().is_empty());
+    d.board.tracks[0] = track(0);
+    let found = drc::check(&d.board, &d.rules).unwrap();
+    assert!(
+        matches!(
+            found[..],
+            [Violation::Short {
+                a: Item::Track(0),
+                b: Item::Pad(0),
+                layer: LayerId(0)
+            }]
+        ),
+        "{found:?}"
+    );
+    // A via through every layer, too close to each of the pad's shapes: reported once, on
+    // the first layer.
+    d.board.tracks.clear();
+    d.board.vias.push(Via {
+        at: Point::new(1_250_000, 0),
+        drill: 300_000,
+        diameter: 600_000,
+        from: LayerId(0),
+        to: LayerId(3),
+        net: Some(NetId(2)),
+    });
+    let found = drc::check(&d.board, &d.rules).unwrap();
+    let of_pad = |v: &&Violation| {
+        matches!(
+            v,
+            Violation::Clearance {
+                b: Item::Pad(0),
+                ..
+            } | Violation::Short {
+                b: Item::Pad(0),
+                ..
+            }
+        )
+    };
+    assert_eq!(found.iter().filter(of_pad).count(), 1, "{found:?}");
+    assert!(matches!(
+        found.iter().find(of_pad),
+        Some(Violation::Clearance {
+            layer: LayerId(0),
+            ..
+        })
+    ));
+}
+
+#[test]
+fn a_pad_s_stack_is_one_terminal_that_joins_its_layers() {
+    // The pad, a pad of its net on the bottom, and two pads of another net on the first
+    // inner layer, either side of it, on a line that only the smaller copper there leaves
+    // room for.
+    let on = |pad: Pad, layer: u8| Pad {
+        layers: LayerSet::EMPTY.with(LayerId(layer)),
+        ..pad
+    };
+    let d = design(
+        4,
+        vec![
+            stacked(1),
+            on(smd(5 * MM, 0, 1), 3),
+            on(smd(-3 * MM, 750_000, 2), 1),
+            on(smd(3 * MM, 750_000, 2), 1),
+        ],
+        3,
+    );
+    let routed = route_checked(&d, &RouteOptions::default());
+    assert!(routed.unrouted.is_empty());
+    // The pad's hole takes its net to the bottom: no via.
+    assert!(routed.vias.is_empty(), "{:?}", routed.vias);
+    assert!(tracks_on(&routed, 1, LayerSet::EMPTY.with(LayerId(3))));
+    // The other net goes straight by, under the pad's copper on the top.
+    assert!(tracks_on(&routed, 2, LayerSet::EMPTY.with(LayerId(1))));
+    assert!(length_of(&routed, 2) <= 6 * MM, "{}", length_of(&routed, 2));
+}
+
+#[test]
+fn a_zone_joins_a_pad_s_stack_by_its_copper_on_the_zone_s_layer() {
+    let mut pad = stacked(1);
+    let c = 5 * MM;
+    let at = Point::new(c, c);
+    pad.shape = Shape::circle(at, 1_600_000).unwrap();
+    pad.hole = Some(Shape::circle(at, 600_000).unwrap());
+    pad.stack[0].1 = Shape::circle(at, 900_000).unwrap();
+    let mut d = design(4, vec![pad], 2);
+    d.zones.zones.push(zone(1, 1, 10 * MM));
+    let fills = fill_zones(&d.board, &d).unwrap();
+    check_fills(&d, &d.board, &fills);
+    // Off the spokes: the gap of 0.4 mm is round the 0.9 mm of the inner layers, so the
+    // fill is back at 1 mm from the centre, where the gap round the top's copper would be.
+    let diagonal = |r: i64| c + r * 7071 / 10_000;
+    assert!(!filled(&fills, diagonal(650_000), diagonal(650_000)));
+    assert!(filled(&fills, diagonal(MM), diagonal(MM)));
+    // And the spokes start at that copper.
+    assert!(filled(&fills, c + 700_000, c));
+    d.zones.zones[0].layers = LayerSet::EMPTY.with(LayerId(0));
+    let fills = fill_zones(&d.board, &d).unwrap();
+    assert!(!filled(&fills, diagonal(MM), diagonal(MM)));
 }

@@ -275,6 +275,7 @@ fn changes(pcb: &str, pro: &str, read: &super::KicadBoard, d0: &Design, r0: &Rou
             hole: None,
             net: Some(net),
             clearance: None,
+            stack: Vec::new(),
         };
         let free = |p: Point| {
             let body = Rect::new(

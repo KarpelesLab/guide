@@ -72,6 +72,22 @@ pub(crate) fn pad_center(shape: &Shape) -> Option<Point> {
         .find(|&p| inside(p))
 }
 
+/// The layers a pad has copper on at `center`, a point of its shape: its shape's, and
+/// those of the shapes of its stack that hold the point.
+pub(crate) fn layers_at(pad: &crate::geom::drc::Pad, center: Point) -> LayerSet {
+    if pad.stack.is_empty() {
+        return pad.layers;
+    }
+    let dot = Shape::circle(center, 2);
+    pad.stack.iter().fold(pad.layers, |all, (layers, shape)| {
+        if dot.as_ref().is_ok_and(|d| shape.touches(d)) {
+            LayerSet(all.0 | layers.0)
+        } else {
+            all
+        }
+    })
+}
+
 /// Where routes of `net` end at a pad: its centre, or if fixed copper leaves no room for a
 /// track's end there, as with text drawn up to the pad, the point of a grid in the pad
 /// nearest the centre that has room, so that routes can still reach it.
@@ -145,7 +161,14 @@ pub(crate) fn terminals(design: &Design, net: NetId) -> Vec<Group> {
     for z in b.zones.iter().filter(|z| z.net == Some(net)) {
         shapes.push((z.shape.clone(), LayerSet::EMPTY.with(z.layer)));
     }
+    // The other shapes of pads' stacks, last, each one piece with its pad.
     let mut parent: Vec<usize> = (0..shapes.len()).collect();
+    for (k, &i) in pads.iter().enumerate() {
+        for (layers, shape) in &b.pads[i].stack {
+            parent.push(k);
+            shapes.push((shape.clone(), *layers));
+        }
+    }
     fn find(parent: &mut [usize], mut i: usize) -> usize {
         while parent[i] != i {
             parent[i] = parent[parent[i]];
@@ -237,7 +260,7 @@ fn jobs(
                 if let Some(center) = pad_center(&pad.shape)
                     && pad.layers.0 & rules.layers().0 != 0
                 {
-                    let on = LayerSet(pad.layers.0 & rules.layers().0);
+                    let on = LayerSet(layers_at(pad, center).0 & rules.layers().0);
                     let center = access_point(world, net, &pad.shape, center, on, &widths);
                     pads.push(TermPad {
                         center,
@@ -584,7 +607,7 @@ pub(crate) fn connectivity(
             .into_iter()
             .filter(|(pads, _)| {
                 pads.iter()
-                    .any(|&p| design.board.pads[p].layers.0 & design.rules.layers().0 != 0)
+                    .any(|&p| design.board.pads[p].copper_layers().0 & design.rules.layers().0 != 0)
             })
             .count();
         if groups < 2 {

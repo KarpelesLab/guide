@@ -811,6 +811,7 @@ impl Reader {
                         hole: None,
                         net,
                         clearance: None,
+                        stack: Vec::new(),
                     });
                     self.pads.push(PadSource {
                         component: index,

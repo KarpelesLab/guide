@@ -593,6 +593,7 @@ impl std::error::Error for RouteError {
 ///     hole: None,
 ///     net: Some(NetId(net)),
 ///     clearance: None,
+///     stack: Vec::new(),
 /// };
 /// let mut design = Design {
 ///     board: drc::Board::default(),

@@ -10,7 +10,8 @@ use crate::id::NetId;
 /// The nets with two pads or more that their copper doesn't all connect, in order.
 ///
 /// Copper of a net is connected where two of its items touch on a layer they share:
-/// pads, tracks, vias and zones. A pad's or a via's copper joins its layers. Arcs are
+/// pads, tracks, vias and zones. A pad's or a via's copper joins its layers, and so do the
+/// shapes of a pad's [stack](crate::geom::drc::Pad::stack). Arcs are
 /// taken as their approximations, which can only make them reach further.
 ///
 /// ```
@@ -26,6 +27,7 @@ use crate::id::NetId;
 ///     hole: None,
 ///     net: Some(NetId(1)),
 ///     clearance: None,
+///     stack: Vec::new(),
 /// };
 /// let mut board = Board::default();
 /// board.pads = vec![pad(0), pad(5000)];
@@ -49,6 +51,22 @@ pub fn unconnected(board: &Board, rules: &Rules) -> Vec<NetId> {
             let entry = items.entry(n).or_default();
             entry.0 += 1;
             entry.1.push((p.shape.clone(), p.layers));
+        }
+    }
+    // By net, the other shapes of its pads' stacks, each with its pad's position among the
+    // net's: they go after everything else, and are one piece with their pad.
+    let mut stacks: BTreeMap<NetId, Vec<(usize, Shape, LayerSet)>> = BTreeMap::new();
+    let mut count: BTreeMap<NetId, usize> = BTreeMap::new();
+    for p in &board.pads {
+        if let Some(n) = p.net {
+            let k = count.entry(n).or_default();
+            for (layers, shape) in &p.stack {
+                stacks
+                    .entry(n)
+                    .or_default()
+                    .push((*k, shape.clone(), *layers));
+            }
+            *k += 1;
         }
     }
     let mut add = |net: Option<NetId>, shape: Option<Shape>, layers: LayerSet| {
@@ -75,6 +93,15 @@ pub fn unconnected(board: &Board, rules: &Rules) -> Vec<NetId> {
     for z in &board.zones {
         add(z.net, Some(z.shape.clone()), LayerSet::EMPTY.with(z.layer));
     }
+    let mut joined: BTreeMap<NetId, Vec<(usize, usize)>> = BTreeMap::new();
+    for (net, parts) in stacks {
+        if let Some(entry) = items.get_mut(&net) {
+            for (pad, shape, layers) in parts {
+                joined.entry(net).or_default().push((pad, entry.1.len()));
+                entry.1.push((shape, layers));
+            }
+        }
+    }
     let stack = rules.layers();
     let mut out = Vec::new();
     let mut near = Vec::new();
@@ -84,6 +111,9 @@ pub fn unconnected(board: &Board, rules: &Rules) -> Vec<NetId> {
         }
         let index = SpatialIndex::bulk_load(list.iter().map(|(s, _)| s.bbox()));
         let mut parent: Vec<usize> = (0..list.len()).collect();
+        for &(pad, part) in joined.get(net).map_or(&[][..], Vec::as_slice) {
+            parent[part] = pad;
+        }
         fn find(parent: &mut [usize], mut i: usize) -> usize {
             while parent[i] != i {
                 parent[i] = parent[parent[i]];

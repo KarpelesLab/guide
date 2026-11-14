@@ -27,6 +27,7 @@ pub(super) fn smd(x: i64, y: i64, net: u32) -> Pad {
         hole: None,
         net: Some(NetId(net)),
         clearance: None,
+        stack: Vec::new(),
     }
 }
 
@@ -37,6 +38,7 @@ pub(super) fn through(x: i64, y: i64, net: u32, layers: usize) -> Pad {
         hole: Some(Shape::circle(Point::new(x, y), 600_000).unwrap()),
         net: Some(NetId(net)),
         clearance: None,
+        stack: Vec::new(),
     }
 }
 
@@ -275,6 +277,7 @@ fn through_hole_pads_connect_their_layers() {
         hole: None,
         net: Some(NetId(2)),
         clearance: None,
+        stack: Vec::new(),
     });
     let mut d = design(2, pads, 3);
     d.nets[2].route = false;

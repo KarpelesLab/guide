@@ -129,7 +129,9 @@ pub(crate) fn pieces(board: &Board, design: &Design, net: NetId, fills: &[Piece]
     let stack = design.rules.layers();
     let mut items: Vec<(Shape, LayerSet)> = Vec::new();
     let pads: Vec<usize> = (0..board.pads.len())
-        .filter(|&i| board.pads[i].net == Some(net) && board.pads[i].layers.0 & stack.0 != 0)
+        .filter(|&i| {
+            board.pads[i].net == Some(net) && board.pads[i].copper_layers().0 & stack.0 != 0
+        })
         .collect();
     for &p in &pads {
         items.push((board.pads[p].shape.clone(), board.pads[p].layers));
@@ -163,7 +165,14 @@ pub(crate) fn pieces(board: &Board, design: &Design, net: NetId, fills: &[Piece]
         items.push((z.shape.clone(), LayerSet::EMPTY.with(z.layer)));
         ends.push(Vec::new());
     }
+    // The other shapes of pads' stacks, last, each one piece with its pad.
     let mut parent: Vec<usize> = (0..items.len()).collect();
+    for (k, &p) in pads.iter().enumerate() {
+        for (layers, shape) in &board.pads[p].stack {
+            parent.push(k);
+            items.push((shape.clone(), *layers));
+        }
+    }
     let index = SpatialIndex::bulk_load(items.iter().map(|(s, _)| s.bbox()));
     let mut near = Vec::new();
     for i in 0..items.len() {
@@ -234,7 +243,7 @@ fn sources(
         if let Some(center) = pad_center(&pad.shape) {
             out.push(TermPad {
                 center,
-                layers: LayerSet(pad.layers.0 & stack.0),
+                layers: LayerSet(super::router::layers_at(pad, center).0 & stack.0),
                 bbox: pad.shape.bbox(),
                 terminal,
             });

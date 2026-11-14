@@ -47,7 +47,8 @@ pub struct Via {
     pub net: Option<NetId>,
 }
 
-/// A pad: copper of any shape, the same on each of its layers, maybe with a hole.
+/// A pad: copper of any shape, the same on each of its layers, maybe with a hole, and
+/// maybe with other shapes on other layers, a pad stack.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pad {
     /// The copper.
@@ -62,6 +63,42 @@ pub struct Pad {
     /// A clearance of the pad's own, which replaces the rules' between it and anything
     /// else. See [`clearance`] for how it combines with the other item's.
     pub clearance: Option<i64>,
+    /// Its copper where it is not [`shape`](Pad::shape): other shapes, each on some layers,
+    /// as the smaller ring of a through-hole pad on inner layers. Empty for a pad that is
+    /// the same on all its layers. All of it is one pad, of one net and one clearance: one
+    /// [item](Item::Pad) for the check, which reports it once whichever of its shapes breaks
+    /// a rule, and one piece of copper, joined from layer to layer through its hole, for
+    /// connectivity and routing, whose routes end at the centre of [`shape`](Pad::shape) on
+    /// the layers of every shape that holds that point.
+    pub stack: Vec<(LayerSet, Shape)>,
+}
+
+impl Pad {
+    /// A pad of one shape on its layers, with no hole and no clearance of its own.
+    pub fn new(shape: Shape, layers: LayerSet, net: Option<NetId>) -> Pad {
+        Pad {
+            shape,
+            layers,
+            hole: None,
+            net,
+            clearance: None,
+            stack: Vec::new(),
+        }
+    }
+
+    /// Every layer it has copper on: those of its [`shape`](Pad::shape) and of its
+    /// [`stack`](Pad::stack).
+    pub fn copper_layers(&self) -> LayerSet {
+        self.stack
+            .iter()
+            .fold(self.layers, |all, (layers, _)| LayerSet(all.0 | layers.0))
+    }
+
+    /// Its copper, shape by shape, each with its layers: [`shape`](Pad::shape) first.
+    pub fn parts(&self) -> impl Iterator<Item = (LayerSet, &Shape)> {
+        core::iter::once((self.layers, &self.shape))
+            .chain(self.stack.iter().map(|(layers, shape)| (*layers, shape)))
+    }
 }
 
 /// Copper filling an area of one layer, such as a piece of a zone's fill.
@@ -510,16 +547,18 @@ fn copper(board: &Board, stack: LayerSet) -> Result<Vec<Copper>, DrcError> {
     }
     for (i, p) in board.pads.iter().enumerate() {
         let item = Item::Pad(i);
-        if !p.layers.is_subset(stack) {
+        if !p.copper_layers().is_subset(stack) {
             return Err(DrcError::Layer { item });
         }
-        copper.push(Copper {
-            item,
-            shape: p.shape.clone(),
-            layers: p.layers,
-            net: p.net,
-            own: own_clearance(item, p.clearance)?,
-        });
+        for (layers, shape) in p.parts() {
+            copper.push(Copper {
+                item,
+                shape: shape.clone(),
+                layers,
+                net: p.net,
+                own: own_clearance(item, p.clearance)?,
+            });
+        }
     }
     for (i, z) in board.zones.iter().enumerate() {
         let item = Item::Zone(i);
@@ -606,6 +645,13 @@ fn copper_pairs(
 ) -> Result<BTreeSet<(Item, Item)>, DrcError> {
     // By pair, the first finding, which a short on a later layer replaces.
     let mut found: BTreeMap<(usize, usize), Violation> = BTreeMap::new();
+    // By position, the first position of its item, which a pad's shapes share.
+    let mut first: Vec<usize> = (0..copper.len()).collect();
+    for i in 1..copper.len() {
+        if copper[i].item == copper[i - 1].item {
+            first[i] = first[i - 1];
+        }
+    }
     let reach = copper
         .iter()
         .filter_map(|c| c.own)
@@ -619,10 +665,14 @@ fn copper_pairs(
             for id in &near {
                 let j = on[id.slot() as usize];
                 // Each pair once, from the lesser side. `copper` is in item order.
-                if (id.slot() as usize) <= k || same_net(a.net, copper[j].net) {
+                if (id.slot() as usize) <= k
+                    || same_net(a.net, copper[j].net)
+                    || first[i] == first[j]
+                {
                     continue;
                 }
-                if matches!(found.get(&(i, j)), Some(Violation::Short { .. })) {
+                let pair = (first[i], first[j]);
+                if matches!(found.get(&pair), Some(Violation::Short { .. })) {
                     continue;
                 }
                 let b = &copper[j];
@@ -639,16 +689,16 @@ fn copper_pairs(
                 }
                 if a.shape.touches(&b.shape) {
                     found.insert(
-                        (i, j),
+                        pair,
                         Violation::Short {
                             a: a.item,
                             b: b.item,
                             layer,
                         },
                     );
-                } else if violated && !found.contains_key(&(i, j)) {
+                } else if violated && !found.contains_key(&pair) {
                     found.insert(
-                        (i, j),
+                        pair,
                         Violation::Clearance {
                             a: a.item,
                             b: b.item,
@@ -852,7 +902,7 @@ fn mask_bridges(
         let mut inside: Vec<(Item, Option<NetId>)> = Vec::new();
         for i in bare {
             let c = &copper[i];
-            if bare_in(&c.shape, c.item, &m.shape, margin)? {
+            if bare_in(&c.shape, c.item, &m.shape, margin)? && !inside.contains(&(c.item, c.net)) {
                 inside.push((c.item, c.net));
             }
         }
@@ -862,7 +912,9 @@ fn mask_bridges(
         for h in found {
             let (i, hole) = holed[h];
             let pad = &board.pads[i];
-            if !pad.layers.contains(m.layer) && bare_in(hole, Item::Pad(i), &m.shape, margin)? {
+            if !pad.copper_layers().contains(m.layer)
+                && bare_in(hole, Item::Pad(i), &m.shape, margin)?
+            {
                 inside.push((Item::Pad(i), pad.net));
             }
         }

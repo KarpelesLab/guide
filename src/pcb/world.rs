@@ -200,14 +200,16 @@ impl<'r> World<'r> {
             );
         }
         for p in &board.pads {
-            world.add(
-                p.layers,
-                p.shape.clone(),
-                Meta {
-                    smd: p.hole.is_none(),
-                    ..fixed(Kind::Copper, p.net, p.clearance)
-                },
-            );
+            for (layers, shape) in p.parts() {
+                world.add(
+                    layers,
+                    shape.clone(),
+                    Meta {
+                        smd: p.hole.is_none(),
+                        ..fixed(Kind::Copper, p.net, p.clearance)
+                    },
+                );
+            }
             if let Some(hole) = &p.hole {
                 world.add(all, hole.clone(), fixed(Kind::Hole, p.net, p.clearance));
             }

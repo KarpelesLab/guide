@@ -18,6 +18,7 @@ fn pin(x: i64, y: i64, net: u32) -> Pad {
         hole: None,
         net: Some(NetId(net)),
         clearance: None,
+        stack: Vec::new(),
     }
 }
 

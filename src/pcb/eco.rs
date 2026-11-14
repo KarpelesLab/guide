@@ -403,6 +403,7 @@ const WIDEN: i64 = 2_000_000;
 ///     hole: None,
 ///     net: Some(NetId(net)),
 ///     clearance: None,
+///     stack: Vec::new(),
 /// };
 /// let mut design = Design {
 ///     board: drc::Board::default(),
@@ -745,6 +746,7 @@ mod tests {
             hole: None,
             net: Some(NetId(net)),
             clearance: None,
+            stack: Vec::new(),
         };
         let mut d = Design {
             board: drc::Board::default(),

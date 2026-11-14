@@ -407,6 +407,12 @@ pub struct RouteOptions {
     /// layer, over its length anywhere else, as a fraction of its length. The default is 1,
     /// twice the cost, so that routes cut planes in pieces only where they must.
     pub plane_cost: f64,
+    /// Whether a via may be in a pad that has no hole, or touch one, its own net's included.
+    /// The default is true. Without, as for boards whose vias are not filled and capped, a
+    /// pad that needs a via gets it beside it, at the end of a short track, a dog-bone: so do
+    /// the [escapes](self#how-it-routes) of fine-pitch footprints, and no route goes under a
+    /// pad for a via in it.
+    pub vias_in_pads: bool,
 }
 
 impl Default for RouteOptions {
@@ -428,6 +434,7 @@ impl Default for RouteOptions {
             max_amplitude: 3_000_000,
             planes: true,
             plane_cost: 1.0,
+            vias_in_pads: true,
         }
     }
 }
@@ -583,6 +590,8 @@ pub fn route(design: &Design, options: &RouteOptions) -> Result<Routed, RouteErr
     router::run(design, options)
 }
 
+#[cfg(test)]
+mod model_tests;
 #[cfg(test)]
 mod pair_tests;
 #[cfg(test)]

@@ -45,6 +45,9 @@ struct Meta {
     /// The clearance of its net on its layer, as [`Rules::clearance`] gives it, so that
     /// queries need not resolve it again.
     clearance: i64,
+    /// Whether it is the copper of a pad with no hole, which vias stay out of where
+    /// [`RouteOptions::vias_in_pads`](super::RouteOptions::vias_in_pads) is off.
+    smd: bool,
 }
 
 /// A handle on what one routed item added, to take it out again.
@@ -81,6 +84,8 @@ pub(crate) struct World<'r> {
     clearances: Vec<i64>,
     /// Where zones of nets are planes, which other nets' tracks pay more to cross.
     planes: Option<Planes>,
+    /// Whether a via may touch a pad with no hole.
+    vias_in_pads: bool,
 }
 
 /// Where the planes of nets are, by tile of a grid and layer, and what crossing another
@@ -128,6 +133,7 @@ impl<'r> World<'r> {
             locked: Vec::new(),
             clearances: Vec::new(),
             planes: None,
+            vias_in_pads: true,
         };
         let nets = board
             .pads
@@ -151,6 +157,7 @@ impl<'r> World<'r> {
             own,
             owner: Owner::Fixed,
             clearance: 0,
+            smd: false,
         };
         for t in &board.tracks {
             let shape = match t.mid {
@@ -179,7 +186,10 @@ impl<'r> World<'r> {
             world.add(
                 p.layers,
                 p.shape.clone(),
-                fixed(Kind::Copper, p.net, p.clearance),
+                Meta {
+                    smd: p.hole.is_none(),
+                    ..fixed(Kind::Copper, p.net, p.clearance)
+                },
             );
             if let Some(hole) = &p.hole {
                 world.add(all, hole.clone(), fixed(Kind::Hole, p.net, p.clearance));
@@ -232,6 +242,11 @@ impl<'r> World<'r> {
         net.and_then(|net| self.clearances.get(net.index() * n + usize::from(layer.0)))
             .copied()
             .unwrap_or_else(|| self.rules.clearance(net, layer))
+    }
+
+    /// What a run's options ask of every query: whether vias may be in pads.
+    pub(crate) fn configure(&mut self, options: &super::RouteOptions) {
+        self.vias_in_pads = options.vias_in_pads;
     }
 
     /// Sets where the planes are.
@@ -302,6 +317,7 @@ impl<'r> World<'r> {
             own: None,
             owner: Owner::Routed(net),
             clearance: 0,
+            smd: false,
         };
         self.add(LayerSet::EMPTY.with(layer), shape, meta)
     }
@@ -317,6 +333,7 @@ impl<'r> World<'r> {
             own: None,
             owner: Owner::Fixed,
             clearance: 0,
+            smd: false,
         };
         self.add(layers, shape, meta)
     }
@@ -333,6 +350,7 @@ impl<'r> World<'r> {
                 own: None,
                 owner,
                 clearance: 0,
+                smd: false,
             };
             let hole_meta = Meta {
                 kind: Kind::Hole,
@@ -476,9 +494,10 @@ impl<'r> World<'r> {
                 let other_net = !same_net(Some(net), meta.net);
                 let hit = match meta.kind {
                     Kind::Copper => {
-                        other_net
+                        (other_net
                             && (self.copper_hit(&copper, other, (net, ours), meta, layer)
-                                || self.hole_hit(other, &hole, None, meta.own))
+                                || self.hole_hit(other, &hole, None, meta.own)))
+                            || (!self.vias_in_pads && meta.smd && copper.touches(other))
                     }
                     // Holes go through every layer, so the first one is enough.
                     Kind::Hole if l == 0 => {

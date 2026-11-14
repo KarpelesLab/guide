@@ -484,6 +484,7 @@ pub(crate) fn run(design: &Design, options: &RouteOptions) -> Result<Routed, Rou
                     &design.obstacles,
                 )
                 .map_err(RouteError::Geometry)?;
+                world.configure(options);
                 let mut joined = Joined {
                     tracks: &mut routed.tracks,
                     vias: &mut routed.vias,
@@ -705,14 +706,16 @@ fn route_all(design: &Design, options: &RouteOptions) -> Result<Routed, RouteErr
     let original = design;
     let rules = &design.rules;
     let world_of = |design: &Design| {
-        World::new(
+        let mut world = World::new(
             &design.board,
             rules,
             &design.outline,
             design.edge_clearance,
             &design.obstacles,
         )
-        .map_err(RouteError::Geometry)
+        .map_err(RouteError::Geometry)?;
+        world.configure(options);
+        Ok::<_, RouteError>(world)
     };
 
     let pitch = pitch(design, options);
@@ -957,7 +960,7 @@ fn route_all(design: &Design, options: &RouteOptions) -> Result<Routed, RouteErr
             }
             Params {
                 pitch: (pitch / FINE).max(1000),
-                under_pads: true,
+                under_pads: options.vias_in_pads,
                 ..params
             }
         };

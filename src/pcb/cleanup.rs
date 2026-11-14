@@ -11,6 +11,17 @@ use crate::geom::{LayerId, Point, Shape};
 /// How much dearer vias are when a net is rerouted to lose some.
 pub(crate) const VIA_COST_FACTOR: f64 = 10.0;
 
+/// How many nodes the search for a net's route with fewer vias may expand, for each of its
+/// connections: with vias that dear, a search goes everywhere a longer way round might be
+/// before it takes one, and a net that needs its vias would cost many times what routing it
+/// did to find that out.
+const NODES_PER_CONNECTION: u64 = 20_000;
+
+/// How many connections at most the search for a net's route with fewer vias has
+/// [`NODES_PER_CONNECTION`] for: a net of more has the vias of its many pads, and few to
+/// lose.
+const CONNECTIONS: u64 = 16;
+
 /// Cleans up every routed net, and returns the nodes its searches expanded.
 pub(crate) fn run(
     world: &mut World<'_>,
@@ -55,6 +66,9 @@ fn fewer_vias(
     c.unplace(world);
     let p = Params {
         via_cost: options.via_cost * VIA_COST_FACTOR,
+        max_expansions: params
+            .max_expansions
+            .min(NODES_PER_CONNECTION * (job.ctx.terminals as u64 - 1).clamp(1, CONNECTIONS)),
         ..params
     };
     let mut expanded = 0;
@@ -74,7 +88,13 @@ fn fewer_vias(
                 found = Some(t);
                 break;
             }
-            Err((_, e)) => expanded += e,
+            Err((f, e)) => {
+                expanded += e;
+                // A search that runs out of nodes in the corridor would over the board too.
+                if f == detail::Failure::Budget {
+                    break;
+                }
+            }
         }
     }
     if let Some(t) = found {

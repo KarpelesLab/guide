@@ -47,8 +47,13 @@ options and its `--help`. Commands follow one pattern, `guide <domain> <action> 
 `--threads`, `--time-limit`, `-q`, `-v`) and the same exit status: 0 for a complete and legal
 result, 1 for an incomplete or illegal one, 2 for an error. The time limit is the engine's
 cancel flag set from a timer thread, so it stops negotiated-congestion routing (FPGA routing,
-multi-agent path finding) with the best result so far; PCB routing, the placers and ASIC routing
-have no cancel flag, and are bounded by iteration or expansion limits instead. There is no
+multi-agent path finding) with the best result so far. PCB routing takes a deadline, a cancel
+flag and a progress callback through `pcb::RunControl`, and a work budget in search nodes
+through `RouteOptions::work_budget`, which is the reproducible one: its searches run on one
+thread, so the run itself looks at the clock every thousand nodes and there is no timer
+thread. Stopped by any of them, it returns what it has routed, with the connections left open
+listed. The placers and ASIC routing have no cancel flag, and are bounded by iteration or
+expansion limits instead. There is no
 signal handler, since std has none, so Ctrl-C ends a run without writing anything.
 
 The examples in `examples/` stay what they were: research harnesses with every tuning knob,

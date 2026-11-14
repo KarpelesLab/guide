@@ -468,9 +468,13 @@ the first routing on the small boards.
   `pcb route|place|flow|drc`, `dsn route` (a drop-in for Freerouting in KiCad's DSN workflow),
   `mapf solve` and `asic route|score`, each with `--help`, a JSON report, one meaning for exit
   statuses, and a time limit where the engine can be cancelled
-  ([README](README.md#command-line-tool)). Left: a time limit or cancellation for PCB routing,
-  the placers and ASIC routing, which have no cancel flag yet; Ctrl-C handling, which needs a
-  signal handler std doesn't have; and progress within a run, not only between its phases.
+  ([README](README.md#command-line-tool)). PCB routing has its own: `pcb::route_with` takes a
+  deadline, a cancel flag and a progress callback, `RouteOptions::work_budget` bounds a run
+  reproducibly, and a run stopped by any of them returns what it has routed, with each
+  connection left open and its cause (`pcb route` and `dsn route` take `--time-limit`,
+  `--work-budget` and `--seed`). Left: a time limit or cancellation for the placers, the PCB
+  flow and ASIC routing, which have no cancel flag yet; Ctrl-C handling, which needs a signal
+  handler std doesn't have; and progress within a run for the other domains.
 - API review and stabilization. **Started:** the [review](docs/api-review.md) of all 405 public
   items, with the consistent fixes made (option and result types `#[non_exhaustive]`, `# Errors`
   and `# Panics` everywhere, `missing_docs` denied, examples per domain, the feature each item

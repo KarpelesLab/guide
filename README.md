@@ -59,10 +59,14 @@ cargo install guide --features cli
 Every command takes `--help`, `--json FILE` for a machine-readable report (`-` for standard
 output), `-q` and `-v`; those that use them take `--seed`, `--threads` (`-j`) and
 `--time-limit SECONDS`, after which routing stops with the best result so far. Results are the
-same for any thread count. The exit status is 0 for a complete and legal result, 1 for an
-incomplete or illegal one (nets unrouted, overuse, violations), and 2 for a wrong command line
-or an input that can't be read. There is no signal handler, so Ctrl-C ends a run at once,
-without writing anything: use `--time-limit` to stop early and keep the result.
+same for any thread count. PCB routing uses one thread, so `pcb route` and `dsn route` take no
+`--threads`; they take `--seed` (another order of the nets, for a second attempt),
+`--time-limit`, and `--work-budget N`, a number of search nodes for the whole run, which stops
+it as a time limit does but gives the same result on any machine. The exit status is 0 for a
+complete and legal result, 1 for an incomplete or illegal one (nets unrouted, overuse,
+violations), and 2 for a wrong command line or an input that can't be read. There is no signal
+handler, so Ctrl-C ends a run at once, without writing anything: use `--time-limit` to stop
+early and keep the result.
 
 ## Why one engine?
 

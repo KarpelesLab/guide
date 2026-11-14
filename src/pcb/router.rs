@@ -43,6 +43,20 @@ const PAIR_RIP_UPS: u32 = 4;
 /// lattice.
 const FINE_RIP_BUDGET: u64 = 4;
 
+/// How many terminals a net has at least for rip-up, in the passes on the finer lattice, to
+/// take out only its branches in the way of the net that crosses it, and join it up again
+/// from what is left. A net of fewer is taken out whole and routed again from nothing,
+/// which finds it another way altogether where it is in the way again and again; a net of
+/// very many pads, a supply or a ground routed as tracks, has most of its tree nowhere
+/// near what crosses it, and routing all of it again costs many times the nets it makes
+/// room for. In the first pass every net is taken out whole: that is cheap there, and has
+/// the nets that crossed it routed before it comes back. At 8 terminals, a board of two
+/// layers lost its ground net of 24 pads, taken out more often and then with no way back.
+const BRANCH_TERMINALS: usize = 32;
+
+/// How many times in a pass a net may lose branches only, before it is taken out whole.
+const BRANCH_CUTS: u32 = 8;
+
 /// How much finer the lattice of the second pass is.
 const FINE: i64 = 2;
 
@@ -1127,6 +1141,8 @@ fn route_all<'a>(
     // Detailed routing, with rip-up.
     let mut copper: Vec<Option<NetCopper>> = vec![None; jobs.len()];
     let mut ripped = vec![0u32; jobs.len()];
+    // By job, how many times it lost branches only, in this pass.
+    let mut cuts = vec![0u32; jobs.len()];
     let mut queue: VecDeque<usize> = (0..jobs.len()).collect();
     let by_net: BTreeMap<NetId, usize> = jobs
         .iter()
@@ -1134,22 +1150,26 @@ fn route_all<'a>(
         .map(|(i, j)| (j.ctx.net, i))
         .collect();
     let mut outside = vec![false; jobs.len()];
-    // By job, the terminals its partial route left out.
+    // By job, the terminals its partial route left out, which are those its copper doesn't
+    // join to its first, and how many connections it still needs: the pieces its copper
+    // leaves its terminals in, less one.
     let mut missing: Vec<Vec<usize>> = vec![Vec::new(); jobs.len()];
+    let mut apart: Vec<usize> = vec![0; jobs.len()];
     // By job, for a net routed in part that a later pass completes, the net with its copper
     // so far as its first terminal and the terminals left out as the others.
     let mut completing: Vec<Option<NetCtx>> = vec![None; jobs.len()];
     // By job, how its last search that failed ended, if it is not routed whole since.
     let mut failed: Vec<Option<Failure>> = vec![None; jobs.len()];
     // What the progress hears of: nets with a route, connections made, nets waiting.
-    let tell = |copper: &[Option<NetCopper>], missing: &[Vec<usize>], queued: usize| {
-        let (mut nets, mut made) = (0, 0);
-        for (j, _) in copper.iter().enumerate().filter(|(_, c)| c.is_some()) {
-            nets += usize::from(missing[j].is_empty());
-            made += jobs[j].ctx.terminals - 1 - missing[j].len();
-        }
-        run.counts(nets, made, queued);
-    };
+    let tell =
+        |copper: &[Option<NetCopper>], missing: &[Vec<usize>], apart: &[usize], queued: usize| {
+            let (mut nets, mut made) = (0, 0);
+            for (j, _) in copper.iter().enumerate().filter(|(_, c)| c.is_some()) {
+                nets += usize::from(missing[j].is_empty());
+                made += jobs[j].ctx.terminals - 1 - apart[j];
+            }
+            run.counts(nets, made, queued);
+        };
     // A second pass, on a finer lattice, for the nets the first leaves unrouted, or routed in
     // part, with every net that can be ripped up again.
     'passes: for pass in 0..=FINE_PASSES {
@@ -1174,13 +1194,14 @@ fn route_all<'a>(
             run.phase(Phase::Fine);
             for &j in &unfinished {
                 if let Some(c) = &copper[j] {
-                    completing[j] = Some(completion(design, &jobs[j].ctx, c, &missing[j], pitch));
+                    completing[j] = Some(completion(design, &jobs[j].ctx, c, pitch));
                 }
             }
             queue.extend(left);
             queue.extend(unfinished);
             for (j, job) in jobs.iter().enumerate() {
                 ripped[j] = 0;
+                cuts[j] = 0;
                 world.set_locked(job.ctx.net, false);
             }
             // Pairs routed first may be moved, but those that found no way after being
@@ -1195,9 +1216,14 @@ fn route_all<'a>(
             }
         };
         while let Some(j) = queue.pop_front() {
-            tell(&copper, &missing, queue.len() + 1);
+            tell(&copper, &missing, &apart, queue.len() + 1);
             if run.poll() {
                 break 'passes;
+            }
+            // A net that was cut more than once since its last turn waits more than once,
+            // and is whole again after the first.
+            if copper[j].is_some() && completing[j].is_none() {
+                continue;
             }
             let job = &jobs[j];
             // A net routed in part is completed from its copper, if it still has it.
@@ -1316,6 +1342,8 @@ fn route_all<'a>(
             stats.expanded += grown.expanded;
             let tree = done.then_some(grown);
             let mut displaced: Vec<usize> = Vec::new();
+            // The nets this one's route runs into, with the copper they had.
+            let mut cut: Vec<(usize, NetCopper)> = Vec::new();
             if let Some(t) = tree.as_ref().filter(|_| crossed) {
                 let (victims, at) = detail::victims(&world, ctx, t);
                 for p in at {
@@ -1338,12 +1366,25 @@ fn route_all<'a>(
                         c.unplace(&mut world);
                         completing[k] = None;
                         failed[k] = None;
-                        ripped[k] += 1;
                         stats.rip_ups += 1;
-                        if ripped[k] >= options.rip_ups {
-                            world.set_locked(v, true);
-                        }
                         queue.push_back(k);
+                        // A net of many pads loses only its branches in the way, a few
+                        // times, before it is taken out whole as any other: a branch
+                        // makes room for one net, and the whole of it for all those that
+                        // wait, which go before it comes back.
+                        if pass > 0
+                            && jobs[k].ctx.terminals >= BRANCH_TERMINALS
+                            && !plane_net(v)
+                            && cuts[k] < BRANCH_CUTS
+                        {
+                            cuts[k] += 1;
+                            cut.push((k, c));
+                        } else {
+                            ripped[k] += 1;
+                            if ripped[k] >= options.rip_ups {
+                                world.set_locked(v, true);
+                            }
+                        }
                     }
                 }
             }
@@ -1370,17 +1411,38 @@ fn route_all<'a>(
                         }
                         old.merge(&job.ctx);
                         c = old;
-                        missing[j] = t.missing.iter().map(|&k| missing[j][k - 1]).collect();
+                        let pieces = c.pieces(&job.ctx);
+                        debug_assert_eq!(pieces.apart(), t.missing.len());
+                        missing[j] = pieces.missing();
+                        apart[j] = pieces.apart();
                     }
                     (_, old) => {
                         if let Some(mut old) = old {
                             old.unplace(&mut world);
                         }
                         missing[j] = t.missing.clone();
+                        apart[j] = t.missing.len();
                     }
                 }
                 c.place(&mut world, &job.ctx);
                 copper[j] = Some(c);
+            }
+            // A net in the way loses only what is in the way: the rest of its copper goes
+            // back, in the pieces that leaves it in, and it is joined up again from them
+            // when its turn comes, instead of being routed again from nothing.
+            for (k, old) in cut {
+                let ctx = &jobs[k].ctx;
+                let mut kept = old.free_in(&world, ctx, params.pitch);
+                kept.prune(ctx);
+                if kept.is_empty() {
+                    continue;
+                }
+                kept.place(&mut world, ctx);
+                let pieces = kept.pieces(ctx);
+                missing[k] = pieces.missing();
+                apart[k] = pieces.apart();
+                completing[k] = Some(completion(design, ctx, &kept, pitch));
+                copper[k] = Some(kept);
             }
             // The pairs this net moved are routed again side by side around it, moving
             // other nets in their way in turn, but not pairs, nor this net. A pair that finds
@@ -1486,7 +1548,7 @@ fn route_all<'a>(
         .filter(|&j| outside[j] && copper[j].is_some())
         .count();
 
-    tell(&copper, &missing, 0);
+    tell(&copper, &missing, &apart, 0);
     // The escapes and pairs of nets routed are part of their routes.
     let kept = |net: Option<NetId>| net.is_some_and(|n| dropped.binary_search(&n).is_err());
     let mut tracks: Vec<Track> = escapes
@@ -1520,6 +1582,14 @@ fn route_all<'a>(
                 (v + c.vias.len(), l + c.length())
             })
     };
+    // The ends that rip-up left leading nowhere go, before anything is measured.
+    for (job, c) in jobs.iter().zip(copper.iter_mut()) {
+        if let Some(c) = c {
+            c.unplace(&mut world);
+            c.prune(&job.ctx);
+            c.place(&mut world, &job.ctx);
+        }
+    }
     stats.before_cleanup = measure(&copper);
     // A run that has to stop keeps the routes as they are.
     if options.cleanup && !run.poll() {
@@ -1560,7 +1630,7 @@ fn route_all<'a>(
         .count();
     stats.connected = (0..jobs.len())
         .filter(|&j| copper[j].is_some())
-        .map(|j| jobs[j].ctx.terminals - 1 - missing[j].len())
+        .map(|j| jobs[j].ctx.terminals - 1 - apart[j])
         .sum();
     // Nets that pairs routed first connect whole have no job, but count.
     for &net in &pair_nets {
@@ -1761,56 +1831,45 @@ impl PairsFirst {
     }
 }
 
-/// A net routed in part, `missing` the terminals it left out, as a net to complete: its
-/// copper and the terminals it reached are its first terminal, and those it left out the
-/// others, in order.
-fn completion(
-    design: &Design,
-    ctx: &NetCtx,
-    copper: &NetCopper,
-    missing: &[usize],
-    pitch: i64,
-) -> NetCtx {
+/// A net routed in part as a net to complete: each of the pieces its copper leaves it in
+/// is a terminal, the first terminal's the first, with the pads of the terminals in it and
+/// the ends of its tracks and its vias as the places where routes may join it.
+fn completion(design: &Design, ctx: &NetCtx, copper: &NetCopper, pitch: i64) -> NetCtx {
+    let pieces = copper.pieces(ctx);
+    // The pieces with a terminal are numbered first, and are the terminals to join.
+    let terminals = pieces.terminals.iter().copied().max().map_or(1, |m| m + 1);
     let mut pads: Vec<TermPad> = ctx
         .pads
         .iter()
-        .filter(|p| !missing.contains(&p.terminal))
         .map(|p| TermPad {
-            terminal: 0,
+            terminal: pieces.terminals[p.terminal],
             ..p.clone()
         })
         .collect();
-    let point = |at: Point, layers: LayerSet| TermPad {
+    let point = |at: Point, layers: LayerSet, terminal: usize| TermPad {
         center: at,
         layers,
         bbox: Rect::new(at, at),
-        terminal: 0,
+        terminal,
     };
-    for s in &copper.segs {
-        let on = LayerSet::EMPTY.with(LayerId(s.l));
-        pads.push(point(s.a, on));
-        pads.push(point(s.b, on));
+    for (s, &piece) in copper.segs.iter().zip(&pieces.segs) {
+        if piece < terminals {
+            let on = LayerSet::EMPTY.with(LayerId(s.l));
+            pads.push(point(s.a, on, piece));
+            pads.push(point(s.b, on, piece));
+        }
     }
-    for &v in &copper.vias {
-        pads.push(point(v, design.rules.layers()));
-    }
-    for (k, &t) in missing.iter().enumerate() {
-        pads.extend(
-            ctx.pads
-                .iter()
-                .filter(|p| p.terminal == t)
-                .map(|p| TermPad {
-                    terminal: k + 1,
-                    ..p.clone()
-                }),
-        );
+    for (&v, &piece) in copper.vias.iter().zip(&pieces.vias) {
+        if piece < terminals {
+            pads.push(point(v, design.rules.layers(), piece));
+        }
     }
     NetCtx::new(
         ctx.net,
         ctx.widths.clone(),
         ctx.via,
         pads,
-        missing.len() + 1,
+        terminals,
         LATTICE_REACH * pitch,
     )
 }

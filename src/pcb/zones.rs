@@ -244,7 +244,18 @@ fn same_net(a: Option<NetId>, b: Option<NetId>) -> bool {
 ///
 /// [`GeomError`] if a zone's outline, or an item of the board, has invalid geometry.
 pub fn fill_zones(board: &Board, design: &Design) -> Result<Vec<Fill>, GeomError> {
-    Ok(fill_all(board, design)?.0)
+    Ok(fill_all(board, design, &|| false)?.0)
+}
+
+/// As [`fill_zones`], but gives up, with `None`, once `stop` says so: it is asked before
+/// each layer of each zone.
+pub(crate) fn fill_zones_until(
+    board: &Board,
+    design: &Design,
+    stop: &dyn Fn() -> bool,
+) -> Result<Option<Vec<Fill>>, GeomError> {
+    let (fills, _) = fill_all(board, design, stop)?;
+    Ok((!stop()).then_some(fills))
 }
 
 /// The thermal reliefs that the zones' fills, filled as [`fill_zones`] fills them, join to
@@ -256,7 +267,7 @@ pub(crate) fn starved_reliefs(
     board: &Board,
     design: &Design,
 ) -> Result<Vec<(usize, LayerId)>, GeomError> {
-    Ok(fill_all(board, design)?.1)
+    Ok(fill_all(board, design, &|| false)?.1)
 }
 
 /// The fills, and the reliefs of a single spoke.
@@ -264,6 +275,7 @@ pub(crate) fn starved_reliefs(
 fn fill_all(
     board: &Board,
     design: &Design,
+    stop: &dyn Fn() -> bool,
 ) -> Result<(Vec<Fill>, Vec<(usize, LayerId)>), GeomError> {
     let zones = &design.zones.zones;
     if zones.is_empty() {
@@ -361,6 +373,9 @@ fn fill_all(
         starved: core::cell::RefCell::new(Vec::new()),
     };
     for z in order {
+        if stop() {
+            break;
+        }
         let zone = &zones[z];
         if design.zones.fills.iter().any(|f| f.zone == z) {
             for layer in LayerSet(zone.layers.0 & stack.0).iter() {
@@ -397,6 +412,9 @@ fn fill_all(
             continue;
         }
         for layer in LayerSet(zone.layers.0 & stack.0).iter() {
+            if stop() {
+                break;
+            }
             let fill = ctx.fill(z, layer, &outline, &done)?;
             for shape in fill.shapes() {
                 out.push(Fill {

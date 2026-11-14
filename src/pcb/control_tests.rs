@@ -490,3 +490,37 @@ fn a_stopped_run_keeps_the_most_connections_it_had() {
         most = r.stats.connected;
     }
 }
+
+#[test]
+fn a_run_stopped_by_its_flag_fills_its_zones_unless_told_not_to() {
+    let d = super::zone_tests::plane_board();
+    let cancel = AtomicBool::new(true);
+    let control = RunControl {
+        cancel: Some(&cancel),
+        ..RunControl::default()
+    };
+    let filled = route_with(&d, &RouteOptions::default(), &control).unwrap();
+    assert_eq!(filled.stopped, Some(Stopped::Cancelled));
+    assert!(!filled.fills.is_empty());
+
+    let control = RunControl {
+        fill_on_stop: false,
+        ..control
+    };
+    let bare = route_with(&d, &RouteOptions::default(), &control).unwrap();
+    check(&d, &bare);
+    assert_eq!(bare.stopped, Some(Stopped::Cancelled));
+    assert!(bare.fills.is_empty());
+    // A run that is not stopped fills them, whatever it was told, and so does one that
+    // its work budget stops.
+    cancel.store(false, Ordering::Relaxed);
+    let whole = route_with(&d, &RouteOptions::default(), &control).unwrap();
+    assert!(whole.stopped.is_none() && !whole.fills.is_empty());
+    let options = RouteOptions {
+        work_budget: Some(0),
+        ..RouteOptions::default()
+    };
+    let spent = route_with(&d, &options, &control).unwrap();
+    assert_eq!(spent.stopped, Some(Stopped::WorkBudget));
+    assert!(!spent.fills.is_empty());
+}

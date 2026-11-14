@@ -723,7 +723,13 @@ fn join_planes(
         // A run that has to stop leaves the pieces as they are.
         let stopped = world.run().is_some_and(Run::poll);
         let board = with_routes(design, out.tracks, out.vias);
-        let all = zones::fill_zones(&board, &keeping).map_err(RouteError::Geometry)?;
+        let no_fill = || world.run().is_some_and(Run::no_fill);
+        // A fill given up half way joins nothing: the pieces are as they were.
+        let Some(all) =
+            zones::fill_zones_until(&board, &keeping, &no_fill).map_err(RouteError::Geometry)?
+        else {
+            break;
+        };
         let mut added = false;
         let mut left = Vec::new();
         for (net, pieces) in planes::pieces_by_net(design, &all) {
@@ -1741,10 +1747,12 @@ fn route_all<'a>(
         )?;
     }
     let mut fills = Vec::new();
-    if !original.zones.zones.is_empty() {
+    if !original.zones.zones.is_empty() && !run.no_fill() {
         run.phase(Phase::Zones);
         let board = with_routes(original, &tracks, &vias);
-        fills = zones::fill_zones(&board, original).map_err(RouteError::Geometry)?;
+        fills = zones::fill_zones_until(&board, original, &|| run.no_fill())
+            .map_err(RouteError::Geometry)?
+            .unwrap_or_default();
     }
     let failed = jobs
         .iter()

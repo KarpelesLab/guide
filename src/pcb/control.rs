@@ -134,6 +134,16 @@ pub struct RunControl<'a> {
     /// The shortest time between two calls of [`progress`](RunControl::progress) within a
     /// phase. The default is 100 ms.
     pub progress_interval: Duration,
+    /// Whether a run stopped by its deadline or its flag still fills the zones around what
+    /// it has routed. The default is true. Filling large zones takes seconds, tens of them
+    /// on a large board, and runs to its end, so a host that fills zones itself, or that
+    /// needs the run back within a second of its deadline, sets this to false: such a run
+    /// then has no [fills](super::Routed::fills), gives up a fill it is in the middle of,
+    /// and counts its connections on its tracks and vias alone, so that nets joined
+    /// through their zones are among its [`unrouted`](super::Routed::unrouted). A run
+    /// stopped by its work budget fills its zones in any case, as its result is the same
+    /// on any machine.
+    pub fill_on_stop: bool,
 }
 
 impl Default for RunControl<'_> {
@@ -143,6 +153,7 @@ impl Default for RunControl<'_> {
             deadline: None,
             progress: None,
             progress_interval: Duration::from_millis(100),
+            fill_on_stop: true,
         }
     }
 }
@@ -154,6 +165,7 @@ impl fmt::Debug for RunControl<'_> {
             .field("deadline", &self.deadline)
             .field("progress", &self.progress.map(|_| "Fn"))
             .field("progress_interval", &self.progress_interval)
+            .field("fill_on_stop", &self.fill_on_stop)
             .finish()
     }
 }
@@ -209,6 +221,14 @@ impl<'a> Run<'a> {
     /// [`poll`](Run::poll).
     pub(crate) fn stopped(&self) -> Option<Stopped> {
         self.why.get()
+    }
+
+    /// Whether zones are not to be filled any more: the run was stopped by the clock or
+    /// the caller's flag, and the caller asked for no fill then. Looks at both.
+    pub(crate) fn no_fill(&self) -> bool {
+        !self.control.fill_on_stop
+            && self.poll()
+            && matches!(self.why.get(), Some(Stopped::Deadline | Stopped::Cancelled))
     }
 
     /// The flag that is set once the run has to stop, for what takes a flag of its own,

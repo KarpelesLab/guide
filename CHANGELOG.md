@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.4](https://github.com/KarpelesLab/guide/compare/v0.0.3...v0.0.4) - 2026-11-14
+
+### Added
+
+- *(pcb)* RouteOptions::fanout_via, a smaller via for the escapes of trapped pads
+- *(pcb)* RouteOptions::fills, for a host that fills its zones itself
+
+### Fixed
+
+- *(pcb)* a net with a plane is taken out whole in a run with no budget, in every pass
+- *(pcb)* only a narrow zone of a net of few pads is a pour
+- *(pcb)* a pour between a few pads is copper, not a plane to cut through
+
+### Other
+
+- PCB routing with a budget, measured, and what was not kept
+- *(pcb)* what route_all returns has a name
+- *(pcb)* a run with a budget routes for the most connections soonest
+- *(pcb)* a host's fill of many edges is measured to by its parts
+
 ## [0.0.3](https://github.com/KarpelesLab/guide/compare/v0.0.2...v0.0.3) - 2026-11-14
 
 ### Added

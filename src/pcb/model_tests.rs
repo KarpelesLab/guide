@@ -2,14 +2,14 @@
 //! filled by the host, zones that are planes or not, keepouts' exceptions, layers, pad
 //! stacks, net ties and rules by area.
 
-use super::tests::{MM, design, route_checked, smd};
+use super::tests::{MM, design, outline, route_checked, smd};
 use super::zone_tests::{check_fills, plane_board, zone};
 use super::{
     CopperZone, Design, Fill, Islands, RouteOptions, Routed, ZoneConnection, fill_zones,
     unconnected,
 };
-use crate::geom::drc::{self, Pad, Track};
-use crate::geom::{LayerId, LayerSet, Point, Shape};
+use crate::geom::drc::{self, Keepout, Pad, Track, Violation};
+use crate::geom::{LayerId, LayerSet, Point, Rect, Shape};
 use crate::id::NetId;
 
 /// The vias of a result that touch a pad with no hole.
@@ -361,4 +361,57 @@ fn zones_are_planes_by_how_much_of_their_nets_they_cover() {
     let routed = route_checked(&d, &options);
     assert_eq!(routed.unrouted, [NetId(1)]);
     assert!(length_of(&routed, 3) > 29 * MM);
+}
+
+#[test]
+fn a_keepout_lets_the_nets_it_excepts_through() {
+    // Two nets side by side, and a keepout from edge to edge of the board between their
+    // pads, which excepts the first.
+    let mut d = design(
+        1,
+        vec![
+            smd(0, 0, 1),
+            smd(10 * MM, 0, 1),
+            smd(0, 2 * MM, 2),
+            smd(10 * MM, 2 * MM, 2),
+        ],
+        3,
+    );
+    d.outline = outline(Rect::new(
+        Point::new(-2 * MM, -2 * MM),
+        Point::new(12 * MM, 4 * MM),
+    ));
+    d.board.keepouts.push(Keepout {
+        shape: Shape::rect(Rect::new(
+            Point::new(4 * MM, -3 * MM),
+            Point::new(6 * MM, 5 * MM),
+        ))
+        .unwrap(),
+        layers: LayerSet::first(1),
+        tracks: true,
+        vias: true,
+        pads: false,
+        except: vec![NetId(1)],
+    });
+    let routed = route_checked(&d, &RouteOptions::default());
+    assert_eq!(routed.unrouted, [NetId(2)]);
+    assert!(length_of(&routed, 1) >= 10 * MM - 1);
+
+    // The check lets the excepted net's track be, and reports the same track of another.
+    let mut board = routed.board(&d);
+    assert!(drc::check(&board, &d.rules).unwrap().is_empty());
+    for t in &mut board.tracks {
+        t.net = Some(NetId(3));
+    }
+    let found = drc::check(&board, &d.rules).unwrap();
+    assert!(
+        found
+            .iter()
+            .any(|v| matches!(v, Violation::Keepout { keepout: 0, .. })),
+        "{found:?}"
+    );
+    // With no exception, neither net is routed.
+    d.board.keepouts[0].except.clear();
+    let routed = route_checked(&d, &RouteOptions::default());
+    assert_eq!(routed.unrouted, [NetId(1), NetId(2)]);
 }

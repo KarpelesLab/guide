@@ -147,6 +147,7 @@ fn routes_keep_out_of_keepouts_and_away_from_the_edge() {
         tracks: true,
         vias: true,
         pads: false,
+        except: Vec::new(),
     });
     d.outline = outline(Rect::new(
         Point::new(-2 * MM, -3 * MM),
@@ -178,6 +179,7 @@ fn a_net_with_no_way_out_is_unrouted_without_breaking_rules() {
         tracks: true,
         vias: true,
         pads: false,
+        except: Vec::new(),
     });
     d.outline = outline(Rect::new(
         Point::new(-2 * MM, -10 * MM),
@@ -450,6 +452,7 @@ fn a_net_of_many_pads_keeps_what_it_reaches() {
         tracks: true,
         vias: true,
         pads: false,
+        except: Vec::new(),
     };
     d.board.keepouts.extend([
         wall(Point::new(x - MM, -MM), Point::new(x + MM, -MM / 2)),

@@ -70,6 +70,7 @@ fn band(d: &mut Design, y0: i64, y1: i64) {
         tracks: true,
         vias: false,
         pads: false,
+        except: Vec::new(),
     });
 }
 

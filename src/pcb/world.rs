@@ -4,7 +4,8 @@
 //!
 //! The answers follow [`drc::check`] rule for rule, so that what is legal here passes the
 //! check: clearances between nets, with those of pairs of nets and of items of their own,
-//! hole clearances and hole-to-hole clearances, keepouts, the openings in the solder mask,
+//! hole clearances and hole-to-hole clearances, keepouts with the nets they except, the
+//! openings in the solder mask,
 //! and, which the check doesn't have, the clearance to the board's edge. An opening with no
 //! net keeps out every net's copper, stricter than the check.
 
@@ -21,8 +22,13 @@ pub(crate) enum Kind {
     Copper,
     /// A drilled hole, which goes through every layer.
     Hole,
-    /// A keepout, with whether it keeps out tracks and vias.
-    Keepout { tracks: bool, vias: bool },
+    /// A keepout, with whether it keeps out tracks and vias, and which of the world's lists
+    /// of nets it excepts, counted from one: zero is none.
+    Keepout {
+        tracks: bool,
+        vias: bool,
+        except: u32,
+    },
     /// The board's edge.
     Edge,
     /// An opening in the solder mask, reaching this far beyond its shape.
@@ -86,6 +92,8 @@ pub(crate) struct World<'r> {
     planes: Option<Planes>,
     /// Whether a via may touch a pad with no hole.
     vias_in_pads: bool,
+    /// The nets that keepouts except, by the number in [`Kind::Keepout`] less one.
+    excepts: Vec<Vec<NetId>>,
 }
 
 /// Where the planes of nets are, by tile of a grid and layer, and what crossing another
@@ -134,6 +142,7 @@ impl<'r> World<'r> {
             clearances: Vec::new(),
             planes: None,
             vias_in_pads: true,
+            excepts: Vec::new(),
         };
         let nets = board
             .pads
@@ -203,9 +212,16 @@ impl<'r> World<'r> {
             );
         }
         for k in &board.keepouts {
+            let except = if k.except.is_empty() {
+                0
+            } else {
+                world.excepts.push(k.except.clone());
+                world.excepts.len() as u32
+            };
             let kind = Kind::Keepout {
                 tracks: k.tracks,
                 vias: k.vias,
+                except,
             };
             world.add(k.layers, k.shape.clone(), fixed(kind, None, None));
         }
@@ -328,6 +344,7 @@ impl<'r> World<'r> {
             kind: Kind::Keepout {
                 tracks: true,
                 vias: true,
+                except: 0,
             },
             net: None,
             own: None,
@@ -402,7 +419,9 @@ impl<'r> World<'r> {
                 Kind::Hole => {
                     !same_net(Some(net), meta.net) && self.hole_hit(shape, other, None, meta.own)
                 }
-                Kind::Keepout { tracks, .. } => tracks && shape.touches(other),
+                Kind::Keepout { tracks, except, .. } => {
+                    tracks && !self.excepted(except, net) && shape.touches(other)
+                }
                 Kind::Edge => self.edge_hit(shape, other),
                 Kind::Mask { margin } => {
                     !same_net(Some(net), meta.net) && violates(shape, other, margin + MASK_GUARD)
@@ -453,7 +472,12 @@ impl<'r> World<'r> {
                     violates(shape, other, required)
                 }
                 Kind::Hole => self.hole_hit(shape, other, None, meta.own),
-                Kind::Keepout { tracks, .. } => tracks && shape.touches(other),
+                // Both tracks are in it, so both nets must be excepted.
+                Kind::Keepout { tracks, except, .. } => {
+                    tracks
+                        && !(self.excepted(except, nets.0) && self.excepted(except, nets.1))
+                        && shape.touches(other)
+                }
                 Kind::Edge => self.edge_hit(shape, other),
                 Kind::Mask { margin } => violates(shape, other, margin + MASK_GUARD),
             };
@@ -505,7 +529,9 @@ impl<'r> World<'r> {
                             || self.hole_to_hole(&hole, other)
                     }
                     Kind::Hole => false,
-                    Kind::Keepout { vias, .. } => vias && copper.touches(other),
+                    Kind::Keepout { vias, except, .. } => {
+                        vias && !self.excepted(except, net) && copper.touches(other)
+                    }
                     Kind::Edge => self.edge_hit(&copper, other),
                     Kind::Mask { margin } => {
                         other_net && violates(&copper, other, margin + MASK_GUARD)
@@ -533,6 +559,12 @@ impl<'r> World<'r> {
             self.meta[0][id.slot() as usize].kind == Kind::Edge
                 && index.get(id).is_some_and(|e| shape.touches(e))
         })
+    }
+
+    /// Whether a keepout's list of excepted nets, by its number, holds `net`.
+    #[inline]
+    fn excepted(&self, except: u32, net: NetId) -> bool {
+        except != 0 && self.excepts[except as usize - 1].contains(&net)
     }
 
     /// Records a hit on something, and returns whether it can be moved.

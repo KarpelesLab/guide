@@ -547,6 +547,7 @@ impl Reader {
                 vias: def.vias,
                 // Pads are where they are: a keepout tells a router where not to go.
                 pads: false,
+                except: Vec::new(),
             });
             self.keepouts.push(owner);
         }

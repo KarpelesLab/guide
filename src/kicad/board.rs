@@ -1387,6 +1387,7 @@ impl Reader {
                         tracks,
                         vias,
                         pads,
+                        except: Vec::new(),
                     });
                 }
             }

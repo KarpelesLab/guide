@@ -821,6 +821,7 @@ fn drc_reports_every_kind() {
         tracks: true,
         vias: false,
         pads: true,
+        except: Vec::new(),
     }];
     let found = drc::check(&board, &rules).unwrap();
     let mut it = found.iter();
@@ -1059,6 +1060,7 @@ fn drc_keepouts_by_kind_and_boundary() {
         tracks: false,
         vias: true,
         pads: false,
+        except: Vec::new(),
     }];
     // A track and a pad inside don't count, nor a via 1 away. A via touching does.
     board.tracks = vec![t((100, 100), (200, 200), 100, 0, Some(1))];
@@ -1282,6 +1284,7 @@ fn drc_rejects_bad_input() {
         tracks: true,
         vias: true,
         pads: true,
+        except: Vec::new(),
     }];
     let err = drc::check(&board, &rules).unwrap_err();
     assert_eq!(

@@ -90,6 +90,9 @@ pub struct Keepout {
     pub vias: bool,
     /// Whether pads must stay out.
     pub pads: bool,
+    /// The nets whose copper may be in it all the same, such as the nets of the part that
+    /// the keepout is drawn under.
+    pub except: Vec<NetId>,
 }
 
 /// An opening in the solder mask over an outer copper layer, which leaves the copper in it
@@ -251,7 +254,8 @@ pub enum Violation {
         /// The gap between the hole and the copper.
         gap: Gap,
     },
-    /// An item touches or enters a keepout it should stay out of.
+    /// An item touches or enters a keepout it should stay out of, and its net is not one
+    /// that the keepout [excepts](Keepout::except).
     Keepout {
         /// The keepout's position in `Board::keepouts`.
         keepout: usize,
@@ -912,7 +916,12 @@ fn keepouts(
                     Item::Pad(_) => keepout.pads,
                     Item::Zone(_) | Item::Keepout(_) => false,
                 };
-                if forbidden && !found.contains_key(&c.item) && c.shape.touches(&keepout.shape) {
+                let excepted = c.net.is_some_and(|n| keepout.except.contains(&n));
+                if forbidden
+                    && !excepted
+                    && !found.contains_key(&c.item)
+                    && c.shape.touches(&keepout.shape)
+                {
                     found.insert(c.item, layer);
                 }
             }

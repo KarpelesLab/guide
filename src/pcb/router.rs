@@ -58,6 +58,12 @@ const BRANCH_TERMINALS: usize = 32;
 /// How many times in a pass a net may lose branches only, before it is taken out whole.
 const BRANCH_CUTS: u32 = 8;
 
+/// A net with a plane may lose stubs only, before it is taken out whole, once in a pass for
+/// each this many of its terminals, if that is more than [`BRANCH_CUTS`]: a ground of
+/// hundreds of pads taken out whole for one stub in the way is hundreds of connections
+/// to make again, and unmade until its turn comes.
+const PLANE_CUTS: u32 = 4;
+
 /// How many pads a net has at most for its zones not to be planes, unless they
 /// [say](super::CopperZone::plane) that they are: a pour between two or three pads is their
 /// connection, drawn as copper where a track would not do, and not a plane to cut through.
@@ -1222,6 +1228,12 @@ fn route_all<'a>(
         .map(|(i, j)| (j.ctx.net, i))
         .collect();
     let mut outside = vec![false; jobs.len()];
+    // By job, whether it has waited for the others in the first pass, after a search in its
+    // corridor that ended so.
+    let mut waited = vec![Wait::No; jobs.len()];
+    // Whether the run has a budget or a deadline, and so routes for the most connections
+    // soonest.
+    let hurried = run.bounded();
     // By job, the terminals its partial route left out, which are those its copper doesn't
     // join to its first, and how many connections it still needs: the pieces its copper
     // leaves its terminals in, less one.
@@ -1326,13 +1338,42 @@ fn route_all<'a>(
                 penalty: None,
                 history: &history,
             };
-            if let Some(corridor) = &job.corridor {
+            // In the first pass of a run with a budget, a net that finds no way in its
+            // corridor waits for every net to have had its turn before it is searched for
+            // over the board, and takes others out: those searches cost many times the
+            // first, and a run that is stopped has then routed what there was room for,
+            // rather than moved a few nets for each other while most waited. A net that
+            // keeps what it reaches is not made to wait: what it reached would be searched
+            // for again. A run with no budget keeps the nets in their order, shortest
+            // first, which on a crowded board ends with fewer vias, if later.
+            let may_wait =
+                hurried && pass == 0 && options.rip_ups > 0 && !plane && !many && rest.is_none();
+            let back = may_wait && matches!(waited[j], Wait::NoPath | Wait::OutOfBudget);
+            if back {
+                out_of_budget = waited[j] == Wait::OutOfBudget;
+                waited[j] = Wait::Done;
+                why = Some(if out_of_budget {
+                    Failure::Budget
+                } else {
+                    Failure::NoPath
+                });
+            } else if let Some(corridor) = &job.corridor {
                 match grow.stage(params, Some(corridor), Some(quiet)) {
                     Ok(()) => done = true,
                     Err(f) => {
                         out_of_budget = f == Failure::Budget;
                         why = Some(f);
                     }
+                }
+                if !done && may_wait && waited[j] == Wait::No && !queue.is_empty() {
+                    waited[j] = if out_of_budget {
+                        Wait::OutOfBudget
+                    } else {
+                        Wait::NoPath
+                    };
+                    stats.expanded += grow.finish().expanded;
+                    queue.push_back(j);
+                    continue;
                 }
             }
             if !done && !out_of_budget {
@@ -1460,11 +1501,8 @@ fn route_all<'a>(
                         // times, before it is taken out whole as any other: a branch
                         // makes room for one net, and the whole of it for all those that
                         // wait, which go before it comes back.
-                        if pass > 0
-                            && jobs[k].ctx.terminals >= BRANCH_TERMINALS
-                            && !plane_net(v)
-                            && cuts[k] < BRANCH_CUTS
-                        {
+                        let terminals = jobs[k].ctx.terminals;
+                        if loses_branches(pass, terminals, hurried && plane_net(v), cuts[k]) {
                             cuts[k] += 1;
                             cut.push((k, c));
                         } else {
@@ -1823,6 +1861,35 @@ fn route_all<'a>(
     Ok((routed, failed, counted))
 }
 
+/// Whether a net in the way of another loses only its branches in the way, rather than
+/// being taken out whole: a net of [`BRANCH_TERMINALS`] or more, cut `cuts` times in this
+/// pass so far. In the passes on the finer lattice, [`BRANCH_CUTS`] times. With `plane`,
+/// for a net with a plane in a run with a budget, in any pass: it is stubs to its plane,
+/// each on its own, and may lose them a time for each [`PLANE_CUTS`] of its terminals, if
+/// that is more. A run with no budget takes such a net out whole, which finds its stubs
+/// other places altogether, and on a crowded board that made one more connection.
+fn loses_branches(pass: usize, terminals: usize, plane: bool, cuts: u32) -> bool {
+    let most = if plane {
+        BRANCH_CUTS.max(terminals as u32 / PLANE_CUTS)
+    } else if pass > 0 {
+        BRANCH_CUTS
+    } else {
+        0
+    };
+    terminals >= BRANCH_TERMINALS && cuts < most
+}
+
+/// Whether a net has been made to wait in the first pass, and how the search in its
+/// corridor ended that it waited after.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Wait {
+    No,
+    NoPath,
+    OutOfBudget,
+    /// It has, and had its turn since.
+    Done,
+}
+
 /// The routes of every net at some point of rip-up, and how many connections they made.
 struct Best {
     made: usize,
@@ -2038,4 +2105,27 @@ fn plane_map(design: &Design, fills: &[Fill], grid: Corridor, cost: f64) -> Plan
         }
     }
     Planes { grid, nets, cost }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BRANCH_CUTS, BRANCH_TERMINALS, loses_branches};
+
+    #[test]
+    fn a_net_with_a_plane_loses_only_the_stubs_in_the_way_in_any_pass() {
+        // A ground of 584 pads, as stubs to its plane: in the first pass too, and far more
+        // often than a net without a plane, before it is taken out whole.
+        assert!(loses_branches(0, 584, true, 0));
+        assert!(loses_branches(0, 584, true, 100));
+        assert!(!loses_branches(0, 584, true, 146));
+        assert!(loses_branches(1, 584, true, 0));
+        // A small one is taken out whole, as it is quick to route again.
+        assert!(!loses_branches(0, BRANCH_TERMINALS - 1, true, 0));
+        assert!(loses_branches(0, BRANCH_TERMINALS, true, BRANCH_CUTS - 1));
+        assert!(!loses_branches(0, BRANCH_TERMINALS, true, BRANCH_CUTS));
+        // Without a plane, only on the finer lattice, a few times.
+        assert!(!loses_branches(0, 584, false, 0));
+        assert!(loses_branches(1, 584, false, BRANCH_CUTS - 1));
+        assert!(!loses_branches(1, 584, false, BRANCH_CUTS));
+    }
 }

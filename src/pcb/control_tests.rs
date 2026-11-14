@@ -95,11 +95,11 @@ fn a_run_under_control_that_nothing_stops_is_the_run_without() {
     assert!(plain.track_kinds.iter().all(|k| *k == CopperKind::Plain));
     check(&d, &plain);
 
+    // A flag that is never set and a progress that hears of everything change nothing.
     let cancel = AtomicBool::new(false);
     let heard = |_: &Progress| {};
     let control = RunControl {
         cancel: Some(&cancel),
-        deadline: Some(Instant::now() + Duration::from_secs(3600)),
         progress: Some(&heard),
         progress_interval: Duration::ZERO,
         ..RunControl::default()
@@ -108,8 +108,19 @@ fn a_run_under_control_that_nothing_stops_is_the_run_without() {
         &plain,
         &route_with(&d, &RouteOptions::default(), &control).unwrap(),
     );
+    // A run with a deadline or a budget makes the nets that find no way in their corridors
+    // wait, and takes only stubs out of nets with planes: here no net does, and there is
+    // no plane, so a deadline that is not reached changes nothing either.
+    let control = RunControl {
+        deadline: Some(Instant::now() + Duration::from_secs(3600)),
+        ..control
+    };
+    same(
+        &plain,
+        &route_with(&d, &RouteOptions::default(), &control).unwrap(),
+    );
 
-    // A budget that is not spent changes nothing either.
+    // Nor does a budget that is not spent.
     let options = RouteOptions {
         work_budget: Some(plain.stats.work + 1),
         ..RouteOptions::default()
@@ -523,4 +534,62 @@ fn a_run_stopped_by_its_flag_fills_its_zones_unless_told_not_to() {
     let spent = route_with(&d, &options, &control).unwrap();
     assert_eq!(spent.stopped, Some(Stopped::WorkBudget));
     assert!(!spent.fills.is_empty());
+}
+
+/// One layer, a wall across the middle with a gap one track wide, and three kinds of nets:
+/// net 1 through the gap, pad to pad; net 2 with a pad on either side of the wall, whose
+/// only way is the gap that net 1 has taken; and eight nets of two pads with nothing in
+/// their way, each longer than net 2, so that they come after it.
+fn one_gap() -> Design {
+    let mut pads = vec![
+        smd(20 * MM, 19 * MM, 1),
+        smd(20 * MM, 21 * MM, 1),
+        smd(18 * MM, 17 * MM, 2),
+        smd(18 * MM, 23 * MM, 2),
+    ];
+    for k in 0..8 {
+        pads.push(smd(5 * MM, (30 + k) * MM, 3 + k as u32));
+        pads.push(smd(13 * MM, (30 + k) * MM, 3 + k as u32));
+    }
+    let mut d = design(1, pads, 11);
+    d.outline = outline(Rect::new(Point::new(0, 0), Point::new(40 * MM, 40 * MM)));
+    let wall = |x0: i64, x1: i64| Keepout {
+        shape: Shape::rect(Rect::new(
+            Point::new(x0, 19_900_000),
+            Point::new(x1, 20_100_000),
+        ))
+        .unwrap(),
+        layers: LayerSet::first(1),
+        tracks: true,
+        vias: true,
+        pads: false,
+        except: Vec::new(),
+    };
+    d.board.keepouts.push(wall(-MM, 19_850_000));
+    d.board.keepouts.push(wall(20_150_000, 41 * MM));
+    d
+}
+
+#[test]
+fn a_net_with_no_way_in_its_corridor_waits_for_the_others_in_the_first_pass() {
+    // Net 2 finds no way in its corridor, and none over the board, which it takes tens of
+    // thousands of nodes to find out. It waits for the eight nets after it to have their
+    // turn first: a budget that the search over the board would have spent routes them.
+    let d = one_gap();
+    let options = RouteOptions {
+        work_budget: Some(12_000),
+        ..RouteOptions::default()
+    };
+    let routed = route(&d, &options).unwrap();
+    check(&d, &routed);
+    assert_eq!(routed.stopped, Some(Stopped::WorkBudget));
+    assert_eq!(routed.unrouted, [NetId(2)]);
+    assert_eq!(routed.open.len(), 1);
+    assert_eq!(routed.open[0].cause, Cause::Stopped);
+    // Left to finish, the run says that it has no way.
+    let whole = route(&d, &RouteOptions::default()).unwrap();
+    check(&d, &whole);
+    assert_eq!(whole.stopped, None);
+    assert_eq!(whole.unrouted.len(), 1);
+    assert!(whole.stats.work > 12_000, "{}", whole.stats.work);
 }

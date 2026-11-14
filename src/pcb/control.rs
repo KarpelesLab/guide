@@ -126,7 +126,9 @@ pub struct RunControl<'a> {
     /// every phase, which is within a second but for a fill of large zones, which runs to
     /// its end.
     pub cancel: Option<&'a AtomicBool>,
-    /// When to stop, by the clock, read as often as the flag.
+    /// When to stop, by the clock, read as often as the flag. A run with a deadline routes
+    /// [for the most connections soonest](super#stopping-a-run-and-what-is-left-open), as
+    /// one with a work budget does, whether the deadline stops it or not.
     pub deadline: Option<Instant>,
     /// Called at every change of phase, and otherwise no more often than
     /// [`progress_interval`](RunControl::progress_interval), on the thread that routes.
@@ -189,6 +191,8 @@ pub(crate) struct Run<'a> {
     ticks: Cell<u32>,
     state: Cell<Progress>,
     last: Cell<Option<Instant>>,
+    /// Whether it has a budget of work.
+    budgeted: bool,
 }
 
 impl<'a> Run<'a> {
@@ -203,6 +207,7 @@ impl<'a> Run<'a> {
             ticks: Cell::new(0),
             state: Cell::new(Progress::start()),
             last: Cell::new(None),
+            budgeted: budget.is_some(),
         };
         if budget == Some(0) {
             run.halt(Stopped::WorkBudget);
@@ -221,6 +226,12 @@ impl<'a> Run<'a> {
     /// [`poll`](Run::poll).
     pub(crate) fn stopped(&self) -> Option<Stopped> {
         self.why.get()
+    }
+
+    /// Whether the run has a budget of work or a deadline: it may be stopped before its
+    /// end, by other than its caller's flag.
+    pub(crate) fn bounded(&self) -> bool {
+        self.control.deadline.is_some() || self.budgeted
     }
 
     /// Whether zones are not to be filled any more: the run was stopped by the clock or

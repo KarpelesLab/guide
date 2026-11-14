@@ -126,6 +126,15 @@
 //! its [`Stats`] are counted on the board it returns. [`RunControl::progress`] hears of the
 //! run as it goes.
 //!
+//! A run with a work budget or a deadline routes for the most connections soonest, which
+//! one with neither does not, so that the two differ even if nothing stops the first. In
+//! its first pass, a net that finds no way in its corridor waits until every net has had
+//! its turn before it is searched for over the board and takes other nets out, and a net
+//! with a plane and 32 terminals or more that is in another's way loses only its stubs in
+//! the way, not all of them. With neither, nets keep their order, shortest first, and such
+//! a net is taken out whole: on crowded boards that ended with a connection more and
+//! fewer vias, later.
+//!
 //! Whatever the run leaves apart is in [`Routed::open`], connection by connection, in the
 //! sense of a ratsnest: the pieces a net's pads are left in, less one, each with a pad on
 //! either side, by position in the design's pads, and the best-known [`Cause`]. With
@@ -525,7 +534,9 @@ pub struct RouteOptions {
     /// How many search nodes the whole run may expand, in the unit of [`Stats::work`], or
     /// `None`, the default, for no limit. A run that spends it stops and returns what it has
     /// routed, with [`Routed::stopped`] set: the same result for the same budget, on any
-    /// machine. Zone fills, cleanup's shortcuts and meanders cost nothing in this unit.
+    /// machine. Zone fills, cleanup's shortcuts and meanders cost nothing in this unit. A
+    /// run with a budget routes [for the most connections soonest](self#stopping-a-run-and-what-is-left-open),
+    /// so its result is not that of a run with none, however large the budget.
     pub work_budget: Option<u64>,
     /// Whether a net that can't be routed whole keeps the tree it can be routed as: after
     /// everything else has failed for it, it is searched for a terminal at a time and keeps

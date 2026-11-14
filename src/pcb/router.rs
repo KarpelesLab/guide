@@ -5,7 +5,9 @@ use std::collections::{BTreeMap, VecDeque};
 
 use super::cleanup;
 use super::control::{Phase, Run};
-use super::detail::{self, Corridor, Failure, History, NetCtx, Params, RipUp, StepCache, TermPad};
+use super::detail::{
+    self, Corridor, Failure, History, NetCtx, NetRun, Params, RipUp, StepCache, TermPad,
+};
 use super::escape;
 use super::geometry::NetCopper;
 use super::global::{self, GlobalSpace, Probe, TerminalPads};
@@ -40,10 +42,6 @@ const PAIR_RIP_UPS: u32 = 4;
 /// How many times its budget a net's search that may cross others' routes has on the finer
 /// lattice.
 const FINE_RIP_BUDGET: u64 = 4;
-
-/// How many nodes a search from a terminal may expand to find it shut in, before a search
-/// over the whole board for it.
-const PRECHECK: u64 = 50_000;
 
 /// How much finer the lattice of the second pass is.
 const FINE: i64 = 2;
@@ -942,7 +940,6 @@ fn route_all<'a>(
             bounds: bounds_of(design),
             max_expansions: options.max_expansions,
             under_pads: false,
-            precheck: 0,
             partial: false,
             stubs: false,
         });
@@ -1004,7 +1001,6 @@ fn route_all<'a>(
         bounds,
         max_expansions: options.max_expansions,
         under_pads: false,
-        precheck: 0,
         partial: false,
         stubs: false,
     };
@@ -1196,49 +1192,38 @@ fn route_all<'a>(
                 stubs: many,
                 ..params
             };
-            let mut tree = None;
             // The world doesn't change until the net is placed.
             let steps = StepCache::default();
+            // One tree through every stage: what the corridor connects is kept by the
+            // search over the board, and what that connects by the one that may cross
+            // other nets' routes, which then crosses them only for what is left.
+            let mut grow = NetRun::new(&world, ctx, &steps, params);
+            let mut done = false;
+            let mut crossed = false;
             // A search that runs out of nodes in the corridor would over the board too.
             let mut out_of_budget = false;
             // How the last search that failed ended.
             let mut why = None;
+            let quiet = RipUp {
+                penalty: None,
+                history: &history,
+            };
             if let Some(corridor) = &job.corridor {
-                let rip = RipUp {
-                    penalty: None,
-                    history: &history,
-                };
-                match detail::route_net(&world, ctx, &steps, params, Some(corridor), Some(rip)) {
-                    Ok(t) => {
-                        stats.expanded += t.expanded;
-                        tree = Some(t);
-                    }
-                    Err((f, e)) => {
-                        stats.expanded += e;
+                match grow.stage(params, Some(corridor), Some(quiet)) {
+                    Ok(()) => done = true,
+                    Err(f) => {
                         out_of_budget = f == Failure::Budget;
                         why = Some(f);
                     }
                 }
             }
-            if tree.is_none() && !out_of_budget {
-                let rip = RipUp {
-                    penalty: None,
-                    history: &history,
-                };
-                let checked = Params {
-                    precheck: PRECHECK,
-                    ..params
-                };
-                match detail::route_net(&world, ctx, &steps, checked, None, Some(rip)) {
-                    Ok(t) => {
-                        stats.expanded += t.expanded;
+            if !done && !out_of_budget {
+                match grow.stage(params, None, Some(quiet)) {
+                    Ok(()) => {
                         outside[j] = job.corridor.is_some();
-                        tree = Some(t);
+                        done = true;
                     }
-                    Err((f, e)) => {
-                        stats.expanded += e;
-                        why = Some(f);
-                    }
+                    Err(f) => why = Some(f),
                 }
             }
             // A net with a plane, or of many pads, keeps what it can reach, and a plane's
@@ -1266,9 +1251,8 @@ fn route_all<'a>(
                     ..params
                 });
             }
-            let mut displaced: Vec<usize> = Vec::new();
             for &partial in &attempts {
-                if tree.is_some() || options.rip_ups == 0 {
+                if done || options.rip_ups == 0 {
                     break;
                 }
                 let rip = RipUp {
@@ -1285,45 +1269,13 @@ fn route_all<'a>(
                     },
                     ..partial
                 };
-                match detail::route_net(&world, ctx, &steps, partial, None, Some(rip)) {
-                    Ok(t) => {
-                        stats.expanded += t.expanded;
-                        let (victims, at) = detail::victims(&world, ctx, &t);
-                        for p in at {
-                            if let Some(tile) = history.grid.tile_of(p) {
-                                history.cost[tile] += HISTORY_STEP;
-                            }
-                        }
-                        for v in victims {
-                            // A pair in the way is taken out whole, and routed again after.
-                            if let Some(&i) = pair_of.get(&v)
-                                && let Some(u) = pair_copper[i].take()
-                            {
-                                u.undo(&mut world);
-                                pair_rips[i] += 1;
-                                stats.rip_ups += 1;
-                                displaced.push(i);
-                            }
-                            let Some(&k) = by_net.get(&v) else { continue };
-                            if let Some(mut c) = copper[k].take() {
-                                c.unplace(&mut world);
-                                completing[k] = None;
-                                failed[k] = None;
-                                ripped[k] += 1;
-                                stats.rip_ups += 1;
-                                if ripped[k] >= options.rip_ups {
-                                    world.set_locked(v, true);
-                                }
-                                queue.push_back(k);
-                            }
-                        }
+                match grow.stage(partial, None, Some(rip)) {
+                    Ok(()) => {
                         outside[j] = job.corridor.is_some();
-                        tree = Some(t);
+                        crossed = true;
+                        done = true;
                     }
-                    Err((f, e)) => {
-                        stats.expanded += e;
-                        why = Some(f);
-                    }
+                    Err(f) => why = Some(f),
                 }
             }
             let partial = if options.keep_partial && !partial.partial && ctx.terminals > 2 {
@@ -1335,19 +1287,44 @@ fn route_all<'a>(
             } else {
                 partial
             };
-            if tree.is_none() && partial.partial && options.rip_ups == 0 {
-                let rip = RipUp {
-                    penalty: None,
-                    history: &history,
-                };
-                match detail::route_net(&world, ctx, &steps, partial, None, Some(rip)) {
-                    Ok(t) => {
-                        stats.expanded += t.expanded;
-                        tree = Some(t);
+            if !done && partial.partial && options.rip_ups == 0 {
+                match grow.stage(partial, None, Some(quiet)) {
+                    Ok(()) => done = true,
+                    Err(f) => why = Some(f),
+                }
+            }
+            let grown = grow.finish();
+            stats.expanded += grown.expanded;
+            let tree = done.then_some(grown);
+            let mut displaced: Vec<usize> = Vec::new();
+            if let Some(t) = tree.as_ref().filter(|_| crossed) {
+                let (victims, at) = detail::victims(&world, ctx, t);
+                for p in at {
+                    if let Some(tile) = history.grid.tile_of(p) {
+                        history.cost[tile] += HISTORY_STEP;
                     }
-                    Err((f, e)) => {
-                        stats.expanded += e;
-                        why = Some(f);
+                }
+                for v in victims {
+                    // A pair in the way is taken out whole, and routed again after.
+                    if let Some(&i) = pair_of.get(&v)
+                        && let Some(u) = pair_copper[i].take()
+                    {
+                        u.undo(&mut world);
+                        pair_rips[i] += 1;
+                        stats.rip_ups += 1;
+                        displaced.push(i);
+                    }
+                    let Some(&k) = by_net.get(&v) else { continue };
+                    if let Some(mut c) = copper[k].take() {
+                        c.unplace(&mut world);
+                        completing[k] = None;
+                        failed[k] = None;
+                        ripped[k] += 1;
+                        stats.rip_ups += 1;
+                        if ripped[k] >= options.rip_ups {
+                            world.set_locked(v, true);
+                        }
+                        queue.push_back(k);
                     }
                 }
             }

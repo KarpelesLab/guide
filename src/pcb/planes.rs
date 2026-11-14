@@ -413,7 +413,6 @@ fn search(
         bounds,
         max_expansions: budget,
         under_pads: false,
-        precheck: 0,
         partial: false,
         stubs: false,
     };

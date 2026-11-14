@@ -86,15 +86,26 @@ fn length(a: Point, b: Point) -> f64 {
     (dx * dx + dy * dy).sqrt()
 }
 
-/// Heights to try for a meander, highest first.
+/// Heights to try for a meander, highest first, down to the lowest there is: where only a
+/// low one fits, between neighbours that are close, it is still length gained, and a net
+/// that needs a lot would otherwise pass by every place too low for an eighth of the
+/// highest.
 fn heights(h: i64, lowest: i64) -> Vec<i64> {
     let mut out = vec![h];
-    for (num, den) in [(3, 4), (1, 2), (1, 3), (1, 4), (1, 6), (1, 8)] {
-        let x = h * num / den;
+    let mut push = |x: i64| {
         if x >= lowest && x < *out.last().unwrap_or(&i64::MAX) {
             out.push(x);
         }
+    };
+    for (num, den) in [(3, 4), (1, 2), (1, 3), (1, 4), (1, 6), (1, 8)] {
+        push(h * num / den);
     }
+    let mut den = 12;
+    while h / den > lowest {
+        push(h / den);
+        den += den / 2;
+    }
+    push(lowest);
     out
 }
 
@@ -896,4 +907,21 @@ pub(crate) fn run(
     tuner.tracks.retain(|t| t.start != t.end);
     routed.tracks = tuner.tracks;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::heights;
+
+    #[test]
+    fn heights_go_down_to_the_lowest() {
+        let h = heights(3_000_000, 120_000);
+        assert_eq!(h.first(), Some(&3_000_000));
+        assert_eq!(h.last(), Some(&120_000));
+        assert!(h.windows(2).all(|w| w[0] > w[1]), "{h:?}");
+        // No step down is by more than half.
+        assert!(h.windows(2).all(|w| 2 * w[1] >= w[0] - 1), "{h:?}");
+        assert_eq!(heights(100, 100), vec![100]);
+        assert_eq!(heights(150, 100), vec![150, 112, 100]);
+    }
 }

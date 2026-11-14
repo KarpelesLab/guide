@@ -241,20 +241,122 @@ pub(crate) struct Params {
     pub(crate) stubs: bool,
 }
 
+/// The side of the blocks of lattice nodes that [`NodeIndex`] numbers together, in nodes.
+const BLOCK: i64 = 8;
+
+/// Numbers for the nodes of a net's searches, as they are first met: nodes of the net's own
+/// lattice by block of [`BLOCK`] by [`BLOCK`] on a layer, so that a node's neighbours are
+/// found beside it rather than each by a hash of its own, and the few nodes off the lattice,
+/// on those of pads, one by one.
+#[derive(Debug, Default)]
+struct NodeIndex {
+    /// The lattice, once the first search has said which it is: a pitch of zero is none yet.
+    origin: Point,
+    pitch: i64,
+    /// By block and layer, where its numbers are in `ids`.
+    blocks: FastMap<(i64, i64, u8), u32>,
+    /// By block, the number of each of its nodes plus one, or zero for none yet.
+    ids: Vec<[u32; (BLOCK * BLOCK) as usize]>,
+    /// The block looked up last, which the next lookup is most often in.
+    last: Option<((i64, i64, u8), u32)>,
+    /// The nodes off the lattice.
+    off: FastMap<DNode, u32>,
+    count: u32,
+}
+
+impl NodeIndex {
+    /// The block of a node and its place there, if it is on the lattice.
+    #[inline]
+    fn place(&self, n: DNode) -> Option<((i64, i64, u8), usize)> {
+        if self.pitch == 0 {
+            return None;
+        }
+        let (dx, dy) = (n.x - self.origin.x, n.y - self.origin.y);
+        if dx % self.pitch != 0 || dy % self.pitch != 0 {
+            return None;
+        }
+        let (i, j) = (dx / self.pitch, dy / self.pitch);
+        let key = (i.div_euclid(BLOCK), j.div_euclid(BLOCK), n.l);
+        Some((
+            key,
+            (j.rem_euclid(BLOCK) * BLOCK + i.rem_euclid(BLOCK)) as usize,
+        ))
+    }
+
+    /// The number of a node, a new one if it has none.
+    #[inline]
+    fn id(&mut self, n: DNode) -> u32 {
+        let Some((key, at)) = self.place(n) else {
+            let next = self.count;
+            let id = *self.off.entry(n).or_insert(next);
+            self.count += u32::from(id == next);
+            return id;
+        };
+        let block = match self.last {
+            Some((k, b)) if k == key => b,
+            _ => {
+                let next = self.ids.len() as u32;
+                let b = *self.blocks.entry(key).or_insert(next);
+                if b == next {
+                    self.ids.push([0; (BLOCK * BLOCK) as usize]);
+                }
+                self.last = Some((key, b));
+                b
+            }
+        };
+        let slot = &mut self.ids[block as usize][at];
+        if *slot == 0 {
+            self.count += 1;
+            *slot = self.count;
+        }
+        *slot - 1
+    }
+
+    /// The number of a node, if it has one.
+    fn get(&self, n: DNode) -> Option<u32> {
+        let Some((key, at)) = self.place(n) else {
+            return self.off.get(&n).copied();
+        };
+        let block = match self.last {
+            Some((k, b)) if k == key => b,
+            _ => *self.blocks.get(&key)?,
+        };
+        self.ids[block as usize][at].checked_sub(1)
+    }
+}
+
 /// Verdicts of the world on steps of one pitch, by node and direction, which hold for as
 /// long as the world and the net's lattice don't change: three bits for each direction,
 /// whether it is known and then the verdict. And its verdicts on the net's vias, which are
-/// asked about once for every layer.
+/// asked about once for every layer. It numbers the nodes, for itself and for the searches
+/// that share it, [`KeptSlots`].
 #[derive(Debug, Default)]
 pub(crate) struct StepCache {
-    steps: RefCell<FastMap<DNode, u32>>,
+    nodes: RefCell<NodeIndex>,
+    /// By number of a node, what is known of the steps from it.
+    steps: RefCell<Vec<u32>>,
     vias: RefCell<FastMap<Point, Verdict>>,
 }
 
 impl StepCache {
+    /// Says which lattice most nodes are on, if nothing has said so yet.
+    fn lattice(&self, origin: Point, pitch: i64) {
+        let mut nodes = self.nodes.borrow_mut();
+        if nodes.pitch == 0 {
+            (nodes.origin, nodes.pitch) = (origin, pitch.max(1));
+        }
+    }
+
+    /// The number of a node, a new one if it has none.
+    #[inline]
+    fn id(&self, node: DNode) -> u32 {
+        self.nodes.borrow_mut().id(node)
+    }
+
     /// What is known of the steps from a node, for [`known`](StepCache::known).
-    fn bits(&self, from: DNode) -> u32 {
-        self.steps.borrow().get(&from).copied().unwrap_or(0)
+    #[inline]
+    fn bits(&self, id: u32) -> u32 {
+        self.steps.borrow().get(id as usize).copied().unwrap_or(0)
     }
 
     /// The verdict on the step in a direction, if `bits` have it.
@@ -268,34 +370,47 @@ impl StepCache {
         (bits & 1 != 0).then_some(verdict)
     }
 
-    fn set(&self, from: DNode, dir: usize, verdict: Verdict) {
+    /// A verdict on the step in a direction, as bits.
+    #[inline]
+    fn code(dir: usize, verdict: Verdict) -> u32 {
         let code = match verdict {
             Verdict::Free => 0,
             Verdict::Routed => 1,
             Verdict::Blocked => 2,
         };
-        *self.steps.borrow_mut().entry(from).or_insert(0) |= (1 | code << 1) << (3 * dir);
+        (1 | code << 1) << (3 * dir)
+    }
+
+    /// Adds to what is known of the steps from a node.
+    #[inline]
+    fn learn(&self, id: u32, bits: u32) {
+        let mut steps = self.steps.borrow_mut();
+        let id = id as usize;
+        if id >= steps.len() {
+            steps.resize(id + 1, 0);
+        }
+        steps[id] |= bits;
     }
 }
 
 /// Slots for the nodes of a net's searches, numbered as they are first met and kept from
-/// one search to the next: a net's searches go over the same nodes again and again, from a
-/// tree that only grows, so a node met before is looked up rather than numbered again, and
-/// is in the same slot, where a search finds the bound it had for it
-/// ([`Search::reuse_bounds`]).
-#[derive(Debug, Default)]
-pub(crate) struct KeptSlots {
-    slots: FastMap<DNode, usize>,
+/// one search to the next, by the [`StepCache`] that the searches share: a net's searches
+/// go over the same nodes again and again, from a tree that only grows, so a node met
+/// before is looked up rather than numbered again, and is in the same slot, where a search
+/// finds the bound it had for it ([`Search::reuse_bounds`]).
+#[derive(Debug)]
+pub(crate) struct KeptSlots<'a> {
+    cache: &'a StepCache,
 }
 
-impl NodeSlots<DNode> for KeptSlots {
+impl NodeSlots<DNode> for KeptSlots<'_> {
+    #[inline]
     fn slot(&mut self, key: DNode) -> usize {
-        let next = self.slots.len();
-        *self.slots.entry(key).or_insert(next)
+        self.cache.id(key) as usize
     }
 
     fn get(&self, key: DNode) -> Option<usize> {
-        self.slots.get(&key).copied()
+        self.cache.nodes.borrow().get(key).map(|id| id as usize)
     }
 
     fn clear(&mut self) {}
@@ -355,6 +470,8 @@ pub(crate) struct DetailSpace<'a> {
     tree_groups: Vec<Rect>,
     /// The run the search is part of, which hears of every node.
     run: Option<&'a Run<'a>>,
+    /// What the node that is being expanded has learnt of its steps, for the cache.
+    fresh: core::cell::Cell<u32>,
 }
 
 impl<'a> DetailSpace<'a> {
@@ -366,6 +483,7 @@ impl<'a> DetailSpace<'a> {
         corridor: Option<&'a Corridor>,
         rip: Option<RipUp<'a>>,
     ) -> DetailSpace<'a> {
+        cache.lattice(ctx.origin, params.pitch);
         DetailSpace {
             world,
             ctx,
@@ -386,6 +504,7 @@ impl<'a> DetailSpace<'a> {
             tree_grid: FastMap::default(),
             tree_groups: Vec::new(),
             run: world.run(),
+            fresh: core::cell::Cell::new(0),
         }
     }
 
@@ -581,14 +700,15 @@ impl<'a> DetailSpace<'a> {
                     .world
                     .track(self.ctx.net, LayerId(from.l), &shape, None);
                 if let Some((d, _)) = dir {
+                    self.fresh.set(self.fresh.get() | StepCache::code(d, v));
                     // The same track, the other way.
-                    self.cache.set(from, d, v);
                     let back = DNode {
                         x: to.x,
                         y: to.y,
                         l: from.l,
                     };
-                    self.cache.set(back, (d + 4) % 8, v);
+                    self.cache
+                        .learn(self.cache.id(back), StepCache::code((d + 4) % 8, v));
                 }
                 v
             }
@@ -611,14 +731,14 @@ impl<'a> DetailSpace<'a> {
     }
 }
 
-impl RoutingSpace for DetailSpace<'_> {
+impl<'a> RoutingSpace for DetailSpace<'a> {
     type Node = DNode;
     type Resource = NodeId;
-    type Slots = KeptSlots;
+    type Slots = KeptSlots<'a>;
     type ResourceSlots = DenseSlots<NodeId>;
 
     fn new_slots(&self) -> Self::Slots {
-        KeptSlots::default()
+        KeptSlots { cache: self.cache }
     }
 
     fn new_resource_slots(&self) -> Self::ResourceSlots {
@@ -677,10 +797,15 @@ impl RoutingSpace for DetailSpace<'_> {
         // many pads would otherwise be searched for over the board once for each of them.
         let main = on(self.ctx.origin);
         if main || found.iter().any(|&i| on(self.ctx.pads[i as usize].center)) {
-            let bits = self.cache.bits(from);
+            let id = self.cache.id(from);
+            let bits = self.cache.bits(id);
+            self.fresh.set(0);
             for (d, (dx, dy)) in DIRS.into_iter().enumerate() {
                 let to = Point::new(p.x + dx * pitch, p.y + dy * pitch);
                 self.track_step(from, to, out, false, Some((d, bits)));
+            }
+            if self.fresh.get() != 0 {
+                self.cache.learn(id, self.fresh.get());
             }
         }
         if !main {
@@ -1372,4 +1497,52 @@ pub(crate) fn victims(world: &World<'_>, ctx: &NetCtx, tree: &Tree) -> (Vec<NetI
         }
     }
     (out, at)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DNode, KeptSlots, StepCache};
+    use crate::geom::Point;
+    use crate::pcb::world::Verdict;
+    use crate::space::NodeSlots;
+
+    #[test]
+    fn nodes_keep_their_numbers_on_the_lattice_and_off_it() {
+        let cache = StepCache::default();
+        cache.lattice(Point::new(10, -20), 100);
+        // A later search of another lattice changes nothing.
+        cache.lattice(Point::new(0, 0), 7);
+        let node = |x, y, l| DNode { x, y, l };
+        let nodes = [
+            node(10, -20, 0),
+            node(110, -20, 0),
+            node(10, -20, 1),
+            // Far away, the other side of the origin, and across a block's edge.
+            node(10 - 100 * 1000, -20 + 100 * 77, 0),
+            node(10 + 100 * 7, -20, 0),
+            node(10 + 100 * 8, -20, 0),
+            // Off the lattice, as on a pad's.
+            node(15, -20, 0),
+            node(10, -21, 0),
+            node(0, 0, u8::MAX),
+        ];
+        let mut slots = KeptSlots { cache: &cache };
+        let ids: Vec<usize> = nodes.iter().map(|&n| slots.slot(n)).collect();
+        assert_eq!(ids, (0..nodes.len()).collect::<Vec<_>>());
+        for (&n, &id) in nodes.iter().zip(&ids).rev() {
+            assert_eq!(slots.slot(n), id);
+            assert_eq!(slots.get(n), Some(id));
+        }
+        assert_eq!(slots.get(node(210, -20, 0)), None);
+        assert_eq!(slots.get(node(11, -20, 0)), None);
+        // What is learnt of a node's steps is kept by its number, and added to.
+        let id = cache.id(nodes[3]);
+        assert_eq!(StepCache::known(cache.bits(id), 2), None);
+        cache.learn(id, StepCache::code(2, Verdict::Routed));
+        cache.learn(id, StepCache::code(5, Verdict::Blocked));
+        assert_eq!(StepCache::known(cache.bits(id), 2), Some(Verdict::Routed));
+        assert_eq!(StepCache::known(cache.bits(id), 5), Some(Verdict::Blocked));
+        assert_eq!(StepCache::known(cache.bits(id), 0), None);
+        assert_eq!(cache.bits(cache.id(nodes[0])), 0);
+    }
 }

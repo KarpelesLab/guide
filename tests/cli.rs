@@ -463,6 +463,78 @@ fn pcb_and_dsn() {
     run(&["pcb", "route", &board, "-o", &kept, "-q"], 0);
     run(&["pcb", "drc", &kept, "-q"], 0);
 
+    // A work budget stops the run with what it has routed, legal and written, and says so:
+    // the same board every time.
+    let budgeted = [
+        path(&dir, "budget-a.kicad_pcb"),
+        path(&dir, "budget-b.kicad_pcb"),
+    ];
+    for to in &budgeted {
+        let out = run(
+            &[
+                "pcb",
+                "route",
+                &board,
+                "--strip",
+                "--check",
+                "--work-budget",
+                "1000",
+                "--seed",
+                "3",
+                "-o",
+                to,
+                "--json",
+                "-",
+                "-q",
+            ],
+            1,
+        );
+        let json = stdout(&out);
+        assert!(has(&json, "stopped", "\"work_budget\""), "{json}");
+        assert!(has(&json, "work", "1000"), "{json}");
+        assert!(has(&json, "complete", "false"), "{json}");
+        assert!(has(&json, "violations", "[]"), "{json}");
+    }
+    assert_eq!(
+        std::fs::read(&budgeted[0]).unwrap(),
+        std::fs::read(&budgeted[1]).unwrap()
+    );
+    // A time limit that the run doesn't reach changes nothing, and one that it does stops
+    // it: with progress heard of on the way, if asked.
+    let out = run(
+        &[
+            "pcb",
+            "route",
+            &board,
+            "--strip",
+            "--time-limit",
+            "3600",
+            "--json",
+            "-",
+            "-q",
+        ],
+        0,
+    );
+    assert!(has(&stdout(&out), "stopped", "null"));
+    assert!(has(&stdout(&out), "time_limit_hit", "false"));
+    let out = run(
+        &[
+            "pcb",
+            "route",
+            &board,
+            "--strip",
+            "--time-limit",
+            "0.000001",
+            "-v",
+            "--json",
+            "-",
+        ],
+        1,
+    );
+    assert!(has(&stdout(&out), "stopped", "\"time_limit\""));
+    assert!(has(&stdout(&out), "time_limit_hit", "true"));
+    assert!(stderr(&out).contains("Prepare: "), "{}", stderr(&out));
+
     // A DSN file has no zone fills, so the ground net, joined by its zone, is unconnected.
     let out = run(&["pcb", "drc", &dsn, "--json", "-", "-q"], 1);
     assert!(has(&stdout(&out), "clean", "false"));

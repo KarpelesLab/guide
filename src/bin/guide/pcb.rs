@@ -8,7 +8,7 @@ use guide::geom::{LayerId, Rules};
 use guide::id::NetId;
 use guide::kicad::{self, FlowOptions, KicadBoard};
 use guide::pcb::place::{PlaceOptions, Side, outline_overlaps, place_components};
-use guide::pcb::{self, Design, RouteOptions, Routed};
+use guide::pcb::{self, Design, RouteOptions, Routed, RunControl, Stopped};
 
 use crate::Outcome;
 use crate::args::{self, Command, Failure, Matches, Opt};
@@ -66,7 +66,52 @@ fn route_opts() -> Vec<Opt> {
         ),
         Opt::flag("no-fine-pass", "Skip the second pass on a finer lattice"),
         Opt::flag("no-cleanup", "Skip pulling tracks tight and removing vias"),
+        Opt::value(
+            "work-budget",
+            "N",
+            "Search nodes a whole routing may expand, after which it stops and keeps what it \
+             has: the same result for the same budget, on any machine [default: no limit]",
+        ),
+        Opt::flag(
+            "keep-partial",
+            "A net that can't be routed whole keeps the tree it can be routed as",
+        ),
     ]
+}
+
+/// What stops a routing by the clock, and the seed of its order: for `pcb route` and
+/// `dsn route`, which are one routing each.
+fn run_opts() -> Vec<Opt> {
+    vec![
+        args::TIME_LIMIT,
+        Opt::value(
+            "seed",
+            "N",
+            "Another order of the nets, the same for the same seed [default: shortest first]",
+        ),
+    ]
+}
+
+/// Routes under `--time-limit`, telling of progress with `-v`, and reports how it ended.
+fn route_limited(
+    m: &Matches,
+    ui: &Ui,
+    design: &Design,
+    options: &RouteOptions,
+) -> Result<Result<Routed, pcb::RouteError>, Failure> {
+    let mut control = RunControl::default();
+    control.deadline = m
+        .seconds("time-limit")?
+        .map(|limit| std::time::Instant::now() + limit);
+    control.progress_interval = std::time::Duration::from_secs(2);
+    let heard = |p: &pcb::Progress| {
+        ui.detail(format!(
+            "{:?}: {} of {} nets, {} of {} connections, {} waiting, {} nodes",
+            p.phase, p.nets_routed, p.nets, p.connected, p.connections, p.queued, p.work
+        ));
+    };
+    control.progress = Some(&heard);
+    Ok(pcb::route_with(design, options, &control))
 }
 
 fn route_options(m: &Matches) -> Result<RouteOptions, Failure> {
@@ -90,6 +135,8 @@ fn route_options(m: &Matches) -> Result<RouteOptions, Failure> {
     o.pairs_first = m.flag("pairs-first");
     o.fine_pass = !m.flag("no-fine-pass");
     o.cleanup = !m.flag("no-cleanup");
+    o.work_budget = m.number("work-budget")?;
+    o.keep_partial = m.flag("keep-partial");
     Ok(o)
 }
 
@@ -251,7 +298,19 @@ fn routing_report(report: &mut Map, routed: &Routed, names: &[String]) {
         .set("pairs_coupled", s.pairs.1)
         .set("length_rules", s.lengths.0)
         .set("length_rules_met", s.lengths.1)
-        .set("planes_broken", s.planes_broken);
+        .set("planes_broken", s.planes_broken)
+        .set("open_connections", routed.open.len())
+        .set("work", s.work)
+        .set(
+            "stopped",
+            routed.stopped.map(|why| match why {
+                Stopped::WorkBudget => "work_budget",
+                Stopped::Deadline => "time_limit",
+                Stopped::Cancelled => "cancelled",
+                _ => "other",
+            }),
+        )
+        .set("time_limit_hit", routed.stopped == Some(Stopped::Deadline));
 }
 
 /// Checks the routed board, and reports what breaks a rule with the new copper: of tracks
@@ -307,15 +366,17 @@ fn pcb_route_command() -> Command {
                     STRIP,
                     CHECK,
                 ],
-                route_opts(),
+                with(route_opts(), run_opts()),
             ),
             common(),
         ),
         details: "Example:\n  guide pcb route board.kicad_pcb -o routed.kicad_pcb\n\n\
                   Tracks and vias already on the board are written back with new UUIDs, and \
                   locks and teardrops are not kept. Without -o, nothing is written. Routing \
-                  is deterministic and has no time limit; --max-expansions bounds each net's \
-                  search.",
+                  is deterministic and uses one thread. --work-budget bounds a run \
+                  reproducibly and --time-limit by the clock: either way what is routed by \
+                  then is written, and the exit status is 1 if that leaves nets unrouted. \
+                  --max-expansions bounds each net's search.",
     }
 }
 
@@ -323,7 +384,8 @@ fn pcb_route_command() -> Command {
 pub fn route(argv: &[String]) -> Outcome {
     let m = pcb_route_command().parse(argv)?;
     let ui = Ui::new(&m);
-    let options = route_options(&m)?;
+    let mut options = route_options(&m)?;
+    options.seed = m.number("seed")?;
     let loaded = load_kicad(&m, &ui)?;
     let read = &loaded.board;
     let mut design = Design::from_kicad(read);
@@ -346,7 +408,7 @@ pub fn route(argv: &[String]) -> Outcome {
         kept_tracks.len(),
         kept_vias.len()
     ));
-    let routed = pcb::route(&design, &options)
+    let routed = route_limited(&m, &ui, &design, &options)?
         .map_err(|e| Failure::Input(format!("{}: {e}", loaded.path)))?;
     let mut report = Map::default();
     routing_report(&mut report, &routed, &read.nets);
@@ -687,7 +749,7 @@ fn dsn_route_command() -> Command {
                          [default: the board's clearance]",
                     ),
                 ],
-                route_opts(),
+                with(route_opts(), run_opts()),
             ),
             common(),
         ),
@@ -704,7 +766,8 @@ fn dsn_route_command() -> Command {
 pub fn dsn_route(argv: &[String]) -> Outcome {
     let m = dsn_route_command().parse(argv)?;
     let ui = Ui::new(&m);
-    let options = route_options(&m)?;
+    let mut options = route_options(&m)?;
+    options.seed = m.number("seed")?;
     let path = match (m.operands.first(), m.get("input")) {
         (Some(_), Some(_)) => {
             return Err(Failure::Usage(
@@ -762,8 +825,8 @@ pub fn dsn_route(argv: &[String]) -> Outcome {
         design.board.tracks.len(),
         design.board.vias.len()
     ));
-    let routed =
-        pcb::route(&design, &options).map_err(|e| Failure::Input(format!("{path}: {e}")))?;
+    let routed = route_limited(&m, &ui, &design, &options)?
+        .map_err(|e| Failure::Input(format!("{path}: {e}")))?;
     let mut report = Map::default();
     routing_report(&mut report, &routed, &dsn.nets);
     let mut complete = routed.unrouted.is_empty();

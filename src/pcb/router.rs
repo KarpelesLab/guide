@@ -64,11 +64,15 @@ const BRANCH_CUTS: u32 = 8;
 /// to make again, and unmade until its turn comes.
 const PLANE_CUTS: u32 = 4;
 
-/// How many pads a net has at most for its zones not to be planes, unless they
-/// [say](super::CopperZone::plane) that they are: a pour between two or three pads is their
-/// connection, drawn as copper where a track would not do, and not a plane to cut through.
-/// Routes of other nets through it would leave its pads apart, and shut in.
+/// How many pads a net has at most, and how many pitches of the lattice a zone of its is
+/// wide at most, by the shorter side of its outline's box, for the zone not to be a plane,
+/// unless it [says](super::CopperZone::plane) that it is: a pour between two or three pads
+/// is their connection, drawn as copper where a track would not do, and not a plane to cut
+/// through. Routes of other nets through it would leave its pads apart, and shut in. A
+/// wider zone is in the way of too much to be gone around, whatever its net: a ground of
+/// four pads under a whole board, or a supply's area under a part.
 const POUR_PADS: usize = 4;
+const POUR_WIDTH: i64 = 32;
 
 /// How much finer the lattice of the second pass is.
 const FINE: i64 = 2;
@@ -836,25 +840,30 @@ fn planned_fills(design: &Design, fills: &[Fill], is_plane: &[bool]) -> Vec<Fill
 }
 
 /// By zone, whether its net plans on it as a plane: as the zone [says](super::CopperZone::plane),
-/// or if its net has more than [`POUR_PADS`] pads and its fills cover enough of the box of
-/// the net's pads, [`RouteOptions::plane_coverage`], on the layer where they cover the most.
-/// With no coverage set, nothing is filled to find out.
+/// or if it is no pour, of a net of [`POUR_PADS`] pads or fewer and [`POUR_WIDTH`] pitches
+/// wide or less, and its net's fills cover enough of the box of the net's pads,
+/// [`RouteOptions::plane_coverage`], on the layer where they cover the most. With no
+/// coverage set, nothing is filled to find out.
 pub(crate) fn plane_zones(
     design: &Design,
     options: &RouteOptions,
 ) -> Result<Vec<bool>, RouteError> {
     let zones = &design.zones.zones;
-    // A net of few pads has pours, not planes.
+    // A narrow zone of a net of few pads is a pour, not a plane.
     let mut pads = vec![0usize; design.nets.len()];
     for p in &design.board.pads {
         if let Some(slot) = p.net.and_then(|n| pads.get_mut(n.index())) {
             *slot += 1;
         }
     }
+    let narrow = POUR_WIDTH * pitch(design, options);
     let pour = |z: &super::CopperZone| {
-        z.net
-            .and_then(|n| pads.get(n.index()))
-            .is_some_and(|&n| n <= POUR_PADS)
+        let few = z.net.and_then(|n| pads.get(n.index()));
+        let (xs, ys) = (z.outline.iter().map(|p| p.x), z.outline.iter().map(|p| p.y));
+        let width = xs.clone().max().zip(xs.min()).map(|(hi, lo)| hi - lo);
+        let height = ys.clone().max().zip(ys.min()).map(|(hi, lo)| hi - lo);
+        few.is_some_and(|&n| n <= POUR_PADS)
+            && width.zip(height).is_some_and(|(w, h)| w.min(h) <= narrow)
     };
     let auto = options.plane_coverage > 0.0;
     if !auto {

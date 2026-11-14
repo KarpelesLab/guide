@@ -347,8 +347,13 @@ fn zones_are_planes_by_how_much_of_their_nets_they_cover() {
         plane_zones(d, &options).unwrap()
     };
     assert_eq!(planes(&d, 0.25), [true, false]);
-    // Whatever it covers, the pour of a net of two pads is no plane, unless it says so.
+    // Whatever it covers, the pour of a net of two pads is no plane, unless it says so,
+    // or is wide: a zone of two pads over the whole board is a plane as any.
     assert_eq!(planes(&d, 0.0), [true, false]);
+    let pour = d.zones.zones[1].outline.clone();
+    d.zones.zones[1].outline = ring(-MM, -30 * MM, 31 * MM, -10 * MM);
+    assert_eq!(planes(&d, 0.0), [true, true]);
+    d.zones.zones[1].outline = pour;
     d.board
         .pads
         .extend((1..4).map(|k| smd(k * 5 * MM, -20 * MM, 3)));

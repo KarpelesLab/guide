@@ -32,10 +32,11 @@
 //!    if it has any, as one terminal, which also holds places in that fill near each of the
 //!    net's other pads where a via fits. So routing it is a stub from each other pad to the
 //!    fill, a track and a via, rather than tracks across the board. Other nets' tracks pay
-//!    more for their length inside another net's plane, [`RouteOptions::plane_cost`]. The
-//!    zones of a net of four pads or fewer are no planes, unless they
-//!    [say so](CopperZone::plane): a pour between a few pads is their connection, and it is
-//!    copper as it is filled, which other nets' routes keep clear of.
+//!    more for their length inside another net's plane, [`RouteOptions::plane_cost`]. A
+//!    zone of a net of four pads or fewer that is 32 pitches of the lattice wide or less
+//!    is no plane, unless it [says so](CopperZone::plane): a pour between a few pads is
+//!    their connection, and it is copper as it is filled, which other nets' routes keep
+//!    clear of.
 //! 1. **Global routing.** The board is cut into square tiles on each layer, and the
 //!    negotiated-congestion [engine](crate::engine) routes every net over them. A resource
 //!    is the side between two tiles on a layer, with as many tracks as fit along its free
@@ -525,8 +526,8 @@ pub struct RouteOptions {
     /// How much of the box of a net's pads its zones' fills must cover, on the layer where
     /// they cover the most, for the net to plan on them as [planes](RouteOptions::planes):
     /// 0.25 is a quarter of the box. The default is 0, which makes every zone a plane but
-    /// those of a net of four pads or fewer, which are pours between them whatever they
-    /// cover. A net's zones that cover less, such as small pours round a few of its pads,
+    /// the narrow ones of a net of four pads or fewer, which are pours between them
+    /// whatever they cover. A net's zones that cover less, such as small pours round a few of its pads,
     /// are copper of the net as they are filled before routing, which routes of other nets
     /// keep clear of and which joins the pads it touches, and the net is routed as tracks
     /// between the rest. A zone that [says](CopperZone::plane) which it is doesn't count,

@@ -358,6 +358,11 @@ impl<'a> Run<'a> {
         }
     }
 
+    /// The work that the budget leaves, if the run has one.
+    pub(crate) fn work_left(&self) -> Option<u64> {
+        self.budgeted.then(|| self.left.get())
+    }
+
     /// Work charged so far.
     pub(crate) fn work(&self) -> u64 {
         self.work.get()

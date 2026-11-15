@@ -712,3 +712,30 @@ fn a_run_stopped_while_it_plans_on_its_zones_comes_back_with_nothing() {
     assert!(routed.tried.is_empty());
     assert!(!routed.open.is_empty());
 }
+
+#[test]
+fn a_work_budget_that_is_not_spent_stops_nothing_on_a_board_with_planes() {
+    // Routing has nineteen twentieths of a budget and the joining of zones' pieces the
+    // rest. Cleanup, between them, has the work that routing left of its own share: with
+    // none at all, a run was stopped as it began cleaning up, for a budget spent, after
+    // the few thousand nodes of its routing, and never joined its zones' pieces.
+    let d = super::zone_tests::plane_board();
+    let plain = route_checked(&d, &RouteOptions::default());
+    assert!(plain.unrouted.is_empty());
+    let options = RouteOptions {
+        work_budget: Some(20_000_000),
+        ..RouteOptions::default()
+    };
+    let routed = route_checked(&d, &options);
+    assert_eq!(routed.stopped, None);
+    assert!(routed.unrouted.is_empty(), "{:?}", routed.unrouted);
+    assert!(routed.stats.work < 1_000_000, "{}", routed.stats.work);
+    assert_eq!(routed.stats.islands.0, routed.stats.islands.1);
+    // And one that is spent in routing still stops the run, with the joining's share kept.
+    let options = RouteOptions {
+        work_budget: Some(plain.stats.work / 4),
+        ..RouteOptions::default()
+    };
+    let cut = route(&d, &options).unwrap();
+    assert_eq!(cut.stopped, Some(Stopped::WorkBudget));
+}

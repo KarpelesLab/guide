@@ -1339,6 +1339,10 @@ fn route_all<'a>(
     let mut best: Option<Best> = None;
     // A run with a deadline or a budget keeps a share of it for what comes after routing.
     let shares = Shares::of(options, planes_on);
+    // The work kept for the joining of zones' pieces, of the budget as it is now.
+    let join_work = run
+        .work_left()
+        .map_or(0, |left| (left as f64 * shares.join_work) as u64);
     run.part(shares.routing.0, shares.routing.1);
     'passes: for pass in 0..=FINE_PASSES {
         if run.poll() {
@@ -1815,7 +1819,12 @@ fn route_all<'a>(
     }
     stats.before_cleanup = measure(&copper);
     // A run that has to stop keeps the routes as they are.
-    run.part(shares.cleanup.0, shares.cleanup.1);
+    // Cleanup has the work that routing left, but what was kept for the joining.
+    let cleanup_work = match run.work_left() {
+        Some(left) if left > 0 => left.saturating_sub(join_work) as f64 / left as f64,
+        _ => 1.0,
+    };
+    run.part(shares.cleanup, cleanup_work);
     if options.cleanup && !run.poll() {
         run.phase(Phase::Cleanup);
         stats.expanded += cleanup::run(&mut world, &jobs, &mut copper, params, options);
@@ -2019,7 +2028,10 @@ impl Best {
 /// that routing cut, and takes a fill of the zones or several.
 struct Shares {
     routing: (f64, f64),
-    cleanup: (f64, f64),
+    /// Cleanup's share of the time.
+    cleanup: f64,
+    /// The share of the work, as it is when routing begins, that the joining has.
+    join_work: f64,
 }
 
 impl Shares {
@@ -2030,17 +2042,15 @@ impl Shares {
         } else {
             (0.0, 0.0)
         };
-        // Cleanup makes no connection, and has what work routing leaves, if any.
-        let cleanup = if options.cleanup {
-            (0.08, 0.0)
-        } else {
-            (0.0, 0.0)
-        };
-        // Each of what is left when the part begins: cleanup's is of what routing left.
+        // Cleanup makes no connection, and has no work kept for it: it has what work
+        // routing leaves of its own share, which is all of it where routing ends early.
+        let cleanup = if options.cleanup { 0.08 } else { 0.0 };
+        // Of the time left when the part begins: cleanup's is of what routing left.
         let of_rest = |c: f64, j: f64| if j > 0.0 { c / (c + j) } else { 1.0 };
         Shares {
-            routing: (1.0 - join.0 - cleanup.0, 1.0 - join.1 - cleanup.1),
-            cleanup: (of_rest(cleanup.0, join.0), of_rest(cleanup.1, join.1)),
+            routing: (1.0 - join.0 - cleanup, 1.0 - join.1),
+            cleanup: of_rest(cleanup, join.0),
+            join_work: join.1,
         }
     }
 }

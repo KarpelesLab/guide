@@ -917,6 +917,35 @@ fn a_net_too_wide_to_leave_its_pad_is_routed_narrower() {
 }
 
 #[test]
+fn a_host_s_fill_of_few_edges_is_cut_only_where_copper_is_too_close() {
+    // A square that a host filled, with a pad of another net a clearance from its edge,
+    // to the nanometre, and a pad of its own net in it. A fill of few edges has no parts
+    // to be measured by, which was taken to say that everything near it was too close:
+    // the square was cut round the pad, and came out as another shape.
+    let pads = vec![
+        smd(3 * MM, 10 * MM + 300_000 + 300_000, 2),
+        smd(6 * MM, 5 * MM, 1),
+        smd(20 * MM, 20 * MM, 2),
+    ];
+    let mut d = design(2, pads, 3);
+    let mut z = zone(1, 0, 15 * MM);
+    z.islands = Islands::Remove;
+    z.connection = ZoneConnection::Solid;
+    d.zones.zones.push(z);
+    d.zones.fills.push(Fill {
+        zone: 0,
+        layer: LayerId(0),
+        shape: Shape::polygon(&ring(0, 0, 10 * MM, 10 * MM), &[]).unwrap(),
+    });
+    assert_eq!(fill_zones(&d.board, &d).unwrap(), d.zones.fills);
+    // A nanometre closer, it is cut.
+    d.board.pads[0] = smd(3 * MM, 10 * MM + 300_000 + 300_000 - 1, 2);
+    let fills = fill_zones(&d.board, &d).unwrap();
+    assert_ne!(fills, d.zones.fills);
+    assert!(filled(&fills, 6 * MM, 5 * MM));
+}
+
+#[test]
 fn a_host_s_fill_of_many_edges_is_measured_as_one_of_few() {
     // A fill with a comb of 60 teeth along its top, which is measured to by its parts: as
     // given while nothing is closer than its clearance, cut around what is, and the same

@@ -496,6 +496,26 @@ impl MayBeClose for Option<Parts> {
     }
 }
 
+/// Whether a shape is closer to a part of the fill than a clearance, for certain: a fill
+/// with no parts, of few edges, says nothing, nor does a part that can't be measured to.
+/// [`MayBeClose`] says that they may be, which is no reason to take a shape for close.
+trait IsClose {
+    fn is_close(&self, other: &Shape, clearance: i64) -> bool;
+}
+
+impl IsClose for Option<Parts> {
+    fn is_close(&self, other: &Shape, clearance: i64) -> bool {
+        let Some(p) = self else { return false };
+        let mut near = p.near.borrow_mut();
+        p.index
+            .query(&other.bbox().expand(clearance.max(0) + 2), &mut near);
+        near.iter().any(|id| {
+            let part = &p.parts[id.slot() as usize];
+            part.violates(other, clearance) == Ok(true)
+        })
+    }
+}
+
 /// A zone's outline less its holes.
 fn outline_area(zone: &CopperZone) -> Result<Area, GeomError> {
     let outline = Area::from_rings(&[&zone.outline])?;
@@ -805,7 +825,7 @@ impl Ctx<'_> {
             // middle of a plane is, and only what is within those two nanometres is
             // measured against the fill, every edge of it.
             let close = |a: &Shape, b: &Shape, clearance: i64| {
-                (clearance > 2 && parts.may_be_close(b, clearance - 2)) || close(a, b, clearance)
+                (clearance > 2 && parts.is_close(b, clearance - 2)) || close(a, b, clearance)
             };
             index.query(&near_box, &mut near);
             for id in &near {

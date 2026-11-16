@@ -487,6 +487,10 @@ pub(crate) struct DetailSpace<'a> {
     anchors: RefCell<Vec<Point>>,
     /// What the node that is being expanded has learnt of its steps, for the cache.
     fresh: core::cell::Cell<u32>,
+    /// What is near the node that is being expanded on its layer, asked of the world
+    /// once for its steps in every direction, and whether it has been asked.
+    around: RefCell<Vec<crate::geom::EntryId>>,
+    asked: core::cell::Cell<bool>,
 }
 
 impl<'a> DetailSpace<'a> {
@@ -524,6 +528,8 @@ impl<'a> DetailSpace<'a> {
             }),
             anchors: RefCell::new(Vec::new()),
             fresh: core::cell::Cell::new(0),
+            around: RefCell::new(Vec::new()),
+            asked: core::cell::Cell::new(false),
         }
     }
 
@@ -715,9 +721,17 @@ impl<'a> DetailSpace<'a> {
                 let Ok(shape) = Shape::track(from.point(), to, width) else {
                     return;
                 };
-                let v = self
-                    .world
-                    .track(self.ctx.net, LayerId(from.l), &shape, None);
+                let v = if dir.is_some() && self.asked.get() {
+                    self.world.track_among(
+                        self.ctx.net,
+                        LayerId(from.l),
+                        &shape,
+                        &self.around.borrow(),
+                    )
+                } else {
+                    self.world
+                        .track(self.ctx.net, LayerId(from.l), &shape, None)
+                };
                 if let Some((d, _)) = dir {
                     self.fresh.set(self.fresh.get() | StepCache::code(d, v));
                     // The same track, the other way.
@@ -826,10 +840,24 @@ impl<'a> RoutingSpace for DetailSpace<'a> {
             let id = self.cache.id(from);
             let bits = self.cache.bits(id);
             self.fresh.set(0);
+            // Where more than one step is not known yet, the world is asked once what is
+            // near all of them.
+            let unknown = (0..DIRS.len())
+                .filter(|&d| StepCache::known(bits, d).is_none())
+                .count();
+            if unknown > 1 {
+                let width = self.ctx.widths[usize::from(from.l)];
+                let r = pitch + (width + 1) / 2 + self.world.reach();
+                let all = Rect::new(Point::new(p.x - r, p.y - r), Point::new(p.x + r, p.y + r));
+                self.world
+                    .near(LayerId(from.l), &all, &mut self.around.borrow_mut());
+                self.asked.set(true);
+            }
             for (d, (dx, dy)) in DIRS.into_iter().enumerate() {
                 let to = Point::new(p.x + dx * pitch, p.y + dy * pitch);
                 self.track_step(from, to, out, false, Some((d, bits)));
             }
+            self.asked.set(false);
             if self.fresh.get() != 0 {
                 self.cache.learn(id, self.fresh.get());
             }

@@ -14,7 +14,7 @@ use core::cell::RefCell;
 use super::control::Run;
 use super::gates::Gates;
 use crate::geom::drc::{self, Board};
-use crate::geom::{EntryId, GeomError, LayerId, LayerSet, Point, Rules, Shape, ShapeIndex};
+use crate::geom::{EntryId, GeomError, LayerId, LayerSet, Point, Rect, Rules, Shape, ShapeIndex};
 use crate::id::NetId;
 
 /// What an entry of the index is.
@@ -526,6 +526,57 @@ impl<'r> World<'r> {
         net: NetId,
         layer: LayerId,
         shape: &Shape,
+        routed: Option<&mut Vec<NetId>>,
+    ) -> Verdict {
+        let l = usize::from(layer.0);
+        let Some(index) = self.layers.get(l) else {
+            return Verdict::Blocked;
+        };
+        let mut near = self.scratch.borrow_mut();
+        index.query(&shape.bbox().expand(self.reach), &mut near);
+        self.track_over(net, layer, shape, &near, None, routed)
+    }
+
+    /// The entries on `layer` whose boxes share a point with `rect`, in order: what
+    /// [`track_among`](World::track_among) is given, for every track whose own box,
+    /// grown by [`reach`](World::reach), is within `rect`.
+    pub(crate) fn near(&self, layer: LayerId, rect: &Rect, out: &mut Vec<EntryId>) {
+        match self.layers.get(usize::from(layer.0)) {
+            Some(index) => index.query(rect, out),
+            None => out.clear(),
+        }
+    }
+
+    /// How far any rule can reach, which a query for what is near a shape is widened by.
+    pub(crate) fn reach(&self) -> i64 {
+        self.reach
+    }
+
+    /// What [`track`](World::track) says of a track, asked of the entries `near` in place
+    /// of the index: those near a box that holds the track's own, grown by
+    /// [`reach`](World::reach). One query then serves the tracks from a node in every
+    /// direction, each of which is measured against the same few entries as if it had
+    /// asked on its own.
+    pub(crate) fn track_among(
+        &self,
+        net: NetId,
+        layer: LayerId,
+        shape: &Shape,
+        near: &[EntryId],
+    ) -> Verdict {
+        let within = shape.bbox().expand(self.reach);
+        self.track_over(net, layer, shape, near, Some(&within), None)
+    }
+
+    /// [`track`](World::track) over the entries `near`, those of them whose boxes share a
+    /// point with `within` if it is given.
+    fn track_over(
+        &self,
+        net: NetId,
+        layer: LayerId,
+        shape: &Shape,
+        near: &[EntryId],
+        within: Option<&Rect>,
         mut routed: Option<&mut Vec<NetId>>,
     ) -> Verdict {
         let l = usize::from(layer.0);
@@ -535,13 +586,14 @@ impl<'r> World<'r> {
         if self.restricted && !self.on_layer(net, l) {
             return Verdict::Blocked;
         }
-        let mut near = self.scratch.borrow_mut();
-        index.query(&shape.bbox().expand(self.reach), &mut near);
         let mut verdict = Verdict::Free;
         let ours = self.clearance(Some(net), layer);
-        for &id in near.iter() {
-            let meta = self.meta[l][id.slot() as usize];
+        for &id in near {
             let Some(other) = index.get(id) else { continue };
+            if within.is_some_and(|w| !other.bbox().intersects(w)) {
+                continue;
+            }
+            let meta = self.meta[l][id.slot() as usize];
             let hit = match meta.kind {
                 Kind::Copper => {
                     !same_net(Some(net), meta.net)
@@ -822,4 +874,67 @@ fn violates(a: &Shape, b: &Shape, clearance: i64) -> bool {
 /// As in the check: copper with no net is of no net, not even its own.
 fn same_net(a: Option<NetId>, b: Option<NetId>) -> bool {
     a.is_some() && a == b
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::detail::DIRS;
+    use super::super::tests::{MM, design, smd, through};
+    use super::{Verdict, World};
+    use crate::geom::{LayerId, Point, Rect, Shape};
+    use crate::id::NetId;
+
+    #[test]
+    fn the_steps_from_a_node_are_judged_by_one_query_as_by_one_each() {
+        // Pads of three nets and a routed track among them, and a net's steps of a pitch
+        // in the eight directions from points all over: asked of the world one by one,
+        // and of what one query for all eight finds, they are judged the same.
+        let d = design(
+            2,
+            vec![
+                smd(0, 0, 1),
+                smd(MM, 0, 2),
+                smd(2 * MM, 300_000, 3),
+                through(-MM, MM, 2, 2),
+                smd(3 * MM, 3 * MM, 1),
+            ],
+            4,
+        );
+        let mut world = World::new(
+            &d.board,
+            &d.rules,
+            &d.outline,
+            d.edge_clearance,
+            &d.obstacles,
+        )
+        .unwrap();
+        let routed = Shape::track(Point::new(-MM, 2 * MM), Point::new(3 * MM, MM), 200_000);
+        world.add_track(NetId(3), LayerId(0), routed.unwrap());
+        let (pitch, width) = (200_000, 200_000);
+        let mut near = Vec::new();
+        let mut verdicts = [0usize; 3];
+        for layer in [LayerId(0), LayerId(1)] {
+            for i in -12..=22 {
+                for j in -8..=20 {
+                    let p = Point::new(i * 137_000, j * 151_000);
+                    let r = pitch + (width + 1) / 2 + world.reach();
+                    let all = Rect::new(Point::new(p.x - r, p.y - r), Point::new(p.x + r, p.y + r));
+                    world.near(layer, &all, &mut near);
+                    for (dx, dy) in DIRS {
+                        let to = Point::new(p.x + dx * pitch, p.y + dy * pitch);
+                        let step = Shape::track(p, to, width).unwrap();
+                        let alone = world.track(NetId(1), layer, &step, None);
+                        assert_eq!(world.track_among(NetId(1), layer, &step, &near), alone);
+                        verdicts[match alone {
+                            Verdict::Free => 0,
+                            Verdict::Routed => 1,
+                            Verdict::Blocked => 2,
+                        }] += 1;
+                    }
+                }
+            }
+        }
+        // Each of the three verdicts was among them.
+        assert!(verdicts.iter().all(|&n| n > 20), "{verdicts:?}");
+    }
 }

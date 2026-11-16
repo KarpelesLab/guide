@@ -2658,6 +2658,81 @@ mod tests {
     }
 
     #[test]
+    fn a_run_with_a_budget_pulls_every_net_tight_before_it_looks_for_fewer_vias() {
+        use super::super::cleanup;
+        use super::super::control::Run;
+        use super::super::detail::Params;
+        use super::super::geometry::{NetCopper, Seg};
+        use super::super::world::World;
+        use super::super::{RouteOptions, RunControl, Stopped};
+        // Two nets of two pads on the top layer. The first goes under and back up by two
+        // vias for nothing, and the second round by a way that is longer than it has to
+        // be, as rip-up leaves routes.
+        let pads = vec![
+            smd(0, 0, 1),
+            smd(4 * MM, 0, 1),
+            smd(0, 3 * MM, 2),
+            smd(4 * MM, 3 * MM, 2),
+        ];
+        let d = design(2, pads, 3);
+        let options = RouteOptions::default();
+        // A budget of one node: the first search for fewer vias ends the run.
+        let control = RunControl::default();
+        let run = Run::new(&control, Some(1));
+        let mut world = World::new(
+            &d.board,
+            &d.rules,
+            &d.outline,
+            d.edge_clearance,
+            &d.obstacles,
+        )
+        .unwrap();
+        world.configure(&d, &options);
+        world.set_run(&run);
+        let pitch = super::pitch(&d, &options);
+        let jobs = super::jobs(&d, &world, pitch, &[], &[]);
+        assert_eq!(jobs.len(), 2);
+        let seg = |a: (i64, i64), b: (i64, i64), l: u8| Seg {
+            a: Point::new(a.0, a.1),
+            b: Point::new(b.0, b.1),
+            l,
+        };
+        let mut under = NetCopper::default();
+        under.segs = vec![
+            seg((0, 0), (MM, 0), 0),
+            seg((MM, 0), (3 * MM, 0), 1),
+            seg((3 * MM, 0), (4 * MM, 0), 0),
+        ];
+        under.vias = vec![Point::new(MM, 0), Point::new(3 * MM, 0)];
+        let mut round = NetCopper::default();
+        round.segs = vec![
+            seg((0, 3 * MM), (MM, 4 * MM), 0),
+            seg((MM, 4 * MM), (3 * MM, 4 * MM), 0),
+            seg((3 * MM, 4 * MM), (4 * MM, 3 * MM), 0),
+        ];
+        let mut copper = vec![Some(under), Some(round)];
+        for (job, c) in jobs.iter().zip(copper.iter_mut()) {
+            c.as_mut().unwrap().place(&mut world, &job.ctx);
+        }
+        let params = Params {
+            pitch,
+            via_cost: options.via_cost,
+            layer_bias: options.layer_bias,
+            bounds: super::bounds_of(&d),
+            max_expansions: options.max_expansions,
+            under_pads: false,
+            partial: false,
+            stubs: false,
+        };
+        cleanup::run(&mut world, &jobs, &mut copper, params, &options);
+        // The search for the first net's route with no vias spent the budget, and the
+        // second net is straight all the same: it was pulled tight before.
+        assert_eq!(run.stopped(), Some(Stopped::WorkBudget));
+        let round = copper[1].as_ref().unwrap();
+        assert_eq!(round.segs, [seg((0, 3 * MM), (4 * MM, 3 * MM), 0)]);
+    }
+
+    #[test]
     fn a_net_with_a_plane_loses_only_the_stubs_in_the_way_in_a_run_with_a_budget() {
         // A ground of 584 pads, as stubs to its plane: in the first pass too, and far more
         // often than a net without a plane, before it is taken out whole.

@@ -53,6 +53,19 @@ pub(crate) fn run(
         let vias = |j: usize| copper[j].as_ref().map_or(0, |c| c.vias.len());
         order.sort_by_key(|&j| (core::cmp::Reverse(vias(j)), j));
     }
+    // And in such a run every net is pulled tight first, which takes no search: the
+    // searches for fewer vias then have the time that is left, each net pulled tight again
+    // if it was routed anew, where they used to have all of it on a board that a budget
+    // cuts, and the tracks of every net were left as rip-up had them.
+    if bounded {
+        for (job, slot) in jobs.iter().zip(copper.iter_mut()) {
+            let Some(c) = slot else { continue };
+            if stopped(world) {
+                return expanded;
+            }
+            tidy(world, &job.ctx, c);
+        }
+    }
     for j in order {
         let job = &jobs[j];
         let Some(c) = &mut copper[j] else { continue };
@@ -60,19 +73,32 @@ pub(crate) fn run(
             break;
         }
         if !c.vias.is_empty() && !(bounded && job.plane) {
+            let before = (c.vias.len(), c.segs.len());
             expanded += fewer_vias(world, job, c, params, options);
+            if bounded && before != (c.vias.len(), c.segs.len()) {
+                tidy(world, &job.ctx, c);
+            }
         }
+    }
+    if bounded {
+        return expanded;
     }
     for (job, slot) in jobs.iter().zip(copper.iter_mut()) {
         let Some(c) = slot else { continue };
         if stopped(world) {
             break;
         }
-        drop_idle_vias(c, &job.ctx);
-        pull_tight(world, &job.ctx, c);
-        c.place(world, &job.ctx);
+        tidy(world, &job.ctx, c);
     }
     expanded
+}
+
+/// A net's copper without the vias that join nothing, and with its runs pulled tight, in
+/// the world.
+fn tidy(world: &mut World<'_>, ctx: &NetCtx, c: &mut NetCopper) {
+    drop_idle_vias(c, ctx);
+    pull_tight(world, ctx, c);
+    c.place(world, ctx);
 }
 
 /// Routes a net again with dearer vias, and keeps the new route if it has fewer vias and is

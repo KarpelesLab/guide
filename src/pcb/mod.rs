@@ -576,7 +576,10 @@ pub struct RouteOptions {
     /// has that width everywhere. The default is true: [`NetSpec::track_width`] is then
     /// the width a net is routed at where it can be, as a net class's is, and a net between
     /// the pads of a part of fine pitch is routed, narrower, rather than not at all.
-    /// [`Stats::necked`] counts such nets.
+    /// [`Stats::necked`] counts such nets. In a run with a budget or a deadline, the
+    /// width is also one at which the pads beside such a pad are left the same way, side
+    /// by side: a little narrower again, where one track fits a pad and two do not fit
+    /// two.
     pub neck_down: bool,
     /// Whether the result has the zones' [fills](Routed::fills). The default is true. A
     /// host that fills its zones itself, around the routes, sets this to false: the fill

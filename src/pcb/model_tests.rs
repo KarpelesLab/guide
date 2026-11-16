@@ -946,6 +946,38 @@ fn a_host_s_fill_of_few_edges_is_cut_only_where_copper_is_too_close() {
 }
 
 #[test]
+fn tracks_out_of_pads_side_by_side_are_narrow_enough_for_both() {
+    // The same row with a clearance of 0.19 mm: a track of 0.22 mm clears the pads on
+    // either side of its own, 0.3 mm from its middle, and two such tracks out of two pads
+    // side by side are 0.18 mm apart. At 0.21 mm they are 0.19 mm apart: the width of a
+    // run with a budget.
+    let mut d = fine_row();
+    d.rules = Rules::new(crate::geom::RuleSpec::new(&["F.Cu"], 100_000, 190_000)).unwrap();
+    let options = RouteOptions {
+        work_budget: Some(50_000_000),
+        ..RouteOptions::default()
+    };
+    let routed = route_checked(&d, &options);
+    assert_eq!(routed.stats.necked, 8);
+    assert!(routed.tracks.iter().all(|t| t.width == 210_000));
+    // With no budget, the width that leaves each pad alone, as before.
+    let plain = route_checked(&d, &RouteOptions::default());
+    assert_eq!(plain.stats.necked, 8);
+    assert!(plain.tracks.iter().all(|t| t.width == 220_000));
+    // A pad with nothing beside it is left at the widest width that leaves it alone.
+    let mut alone = fine_row();
+    alone.rules = d.rules.clone();
+    for (k, p) in alone.board.pads.iter_mut().enumerate() {
+        // Every other pin of the row belongs to no net, and has no track.
+        if k % 4 == 0 {
+            p.net = None;
+        }
+    }
+    let routed = route_checked(&alone, &options);
+    assert!(routed.tracks.iter().all(|t| t.width == 220_000));
+}
+
+#[test]
 fn a_host_s_fill_of_many_edges_is_measured_as_one_of_few() {
     // A fill with a comb of 60 teeth along its top, which is measured to by its parts: as
     // given while nothing is closer than its clearance, cut around what is, and the same

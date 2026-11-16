@@ -146,6 +146,17 @@ impl NetCtx {
         }
     }
 
+    /// The same net on the lattice of `origin`, in place of its first pad's.
+    pub(crate) fn on_lattice(mut self, origin: Point) -> NetCtx {
+        self.origin = origin;
+        self
+    }
+
+    /// The origin of the net's own lattice.
+    pub(crate) fn lattice(&self) -> Point {
+        self.origin
+    }
+
     /// Whether a pad of the net at `p` has copper on both layers, and so joins them there.
     pub(crate) fn joins(&self, p: Point, a: u8, b: u8) -> bool {
         self.centers

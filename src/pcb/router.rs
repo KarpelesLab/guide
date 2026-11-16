@@ -21,7 +21,7 @@ use super::world::{Placed, Planes, Verdict, World};
 use super::zones::{self, Fill};
 use super::{CopperKind, Design, DiffPair, RouteError, RouteOptions, Routed, RunControl, Stats};
 use crate::geom::drc::{Board, Track, Via};
-use crate::geom::{LayerId, LayerSet, Point, Rect, Shape};
+use crate::geom::{LayerId, LayerSet, Point, Rect, Shape, SpatialIndex};
 use crate::id::NetId;
 
 /// A net to route, and where it may go.
@@ -30,6 +30,8 @@ pub(crate) struct Job {
     pub(crate) corridor: Option<Corridor>,
     /// Half the perimeter of its pads' box, which orders the nets.
     span: i64,
+    /// Whether its first terminal is a plane of its, which its routes are stubs to.
+    pub(crate) plane: bool,
 }
 
 /// What a penalty for crossing another net's route costs, in millimetres, and how much a
@@ -246,6 +248,7 @@ fn jobs(
     world: &World<'_>,
     pitch: i64,
     planes: &[(NetId, Vec<planes::Piece>)],
+    origins: &[Option<Point>],
 ) -> Vec<Job> {
     let rules = &design.rules;
     let layers = rules.layer_count();
@@ -366,6 +369,7 @@ fn jobs(
         if t < 2 {
             continue;
         }
+        let stubs = span.is_some();
         let span = span.unwrap_or_else(|| {
             let bbox = pads
                 .iter()
@@ -374,10 +378,15 @@ fn jobs(
                 .unwrap_or_default();
             (bbox.max().x - bbox.min().x) + (bbox.max().y - bbox.min().y)
         });
+        let ctx = NetCtx::new(net, widths, via, pads, t, LATTICE_REACH * pitch);
         out.push(Job {
-            ctx: NetCtx::new(net, widths, via, pads, t, LATTICE_REACH * pitch),
+            ctx: match origins.get(i).copied().flatten() {
+                Some(origin) => ctx.on_lattice(origin),
+                None => ctx,
+            },
             corridor: None,
             span,
+            plane: stubs,
         });
     }
     out
@@ -1043,7 +1052,8 @@ fn route_all<'a>(
     // Nets too wide to leave their pads are routed narrower, from here on.
     let narrow = if options.neck_down && !run.poll() {
         let world = world_of(design)?;
-        neck::plan(design, &world)
+        // Beside their neighbours too in a run with a budget.
+        neck::plan(design, &world, run.bounded())
     } else {
         Vec::new()
     };
@@ -1085,7 +1095,8 @@ fn route_all<'a>(
     // Escapes from fine-pitch footprints, which become fixed copper of their nets.
     let escapes = {
         let mut world = world_of(design)?;
-        escape::plan(design, &mut world, pitch, options.fanout_via)
+        // In a run with a budget, for the balls deep in an area array too.
+        escape::plan(design, &mut world, pitch, options.fanout_via, run.bounded())
     };
     let with_escapes;
     let design = if escapes.is_empty() {
@@ -1107,7 +1118,7 @@ fn route_all<'a>(
     let before_pairs = design;
     let design = if options.couple_pairs && options.pairs_first && !design.pairs.is_empty() {
         let mut world = world_of(design)?;
-        pairs_first.jobs = jobs(design, &world, pitch, &[]);
+        pairs_first.jobs = jobs(design, &world, pitch, &[], &[]);
         pairs_first.params = Some(Params {
             pitch,
             via_cost: options.via_cost,
@@ -1217,7 +1228,14 @@ fn route_all<'a>(
     }
     let mut pair_rips = vec![0u32; pair_copper.len()];
     let pair_nets = pairs_first.nets(design);
-    let mut jobs = jobs(terminal_design, &world, pitch, &plane_pieces);
+    // In a run with a budget, a net with a pad in a row of fine pitch is on that pad's
+    // lattice.
+    let origins = if run.bounded() {
+        row_origins(design)
+    } else {
+        Vec::new()
+    };
+    let mut jobs = jobs(terminal_design, &world, pitch, &plane_pieces, &origins);
     match options.seed {
         None => jobs.sort_by_key(|j| (j.span, j.ctx.net)),
         Some(seed) => jobs.sort_by_key(|j| (seeded_span(seed, j), j.ctx.net)),
@@ -2238,6 +2256,67 @@ fn completion(design: &Design, ctx: &NetCtx, copper: &NetCopper, pitch: i64) -> 
         terminals,
         LATTICE_REACH * pitch,
     )
+    .on_lattice(ctx.lattice())
+}
+
+/// By net, the centre of its pad with the least room beside it, if no track of the net
+/// passes between that pad and the pad of another net next to it: the pad of a row of
+/// fine pitch. A net's own lattice starts there, rather than at its first pad. Out of such
+/// a row the tracks of pads side by side have no room to move sideways onto another
+/// lattice, each beside the next, within the few pitches that a pad's lattice goes on
+/// for: on the lattice of its pad in the row, a track goes straight on for as long as it
+/// has to, and turns where the next one lets it.
+fn row_origins(design: &Design) -> Vec<Option<Point>> {
+    let rules = &design.rules;
+    let stack = rules.layers();
+    let pads = &design.board.pads;
+    let copper: Vec<usize> = (0..pads.len())
+        .filter(|&i| pads[i].layers.0 & stack.0 != 0)
+        .collect();
+    let index = SpatialIndex::bulk_load(copper.iter().map(|&i| pads[i].shape.bbox()));
+    // By net, the least gap beside one of its pads, and that pad.
+    let mut best: Vec<Option<(i64, usize)>> = vec![None; design.nets.len()];
+    let mut near = Vec::new();
+    for &i in &copper {
+        let pad = &pads[i];
+        let Some(net) = pad.net.filter(|n| n.index() < design.nets.len()) else {
+            continue;
+        };
+        let spec = &design.nets[net.index()];
+        if !spec.route || pad.hole.is_some() {
+            continue;
+        }
+        let layer = LayerSet(pad.layers.0 & stack.0)
+            .iter()
+            .next()
+            .unwrap_or(LayerId(0));
+        let passage = spec.track_width.max(rules.track_width(Some(net), layer))
+            + 2 * rules.clearance(Some(net), layer);
+        let b = pad.shape.bbox();
+        index.query(&b.expand(passage), &mut near);
+        let mut gap: Option<i64> = None;
+        for id in &near {
+            let q = &pads[copper[id.slot() as usize]];
+            if q.net == pad.net || q.layers.0 & pad.layers.0 & stack.0 == 0 {
+                continue;
+            }
+            let o = q.shape.bbox();
+            let dx = (o.min().x - b.max().x).max(b.min().x - o.max().x);
+            let dy = (o.min().y - b.max().y).max(b.min().y - o.max().y);
+            let d = dx.max(dy).max(0);
+            if d < passage {
+                gap = Some(gap.map_or(d, |g| g.min(d)));
+            }
+        }
+        if let Some(g) = gap
+            && best[net.index()].is_none_or(|(h, _)| g < h)
+        {
+            best[net.index()] = Some((g, i));
+        }
+    }
+    best.into_iter()
+        .map(|b| b.and_then(|(_, i)| pad_center(&pads[i].shape)))
+        .collect()
 }
 
 /// Where planes are: by layer and tile of `grid`, the net whose planned fill on an inner
@@ -2272,7 +2351,38 @@ fn plane_map(design: &Design, fills: &[Fill], grid: Corridor, cost: f64) -> Plan
 
 #[cfg(test)]
 mod tests {
-    use super::{BRANCH_CUTS, BRANCH_TERMINALS, loses_branches};
+    use super::super::tests::{MM, design, smd};
+    use super::{BRANCH_CUTS, BRANCH_TERMINALS, loses_branches, row_origins};
+    use crate::geom::drc::Pad;
+    use crate::geom::{Point, Rect, Shape};
+
+    #[test]
+    fn a_net_s_lattice_starts_at_its_pad_in_a_row_of_fine_pitch() {
+        // Four nets, each from a pad on its own to a pad 0.2 mm wide in a row at 0.4 mm,
+        // where no track passes between two pads, and a fifth between two pads apart.
+        let mut pads: Vec<Pad> = (0..4)
+            .map(|k| smd(k * 2 * MM, 5 * MM, k as u32 + 1))
+            .collect();
+        for k in 0..4 {
+            let x = k * 400_000;
+            pads.push(Pad {
+                shape: Shape::rect(Rect::new(
+                    Point::new(x - 100_000, -400_000),
+                    Point::new(x + 100_000, 400_000),
+                ))
+                .unwrap(),
+                ..smd(x, 0, k as u32 + 1)
+            });
+        }
+        pads.push(smd(10 * MM, 10 * MM, 5));
+        pads.push(smd(12 * MM, 10 * MM, 5));
+        let origins = row_origins(&design(1, pads, 6));
+        for k in 0..4 {
+            assert_eq!(origins[k + 1], Some(Point::new(k as i64 * 400_000, 0)));
+        }
+        assert_eq!(origins[5], None);
+        assert_eq!(origins[0], None);
+    }
 
     #[test]
     fn a_net_with_a_plane_loses_only_the_stubs_in_the_way_in_a_run_with_a_budget() {

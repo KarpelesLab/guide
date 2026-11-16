@@ -44,12 +44,22 @@ pub(crate) fn run(
     let mut expanded = 0;
     // A run that has to stop leaves the nets not yet cleaned up as they are.
     let stopped = |world: &World<'_>| world.run().is_some_and(super::control::Run::poll);
-    for (job, slot) in jobs.iter().zip(copper.iter_mut()) {
-        let Some(c) = slot else { continue };
+    // In a run with a budget, the nets with the most vias first, as the time may not be
+    // there for all of them, and not a net whose routes are stubs to its plane: each has
+    // the via that takes it there, and none to lose.
+    let bounded = world.run().is_some_and(super::control::Run::bounded);
+    let mut order: Vec<usize> = (0..jobs.len().min(copper.len())).collect();
+    if bounded {
+        let vias = |j: usize| copper[j].as_ref().map_or(0, |c| c.vias.len());
+        order.sort_by_key(|&j| (core::cmp::Reverse(vias(j)), j));
+    }
+    for j in order {
+        let job = &jobs[j];
+        let Some(c) = &mut copper[j] else { continue };
         if stopped(world) {
             break;
         }
-        if !c.vias.is_empty() {
+        if !c.vias.is_empty() && !(bounded && job.plane) {
             expanded += fewer_vias(world, job, c, params, options);
         }
     }

@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.7](https://github.com/KarpelesLab/guide/compare/v0.0.6...v0.0.7) - 2026-11-16
+
+### Fixed
+
+- *(pcb)* a run with a budget pulls every net tight before it looks for fewer vias
+- *(pcb)* a pad is said to be shut in at the width its net was routed at
+
+### Other
+
+- PCB routing planned sooner, measured, and what was not kept
+- *(pcb)* Routed::failed is final only after a run that ended on its own
+- *(pcb)* a run with a budget ends global routing once it gains nothing
+- *(pcb)* a host's fill is cut round new copper in a window, not opened whole
+- *(geom)* the parts of a polygon of many vertices are worked out once
+- *(geom)* the fixed items of a board are packed in its index once they are in
+- *(pcb)* the steps from a node are asked of the world in one query
+
 ## [0.0.6](https://github.com/KarpelesLab/guide/compare/v0.0.5...v0.0.6) - 2026-11-16
 
 ### Added

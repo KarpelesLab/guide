@@ -430,6 +430,37 @@ impl RoutingSpace for Watched<'_> {
 
 /// Routes the nets over the tiles. Each net is a list of terminals, each a list of pads'
 /// positions and layers. A `run` that has to stop ends it with what it has.
+/// How many iterations in a row may gain less than one part in [`STALL_GAIN`] of the least
+/// overuse so far before a run with a budget ends its global routing.
+const STALL_ITERATIONS: u32 = 3;
+const STALL_GAIN: u64 = 50;
+
+/// Whether a negotiation still gains: the least it left unrouted and overused so far, and
+/// how many iterations have gone by since without less.
+#[derive(Clone, Copy, Debug, Default)]
+struct Stall {
+    best: Option<u64>,
+    idle: u32,
+}
+
+impl Stall {
+    /// Whether the negotiation has stalled, after an iteration that left so many nets
+    /// unrouted and so much overuse.
+    fn after(&mut self, unrouted: u32, overuse: u64) -> bool {
+        // Nets unrouted first: one fewer is a gain whatever the overuse.
+        let total = u64::from(unrouted) << 32 | overuse.min(u64::from(u32::MAX));
+        match self.best {
+            // Less by a fiftieth, at least: a resource or two fewer is no trend.
+            Some(b) if total + b / STALL_GAIN >= b => self.idle += 1,
+            _ => {
+                self.best = Some(total);
+                self.idle = 0;
+            }
+        }
+        self.idle >= STALL_ITERATIONS
+    }
+}
+
 pub(crate) fn route(
     space: &GlobalSpace,
     nets: &[(NetId, Vec<TerminalPads>)],
@@ -453,12 +484,24 @@ pub(crate) fn route(
         ..EngineOptions::default()
     };
     let watched = Watched { space, run };
-    let Ok(outcome) = engine::route(&watched, &engine_nets, options) else {
+    let Ok(mut engine) = engine::Engine::new(&watched, &engine_nets, options) else {
         return GlobalResult {
             routes: vec![None; nets.len()],
             overused: 0,
         };
     };
+    // A run with a budget ends the negotiation once it gains nothing: on a board with more
+    // nets through a place than fit, the overuse falls for a few iterations and then stays
+    // where it is for as many as are left, each of them most of the work of the first few
+    // together. The result is the best iteration's, as it is for a run left to its end.
+    let hurried = run.bounded();
+    let mut stall = Stall::default();
+    while let Some(report) = engine.step() {
+        if hurried && stall.after(report.unrouted, report.total_overuse) {
+            break;
+        }
+    }
+    let outcome = engine.outcome();
     let routes = nets
         .iter()
         .map(|(id, _)| outcome.routes.route(*id).map(|r| r.nodes().collect()))
@@ -466,5 +509,33 @@ pub(crate) fn route(
     GlobalResult {
         routes,
         overused: outcome.overused.len(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Stall;
+
+    #[test]
+    fn a_negotiation_that_gains_nothing_more_is_said_to_have_stalled() {
+        // The overuse of a board of six layers, iteration by iteration: it falls for
+        // four, and stays there for the twenty-six that were left.
+        let overuse = [356, 253, 198, 178, 178, 176, 181, 179, 179, 183];
+        let mut stall = Stall::default();
+        let ended = overuse.iter().position(|&o| stall.after(0, o));
+        assert_eq!(ended, Some(6));
+        // One that falls every time goes on, and so does one that routes a net more.
+        let mut stall = Stall::default();
+        assert!(
+            [400, 300, 200, 150, 100, 50, 0]
+                .iter()
+                .all(|&o| !stall.after(0, o))
+        );
+        let mut stall = Stall::default();
+        assert!((0..8).rev().all(|unrouted| !stall.after(unrouted, 100)));
+        // Nothing overused is the end in any case, which the engine sees to.
+        let mut stall = Stall::default();
+        assert!((0..3).all(|_| !stall.after(0, 0)));
+        assert!(stall.after(0, 0));
     }
 }

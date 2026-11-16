@@ -760,7 +760,10 @@ pub struct Routed {
     /// out of nodes: the others that were [tried](Routed::tried) lost their routes to
     /// another net's and were not got to again before the run was
     /// [stopped](Routed::stopped), and a run on the board as it is returned has room to
-    /// give them, where these were looked for and found none.
+    /// give them, where these were looked for and found none. None on the board as it was
+    /// when their turn came, that is: in a run that was stopped, other nets were taken
+    /// out and put back since, and a run on the board as it is returned may find a way
+    /// for some of these too. Only after a run that ended on its own is the list final.
     pub failed: Vec<NetId>,
 }
 

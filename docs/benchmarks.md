@@ -3519,6 +3519,18 @@ eleven without `glasgow-revD1`. Ahead in every order on `glasgow-revD1`, `cynthi
 and `glasgow-revC3`; behind on `corne-cherry`, 35 to 38 against 3, `nrfmicro`, 4 to 7
 against none, and `sweep-v2.2`, 6 or 7 against 3.
 
+`lumenpnp-mobo`'s 9, 10 and 6 are all pads of its ground, and none of them is this
+crate's: its run counts itself complete, 524 of 524. The host gives a run the nets that
+its board has open, and the ground of this board has none while nothing is routed, as the
+host's fill of its pour on the top layer joins every pad. So the first run is not asked
+to route the ground, its routes go through that pour, and the second run, on the routed
+board, is asked for some 220 stubs to the ground's plane at once, of which five to ten
+find their pads shut in. With the nets that have zones among those of the first run, on
+an uncommitted change of the adapter, the run makes those stubs while the board is free,
+813 of 813 connections in 20 s for 524 of 524 in 29 s, and the board has 0, 1 and 0
+open, with 713 vias for 748: the twelve boards 275, 252 and 232, the eleven 113, 116 and
+108.
+
 What one run does, by the six orders of the nets of `corne-cherry` with a budget of 40
 million nodes and no second run, before the wait and with the rows planned: connections
 open as the run counts them on the fill it planned on, and after the stroke as cadlab
@@ -3568,6 +3580,17 @@ budget nor a deadline.
   board of four layers is then routed again by half. At 3 mm and 4.5 mm no run of any
   board made a connection more. Eight connections of 360 for four more runs of each
   board: not kept in the adapter.
+- *A pad beside others taken off the fill that joins it*, on boards whose host does ask
+  for the nets with zones. A pad with no hole, with a pad of another net closer than a
+  track and its clearances, was made a terminal of its own though its net's fill joins
+  it, to be given a stub like the pads that the fill does not reach, to the fill of
+  another layer where there is one: `corne-cherry` 101 for 108 over three orders and
+  `cynthion` 41 for 44, and `glasgow-revC3` 677 for 113 and `buspirate5-rev10` 74 for 11,
+  as most pads of a dense board have such a neighbour, the balls of a BGA among them, and
+  a ground of two hundred terminals more spends its searches on stubs that it did not
+  need. Then only the pads with such neighbours on two opposite sides and not on four,
+  as in a row, each given its stub through a via before anything is routed, as fixed
+  copper: 343 for 337 on the eleven boards, `corne-cherry` 113 for 109.
 - *An end to a first run that has stopped gaining*, which is what the host asked for.
   Not built: what stopped `glasgow-revD1` gaining was the order of its searches, and with
   the wait its first run holds at 27 s all but 25 of the connections that its two runs
@@ -3584,7 +3607,8 @@ budget nor a deadline.
   rows planned as routes are cut like any other, and planned as walls they were worse.
 - What a route through a host's fill cuts off for good. The stubs made once routing is
   over join what still has a way, and a pad shut in by then has none: a dozen on
-  `corne-cherry`, five to ten on `lumenpnp-mobo`, whose run counts itself complete.
+  `corne-cherry`, whose ground is a pour on both of its two layers. A net that its fill
+  joins whole has no route to make and nothing that keeps count of its pour.
 - Rip-up that settles. `glasgow-revD1` makes eleven connections in fifteen seconds of
   turns that cross other nets' routes, and `nrfmicro` ends on its own after 23 s with 4 to
   7 open and the rest of its minute unspent.

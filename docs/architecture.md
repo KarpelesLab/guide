@@ -664,7 +664,7 @@ keeps what that reaches.** Measured after the above
 
 A run with no budget has neither, and the curated boards are as they were.
 
-Tried and not kept there: nothing of guide's own. Through the host, on an uncommitted
+Tried and not kept there. Through the host, on an uncommitted
 change of cadlab's adapter: runs of `eco::reroute_with` after the two runs it makes, each
 with the routed copper within 1.5 mm of the ends of what is still open taken out and
 routed again, in another order of the nets each time, and a run on the board filled again
@@ -672,7 +672,14 @@ after each. `nrfmicro` had 12 connections open over three orders for 18 and
 `buspirate5-rev10` 9 for 11; `lumenpnp-mobo` and `tinytapeout-demo` gained nothing, a run
 that took out the copper round five to eleven open pads leaving 50 to 70 open where it
 was cut, as a net with no zone that touches an area is taken out whole. At 3 mm and
-4.5 mm no run of any board gained.
+4.5 mm no run of any board gained. And of guide's own, for the pads that routes cut off
+their fill for good: a pad with a pad of another net close beside it made a terminal of
+its own though the fill joins it, which most pads of a dense board are, 677 connections
+open on `glasgow-revC3` for 113; and the pads of rows alone given a stub through a via to
+the fill of another layer before anything is routed, as fixed copper, 343 for 337 on
+eleven boards. What `lumenpnp-mobo` had open was neither: its host did not ask the first
+run for the ground that its own fill joined, and asked, the run leaves 1 open over three
+orders for 25.
 
 **Differential pairs are routed side by side last, in place of their nets' routes.** Routing
 pairs first, before anything else, as fixed copper, coupled `udb-s`'s USB pair a little better,

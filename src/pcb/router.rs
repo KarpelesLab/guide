@@ -1351,6 +1351,10 @@ fn route_all<'a>(
     // By job, whether it has waited for the others in the first pass, after a search in its
     // corridor that ended so.
     let mut waited = vec![Wait::No; jobs.len()];
+    // By job, whether its copper is what it reached with nothing moved, in the turn after
+    // it waited, and its next turn is the first in which it may cross other nets' routes:
+    // if that finds no way, it keeps what it has.
+    let mut held = vec![false; jobs.len()];
     // Whether the run has a budget or a deadline, and so routes for the most connections
     // soonest.
     let hurried = run.bounded();
@@ -1483,6 +1487,7 @@ fn route_all<'a>(
             }
             let job = &jobs[j];
             tried[j] = true;
+            let was_held = core::mem::take(&mut held[j]);
             // A net routed in part is completed from its copper, if it still has it.
             let mut rest = completing[j].take().filter(|_| copper[j].is_some());
             // A net with nothing but its stubs is routed as any net is for the first time.
@@ -1529,6 +1534,13 @@ fn route_all<'a>(
             // keeps what it reaches is not made to wait: what it reached would be searched
             // for again. A run with no budget keeps the nets in their order, shortest
             // first, which on a crowded board ends with fewer vias, if later.
+            // When it comes back it is searched for over the board with nothing moved, and
+            // if that finds no way it waits once more before it crosses other nets'
+            // routes: a search that finds none with nothing moved ends soon where the net
+            // is shut in, and one that crosses routes costs up to its limit of nodes, so
+            // that a hundred nets waited behind a few such searches with nothing, on a
+            // board of six layers. A net of more than two terminals that keeps what it
+            // reaches has what that search reached as its copper, and goes on from it.
             let may_wait = hurried
                 && pass == 0
                 && options.rip_ups > 0
@@ -1536,14 +1548,53 @@ fn route_all<'a>(
                 && !many
                 && (rest.is_none() || first);
             let back = may_wait && matches!(waited[j], Wait::NoPath | Wait::OutOfBudget);
-            if back {
-                out_of_budget = waited[j] == Wait::OutOfBudget;
+            // Whether this turn is the one in which it may cross them.
+            let cross = may_wait && waited[j] == Wait::Cross;
+            // Whether what it reaches this turn, with nothing moved, is kept for it to go
+            // on from.
+            let mut reached = false;
+            if cross {
+                out_of_budget = true;
                 waited[j] = Wait::Done;
+                why = Some(Failure::NoPath);
+            } else if back {
+                out_of_budget = waited[j] == Wait::OutOfBudget;
                 why = Some(if out_of_budget {
                     Failure::Budget
                 } else {
                     Failure::NoPath
                 });
+                if !out_of_budget {
+                    match grow.stage(params, None, Some(quiet)) {
+                        Ok(()) => {
+                            outside[j] = job.corridor.is_some();
+                            done = true;
+                        }
+                        Err(f) => why = Some(f),
+                    }
+                }
+                if !done && options.keep_partial && ctx.terminals > 2 {
+                    let part = Params {
+                        partial: true,
+                        stubs: true,
+                        ..params
+                    };
+                    if grow.stage(part, None, Some(quiet)).is_ok()
+                        && grow.apart() + 1 < ctx.terminals
+                    {
+                        done = true;
+                        reached = true;
+                    }
+                }
+                if !done && !queue.is_empty() {
+                    waited[j] = Wait::Cross;
+                    stats.expanded += grow.finish().expanded;
+                    completing[j] = rest.take();
+                    queue.push_back(j);
+                    continue;
+                }
+                waited[j] = Wait::Done;
+                out_of_budget = true;
             } else if mending {
                 // A net that is mended is looked for a way around what cut it, near where
                 // it was: its corridor may have none, and the board over would be searched
@@ -1667,6 +1718,7 @@ fn route_all<'a>(
             // nothing when its turn comes: its pieces join nothing, and are in the way.
             if tree.is_none()
                 && rest.is_some()
+                && !was_held
                 && job.ctx.terminals < BRANCH_TERMINALS
                 && !plane
                 && mends(job.ctx.terminals, plane, hurried, 0)
@@ -1830,6 +1882,13 @@ fn route_all<'a>(
                     }
                 }
                 c.place(&mut world, &job.ctx);
+                // What a net reached with nothing moved is what it goes on from, when its
+                // turn to cross other nets' routes comes.
+                if reached {
+                    completing[j] = Some(completion(design, &job.ctx, &c, pitch));
+                    held[j] = true;
+                    queue.push_back(j);
+                }
                 copper[j] = Some(c);
             }
             // A net in the way loses only what is in the way: the rest of its copper goes
@@ -2401,6 +2460,9 @@ enum Wait {
     No,
     NoPath,
     OutOfBudget,
+    /// It has waited twice: its search over the board, which moved nothing, found no way
+    /// either, and it waits for its turn to cross other nets' routes.
+    Cross,
     /// It has, and had its turn since.
     Done,
 }

@@ -595,6 +595,47 @@ fn a_net_with_no_way_in_its_corridor_waits_for_the_others_in_the_first_pass() {
 }
 
 #[test]
+fn a_net_that_waited_keeps_what_it_reaches_before_it_crosses_anything() {
+    // The same board with a third pad of net 2 on the near side of the wall, and a net
+    // that keeps what it reaches. When its turn comes again, net 2 joins the two pads on
+    // one side and finds no way through the gap that net 1 has taken, with nothing moved:
+    // that is kept, and the search that may cross net 1 waits once more. A budget that
+    // ends before that search leaves net 1 routed and net 2 with the connection it
+    // made; it used to end with net 1 taken out for net 2.
+    let mut d = one_gap();
+    d.board.pads.push(smd(16 * MM, 17 * MM, 2));
+    let joined = |r: &Routed| {
+        r.tracks.iter().any(|t| {
+            t.net == Some(NetId(2)) && t.start.y.max(t.end.y) < 19 * MM && t.start.x != t.end.x
+        })
+    };
+    let options = RouteOptions {
+        keep_partial: true,
+        work_budget: Some(60_000),
+        ..RouteOptions::default()
+    };
+    let routed = route(&d, &options).unwrap();
+    check(&d, &routed);
+    assert_eq!(routed.stopped, Some(Stopped::WorkBudget));
+    assert!(joined(&routed), "{:?}", routed.tracks);
+    assert_eq!(routed.unrouted, [NetId(2)]);
+    assert_eq!(routed.open.len(), 1);
+    // Left to finish, the run ends with one of the two nets through the gap, as before.
+    let whole = route(
+        &d,
+        &RouteOptions {
+            work_budget: Some(u64::MAX / 2),
+            ..options
+        },
+    )
+    .unwrap();
+    check(&d, &whole);
+    assert_eq!(whole.stopped, None);
+    assert_eq!(whole.unrouted.len(), 1);
+    assert_eq!(whole.open.len(), 1);
+}
+
+#[test]
 fn a_part_of_a_run_ends_at_its_share_and_the_run_is_then_one_that_was_stopped() {
     use super::control::Run;
     // Nine tenths of a budget of work for the first part, and the rest for the next.

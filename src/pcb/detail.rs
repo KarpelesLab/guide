@@ -1159,6 +1159,11 @@ impl<'a> NetRun<'a> {
         (0..self.ctx.terminals).filter(|&t| !self.connected[t] && !self.missing[t])
     }
 
+    /// How many terminals the tree doesn't reach so far.
+    pub(crate) fn apart(&self) -> usize {
+        self.connected.iter().filter(|&&c| !c).count()
+    }
+
     /// The tree, with the terminals it doesn't reach as [`Tree::missing`].
     pub(crate) fn finish(mut self) -> Tree {
         self.tree.missing = (0..self.ctx.terminals)

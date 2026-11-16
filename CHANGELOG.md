@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.6](https://github.com/KarpelesLab/guide/compare/v0.0.5...v0.0.6) - 2026-11-16
+
+### Added
+
+- *(pcb)* a run with a budget moves a net aside before it takes one out
+- *(pcb)* a run with a budget plans the ways out of fine rows and deep balls
+- *(pcb)* Routed::failed, the open nets whose own search found no way
+
+### Fixed
+
+- *(pcb)* a host's fill of few edges is cut only where copper is too close
+- *(pcb)* a work budget that is not spent stops no run with zones to join
+
+### Other
+
+- PCB routing with ways out planned, measured, and what was not kept
+
 ## [0.0.5](https://github.com/KarpelesLab/guide/compare/v0.0.4...v0.0.5) - 2026-11-14
 
 ### Added

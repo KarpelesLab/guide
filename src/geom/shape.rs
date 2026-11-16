@@ -37,6 +37,82 @@ pub struct Shape {
     pub(super) core_bounds: Rect,
 }
 
+/// The [parts](Shape::parts) of the polygons of many vertices that were last cut up, by
+/// what they were cut from: the same shape is cut the same way, so that keeping the parts
+/// changes no result.
+struct PartsMemo {
+    /// A key, the vertices at most, the shape and its parts, oldest first.
+    known: Vec<(u64, usize, Shape, Option<Vec<Shape>>)>,
+    /// How many vertices the shapes kept have between them.
+    vertices: usize,
+}
+
+impl PartsMemo {
+    /// How many vertices a shape has at least for its parts to be kept.
+    const LEAST: usize = 256;
+    /// How many vertices the shapes kept have between them at most.
+    const MOST: usize = 1_000_000;
+
+    /// A key for a polygon's parts: FNV-1a over what they are worked out from.
+    fn key(most: usize, radius2: i64, error2: i64, rings: &[Vec<Point>]) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut mix = |v: u64| {
+            h ^= v;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        };
+        mix(most as u64);
+        mix(radius2 as u64);
+        mix(error2 as u64);
+        for ring in rings {
+            mix(ring.len() as u64);
+            for p in ring {
+                mix(p.x as u64);
+                mix(p.y as u64);
+            }
+        }
+        h
+    }
+
+    /// The parts kept for a shape, if they are.
+    fn get(&self, key: u64, most: usize, shape: &Shape) -> Option<Option<Vec<Shape>>> {
+        self.known
+            .iter()
+            .find(|(k, m, s, _)| *k == key && *m == most && s == shape)
+            .map(|(_, _, _, parts)| parts.clone())
+    }
+
+    /// Keeps the parts of a shape of so many vertices, in place of the oldest if there
+    /// are too many.
+    fn put(
+        &mut self,
+        key: u64,
+        most: usize,
+        shape: Shape,
+        parts: Option<Vec<Shape>>,
+        vertices: usize,
+    ) {
+        self.known.push((key, most, shape, parts));
+        self.vertices += vertices;
+        while self.vertices > PartsMemo::MOST && self.known.len() > 1 {
+            let (_, _, old, _) = self.known.remove(0);
+            let gone = old
+                .core
+                .rings()
+                .map_or(0, |r| r.iter().map(Vec::len).sum::<usize>());
+            self.vertices = self.vertices.saturating_sub(gone);
+        }
+    }
+}
+
+std::thread_local! {
+    static PARTS: core::cell::RefCell<PartsMemo> = const {
+        core::cell::RefCell::new(PartsMemo {
+            known: Vec::new(),
+            vertices: 0,
+        })
+    };
+}
+
 fn check_dimension(what: &'static str, value: i64) -> Result<i64, GeomError> {
     if value > 0 && value <= MAX_COORD {
         Ok(value)
@@ -267,9 +343,30 @@ impl Shape {
             return None;
         }
         let rings = self.core.rings()?;
-        if rings.iter().map(Vec::len).sum::<usize>() <= most {
+        let vertices = rings.iter().map(Vec::len).sum::<usize>();
+        if vertices <= most {
             return None;
         }
+        // A fill of thousands of edges is cut up for every index it is put in, and for
+        // every fill of the zones that starts from it: the parts of the last few such
+        // shapes are kept.
+        if vertices < PartsMemo::LEAST {
+            return self.cut(most, &rings);
+        }
+        let key = PartsMemo::key(most, self.radius2, self.error2, &rings);
+        if let Some(known) = PARTS.with(|m| m.borrow().get(key, most, self)) {
+            return known;
+        }
+        let parts = self.cut(most, &rings);
+        PARTS.with(|m| {
+            m.borrow_mut()
+                .put(key, most, self.clone(), parts.clone(), vertices);
+        });
+        parts
+    }
+
+    /// [`parts`](Shape::parts) of a polygon of these rings, worked out.
+    fn cut(&self, most: usize, rings: &[Vec<Point>]) -> Option<Vec<Shape>> {
         // The outline less the holes, whichever way round each ring goes.
         let outline = super::poly::Area::from_rings(&[&rings[0]]).ok()?;
         let holes: Vec<&[Point]> = rings[1..].iter().map(Vec::as_slice).collect();

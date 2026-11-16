@@ -2039,6 +2039,17 @@ fn a_polygon_s_parts_cover_it_and_reach_a_nanometre_past_it_at_most() {
     );
     let parts = gear.parts(48).unwrap();
     assert!(parts.len() > 8, "{}", parts.len());
+    // A shape of that many vertices is cut up once, and gives the same parts again: asked
+    // again, as another shape that is the same, and after other shapes have been asked.
+    assert_eq!(gear.parts(48).unwrap(), parts);
+    let again = Shape::polygon(&outer, &[&hole]).unwrap();
+    assert_eq!(again.parts(48).unwrap(), parts);
+    let other = Shape::polygon(&ring(9_000_019.0, 8_700_003.0, 400), &[&hole]).unwrap();
+    let others = other.parts(48).unwrap();
+    assert_ne!(others, parts);
+    assert_ne!(gear.parts(24).unwrap(), parts);
+    assert_eq!(gear.parts(48).unwrap(), parts);
+    assert_eq!(other.parts(48).unwrap(), others);
     // Probes all over its box, at a clearance: whatever is too close to the gear is too
     // close to a part, and whatever is too close to a part is within 2 nm of being too
     // close to the gear.

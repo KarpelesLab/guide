@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.9](https://github.com/KarpelesLab/guide/compare/v0.0.8...v0.0.9) - 2026-11-16
+
+### Fixed
+
+- *(pcb)* a track's end and a via at one point join the layers from either side
+
+### Other
+
+- a via on a via, found
+
 ## [0.0.8](https://github.com/KarpelesLab/guide/compare/v0.0.7...v0.0.8) - 2026-11-16
 
 ### Added

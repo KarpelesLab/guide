@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.8](https://github.com/KarpelesLab/guide/compare/v0.0.7...v0.0.8) - 2026-11-16
+
+### Added
+
+- *(pcb)* a net that waited keeps what it reaches before it crosses anything
+- *(pcb)* a run with a budget joins the pads that its routes cut off the planned fills
+- *(pcb)* a run with a budget plans the ways out of a fine row for the whole row
+
+### Fixed
+
+- *(pcb)* the ways out of fine rows are planned only if asked
+- *(pcb)* two tracks side by side in a rule area are necked by the area's clearance
+
+### Other
+
+- the pads that routes cut off their fill for good, what was tried, and whose they were
+- PCB routing with a second wait, measured, and what was not kept
+
 ## [0.0.7](https://github.com/KarpelesLab/guide/compare/v0.0.6...v0.0.7) - 2026-11-16
 
 ### Fixed

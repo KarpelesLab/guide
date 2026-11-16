@@ -733,9 +733,32 @@ fn a_work_budget_that_is_not_spent_stops_nothing_on_a_board_with_planes() {
     assert_eq!(routed.stats.islands.0, routed.stats.islands.1);
     // And one that is spent in routing still stops the run, with the joining's share kept.
     let options = RouteOptions {
-        work_budget: Some(plain.stats.work / 4),
+        work_budget: Some(1),
         ..RouteOptions::default()
     };
     let cut = route(&d, &options).unwrap();
     assert_eq!(cut.stopped, Some(Stopped::WorkBudget));
+}
+
+#[test]
+fn a_result_says_which_open_nets_had_a_search_that_failed() {
+    // A net with a pad walled in is open because its own search found no way.
+    let routed = route_checked(&walled_in(), &RouteOptions::default());
+    assert_eq!(routed.unrouted, [NetId(1)]);
+    assert_eq!(routed.failed, [NetId(1)]);
+    // Nothing failed where everything is routed, nor where the run was stopped before a
+    // net had a search: what is open then is for a run that goes on.
+    assert!(
+        route_checked(&weave(), &RouteOptions::default())
+            .failed
+            .is_empty()
+    );
+    let options = RouteOptions {
+        work_budget: Some(0),
+        ..RouteOptions::default()
+    };
+    let cut = route(&weave(), &options).unwrap();
+    assert_eq!(cut.stopped, Some(Stopped::WorkBudget));
+    assert!(!cut.unrouted.is_empty());
+    assert!(cut.failed.is_empty(), "{:?}", cut.failed);
 }

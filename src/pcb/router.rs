@@ -669,6 +669,11 @@ pub(crate) fn run(
         };
         routed.open = report::explain(design, &world, survey.open, &known);
     }
+    routed.failed = failed
+        .keys()
+        .copied()
+        .filter(|n| routed.unrouted.binary_search(n).is_ok())
+        .collect();
     routed.stats.work = run.work();
     routed.stopped = run.stopped();
     Ok(routed)
@@ -1956,6 +1961,7 @@ fn route_all<'a>(
             nets.sort_unstable();
             nets
         },
+        failed: Vec::new(),
     };
     let counted = counted.or(Some(first_fills).filter(|f| !f.is_empty()));
     Ok((routed, failed, counted))

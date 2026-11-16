@@ -734,6 +734,12 @@ pub struct Routed {
     /// [stopped](Routed::stopped), or had nothing to route. Nets whose zones' pieces were
     /// only to be joined after routing are not here for that.
     pub tried: Vec<NetId>,
+    /// Of the nets left open, in order, those whose own last search found no way, or ran
+    /// out of nodes: the others that were [tried](Routed::tried) lost their routes to
+    /// another net's and were not got to again before the run was
+    /// [stopped](Routed::stopped), and a run on the board as it is returned has room to
+    /// give them, where these were looked for and found none.
+    pub failed: Vec<NetId>,
 }
 
 impl Routed {

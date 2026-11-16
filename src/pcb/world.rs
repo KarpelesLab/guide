@@ -324,6 +324,10 @@ impl<'r> World<'r> {
                 fixed(Kind::Copper, None, None),
             );
         }
+        // What is fixed went in a piece at a time: packed together, it is found faster.
+        for index in &mut world.layers {
+            index.repack();
+        }
         Ok(world)
     }
 

@@ -193,6 +193,44 @@ impl SpatialIndex {
         }
     }
 
+    /// Packs the tree again as [`bulk_load`](SpatialIndex::bulk_load) would have built
+    /// it, with every entry under the identifier it has: a tree that entries were added
+    /// to one at a time answers queries more slowly than one built of them all at once,
+    /// with the same answers. Nothing is done if an entry was ever removed.
+    pub(crate) fn repack(&mut self) {
+        if !self.free_slots.is_empty() || self.slots.len() <= MAX_CHILDREN {
+            return;
+        }
+        self.nodes.clear();
+        self.free_nodes.clear();
+        let mut level: Vec<(Rect, u32)> = (0..self.slots.len())
+            .map(|i| (self.slots[i].rect, i as u32))
+            .collect();
+        let mut leaf = true;
+        loop {
+            tile(&mut level);
+            let mut parents = Vec::with_capacity(level.len().div_ceil(MAX_CHILDREN));
+            for group in level.chunks(MAX_CHILDREN) {
+                let id = self.nodes.len() as u32;
+                let mut node = Node::new(leaf);
+                for (i, &(rect, kid)) in group.iter().enumerate() {
+                    node.rects[i] = rect;
+                    node.kids[i] = kid;
+                    self.adopt(id, kid, leaf);
+                }
+                node.len = group.len() as u8;
+                parents.push((node.cover(), id));
+                self.nodes.push(node);
+            }
+            if parents.len() == 1 {
+                self.root = parents[0].1;
+                return;
+            }
+            level = parents;
+            leaf = false;
+        }
+    }
+
     /// How many entries there are.
     #[inline]
     pub fn len(&self) -> usize {
@@ -580,6 +618,11 @@ impl ShapeIndex {
     /// All entries, ordered by identifier.
     pub fn ids(&self) -> impl Iterator<Item = EntryId> + '_ {
         self.index.ids()
+    }
+
+    /// Packs the index again: [`SpatialIndex::repack`].
+    pub(crate) fn repack(&mut self) {
+        self.index.repack();
     }
 
     /// Adds a shape.

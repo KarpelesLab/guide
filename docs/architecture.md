@@ -505,6 +505,60 @@ for a way round, which made each mend a search of the whole corridor, 300,000 no
 more; and mending that may cross the net that cut it, where two nets then took each
 other's place in turn until each had been cut its eight times.
 
+**What a run does before it searches is done once, and a search asks the index once for a
+node.** Measured after the above ([results](benchmarks.md#pcb-routing-planned-sooner)):
+
+- *One query for the steps from a node.* A search asked the index of shapes what was near
+  each of the eight steps from a node, three queries for a node with what the cache of
+  steps knew, and the walk down the tree was a third of a search. A node with more than
+  one step to judge asks once what is near all of them, and each step is measured against
+  those of the entries that its own query would have found, in the same order
+  (`World::near`, `World::track_among`): the same verdicts, so the same nodes and routes.
+- *The fixed items packed.* A board's pads, zones and edges went into the index one at a
+  time; they are packed as a tree built of all of them once the last is in
+  (`SpatialIndex::repack`), under the same identifiers, and routes go in after as before.
+- *The parts of a fill worked out once.* A fill of thousands of edges is measured to by
+  its parts of 48 vertices, and was cut into them again for each world a run builds, each
+  fill of the zones that starts from a host's, and each piece of a plane that a pad asks
+  about: by halves, with a clip of the whole at each. The parts of the last shapes cut are
+  kept, a million vertices of them by thread, by what they were cut from (`Shape::parts`).
+- *A host's fill cut in windows.* Where copper came closer to a host's fill than its
+  clearance, the whole fill was cut and opened by the zone's minimum width. Nothing
+  changes further from the copper than twice the radius of that opening, so the fill is
+  cut and opened in a window of that round each piece of copper, and is as it was given
+  outside the windows, to the vertex.
+- *Global routing that ends when it gains nothing*, in a run with a budget: after three
+  iterations in a row that take less than a fiftieth off the least overuse so far, with
+  the best iteration's routes. A run with no budget has its thirty iterations.
+- *Tight before fewer vias*, in a run with a budget. Cleanup searched each net for a
+  route with fewer vias and then pulled every net tight, and its share of the time ended
+  in the searches on a board that a budget cuts: the tracks of every net were left as
+  rip-up and mending had them. Pulling tight takes no search, so it comes first, and
+  again for a net that a search routes anew.
+- *A pad is said to be shut in at the width its net was routed at.* The flood that looks
+  for the cause of an open connection used the net's own width, at which a net necked for
+  a row of fine pitch never leaves its pad: every open pad of such a row was said to be
+  shut in by the two pads beside it.
+
+None of these changes a route of a run with no budget: the curated boards are as they
+were, to the via and the millimetre and the node, in a sixth less time. A run with a
+budget has other corridors where its global routing ends sooner, and other tracks where
+they were not pulled tight.
+
+Tried and not kept there, all for the pads of rows of fine pitch that stay shut in on
+boards of two layers, and all measured over three orders of the nets, as one run of a board
+moves by ten connections from one order to the next: *lanes*, the ways out of such pads
+priced for other nets' tracks and vias for as far as a via and its clearances take, which
+made routes leave a row straight, as a router with a planned fan-out has them, and left as
+many pads open on the board it was made for and more on the boards of four and six layers,
+whose rows have their vias at the ends of their pads; the same with vias of other nets
+forbidden in the lanes that lead away from a part, and with other nets' tracks forbidden in
+the first two pitches of a lane; a history of conflicts by cell of two pitches in place of
+by tile of sixteen; the pitch of the lattice taken from the necked widths, half the pitch
+of the row; the nets of such rows routed first; sixteen rip-ups of a net before it is
+locked, for four; and the passes on the finer lattice ended once they had gone on for half
+the nodes of the run before them with no connection more.
+
 **Differential pairs are routed side by side last, in place of their nets' routes.** Routing
 pairs first, before anything else, as fixed copper, coupled `udb-s`'s USB pair a little better,
 60% of its length side by side in place of 50%, but cost other nets their room: `GB-LIVE32`

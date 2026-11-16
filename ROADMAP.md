@@ -263,16 +263,23 @@ Each item is independently useful, and they can land in any order.
   are on the row's lattice, and each ball too deep in an area array to get out on its
   layer has a dog-bone with the smaller via; and it moves the nets in a route's way aside,
   cut and mended around it, before it takes any out
-  ([benchmarks](docs/benchmarks.md#pcb-routing-with-ways-out-planned)). Not yet:
+  ([benchmarks](docs/benchmarks.md#pcb-routing-with-ways-out-planned)). What a run does
+  before it searches is done once: the parts that a fill of many edges is measured by are
+  kept, a host's fill is cut round new copper in a window and not opened whole, global
+  routing ends when its overuse falls no more, in a run with a budget, and a search asks
+  the index of shapes once for the steps from a node, with the same routes
+  ([benchmarks](docs/benchmarks.md#pcb-routing-planned-sooner)). Not yet:
   tracks routed at an area's width, or narrower only near pads, and several via sizes for
   a net beyond its escapes, which the search, with one width and one via for each net, has
   no place for; the balls of an array further in than the ring that its dog-bones' vias
   close, where holes keep copper so far that no track passes between two vias; rip-up
   that settles, which moving nets aside brings nearer and does not reach, as a route that
-  crosses several nets still has each of them cross others in turn; a fill of a host's
-  that is cut round new copper without the whole of it being opened again, seconds of the
-  plan of a run on a routed board; and a search that costs less for each node, or
-  searches several nets at once, which is where most of a budget of 60 s still goes.
+  crosses several nets still has each of them cross others in turn, and a fan-out
+  planned for a whole row of fine pitch on a board of two layers, which costs on the way
+  out of other nets' pads did not replace; an account of what a route through a host's
+  fill cuts off its pour, which a host finds out when it fills again; cleanup with the
+  time to take back the vias and the detours of nets that were mended; and searches of
+  several nets at once, as a node of a search still costs most of a microsecond.
 - Net topology constraints (daisy chain, star, T). Not needed by the DRAM boards, whose
   signals are all point to point.
 - Direct KiCad board-file reading for routing, and writing routes back. Reading for

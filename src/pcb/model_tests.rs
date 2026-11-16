@@ -978,6 +978,38 @@ fn tracks_out_of_pads_side_by_side_are_narrow_enough_for_both() {
 }
 
 #[test]
+fn tracks_side_by_side_in_an_area_are_necked_to_the_area_s_clearance() {
+    // The row on a board with a clearance of 0.25 mm, in an area whose own is 0.18 mm, as
+    // the courtyard of a QFN is given. A track of 0.24 mm clears the pads on either side
+    // of its own by the area's 0.18 mm, and two tracks out of two pads side by side are
+    // both in the area: at 0.22 mm they are 0.18 mm apart. By the board's clearance they
+    // would have to be 0.15 mm wide.
+    let mut d = fine_row();
+    let mut spec = crate::geom::RuleSpec::new(&["F.Cu"], 100_000, 250_000);
+    spec.areas.push(RuleArea {
+        shape: Shape::rect(Rect::new(
+            Point::new(-MM, -2 * MM),
+            Point::new(4 * MM, 2 * MM),
+        ))
+        .unwrap(),
+        layers: LayerSet::first(1),
+        overrides: Overrides {
+            track_width: None,
+            clearance: Some(180_000),
+        },
+    });
+    d.rules = Rules::new(spec).unwrap();
+    let options = RouteOptions {
+        work_budget: Some(50_000_000),
+        ..RouteOptions::default()
+    };
+    let routed = route_checked(&d, &options);
+    assert_eq!(routed.stats.necked, 8);
+    assert!(routed.tracks.iter().all(|t| t.width == 220_000));
+    assert!(routed.unrouted.is_empty(), "{:?}", routed.unrouted);
+}
+
+#[test]
 fn a_host_s_fill_of_many_edges_is_measured_as_one_of_few() {
     // A fill with a comb of 60 teeth along its top, which is measured to by its parts: as
     // given while nothing is closer than its clearance, cut around what is, and the same

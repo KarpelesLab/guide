@@ -14,7 +14,8 @@
 //! pad of the row then gets out, and the rest are shut in by their neighbours' tracks, which
 //! no rip-up settles: whichever of two pads is routed shuts the other in. So a pad's track
 //! has to leave it *beside* those of the pads next to it: the same way as a track of the
-//! same width leaves each neighbour of another net, and clear of it. In a run with a
+//! same width leaves each neighbour of another net, and clear of it, by the clearance of
+//! the rule area that both are in if there is one with its own. In a run with a
 //! budget: with none, the narrower tracks of two curated boards found other ways, a
 //! connection fewer on one of them.
 
@@ -75,8 +76,11 @@ fn leaves(
         layers.iter().any(|l| {
             world.track(net, l, &track, None) == Verdict::Free
                 && beside.iter().filter(|q| q.layers.contains(l)).all(|q| {
-                    let clearance = rules.clearance_between(Some(net), Some(q.net), l);
                     exit(q.shape, q.center, dir, width).is_some_and(|other| {
+                        // Two tracks in an area with a clearance of its own keep that.
+                        let clearance = rules
+                            .area_clearance(l, &track, &other)
+                            .unwrap_or_else(|| rules.clearance_between(Some(net), Some(q.net), l));
                         track.violates(&other, clearance) != Ok(true)
                             && world.track(q.net, l, &other, None) == Verdict::Free
                     })

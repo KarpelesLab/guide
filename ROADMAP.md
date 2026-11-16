@@ -268,18 +268,36 @@ Each item is independently useful, and they can land in any order.
   kept, a host's fill is cut round new copper in a window and not opened whole, global
   routing ends when its overuse falls no more, in a run with a budget, and a search asks
   the index of shapes once for the steps from a node, with the same routes
-  ([benchmarks](docs/benchmarks.md#pcb-routing-planned-sooner)). Not yet:
+  ([benchmarks](docs/benchmarks.md#pcb-routing-with-ways-out-planned)). A net that
+  waited in the first pass of such a run is searched for with nothing moved before it
+  crosses anything, keeps what that reaches, and waits once more for its turn to cross
+  other nets' routes; once routing is over the run joins the pads that its routes cut
+  off the fills its nets were planned on to them again, told on a grid with no fill made
+  (`RouteOptions::pour_cuts`); two tracks out of two pads side by side in a rule area
+  are necked by the area's clearance; and if asked it plans the ways out of a row of
+  fine pitch for the whole row, a straight stub out of either end of each pad and a via
+  where one is needed and fits, so that no stub's via is in the way of the pad beside
+  it, as routes of their nets that rip-up moves like any other
+  (`RouteOptions::row_fanout`, off by default, as it is no gain on every board)
+  ([benchmarks](docs/benchmarks.md#pcb-routing-with-a-second-wait)). Not yet:
   tracks routed at an area's width, or narrower only near pads, and several via sizes for
   a net beyond its escapes, which the search, with one width and one via for each net, has
   no place for; the balls of an array further in than the ring that its dog-bones' vias
   close, where holes keep copper so far that no track passes between two vias; rip-up
   that settles, which moving nets aside brings nearer and does not reach, as a route that
-  crosses several nets still has each of them cross others in turn, and a fan-out
-  planned for a whole row of fine pitch on a board of two layers, which costs on the way
-  out of other nets' pads did not replace; an account of what a route through a host's
-  fill cuts off its pour, which a host finds out when it fills again; cleanup with the
-  time to take back the vias and the detours of nets that were mended; and searches of
-  several nets at once, as a node of a search still costs most of a microsecond.
+  crosses several nets still has each of them cross others in turn, and on a board of
+  six layers the turns that cross other nets' routes make nothing more once every net
+  has what it reaches with nothing moved; a way out of the pads of a QFN of 0.4 mm on a
+  board of two layers that holds while routes are moved, where the rows planned as
+  routes are cut like any other and planned as walls were worse; a fan for a row
+  with one side only, as a connector at a board's edge has, whose pads all leave it the
+  same way and need their tracks spread before any has a via; the way out of a pad that
+  its pour joins kept for it while routes are moved, in a row where the tracks of the
+  pads beside it close the pour's way to it, and the pads cut off their pours joined
+  again while there is still something to move, which made more of a crowded board's
+  nets worse than it joined; cleanup with the time to take back the vias and the detours
+  of nets that were mended; and searches of several nets at once, as a node of a search
+  still costs most of a microsecond.
 - Net topology constraints (daisy chain, star, T). Not needed by the DRAM boards, whose
   signals are all point to point.
 - Direct KiCad board-file reading for routing, and writing routes back. Reading for

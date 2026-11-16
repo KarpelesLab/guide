@@ -506,7 +506,7 @@ more; and mending that may cross the net that cut it, where two nets then took e
 other's place in turn until each had been cut its eight times.
 
 **What a run does before it searches is done once, and a search asks the index once for a
-node.** Measured after the above ([results](benchmarks.md#pcb-routing-planned-sooner)):
+node.** Measured after the above ([results](benchmarks.md#pcb-routing-with-ways-out-planned)):
 
 - *One query for the steps from a node.* A search asked the index of shapes what was near
   each of the eight steps from a node, three queries for a node with what the cache of
@@ -558,6 +558,121 @@ by tile of sixteen; the pitch of the lattice taken from the necked widths, half 
 of the row; the nets of such rows routed first; sixteen rip-ups of a net before it is
 locked, for four; and the passes on the finer lattice ended once they had gone on for half
 the nodes of the run before them with no connection more.
+
+**A run with a budget joins what its routes cut off the planned fills before it ends, and
+plans the ways out of a row of fine pitch for the whole row if asked.** Measured after the
+above ([results](benchmarks.md#pcb-routing-with-a-second-wait)):
+
+- *Rows.* A row is fine if a via in the way out of one of its pads is in the way out of the
+  pads beside it: 0.4 mm of pitch for a via of 0.6 mm, a track of 0.2 mm and as much of
+  clearance. Two tracks side by side out of two such pads leave neither a place for a via,
+  which is why a price on the ways out did not settle such rows, nor a wall: the choice is
+  the row's. Rows are told from the pads alone, with no footprint to say so: pads with no
+  hole on one layer, of one size, in line at one pitch along x, y or a diagonal, four at
+  least, and not in rows more than one way, as the balls of an area array are. Each pad of
+  a net that is routed then has ways to choose from: none; a straight track out of either
+  end, past the pad by what a via beside it takes, on a side where it has room to go on;
+  or such a track with a via at its end, at up to three depths where the world has room
+  for one, looked for in steps of an eighth of the lattice's pitch, as the room between a
+  row and the exposed pad under its part is a few tens of micrometres long. A way's cost is
+  its stub's length, a via's cost, and how far its end is from the nearest other terminal
+  of the net, a via more if that is on no layer the stub's end is on, and the row's length
+  more for a plain track if it is behind the row; no way costs what crossing a route
+  does, unless another terminal is within 1.5 mm on the pad's layer. Two ways of two pads
+  clash if the via of one is too close to the other's via or in the other's lane, which
+  for a plain track goes on past its stub, and two plain tracks side by side on one side
+  cost 3 mm. The ways of a row are chosen together, at the least cost with no clash,
+  exactly, by the ways of the last three pads. On a QFN with an exposed pad that is every
+  other pad to a via under the part and the others straight out, on a part with none
+  vias on both sides by turns, and the pads of a net with a plane have their via to it
+  in the row's plan.
+- *Stubs are routes.* What is chosen is copper of its net in the world before the first
+  net is searched for, as a net routed in part has its copper: each stub a piece with its
+  pad, its end and its via as places to go on from. A net's first search with stubs is its
+  first search all the same, in its corridor, and waits like any other. A net routed
+  whole loses the stubs it did without, a net in the way of another is cut or taken out
+  with its stubs, and a net left open has none in the result. A stub's end is kept
+  through the prunes of a cut net (`NetCopper::keep`): a net of many pads, or with a
+  plane, that is cut anywhere is cut back to what joins something, and lost every stub
+  of its pads in rows the first time, a supply's as a ground's.
+- *Pours.* A net is planned on its zones' fill as it is before routing, and the pads that
+  the fill joins need no route. On an outer layer other nets' routes go through that fill:
+  on a board of two layers with a ground pour, a host that filled again found some sixty
+  pads off their pour after one run, twice the connections that routing itself left open.
+  The planned fills are kept as cells of a grid as fine as the lattice, by scan line, with
+  the relief of each pad they join. Once routing is over, the cells within the fill's
+  clearance and half its least width of another net's routes are taken out, what is left
+  is told into its pieces, joined through the net's pads, tracks and vias, and each piece
+  with a pad or a stub of the net on it that is not the largest is a terminal to join to
+  the largest: by a search that moves nothing, to places in the largest piece near it
+  that are kept as places of the net from then on. Three times over at most, in cleanup's
+  share of the time and three hundredths of a work budget. What the grid leaves apart
+  before anything is routed is its own coarseness, and is never told to be cut off; the
+  grid errs on the side of a cut, and a stub.
+
+A run with no budget has none of these, and the curated boards are as they were. The
+rows are planned only if asked (`RouteOptions::row_fanout`, off by default): through
+cadlab's adapter at 60 s over three orders of the nets, with the wait below,
+`corne-cherry` has 99 connections open with them for 106, `glasgow-revC3` 127 for 113 and
+`buspirate5-rev10` 14 for 11, and the eleven boards without `glasgow-revD1` 367 for 358.
+The pours are joined by default (`RouteOptions::pour_cuts`): 358 for 381 the same way,
+`corne-cherry` 106 for 118 and `tinytapeout-demo` 22 for 28.
+
+Tried and not kept there, each over six orders of the nets of `corne-cherry` with a budget
+of 40 million nodes, by the connections that the run itself counts open, 163 as kept
+before the stubs' ends were: the stubs of a row locked until their nets' first searches,
+so that no search of the first sweep crosses one, 205; a net taken out whole given its
+stubs back, where the world still had room for them, 194, and 222 with both; and the pads
+cut off their fill joined to it again while routes are still moved, every 64 routes
+placed, with the right to move what is in the way or without: a ground whose pour is in a
+dozen pieces then has a dozen stubs to make across the tracks that cut it, each in the
+way of the nets still to settle, and one order had 41 to 46 connections open for 23,
+and more as its host counted them, not fewer. A plain stub for each pad that its net's
+fill joins, in any row, fine or not, to keep the fill's way to the pad open, changed no
+route of the four boards it was measured on. Keeping the stubs' ends is not a gain on
+every board either: `corne-cherry` has 191 for 163 with it, and `buspirate5-rev10` 13 for
+36.
+
+**A net that waited is searched for with nothing moved before it crosses anything, and
+keeps what that reaches.** Measured after the above
+([results](benchmarks.md#pcb-routing-with-a-second-wait)):
+
+- *A second wait.* In the first pass of a run with a budget, a net that found no way in
+  its corridor waited for every net to have had its turn, and then had all of its
+  searches at once: over the board with nothing moved, then across other nets' routes,
+  whole and then a terminal at a time. A search with nothing moved ends soon where the
+  net is shut in, and one that crosses routes costs up to its limit of nodes whether it
+  finds a way or not. On `glasgow-revD1`, with 561 nets, 114 nets were waiting after 9 s
+  of a run through cadlab's adapter, with nothing of their 436 connections, and 94 of
+  them, with 313 connections, still when the run was cut at 27 s: the few that had had
+  their turn had spent the time moving each other. cadlab's second run, on the routed
+  board, where nothing moves, then made 110 to 160 of those connections in as many
+  seconds, which is why its first run could not be given more of the budget. Now a net
+  that comes back is searched for over the board with nothing moved, and if that finds
+  no way it waits once more (`Wait::Cross`) before it may cross anything. With
+  `RouteOptions::keep_partial`, a net of more than two terminals keeps what that search
+  reached, as a net routed in part, and its turn to cross other nets' routes completes
+  it from there, or leaves it what it has. The same run has 1692 connections made after
+  15 s and 1757 after 22 s where it had 1612 and 1620.
+- *Side by side in an area.* The width at which two tracks leave two pads side by side
+  was told by the clearance between their nets, and the clearance of a rule area that
+  both tracks are in was not looked at: in the courtyard of a QFN that a board's rules
+  give 0.18 mm, the supply pins of classes with 0.25 mm kept the width that left each
+  pad alone, 0.24 mm, at which two do not leave two, as no width the rules allow is
+  0.25 mm apart from its neighbour at a pitch of 0.4 mm. An area's clearance now takes
+  the place of the nets' there, as it does for every piece of track that is laid.
+
+A run with no budget has neither, and the curated boards are as they were.
+
+Tried and not kept there: nothing of guide's own. Through the host, on an uncommitted
+change of cadlab's adapter: runs of `eco::reroute_with` after the two runs it makes, each
+with the routed copper within 1.5 mm of the ends of what is still open taken out and
+routed again, in another order of the nets each time, and a run on the board filled again
+after each. `nrfmicro` had 12 connections open over three orders for 18 and
+`buspirate5-rev10` 9 for 11; `lumenpnp-mobo` and `tinytapeout-demo` gained nothing, a run
+that took out the copper round five to eleven open pads leaving 50 to 70 open where it
+was cut, as a net with no zone that touches an area is taken out whole. At 3 mm and
+4.5 mm no run of any board gained.
 
 **Differential pairs are routed side by side last, in place of their nets' routes.** Routing
 pairs first, before anything else, as fixed copper, coupled `udb-s`'s USB pair a little better,

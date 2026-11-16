@@ -3442,6 +3442,160 @@ has without, and its passes were over after 146 s: time is not what its rows lac
 - A node of a search still costs most of a microsecond: the curated boards take 1.3 µs
   for each node of a whole run where they took 1.6. The walk down the index is still a
   sixth of a search, the heap and the numbering of nodes a quarter.
+## PCB routing with a second wait
+
+What was changed after [the release above](#pcb-routing-with-ways-out-planned), 0.0.7, for
+the same host, cadlab, whose adapter gave guide's first run 0.45 of its 60 s because one
+board of six layers made nothing more after 20 s and the eleven others wanted the run
+longer ([what and why](architecture.md#decisions)). Measured on 2026-11-16 and 17, each
+run with one thread, three runs at a time, on a machine that other work shared with a
+load of 8 to 14: a run that its budget cuts ends where the clock finds it, and the same
+build left 1096 connections open over three orders on one hour and 851 on another, of
+which `glasgow-revD1` 629 and 424. What is compared here was run within the same hour.
+
+### How
+
+Through cadlab's adapter as it is on its `master`, commit `ecf0242`, with nothing changed
+but the crate, and then with the share of its first run read from the environment, on an
+uncommitted change of it:
+
+```text
+RAYON_NUM_THREADS=1 CADLAB_BENCH_ROUTER=guide CADLAB_BENCH_VERBOSE=1 CADLAB_BENCH_TRACE=1 CADLAB_BENCH_BUDGET_MS=60000 [CADLAB_BENCH_SEED=2|3] route_bench --corpus <board>
+RAYON_NUM_THREADS=1 CADLAB_BENCH_ROUTER=guide CADLAB_BENCH_TRACE=1 CADLAB_BENCH_WORK=40000000 route_bench --corpus <board>
+GUIDE_ROUTE=1 cargo test --release --features kicad curated_boards_route -- --nocapture
+```
+
+cadlab's own router is as cadlab measured it for 0.0.7, on the same machine, with its seed
+1 and three threads. With a budget of work the adapter makes one run of guide and no
+second: what cadlab then counts open is what one run leaves on the board that cadlab fills
+again, and the run's own count, on the fill that it planned on, is in the trace.
+
+### Results
+
+cadlab's corpus with a budget of 60 s, vias kept out of pads, in three orders of the
+nets, no seed and seeds 2 and 3. Connections left open as cadlab counts them on the board
+that it fills again: before → after through the adapter as it is, whose first run has
+0.45 of the budget, and after with a first run of 0.7; vias, track and the seconds the
+call took are of the first order, before → after with 0.7:
+
+| Board | Layers | Open, as the adapter is | Open, the first run with 0.7 | Vias | Track, mm | Seconds | cadlab's router: open, vias, track, seconds |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `buspirate-flash-sop` | 2 | 0 → 0 | 0 | 7 → 7 | 497 → 497 | 0.8 → 0.7 | 0, 4, 460, 0.4 |
+| `buspirate-rs232` | 2 | 0 → 0 | 0 | 6 → 6 | 356 → 356 | 0.7 → 0.7 | 0, 10, 281, 0.4 |
+| `lumenpnp-ringlight` | 2 | 0 → 0 | 0 | 1 → 1 | 209 → 210 | 0.3 → 0.3 | 0, 2, 180, 0.4 |
+| `nrfmicro` | 2 | 7, 5, 5 → 4, 7, 7 | 4, 7, 7 | 50 → 60 | 454 → 495 | 23.8 → 23.6 | 0, 46, 454, 11.9 |
+| `sweep-v2.2` | 2 | 6, 7, 6 → 6, 8, 6 | 6, 7, 6 | 42 → 42 | 2231 → 2231 | 55.0, cut → 56.1, cut | 3, 21, 2161, 52.6 |
+| `corne-cherry` | 2 | 45, 40, 35 → 41, 36, 43 | 35, 35, 38 | 609 → 820 | 7606 → 8422 | 56.8, cut → 46.7, cut | 3, 483, 8276, 30.1 |
+| `tinytapeout-demo` | 4 | 13, 20, 20 → 9, 13, 6 | 9, 8, 5 | 572 → 605 | 5530 → 5799 | 39.8, cut → 48.7, cut | 6, 274, 4913, 61.1 |
+| `buspirate5-rev10` | 4 | 7, 5, 5 → 7, 7, 7 | 2, 6, 3 | 513 → 501 | 3650 → 3816 | 31.5, cut → 37.4 | 2, 313, 3053, 28.4 |
+| `lumenpnp-mobo` | 4 | 10, 5, 7 → 10, 10, 6 | 9, 10, 6 | 789 → 748 | 6557 → 6610 | 38.9, cut → 40.5 | 15, 347, 5424, 62.5, cut |
+| `cynthion` | 4 | 20, 22, 25 → 19, 23, 28 | 19, 14, 11 | 601 → 629 | 3748 → 3908 | 42.9, cut → 57.5, cut | 28, 476, 3177, 61.4, cut |
+| `glasgow-revC3` | 4 | 34, 38, 40 → 40, 39, 41 | 38, 38, 37 | 575 → 560 | 4060 → 3983 | 56.7, cut → 57.8, cut | 36, 415, 3436, 60.7, cut |
+| `glasgow-revD1` | 6 | 155, 141, 128 → 165, 156, 119 | 162, 136, 123 | 1186 → 1085 | 8414 → 7954 | 59.0, cut → 58.0, cut | 192, 1046, 8967, 60.7, cut |
+| All | | 297, 283, 271 → 301, 299, 263 | 284, 261, 236 | | | | 285 |
+| Without `glasgow-revD1` | | 142, 142, 143 → 136, 143, 144 | 122, 125, 113 | | | | 93 |
+| All, three orders | | 851 → 863 | 781 | | | | |
+
+No run has an error of cadlab's check, and none has anything that its verification took
+out.
+
+Through the adapter as it is, nothing is gained: 851 → 863. What changes is where the
+connections are made. `glasgow-revD1`, 1948 connections on the board as the run counts
+them: before, the first run has 317 open when it is cut at 27 s and cadlab's second run,
+on the routed board, makes 161 of them; after, the first run has 181 open at 27 s and the
+second makes 16. With 0.7 the first run has 170 open at 42 s and the second makes 8. The
+board ends near 160 either way, and no longer needs its first run short: with 0.0.7 and
+a first run of 0.7 cadlab measured it at 821 over three orders for 454 with 0.45, and
+the twelve boards at 1189 for 890; here it has 421, and the twelve 781. The eleven others
+are what a longer first run is for: 427 → 360, of which `cynthion` 67 → 44,
+`tinytapeout-demo` 53 → 22 and `corne-cherry` 120 → 108. `tinytapeout-demo`'s are the
+supply pins of its QFN, necked by its courtyard's clearance, and the pours: 53 → 28
+through the adapter as it is.
+
+Against cadlab's own router at the same 60 s, three orders against its one run: 284, 261
+and 236 open on the twelve boards against 285, and 122, 125 and 113 against 93 on the
+eleven without `glasgow-revD1`. Ahead in every order on `glasgow-revD1`, `cynthion` and
+`lumenpnp-mobo`; within what two runs differ by on `tinytapeout-demo`, `buspirate5-rev10`
+and `glasgow-revC3`; behind on `corne-cherry`, 35 to 38 against 3, `nrfmicro`, 4 to 7
+against none, and `sweep-v2.2`, 6 or 7 against 3.
+
+What one run does, by the six orders of the nets of `corne-cherry` with a budget of 40
+million nodes and no second run, before the wait and with the rows planned: connections
+open as the run counts them on the fill it planned on, and after the stroke as cadlab
+counts them on the board that it fills again:
+
+| `corne-cherry`, by order of the nets | Run's count / cadlab's | Sum |
+| --- | --- | --- |
+| 0.0.7 | 42/101, 26/88, 33/88, 33/100, 19/92, 41/100 | 194 / 569 |
+| Rows planned | 23/85, 25/86, 25/85, 26/87, 24/82, 31/78 | 154 / 503 |
+| And the pours joined, 97% of the work for routing | 28/43, 26/52, 25/35, 29/47, 24/42, 31/42 | 163 / 261 |
+| And the stubs' ends kept | 42/53, 32/43, 22/44, 31/45, 29/44, 35/49 | 191 / 278 |
+
+With the pours joined at its end, what cadlab finds open after one run is half of what it
+was: the grid tells some sixty pads off their pour in a run, in a dozen pieces, and a stub
+to each piece joins most of them. Through the host's two runs that is less, as its second
+run joined most of them before: at 60 s with the first run at 0.7 and the wait, over three
+orders, the eleven boards have 358 open with the pours joined for 381 without,
+`corne-cherry` 106 for 118 and `tinytapeout-demo` 22 for 28. Of what `corne-cherry` still
+has open after its two runs, a dozen are pads off their pours all the same: its first
+run counts 22 open at 42 s and cadlab 34 on the board filled again, where its second run
+then moves nothing.
+
+The rows planned, the same way: 367 for 358 on the eleven boards, `corne-cherry` 99 for
+106, `nrfmicro` 15 for 18, `glasgow-revC3` 127 for 113 and `buspirate5-rev10` 14 for 11.
+With them `nrfmicro`'s call is back after 5 s for 24 and `lumenpnp-mobo`'s after 24 s for
+42, with no more made of the time. They are planned only if asked.
+
+The first run's share, with the wait and the pours, over three orders: 0.45 863, 0.6
+786, 0.7 781 and 780 in two runs, 0.8 821; the eleven boards 423, 374, 360 and 358, 367.
+
+The curated boards, routed with no budget, are as they were, 1150 of 1151 connections
+with 712 vias and 6833 mm of track in 46 s: none of this is in a run with neither a
+budget nor a deadline.
+
+### What was tried and not kept
+
+- *The rows planned, by default.* Above: a gain on `corne-cherry` and a loss on two
+  boards of four layers, 367 for 358. `RouteOptions::row_fanout` is off unless asked.
+- *Runs that move what the runs before placed*, through the host, on an uncommitted
+  change of cadlab's adapter: after its two runs, `eco::reroute_with` with the routed
+  copper within 1.5 mm of the ends of what is still open taken out, in another order of
+  the nets each time, a run on the board filled again after each, kept when cadlab counts
+  fewer open, for as long as there is time. Over three orders `nrfmicro` 12 for 18 and
+  `buspirate5-rev10` 9 for 11, and nothing on `lumenpnp-mobo` and `tinytapeout-demo`,
+  where a run that took out the copper round five to eleven open pads left 50 to 70 open
+  when it was cut: a net with no zone that touches an area is taken out whole, and a
+  board of four layers is then routed again by half. At 3 mm and 4.5 mm no run of any
+  board made a connection more. Eight connections of 360 for four more runs of each
+  board: not kept in the adapter.
+- *An end to a first run that has stopped gaining*, which is what the host asked for.
+  Not built: what stopped `glasgow-revD1` gaining was the order of its searches, and with
+  the wait its first run holds at 27 s all but 25 of the connections that its two runs
+  made by 54 s. The turns that
+  cross other nets' routes then make nothing more on that board, 1767 connections at
+  27 s and 1778 at 42 s, and neither does a second run: a rule that told that would save
+  the time and have nothing to spend it on.
+
+### What this does not show
+
+- A way out of the pads of a QFN of 0.4 mm on a board of two layers. `corne-cherry` has
+  35 to 38 open against 3 for a router that plans its fan-out and keeps it: two in three
+  are pads of its two QFNs shut in by the tracks and vias of the pads beside them. The
+  rows planned as routes are cut like any other, and planned as walls they were worse.
+- What a route through a host's fill cuts off for good. The stubs made once routing is
+  over join what still has a way, and a pad shut in by then has none: a dozen on
+  `corne-cherry`, five to ten on `lumenpnp-mobo`, whose run counts itself complete.
+- Rip-up that settles. `glasgow-revD1` makes eleven connections in fifteen seconds of
+  turns that cross other nets' routes, and `nrfmicro` ends on its own after 23 s with 4 to
+  7 open and the rest of its minute unspent.
+- A via on a via. Once in some forty runs of `corne-cherry` here, as twice in cadlab's record
+  before, a second run put a via of a net with a zone where the board it was given has
+  one of the same net, and cadlab's verification took the piece out. Not found.
+- Vias and track. `corne-cherry` has 820 vias for 609, and the corpus about as many
+  more as it has connections more: 1.7 times cadlab's router's on `corne-cherry`, twice
+  on `lumenpnp-mobo` and `tinytapeout-demo`.
+- The load of the machine. One build, two hours: 1096 and 851.
+
 ## PCB differential pairs and lengths
 
 Differential pairs routed side by side, and nets meandered to their lengths, by `pcb::route`

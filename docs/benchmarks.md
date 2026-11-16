@@ -3612,9 +3612,19 @@ budget nor a deadline.
 - Rip-up that settles. `glasgow-revD1` makes eleven connections in fifteen seconds of
   turns that cross other nets' routes, and `nrfmicro` ends on its own after 23 s with 4 to
   7 open and the rest of its minute unspent.
-- A via on a via. Once in some forty runs of `corne-cherry` here, as twice in cadlab's record
-  before, a second run put a via of a net with a zone where the board it was given has
-  one of the same net, and cadlab's verification took the piece out. Not found.
+- A via on a via was this, found after the release and gone with 0.0.9: once in some forty
+  runs of `corne-cherry` here, as twice in cadlab's record before, a second run put a via
+  of a net with a zone where the board it was given has one of the same net, and cadlab's
+  verification took the piece out. A track that ends at a via is two of its net's places
+  at one point, the end on its layer and the via on all of them, and the first of the two
+  was asked which layers the net joins there. From the layer that the track is on, that
+  was the track's end, which joins none; from any other, the via. A search goes through
+  such a via from the other layers only, where nothing has to be added; a path found from
+  its far end is laid the other way round, and was then given a via of its own on the one
+  it went through. The layers joined at a point are now those of all the net's places
+  there that share one, whichever is asked from. On seven boards of the corpus over three
+  orders, 21 runs, the old question would have had another answer 12 times, in 8 runs:
+  mostly where the net's own run had the via, which one net's copper holds once.
 - Vias and track. `corne-cherry` has 820 vias for 609, and the corpus about as many
   more as it has connections more: 1.7 times cadlab's router's on `corne-cherry`, twice
   on `lumenpnp-mobo` and `tinytapeout-demo`.

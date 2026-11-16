@@ -681,6 +681,16 @@ eleven boards. What `lumenpnp-mobo` had open was neither: its host did not ask t
 run for the ground that its own fill joined, and asked, the run leaves 1 open over three
 orders for 25.
 
+**The layers that a net joins at a point are those of all its places there.** A track's
+end and a via at the same point are two places of a net, as a stub to a plane has them once
+it is fixed copper of a later run. Asked from the track's layer, the first of the two said
+that nothing joins the layers there; asked from another, the second said that the via does.
+A search only steps through from where it is free to, but a path found from its far end is
+laid the other way round, and its change of layers was then taken for one that needs a via:
+a via on a via, which a host's check took out with the piece it was on. The places at a
+point are merged by the layers they share, and the answer is the same from either side
+(`NetCtx::joins`).
+
 **Differential pairs are routed side by side last, in place of their nets' routes.** Routing
 pairs first, before anything else, as fixed copper, coupled `udb-s`'s USB pair a little better,
 60% of its length side by side in place of 50%, but cost other nets their room: `GB-LIVE32`

@@ -156,6 +156,21 @@
 //! a net is taken out whole: on crowded boards that ended with a connection more and
 //! fewer vias, later.
 //!
+//! Such a run also plans, before it routes, the ways out of what its first routes would
+//! shut in: a net with a pad in a row of fine pitch is necked to the width at which the
+//! row's pads are left side by side, and is on that pad's lattice, and each ball too deep
+//! in an area array to get out on its layer, whose net's own via fits nowhere beside it,
+//! gets a dog-bone with [`RouteOptions::fanout_via`]. And a net in
+//! the way of another's route is moved aside before it is taken out: cut where the route
+//! crosses it and mended around the route, with nothing else moved
+//! ([`Stats::shoved`]), or failing that, cut, given the next turn, and mended across
+//! other nets if it has to be. A pass that ends with fewer connections than its routes
+//! made at their best goes back to those.
+//!
+//! [`Routed::failed`] has the nets left open whose own search found no way: the others
+//! were tried and lost their routes to another net's, and a host that routes again on the
+//! board as it is returned has room for them.
+//!
 //! Whatever the run leaves apart is in [`Routed::open`], connection by connection, in the
 //! sense of a ratsnest: the pieces a net's pads are left in, less one, each with a pad on
 //! either side, by position in the design's pads, and the best-known [`Cause`]. With
@@ -666,6 +681,10 @@ pub struct Stats {
     pub outside_corridor: usize,
     /// How many times a net was ripped up.
     pub rip_ups: usize,
+    /// How many times a net was moved aside for another's route, in a run with a budget:
+    /// cut where the route crosses it and mended around the route, with no other net
+    /// moved. They are not among the [`rip_ups`](Stats::rip_ups).
+    pub shoved: usize,
     /// How many nets the first pass left unrouted, for the second.
     pub fine_pass: usize,
     /// How many nets are routed narrower than their own width, so as to leave their pads:

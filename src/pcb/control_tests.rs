@@ -713,6 +713,69 @@ fn a_run_stopped_while_it_plans_on_its_zones_comes_back_with_nothing() {
     assert!(!routed.open.is_empty());
 }
 
+/// A net straight across a board of one layer, and a longer one that has to cross it:
+/// nothing passes the ends of the first, but it has room to go round a pad of the second.
+fn crossed() -> Design {
+    let pads = vec![
+        smd(500_000, 0, 1),
+        smd(3_500_000, 0, 1),
+        smd(2 * MM, -1_600_000, 2),
+        smd(2 * MM, 1_600_000, 2),
+    ];
+    let mut d = design(1, pads, 3);
+    d.outline = outline(Rect::new(
+        Point::new(0, -3_500_000),
+        Point::new(4 * MM, 3_500_000),
+    ));
+    d
+}
+
+#[test]
+fn a_run_with_a_budget_moves_a_net_aside_where_another_has_to_cross_it() {
+    let d = crossed();
+    // With no budget the first net is taken out for the second, and routed again.
+    let plain = route_checked(&d, &RouteOptions::default());
+    assert!(plain.unrouted.is_empty(), "{:?}", plain.unrouted);
+    assert_eq!((plain.stats.rip_ups, plain.stats.shoved), (1, 0));
+    // With one it is cut where the second crosses it and mended round the second's pad,
+    // and nothing is taken out.
+    let options = RouteOptions {
+        work_budget: Some(10_000_000),
+        ..RouteOptions::default()
+    };
+    let routed = route_checked(&d, &options);
+    assert!(routed.unrouted.is_empty(), "{:?}", routed.unrouted);
+    assert!(routed.stopped.is_none());
+    assert_eq!((routed.stats.rip_ups, routed.stats.shoved), (0, 1));
+    // The second net is straight, and the first goes round.
+    let length = |net: u32| -> i64 {
+        let of = |t: &&Track| t.net == Some(NetId(net));
+        let long = |t: &Track| (t.end.x - t.start.x).abs().max((t.end.y - t.start.y).abs());
+        routed.tracks.iter().filter(of).map(long).sum()
+    };
+    assert_eq!(length(2), 3_200_000);
+    assert!(length(1) > 3 * MM);
+}
+
+#[test]
+fn a_net_that_can_not_be_moved_aside_is_taken_out_as_before() {
+    // The same board with no room round the second net's pads: the first net can't be
+    // mended, everything is put back, and the second takes its place as with no budget.
+    let mut d = crossed();
+    d.outline = outline(Rect::new(
+        Point::new(0, -2 * MM),
+        Point::new(4 * MM, 2 * MM),
+    ));
+    let options = RouteOptions {
+        work_budget: Some(10_000_000),
+        ..RouteOptions::default()
+    };
+    let routed = route_checked(&d, &options);
+    assert_eq!(routed.stats.shoved, 0);
+    assert_eq!(routed.unrouted.len(), 1);
+    assert_eq!(routed.stats.connected, 1);
+}
+
 #[test]
 fn a_work_budget_that_is_not_spent_stops_nothing_on_a_board_with_planes() {
     // Routing has nineteen twentieths of a budget and the joining of zones' pieces the

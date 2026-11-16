@@ -1329,6 +1329,8 @@ fn route_all<'a>(
         .map(|(i, j)| (j.ctx.net, i))
         .collect();
     let mut outside = vec![false; jobs.len()];
+    // By job, the net that cut it last, if it is to be mended.
+    let mut cut_by: Vec<Option<NetId>> = vec![None; jobs.len()];
     // By job, whether it has waited for the others in the first pass, after a search in its
     // corridor that ended so.
     let mut waited = vec![Wait::No; jobs.len()];
@@ -1345,6 +1347,8 @@ fn route_all<'a>(
     let mut completing: Vec<Option<NetCtx>> = vec![None; jobs.len()];
     // By job, how its last search that failed ended, if it is not routed whole since.
     let mut failed: Vec<Option<Failure>> = vec![None; jobs.len()];
+    // And how its last search that failed ended, whatever came after.
+    let mut last_failure: Vec<Option<Failure>> = vec![None; jobs.len()];
     // What the progress hears of: nets with a route, connections made, nets waiting.
     let tell =
         |copper: &[Option<NetCopper>], missing: &[Vec<usize>], apart: &[usize], queued: usize| {
@@ -1433,12 +1437,21 @@ fn route_all<'a>(
                 stubs: many,
                 ..params
             };
+            // A net that is mended does not cross the net that cut it: the two would take
+            // each other's place in turn. It goes around, or is taken out whole.
+            let cutter = cut_by[j].take().filter(|_| rest.is_some());
+            let mending = hurried && rest.is_some();
+            let cutter_was = cutter.map(|n| world.locked(n));
+            if let Some(n) = cutter {
+                world.set_locked(n, true);
+            }
+            let world_ref = &world;
             // The world doesn't change until the net is placed.
             let steps = StepCache::default();
             // One tree through every stage: what the corridor connects is kept by the
             // search over the board, and what that connects by the one that may cross
             // other nets' routes, which then crosses them only for what is left.
-            let mut grow = NetRun::new(&world, ctx, &steps, params);
+            let mut grow = NetRun::new(world_ref, ctx, &steps, params);
             let mut done = false;
             let mut crossed = false;
             // A search that runs out of nodes in the corridor would over the board too.
@@ -1468,6 +1481,21 @@ fn route_all<'a>(
                 } else {
                     Failure::NoPath
                 });
+            } else if mending {
+                // A net that is mended is looked for a way around what cut it, near where
+                // it was: its corridor may have none, and the board over would be searched
+                // whole before the routes in its way are crossed.
+                let near = Params {
+                    max_expansions: MEND_NODES,
+                    ..params
+                };
+                match grow.stage(near, None, Some(quiet)) {
+                    Ok(()) => done = true,
+                    Err(f) => {
+                        out_of_budget = true;
+                        why = Some(f);
+                    }
+                }
             } else if let Some(corridor) = &job.corridor {
                 match grow.stage(params, Some(corridor), Some(quiet)) {
                     Ok(()) => done = true,
@@ -1567,11 +1595,66 @@ fn route_all<'a>(
             let grown = grow.finish();
             stats.expanded += grown.expanded;
             let tree = done.then_some(grown);
+            if let (Some(n), Some(was)) = (cutter, cutter_was) {
+                world.set_locked(n, was);
+            }
+            // A net that could not be mended is taken out whole, and routed again from
+            // nothing when its turn comes: its pieces join nothing, and are in the way.
+            if tree.is_none()
+                && rest.is_some()
+                && job.ctx.terminals < BRANCH_TERMINALS
+                && !plane
+                && mends(job.ctx.terminals, plane, hurried, 0)
+                && !run.ending()
+                && let Some(mut c) = copper[j].take()
+            {
+                c.unplace(&mut world);
+                missing[j].clear();
+                apart[j] = 0;
+                ripped[j] += 1;
+                queue.push_back(j);
+                continue;
+            }
             let mut displaced: Vec<usize> = Vec::new();
             // The nets this one's route runs into, with the copper they had.
             let mut cut: Vec<(usize, NetCopper)> = Vec::new();
             if let Some(t) = tree.as_ref().filter(|_| crossed) {
-                let (victims, at) = detail::victims(&world, ctx, t);
+                let (mut victims, at) = detail::victims(&world, ctx, t);
+                // In a run with a budget, the nets in the way are first moved aside: each
+                // cut where the route crosses it and mended around the route, with nothing
+                // else moved. If all of them can be, no connection is lost for the one
+                // made, and nothing has to be routed again.
+                if hurried && !victims.is_empty() && victims.len() <= SHOVED {
+                    let whole = |v: &NetId| {
+                        !pair_of.contains_key(v)
+                            && by_net.get(v).is_some_and(|&k| {
+                                copper[k].is_some()
+                                    && apart[k] == 0
+                                    && missing[k].is_empty()
+                                    && completing[k].is_none()
+                            })
+                    };
+                    if victims.iter().all(whole) {
+                        let aside: Vec<usize> = victims.iter().map(|v| by_net[v]).collect();
+                        let mut route = NetCopper::from_tree(ctx, t);
+                        let mut shove = Shove {
+                            design,
+                            jobs: &jobs,
+                            plane: &plane_net,
+                            params,
+                            pitch,
+                            history: &history,
+                            expanded: 0,
+                        };
+                        let moved =
+                            shove.all(&mut world, &mut copper, &aside, &mut route, &job.ctx);
+                        stats.expanded += shove.expanded;
+                        if moved {
+                            stats.shoved += aside.len();
+                            victims.clear();
+                        }
+                    }
+                }
                 // Taking nets out leaves fewer connections made until they are routed
                 // again: the routes as they are now are kept, if none before made more,
                 // for a run that is stopped before then.
@@ -1608,13 +1691,24 @@ fn route_all<'a>(
                         completing[k] = None;
                         failed[k] = None;
                         stats.rip_ups += 1;
-                        queue.push_back(k);
                         // A net of many pads loses only its branches in the way, a few
                         // times, before it is taken out whole as any other: a branch
                         // makes room for one net, and the whole of it for all those that
                         // wait, which go before it comes back.
                         let terminals = jobs[k].ctx.terminals;
-                        if loses_branches(pass, terminals, plane_net(v), hurried, cuts[k]) {
+                        let mended = mends(terminals, plane_net(v), hurried, cuts[k]);
+                        if mended {
+                            // A net to mend goes next: the room it is mended in is beside
+                            // the route that cut it, and is not left to others first.
+                            queue.push_front(k);
+                        } else {
+                            queue.push_back(k);
+                        }
+                        if mended {
+                            cut_by[k] = Some(job.ctx.net);
+                        }
+                        if mended || loses_branches(pass, terminals, plane_net(v), hurried, cuts[k])
+                        {
                             cuts[k] += 1;
                             cut.push((k, c));
                         } else {
@@ -1634,6 +1728,7 @@ fn route_all<'a>(
                 Some(_) => Some(Failure::NoPath),
                 None => why,
             };
+            last_failure[j] = failed[j].or(last_failure[j]);
             if let Some(t) = tree {
                 let mut c = NetCopper::from_tree(ctx, &t);
                 match (&rest, copper[j].take()) {
@@ -1649,8 +1744,13 @@ fn route_all<'a>(
                         }
                         old.merge(&job.ctx);
                         c = old;
-                        let pieces = c.pieces(&job.ctx);
+                        let mut pieces = c.pieces(&job.ctx);
                         debug_assert_eq!(pieces.apart(), t.missing.len());
+                        // A net mended whole loses the ends that its cuts left.
+                        if pieces.apart() == 0 && job.ctx.terminals < BRANCH_TERMINALS && !plane {
+                            c.prune(&job.ctx);
+                            pieces = c.pieces(&job.ctx);
+                        }
                         missing[j] = pieces.missing();
                         apart[j] = pieces.apart();
                     }
@@ -1671,7 +1771,13 @@ fn route_all<'a>(
             for (k, old) in cut {
                 let ctx = &jobs[k].ctx;
                 let mut kept = old.free_in(&world, ctx, params.pitch);
-                kept.prune(ctx);
+                if ctx.terminals < BRANCH_TERMINALS && !plane_net(ctx.net) {
+                    // A net of few pads is mended from its ends at the cut: cut back to
+                    // its joints, one of two pads would have nothing left.
+                    kept.drop_floating(ctx);
+                } else {
+                    kept.prune(ctx);
+                }
                 if kept.is_empty() {
                     continue;
                 }
@@ -1765,6 +1871,25 @@ fn route_all<'a>(
                         world.set_locked(pair.positive, true);
                         world.set_locked(pair.negative, true);
                     }
+                }
+            }
+        }
+        // A pass of a run with a budget that ends with fewer connections than its routes
+        // made at their best goes back to those: more work never leaves fewer.
+        if hurried
+            && !run.ending()
+            && best
+                .as_ref()
+                .is_some_and(|b| b.made > made_by(&jobs, &copper, &apart))
+            && let Some(b) = best.take()
+        {
+            b.restore(&mut world, &jobs, &mut copper, &mut missing, &mut apart);
+            for (j, slot) in completing.iter_mut().enumerate() {
+                *slot = None;
+                // What these routes leave open was looked for since, and its search is
+                // what it is left with.
+                if copper[j].is_none() || !missing[j].is_empty() {
+                    failed[j] = failed[j].or(last_failure[j]);
                 }
             }
         }
@@ -2001,6 +2126,147 @@ fn loses_branches(pass: usize, terminals: usize, plane: bool, hurried: bool, cut
         (false, _) => 0,
     };
     terminals >= BRANCH_TERMINALS && cuts < most
+}
+
+/// How many nets at most a route moves aside at once.
+const SHOVED: usize = 8;
+
+/// The moving aside of the nets in a route's way.
+struct Shove<'a> {
+    design: &'a Design,
+    jobs: &'a [Job],
+    plane: &'a dyn Fn(NetId) -> bool,
+    params: Params,
+    /// The pitch of the first pass, which the lattices of pads go on by.
+    pitch: i64,
+    history: &'a History,
+    /// The nodes its searches expanded.
+    expanded: u64,
+}
+
+impl Shove<'_> {
+    /// Moves the nets of the jobs `aside`, each routed whole, out of the way of `route`,
+    /// a route of the net `of` that is not in the world: with the route in place, each is
+    /// cut where the route is in its way and mended around it, crossing nothing. If all
+    /// of them are mended, they have their new copper, in the world, and the route is not
+    /// in it. If one can't be, everything is as it was.
+    fn all(
+        &mut self,
+        world: &mut World<'_>,
+        copper: &mut [Option<NetCopper>],
+        aside: &[usize],
+        route: &mut NetCopper,
+        of: &NetCtx,
+    ) -> bool {
+        let mut old: Vec<(usize, NetCopper)> = Vec::new();
+        for &k in aside {
+            if let Some(mut c) = copper[k].take() {
+                c.unplace(world);
+                old.push((k, c));
+            }
+        }
+        route.place(world, of);
+        let mut mended: Vec<(usize, NetCopper)> = Vec::new();
+        for (k, c) in &old {
+            match self.mend(world, &self.jobs[*k].ctx, c) {
+                Some(c) => mended.push((*k, c)),
+                None => break,
+            }
+        }
+        route.unplace(world);
+        if mended.len() == old.len() {
+            for (k, c) in mended {
+                copper[k] = Some(c);
+            }
+            return true;
+        }
+        for (_, mut c) in mended {
+            c.unplace(world);
+        }
+        for (k, mut c) in old {
+            c.place(world, &self.jobs[k].ctx);
+            copper[k] = Some(c);
+        }
+        false
+    }
+
+    /// The copper of a net that was routed whole as `old`, which is not in the world,
+    /// mended around what is in the world now: what of it is still free there, joined up
+    /// again by a search that crosses nothing, of [`MEND_NODES`] nodes at most. It is
+    /// in the world if it is returned.
+    fn mend(&mut self, world: &mut World<'_>, ctx: &NetCtx, old: &NetCopper) -> Option<NetCopper> {
+        let mut kept = old.free_in(world, ctx, self.params.pitch);
+        if ctx.terminals < BRANCH_TERMINALS && !(self.plane)(ctx.net) {
+            // A net of few pads is mended from its ends at the cut: cut back to its
+            // joints, one of two pads would have nothing left.
+            kept.drop_floating(ctx);
+        } else {
+            kept.prune(ctx);
+        }
+        kept.place(world, ctx);
+        if kept.pieces(ctx).apart() > 0 {
+            let rest = completion(self.design, ctx, &kept, self.pitch);
+            let near = Params {
+                max_expansions: MEND_NODES,
+                partial: false,
+                stubs: false,
+                ..self.params
+            };
+            let quiet = RipUp {
+                penalty: None,
+                history: self.history,
+            };
+            let steps = StepCache::default();
+            let mut grow = NetRun::new(world, &rest, &steps, near);
+            let joined = grow.stage(near, None, Some(quiet)).is_ok();
+            let tree = grow.finish();
+            self.expanded += tree.expanded;
+            kept.unplace(world);
+            if !joined {
+                return None;
+            }
+            let more = NetCopper::from_tree(&rest, &tree);
+            kept.segs.extend(more.segs);
+            for v in more.vias {
+                if !kept.vias.contains(&v) {
+                    kept.vias.push(v);
+                }
+            }
+            kept.merge(ctx);
+            if kept.pieces(ctx).apart() > 0 {
+                return None;
+            }
+        } else {
+            kept.unplace(world);
+        }
+        // The ends that the cut left go.
+        kept.prune(ctx);
+        kept.place(world, ctx);
+        Some(kept)
+    }
+}
+
+/// How many times in a pass a net of few pads is cut and mended before it is taken out
+/// whole.
+const MENDS: u32 = 8;
+
+/// How many nodes the search for a way to mend a net, around what cut it, may expand
+/// before the routes in its way may be crossed.
+const MEND_NODES: u64 = 20_000;
+
+/// Whether a net in the way of another is cut where it is in the way and mended from the
+/// ends that leaves, rather than taken out whole and routed again from nothing: a net with
+/// no plane and fewer than [`BRANCH_TERMINALS`] terminals, in a run with a budget, `hurried`,
+/// cut `cuts` times in this pass so far. Routed again from nothing, a net is searched for over
+/// its whole length for a few lattice pitches of it that were in the way, and comes back
+/// by another way altogether, in the way of other nets somewhere else.
+fn mends(terminals: usize, plane: bool, hurried: bool, cuts: u32) -> bool {
+    let most = if plane {
+        BRANCH_CUTS.max(terminals as u32 / PLANE_CUTS)
+    } else {
+        MENDS
+    };
+    hurried && cuts < most
 }
 
 /// Whether a net has been made to wait in the first pass, and how the search in its

@@ -568,7 +568,7 @@ pub(crate) fn run(
     let run = Run::new(control, options.work_budget);
     run.phase(Phase::Prepare);
     run.poll();
-    let (mut routed, mut failed, mut counted) = route_all(design, options, &run)?;
+    let (mut routed, mut failed, mut counted, narrow) = route_all(design, options, &run)?;
     if options.tune_lengths && !design.lengths.is_empty() && !run.poll() {
         run.phase(Phase::Lengths);
         tune::run(design, &mut routed, options).map_err(RouteError::Geometry)?;
@@ -675,6 +675,7 @@ pub(crate) fn run(
             stopped: run.stopped(),
             pitch: if fine { (base / FINE).max(1000) } else { base },
             bounds: bounds_of(design),
+            widths: &narrow,
         };
         routed.open = report::explain(design, &world, survey.open, &known);
     }
@@ -1022,9 +1023,15 @@ fn keep_islands(design: &Design) -> Design {
 const REPAIRS: usize = 3;
 
 /// What [`route_all`] returns: the result, how the last search of each net that failed
-/// ended, for the nets left open, and the fill that the joining of zones' pieces ended on,
-/// if it was made.
-type Outcome = (Routed, BTreeMap<NetId, Failure>, Option<Vec<Fill>>);
+/// ended, for the nets left open, the fill that the joining of zones' pieces ended on,
+/// if it was made, and by net the width it was routed at where that is narrower than its
+/// own.
+type Outcome = (
+    Routed,
+    BTreeMap<NetId, Failure>,
+    Option<Vec<Fill>>,
+    Vec<Option<i64>>,
+);
 
 /// Routes everything but meanders.
 fn route_all<'a>(
@@ -2107,7 +2114,7 @@ fn route_all<'a>(
         failed: Vec::new(),
     };
     let counted = counted.or(Some(first_fills).filter(|f| !f.is_empty()));
-    Ok((routed, failed, counted))
+    Ok((routed, failed, counted, narrow))
 }
 
 /// Whether a net in the way of another loses only its branches in the way, rather than

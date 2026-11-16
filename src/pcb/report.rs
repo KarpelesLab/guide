@@ -311,6 +311,8 @@ pub(crate) struct Known<'a> {
     pub(crate) pitch: i64,
     /// Where routes may go.
     pub(crate) bounds: Rect,
+    /// By net, the width it was routed at, if that is narrower than its own.
+    pub(crate) widths: &'a [Option<i64>],
 }
 
 /// The open connections with their causes. `world` holds the design's items and the
@@ -604,7 +606,12 @@ fn enclosed(
             return None;
         }
         let layer = LayerId(l);
-        let width = spec.track_width.max(rules.track_width(Some(net), layer));
+        // At the width the net was routed at: a net necked to leave its pads is not shut
+        // in by the pads beside them.
+        let own = known.widths.get(net.index()).copied().flatten();
+        let width = own
+            .unwrap_or(spec.track_width)
+            .max(rules.track_width(Some(net), layer));
         for (dx, dy) in DIRS {
             let to = Point::new(p.x + dx * pitch, p.y + dy * pitch);
             if to.x < b.min().x || to.y < b.min().y || to.x > b.max().x || to.y > b.max().y {
@@ -666,4 +673,58 @@ fn enclosed(
     }
     out.truncate(BLOCKERS);
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::{MM, design, smd};
+    use super::super::world::World;
+    use super::{Items, Known, enclosed};
+    use crate::geom::drc::Pad;
+    use crate::geom::{Point, Rect, Shape};
+    use crate::id::NetId;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn a_net_routed_narrower_is_not_shut_in_by_the_pads_beside_its_own() {
+        // Three pads 0.2 mm wide at 0.55 mm, of three nets, with 0.2 mm of clearance: a
+        // track of 0.5 mm or less leaves the middle one between its neighbours, and the
+        // net's own width is 0.6 mm.
+        let row = |k: i64, net: u32| Pad {
+            shape: Shape::rect(Rect::new(
+                Point::new(k * 550_000 - 100_000, -400_000),
+                Point::new(k * 550_000 + 100_000, 400_000),
+            ))
+            .unwrap(),
+            ..smd(k * 550_000, 0, net)
+        };
+        let mut d = design(1, vec![row(-1, 1), row(0, 2), row(1, 3)], 4);
+        d.nets[2].track_width = 600_000;
+        let world = World::new(
+            &d.board,
+            &d.rules,
+            &d.outline,
+            d.edge_clearance,
+            &d.obstacles,
+        )
+        .unwrap();
+        let items = Items::new(&d);
+        let failed = BTreeMap::new();
+        let known = |widths| Known {
+            failed: &failed,
+            stopped: None,
+            pitch: 100_000,
+            bounds: Rect::new(Point::new(-5 * MM, -5 * MM), Point::new(5 * MM, 5 * MM)),
+            widths,
+        };
+        // At its own width, nothing leaves the pad, and the pads beside it are why.
+        let by = enclosed(&d, &world, &items, NetId(2), 1, &known(&[]));
+        assert_eq!(by.map(|b| b.len()), Some(2));
+        // At the width it was necked to, the pad is not shut in.
+        let widths = [None, None, Some(400_000), None];
+        assert_eq!(
+            enclosed(&d, &world, &items, NetId(2), 1, &known(&widths)),
+            None
+        );
+    }
 }

@@ -90,8 +90,13 @@ pub(crate) struct NetCtx {
     /// The origin of the net's own lattice, which its routes are on away from its pads:
     /// the centre of the first pad of its first terminal.
     origin: Point,
-    /// The pads' centres, for finding through-hole pads at a node.
+    /// The pads' centres, for finding the terminal at a node.
     centers: FastMap<(Point, u8), usize>,
+    /// By centre and layer, the layers that the net's copper centred there joins that layer
+    /// to: those of every pad there with copper on it, and of the pads that these share a
+    /// layer with. A track's end on one layer and a via at the same point are two of the
+    /// net's places there, and the first found says nothing of the other.
+    joined: FastMap<(Point, u8), LayerSet>,
     /// The centres of pads with copper on every layer, which join the layers, so that vias
     /// are not needed there.
     through: FastMap<Point, ()>,
@@ -127,6 +132,33 @@ impl NetCtx {
                 through.insert(p.center, ());
             }
         }
+        // The layers joined at each centre: the layer sets there, merged while they overlap.
+        let mut at: FastMap<Point, Vec<LayerSet>> = FastMap::default();
+        for p in &pads {
+            at.entry(p.center).or_default().push(p.layers);
+        }
+        let mut joined = FastMap::default();
+        for (center, mut sets) in at {
+            let mut merged = true;
+            while merged {
+                merged = false;
+                'pairs: for i in 0..sets.len() {
+                    for j in i + 1..sets.len() {
+                        if sets[i].0 & sets[j].0 != 0 {
+                            sets[i] = LayerSet(sets[i].0 | sets[j].0);
+                            sets.swap_remove(j);
+                            merged = true;
+                            break 'pairs;
+                        }
+                    }
+                }
+            }
+            for set in sets {
+                for l in set.iter() {
+                    joined.insert((center, l.0), set);
+                }
+            }
+        }
         let origin = pads
             .iter()
             .min_by_key(|p| p.terminal)
@@ -142,6 +174,7 @@ impl NetCtx {
             pad_cell,
             snap,
             centers,
+            joined,
             through,
         }
     }
@@ -157,11 +190,13 @@ impl NetCtx {
         self.origin
     }
 
-    /// Whether a pad of the net at `p` has copper on both layers, and so joins them there.
+    /// Whether the net's copper centred at `p` joins the two layers there: a pad with
+    /// copper on both, or a track's end on one and a via at the same point. The same
+    /// whichever of the two is asked from, as a path is laid from either end.
     pub(crate) fn joins(&self, p: Point, a: u8, b: u8) -> bool {
-        self.centers
+        self.joined
             .get(&(p, a))
-            .is_some_and(|&i| self.pads[i].layers.contains(LayerId(b)))
+            .is_some_and(|set| set.contains(LayerId(b)))
     }
 
     /// The nodes where a terminal is reached: each of its pads' centres, on each layer.
@@ -798,8 +833,8 @@ impl<'a> RoutingSpace for DetailSpace<'a> {
         }
         let p = from.point();
         // A pad's centre connects its layers.
-        if let Some(&i) = self.ctx.centers.get(&(p, from.l)) {
-            for l in self.ctx.pads[i].layers.iter().filter(|l| l.0 != from.l) {
+        if let Some(&set) = self.ctx.joined.get(&(p, from.l)) {
+            for l in set.iter().filter(|l| l.0 != from.l) {
                 out.push(Step {
                     to: DNode { l: l.0, ..from },
                     cost: Cost::ZERO,
@@ -943,11 +978,7 @@ impl<'a> RoutingSpace for DetailSpace<'a> {
             if let Some(extra) = self.verdict_cost(verdict, self.history(p))
                 && let Some(cost) = Cost::new(self.params.via_cost + extra)
             {
-                let joined = self
-                    .ctx
-                    .centers
-                    .get(&(p, from.l))
-                    .map(|&i| self.ctx.pads[i].layers);
+                let joined = self.ctx.joined.get(&(p, from.l)).copied();
                 for l in (0..self.layers as u8)
                     .filter(|&l| l != from.l && !joined.is_some_and(|j| j.contains(LayerId(l))))
                 {
@@ -1614,5 +1645,55 @@ mod tests {
         assert_eq!(StepCache::known(cache.bits(id), 5), Some(Verdict::Blocked));
         assert_eq!(StepCache::known(cache.bits(id), 0), None);
         assert_eq!(cache.bits(cache.id(nodes[0])), 0);
+    }
+    #[test]
+    fn a_track_s_end_and_a_via_at_one_point_join_the_layers_from_either() {
+        use super::super::geometry::NetCopper;
+        use super::{NetCtx, TermPad, Tree};
+        use crate::geom::{LayerId, LayerSet, Rect};
+        use crate::id::NetId;
+        // A net with a track that ends at a via of its own, as a stub to a plane that an
+        // earlier run made: two of the net's places at one point, the track's end on the
+        // top layer and the via on both. The first of the two was asked for the layers
+        // joined there, which the track's end says nothing of: a path found from its far
+        // end, and so laid the other way round, went through the via from the top and was
+        // given a via of its own on it.
+        let q = Point::new(2_000_000, 0);
+        let place = |center: Point, layers: LayerSet, terminal: usize| TermPad {
+            center,
+            layers,
+            bbox: Rect::new(center, center),
+            terminal,
+        };
+        let top = LayerSet::EMPTY.with(LayerId(0));
+        let bottom = LayerSet::EMPTY.with(LayerId(1));
+        let far = Point::new(5_000_000, 0);
+        let ctx = NetCtx::new(
+            NetId(1),
+            vec![200_000; 2],
+            Some((600_000, 300_000)),
+            vec![
+                place(Point::new(0, 0), top, 0),
+                place(q, top, 0),
+                place(q, LayerSet::first(2), 0),
+                place(far, bottom, 1),
+            ],
+            2,
+            0,
+        );
+        assert!(ctx.joins(q, 1, 0));
+        assert!(ctx.joins(q, 0, 1));
+        // Nothing joins them where the net has copper on one layer alone.
+        assert!(!ctx.joins(far, 1, 0) && !ctx.joins(far, 0, 1));
+        assert!(!ctx.joins(Point::new(0, 0), 0, 1));
+        // A path through the via from the top, and on along the bottom, has no via.
+        let at = |p: Point, l: u8| DNode { x: p.x, y: p.y, l };
+        let tree = Tree {
+            edges: vec![(at(q, 0), at(q, 1)), (at(q, 1), at(far, 1))],
+            ..Tree::default()
+        };
+        let copper = NetCopper::from_tree(&ctx, &tree);
+        assert!(copper.vias.is_empty(), "{:?}", copper.vias);
+        assert_eq!(copper.segs.len(), 1);
     }
 }

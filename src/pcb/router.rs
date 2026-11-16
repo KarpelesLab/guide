@@ -15,6 +15,7 @@ use super::global::{self, GlobalSpace, Probe, TerminalPads};
 use super::neck;
 use super::pairs;
 use super::planes;
+use super::pours::{self, Pours};
 use super::report::{self, Known};
 use super::rows;
 use super::tune;
@@ -1023,6 +1024,14 @@ fn keep_islands(design: &Design) -> Design {
 /// How many times zones are filled again and their nets' pieces joined after routing.
 const REPAIRS: usize = 3;
 
+/// How many times over the planned fills are looked at once routing is over, in a run
+/// with a budget, for what the routes cut off them and the stubs of the time before left
+/// so.
+const POUR_ROUNDS: usize = 3;
+
+/// The share of a work budget that routing leaves for those stubs.
+const POUR_WORK: f64 = 0.03;
+
 /// What [`route_all`] returns: the result, how the last search of each net that failed
 /// ended, for the nets left open, the fill that the joining of zones' pieces ended on,
 /// if it was made, and by net the width it was routed at where that is narrower than its
@@ -1380,6 +1389,10 @@ fn route_all<'a>(
     // from, as it does when it completes a net routed in part. By job, whether it has
     // such stubs and has not had that search.
     let mut fresh = vec![false; jobs.len()];
+    // In a run with a budget, the fills that nets are planned on are kept as cells, to
+    // tell what the routes cut off them once routing is over.
+    let pours = (hurried && options.pour_cuts && !planned.is_empty() && !run.poll())
+        .then(|| Pours::plan(design, &world, &planned, &jobs, bounds, pitch));
     if hurried && options.row_fanout && !run.poll() {
         let mut stubs: Vec<Option<NetCopper>> = vec![None; jobs.len()];
         for s in rows::plan(design, &mut world, pitch, &jobs, options.via_cost) {
@@ -1409,7 +1422,12 @@ fn route_all<'a>(
     let join_work = run
         .work_left()
         .map_or(0, |left| (left as f64 * shares.join_work) as u64);
-    run.part(shares.routing.0, shares.routing.1);
+    let pour_work = if pours.is_some() {
+        1.0 - POUR_WORK
+    } else {
+        1.0
+    };
+    run.part(shares.routing.0, shares.routing.1 * pour_work);
     'passes: for pass in 0..=FINE_PASSES {
         if run.poll() {
             break;
@@ -2024,6 +2042,62 @@ fn route_all<'a>(
         _ => 1.0,
     };
     run.part(shares.cleanup, cleanup_work);
+    // What the routes cut off the planned fills is joined to them again, by stubs that
+    // move nothing: now that nothing moves any more, a piece that is cut off stays so.
+    if let Some(pours) = &pours {
+        for _ in 0..POUR_ROUNDS {
+            let mut joined = false;
+            for k in pours.jobs().collect::<Vec<usize>>() {
+                if run.poll() {
+                    break;
+                }
+                let Some(c) = copper[k].as_ref() else {
+                    continue;
+                };
+                let Some(again) = pours.rejoin(&world, design, &jobs, &copper, k, pitch) else {
+                    continue;
+                };
+                let ctx = completion(design, &again.ctx, c, pitch);
+                jobs[k].ctx = pours::with_sites(&jobs[k].ctx, &again.sites, pitch);
+                stats.pour_cuts += again.cut;
+                let steps = StepCache::default();
+                let stubs = Params {
+                    partial: true,
+                    stubs: true,
+                    ..params
+                };
+                let found = detail::route_net(&world, &ctx, &steps, stubs, None, None);
+                let tree = match found {
+                    Ok(tree) => tree,
+                    Err((_, expanded)) => {
+                        stats.expanded += expanded;
+                        continue;
+                    }
+                };
+                stats.expanded += tree.expanded;
+                let more = NetCopper::from_tree(&ctx, &tree);
+                if more.is_empty() {
+                    continue;
+                }
+                if let Some(mut old) = copper[k].take() {
+                    old.unplace(&mut world);
+                    old.segs.extend(more.segs);
+                    for v in more.vias {
+                        if !old.vias.contains(&v) {
+                            old.vias.push(v);
+                        }
+                    }
+                    old.merge(&jobs[k].ctx);
+                    old.place(&mut world, &jobs[k].ctx);
+                    copper[k] = Some(old);
+                    joined = true;
+                }
+            }
+            if !joined {
+                break;
+            }
+        }
+    }
     if options.cleanup && !run.poll() {
         run.phase(Phase::Cleanup);
         stats.expanded += cleanup::run(&mut world, &jobs, &mut copper, params, options);

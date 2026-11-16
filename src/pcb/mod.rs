@@ -198,6 +198,7 @@ mod neck;
 mod pairs;
 pub mod place;
 mod planes;
+mod pours;
 mod report;
 mod router;
 mod rows;
@@ -629,6 +630,18 @@ pub struct RouteOptions {
     /// which the nets go on from, and which rip-up takes out like any other. A run with no
     /// budget plans none.
     pub row_fanout: bool,
+    /// Whether a run with a [budget](RouteOptions::work_budget) or a deadline keeps count,
+    /// while it routes, of what the routes cut off the fills that its nets are planned on.
+    /// The default is `true`. A net is planned on its zones' fill as it is before routing,
+    /// given by a host ([`Zones::fills`]) or made here: the pads that the fill joins need
+    /// no route. Routes of other nets through a fill on an outer layer leave some of those
+    /// pads on a piece of their own, which a fill of the routed board shows, when it is
+    /// too late to move anything. With this, the fills are kept as cells of a grid, what
+    /// is too near a route for copper of the fill's least width is taken out of them from
+    /// time to time, and a pad that is no longer on the largest piece of its fill is
+    /// joined to it again by a stub, with the right to move what is in its way. The grid
+    /// errs on the side of a cut, and a stub. A run with no budget counts none.
+    pub pour_cuts: bool,
     /// A seed for another order of the nets, or `None`, the default, for shortest first.
     /// With a seed, each net's length counts for between three quarters and five quarters
     /// of itself in that order, by a factor drawn from the seed and the net's number: the
@@ -665,6 +678,7 @@ impl Default for RouteOptions {
             join: true,
             fanout_via: None,
             row_fanout: true,
+            pour_cuts: true,
             seed: None,
         }
     }
@@ -721,6 +735,10 @@ pub struct Stats {
     /// Ways out planned for the pads of rows of fine pitch
     /// ([`RouteOptions::row_fanout`]), before routing.
     pub row_stubs: usize,
+    /// Pieces of fill with pads on them found cut off the fill that their net is planned
+    /// on, each time the net was given a turn to join them to it again
+    /// ([`RouteOptions::pour_cuts`]).
+    pub pour_cuts: usize,
     /// Nets whose copper and zones are still in pieces, after the last attempt to join them.
     pub planes_broken: usize,
     /// Work spent: the nodes expanded by every search of the run, those of pairs, stubs

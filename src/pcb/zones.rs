@@ -879,14 +879,38 @@ impl Ctx<'_> {
                 others.push(grow(&self.holes[i].shape, clearance + MARGIN)?);
             }
             let whole = Area::union_all(&areas)?;
-            let left = whole.minus_all(&others)?;
+            let d = zone.min_width / 2;
+            // The cut changes the fill only near what it is cut around: within twice the
+            // radius of the opening of it, which a disc that holds a point of the fill
+            // reaches no further than. So the fill is cut there alone, in a window around
+            // each piece of copper that is wide enough for what happens at its border to
+            // stay outside the part of it that is kept, and what the windows leave of the
+            // fill is as it was given: the fill of a plane has a hundred thousand edges,
+            // and a few vias in it took seconds to cut around when all of it was opened.
+            let inner = 2 * d + TOLERANCE + MARGIN;
+            let outer = 2 * inner;
+            let mut near_cuts = Vec::with_capacity(others.len());
+            let mut around_cuts = Vec::with_capacity(others.len());
+            for other in &others {
+                let Some(b) = other.bbox() else { continue };
+                let rect = |r: Rect| {
+                    let (lo, hi) = (r.min(), r.max());
+                    Area::from_rings(&[&[lo, Point::new(hi.x, lo.y), hi, Point::new(lo.x, hi.y)]])
+                };
+                near_cuts.push(rect(b.expand(inner))?);
+                around_cuts.push(rect(b.expand(outer))?);
+            }
+            let near_cuts = Area::union_all(&near_cuts)?;
+            let around_cuts = Area::union_all(&around_cuts)?;
+            let local = whole.and(&around_cuts)?;
+            let left = local.minus_all(&others)?;
             // What the cut leaves too narrow goes, but not what the host kept as narrow,
             // such as its spokes.
-            let d = zone.min_width / 2;
-            let thin = whole
-                .minus_all(&[whole.opening(d, TOLERANCE)?])?
+            let thin = local
+                .minus_all(&[local.opening(d, TOLERANCE)?])?
                 .minus_all(&others)?;
-            let kept = Area::union_all(&[left.opening(d, TOLERANCE)?, thin])?;
+            let cut = Area::union_all(&[left.opening(d, TOLERANCE)?, thin])?.and(&near_cuts)?;
+            let kept = Area::union_all(&[whole.minus_all(&[near_cuts])?, cut])?;
             // Less the dust that the cut leaves of what was narrow: pieces too small to
             // hold a disc as wide as the minimum width, such as the tip of a corner.
             let dust = 3 * i128::from(zone.min_width) * i128::from(zone.min_width);

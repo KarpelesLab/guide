@@ -1050,6 +1050,19 @@ fn a_host_s_fill_of_many_edges_is_measured_as_one_of_few() {
     assert!(!filled(&fills, 3 * MM, 5 * MM));
     assert!(!filled(&fills, 3 * MM + 400_000, 5 * MM));
     assert!(filled(&fills, 6 * MM, 5 * MM));
+    // Away from the via the fill is as the host gave it, to the vertex: it is cut in a
+    // window around the via, and not opened again whole.
+    let cut: Vec<Point> = fills
+        .iter()
+        .flat_map(|f| f.shape.rings().unwrap())
+        .flatten()
+        .collect();
+    let far = |p: &&Point| (p.x - 3 * MM).abs().max((p.y - 5 * MM).abs()) > 2 * MM;
+    let given = host.rings().unwrap();
+    assert!(given[0].iter().filter(far).count() > 100);
+    for p in given[0].iter().filter(far) {
+        assert!(cut.contains(p), "{p:?}");
+    }
     // And a piece of fill of many edges says where it is by its parts, as its area does.
     let piece = &super::planes::pieces_by_net(&d, &d.zones.fills)[0].1[0];
     for (x, y) in [

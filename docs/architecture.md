@@ -451,6 +451,60 @@ pass once it made no more connections for a million nodes, which took `glasgow-r
 `buspirate5-rev10` from 16 to 61; and a first pass with no rip-up until every net had had
 its turn, for all nets or for those that wait, which left more open on six or seven boards of nine.
 
+**A run with a budget plans the ways out of what a net-by-net search shuts in, and moves a
+net aside before it takes one out.** Measured after the above
+([results](benchmarks.md#pcb-routing-with-ways-out-planned)):
+
+- *Side by side out of a row.* A net too wide to leave a pad was necked to the width that
+  leaves that pad, past the pads beside it. Two such tracks out of two pads side by side are
+  then too close to each other, by ten micrometres on a 0.4 mm QFN with 0.19 mm of clearance:
+  every other pad of a row got out, and the rest were shut in by their neighbours' tracks,
+  whichever were routed first. A pad with pads of other nets beside it is necked to the
+  width at which a track leaves it the same way as one leaves each of them, clear of it,
+  and a net with a pad in such a row is on that pad's lattice, so that its track needs no
+  step sideways where it has no room for one.
+- *Balls deep in an area array.* Between two balls that `n` tracks pass, `n + 1` rings get
+  out on their layer and no ball further in does. Such a ball is not trapped while nothing
+  is routed, so it had no escape, and where its net's own via fits nowhere beside it, the
+  search, with one via a net, had no way to take it to another layer. It gets its dog-bone
+  with the smaller via, on the side of the array's middle where it can, the balls furthest
+  from the middle first: a via between the balls further out closes the ways that those
+  balls get out by, which is what a dog-bone the same way for every ball did when it was
+  tried. Only for the balls that deep, and only where the net's own via does not fit.
+- *A net in the way is moved aside before it is taken out.* A route that has to cross
+  others' used to take each of them out whole, to be routed again from nothing when its turn
+  came: searched for over its whole length for the few pitches of it that were in the way,
+  and back by another way altogether, in the way of other nets somewhere else. Now the
+  nets crossed are first cut where the route crosses them and mended around it by a search
+  that crosses nothing, of 20,000 nodes at most, all of them or none: if every one is
+  mended, a connection is made and none is lost, and if one can't be, everything is put
+  back. Then, as before, they are taken out, but cut and mended too: a net keeps what of
+  its copper the route leaves free, has its turn next, mends itself from the ends at the
+  cut without crossing the net that cut it, crossing others if it has to, and is taken out
+  whole only after eight cuts in a pass, or if it can't be mended.
+- *A pass never ends with fewer connections than it had.* The routes that made the most
+  connections are kept through a pass, as they were for a run that is stopped, and a pass
+  that ends below them goes back to them.
+- *What a host is told.* `Routed::failed` has the open nets whose own search found no way:
+  the others lost their routes to another net and have room on the board as it is returned.
+
+A run with no budget has none of these: the curated boards are as they were, to the via
+and the millimetre. With the necking alone in such a run, the narrower tracks found other
+ways on two of them, and `nk3-nrf-mini` ended a connection short.
+
+Tried and not kept there: a fan for each row of fine pitch, a track out of each pad and
+then at 45° away from the middle of the row, each a lattice step deeper than the one outside
+it, as fixed copper that routes go on from, which made no more connections over the boards
+and orders measured, cost `corne-cherry` 240 vias, and left two of cadlab's generated
+boards, which complete, five and six connections short, the fixed tracks in the way of the
+routes round the part; rip-up of the first pass given up once it has made no more
+connections for half the work that its most took, which left the nets still out to the
+passes on the finer lattice, where they cost more nodes for fewer connections, 542
+connections open on twelve boards for 439; cutting and mending with no limit on the search
+for a way round, which made each mend a search of the whole corridor, 300,000 nodes and
+more; and mending that may cross the net that cut it, where two nets then took each
+other's place in turn until each had been cut its eight times.
+
 **Differential pairs are routed side by side last, in place of their nets' routes.** Routing
 pairs first, before anything else, as fixed copper, coupled `udb-s`'s USB pair a little better,
 60% of its length side by side in place of 50%, but cost other nets their room: `GB-LIVE32`

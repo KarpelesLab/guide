@@ -492,8 +492,9 @@ fn pcb_and_dsn() {
         let json = stdout(&out);
         assert!(has(&json, "stopped", "\"work_budget\""), "{json}");
         // Routing has all of the budget but the twentieth kept for joining the pieces of
-        // the board's zones, which here had none to join.
-        assert!(has(&json, "work", "950"), "{json}");
+        // the board's zones, which here had none to join, and three hundredths of the rest
+        // for the pads that its routes cut off the planned fills, which here cut none.
+        assert!(has(&json, "work", "921"), "{json}");
         assert!(has(&json, "complete", "false"), "{json}");
         assert!(has(&json, "violations", "[]"), "{json}");
     }

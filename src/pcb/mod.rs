@@ -150,7 +150,10 @@
 //! A run with a work budget or a deadline routes for the most connections soonest, which
 //! one with neither does not, so that the two differ even if nothing stops the first. In
 //! its first pass, a net that finds no way in its corridor waits until every net has had
-//! its turn before it is searched for over the board and takes other nets out, and a net
+//! its turn before it is searched for over the board, and waits once more before it takes
+//! other nets out: with [`RouteOptions::keep_partial`], a net of more than two terminals
+//! keeps what its search over the board reached with nothing moved, and goes on from
+//! that. A net
 //! with a plane and 32 terminals or more that is in another's way loses only its stubs in
 //! the way, not all of them. With neither, nets keep their order, shortest first, and such
 //! a net is taken out whole: on crowded boards that ended with a connection more and
@@ -158,14 +161,18 @@
 //!
 //! Such a run also plans, before it routes, the ways out of what its first routes would
 //! shut in: a net with a pad in a row of fine pitch is necked to the width at which the
-//! row's pads are left side by side, and is on that pad's lattice, and each ball too deep
+//! row's pads are left side by side, by the clearance of the [area](crate::geom::RuleArea)
+//! that both tracks are in if one has its own, and is on that pad's lattice, and each ball too deep
 //! in an area array to get out on its layer, whose net's own via fits nowhere beside it,
 //! gets a dog-bone with [`RouteOptions::fanout_via`]. And a net in
 //! the way of another's route is moved aside before it is taken out: cut where the route
 //! crosses it and mended around the route, with nothing else moved
 //! ([`Stats::shoved`]), or failing that, cut, given the next turn, and mended across
 //! other nets if it has to be. A pass that ends with fewer connections than its routes
-//! made at their best goes back to those.
+//! made at their best goes back to those. Once routing is over, the pads that routes cut
+//! off the fill that their net was planned on are joined to it again by stubs
+//! ([`RouteOptions::pour_cuts`]), and if asked, the ways out of rows of fine pitch are
+//! planned a row at a time before anything is routed ([`RouteOptions::row_fanout`]).
 //!
 //! [`Routed::failed`] has the nets left open whose own search found no way: the others
 //! were tried and lost their routes to another net's, and a host that routes again on the
@@ -623,12 +630,14 @@ pub struct RouteOptions {
     pub fanout_via: Option<ViaSize>,
     /// Whether a run with a [budget](RouteOptions::work_budget) or a deadline plans the
     /// ways out of rows of fine pitch a row at a time, before anything is routed. The
-    /// default is `true`. A row is one in which a via in the way out of a pad is in the way
+    /// default is `false`. A row is one in which a via in the way out of a pad is in the way
     /// out of the pads beside it: its pads then get stubs, a straight track out of either
     /// end of each and a via at its end where one is needed and fits, chosen for the row
     /// as a whole so that no stub's via is in another's way. They are routes of their nets,
     /// which the nets go on from, and which rip-up takes out like any other. A run with no
-    /// budget plans none.
+    /// budget plans none. Off by default, as it is not a gain on every board: with it a
+    /// crowded board of two layers left fewer connections open and two boards of four
+    /// layers more, see `docs/benchmarks.md`.
     pub row_fanout: bool,
     /// Whether a run with a [budget](RouteOptions::work_budget) or a deadline keeps count,
     /// while it routes, of what the routes cut off the fills that its nets are planned on.
@@ -636,11 +645,12 @@ pub struct RouteOptions {
     /// given by a host ([`Zones::fills`]) or made here: the pads that the fill joins need
     /// no route. Routes of other nets through a fill on an outer layer leave some of those
     /// pads on a piece of their own, which a fill of the routed board shows, when it is
-    /// too late to move anything. With this, the fills are kept as cells of a grid, what
-    /// is too near a route for copper of the fill's least width is taken out of them from
-    /// time to time, and a pad that is no longer on the largest piece of its fill is
-    /// joined to it again by a stub, with the right to move what is in its way. The grid
-    /// errs on the side of a cut, and a stub. A run with no budget counts none.
+    /// too late to move anything. With this, the fills are kept as cells of a grid, and
+    /// once routing is over what is too near a route for copper of the fill's least width
+    /// is taken out of them: a pad that is then no longer on the largest piece of its
+    /// fill is joined to it again by a stub that moves nothing, in cleanup's share of the
+    /// time. The grid errs on the side of a cut, and a stub. A run with no budget counts
+    /// none.
     pub pour_cuts: bool,
     /// A seed for another order of the nets, or `None`, the default, for shortest first.
     /// With a seed, each net's length counts for between three quarters and five quarters
@@ -677,7 +687,7 @@ impl Default for RouteOptions {
             fills: true,
             join: true,
             fanout_via: None,
-            row_fanout: true,
+            row_fanout: false,
             pour_cuts: true,
             seed: None,
         }

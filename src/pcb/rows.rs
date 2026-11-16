@@ -838,6 +838,7 @@ mod tests {
         let options = RouteOptions {
             vias_in_pads: false,
             work_budget: Some(50_000_000),
+            row_fanout: true,
             ..RouteOptions::default()
         };
         let routed = route_checked(&d, &options);

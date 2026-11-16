@@ -106,11 +106,9 @@ fn center_of(shape: &Shape) -> Point {
     )
 }
 
-/// Plans the escapes of a design, against the fixed copper of `world`, into which it puts
-/// them as routes of their nets as it goes. `pitch` is detailed routing's lattice.
 /// Whether fixed copper of a pad's net already touches it, as routing kept from before does:
 /// then it is out already.
-fn joined(design: &Design, pad: usize) -> bool {
+pub(crate) fn joined(design: &Design, pad: usize) -> bool {
     let b = &design.board;
     let p = &b.pads[pad];
     let Some(net) = p.net else { return false };
@@ -127,6 +125,8 @@ fn joined(design: &Design, pad: usize) -> bool {
         })
 }
 
+/// Plans the escapes of a design, against the fixed copper of `world`, into which it puts
+/// them as routes of their nets as it goes. `pitch` is detailed routing's lattice.
 pub(crate) fn plan(
     design: &Design,
     world: &mut World<'_>,

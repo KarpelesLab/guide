@@ -16,6 +16,7 @@ use super::neck;
 use super::pairs;
 use super::planes;
 use super::report::{self, Known};
+use super::rows;
 use super::tune;
 use super::world::{Placed, Planes, Verdict, World};
 use super::zones::{self, Fill};
@@ -243,7 +244,7 @@ pub(crate) fn terminals(design: &Design, net: NetId) -> Vec<Group> {
 /// terminal of its main fill first, which also holds places in the fill near its other
 /// terminals' pads, where a via or a track's end fits, so that routes from it to them are
 /// stubs to the fill.
-fn jobs(
+pub(crate) fn jobs(
     design: &Design,
     world: &World<'_>,
     pitch: i64,
@@ -1357,20 +1358,51 @@ fn route_all<'a>(
     // And how its last search that failed ended, whatever came after.
     let mut last_failure: Vec<Option<Failure>> = vec![None; jobs.len()];
     // What the progress hears of: nets with a route, connections made, nets waiting.
-    let tell =
-        |copper: &[Option<NetCopper>], missing: &[Vec<usize>], apart: &[usize], queued: usize| {
-            let (mut nets, mut made) = (0, 0);
-            for (j, _) in copper.iter().enumerate().filter(|(_, c)| c.is_some()) {
-                nets += usize::from(missing[j].is_empty());
-                made += jobs[j].ctx.terminals - 1 - apart[j];
-            }
-            run.counts(nets, made, queued);
-        };
+    let tell = |jobs: &[Job],
+                copper: &[Option<NetCopper>],
+                missing: &[Vec<usize>],
+                apart: &[usize],
+                queued: usize| {
+        let (mut nets, mut made) = (0, 0);
+        for (j, _) in copper.iter().enumerate().filter(|(_, c)| c.is_some()) {
+            nets += usize::from(missing[j].is_empty());
+            made += jobs[j].ctx.terminals - 1 - apart[j];
+        }
+        run.counts(nets, made, queued);
+    };
     // A second pass, on a finer lattice, for the nets the first leaves unrouted, or routed in
     // part, with every net that can be ripped up again.
     // By job, whether it has had a turn.
     let mut tried = vec![false; jobs.len()];
     let mut best: Option<Best> = None;
+    // In a run with a budget, the ways out of the rows of fine pitch, planned a row at a
+    // time, are copper of their nets from the start, which each net's first search goes on
+    // from, as it does when it completes a net routed in part. By job, whether it has
+    // such stubs and has not had that search.
+    let mut fresh = vec![false; jobs.len()];
+    if hurried && options.row_fanout && !run.poll() {
+        let mut stubs: Vec<Option<NetCopper>> = vec![None; jobs.len()];
+        for s in rows::plan(design, &mut world, pitch, &jobs, options.via_cost) {
+            let c = stubs[s.job].get_or_insert_with(NetCopper::default);
+            c.segs.push(s.seg);
+            c.vias.extend(s.via);
+            // A stub's end is kept for as long as its net has it, whatever else of the
+            // net is cut away.
+            c.keep.push(s.seg.b);
+            stats.row_stubs += 1;
+        }
+        for (j, c) in stubs.into_iter().enumerate() {
+            let Some(mut c) = c else { continue };
+            let ctx = &jobs[j].ctx;
+            c.place(&mut world, ctx);
+            let pieces = c.pieces(ctx);
+            missing[j] = pieces.missing();
+            apart[j] = pieces.apart();
+            completing[j] = Some(completion(design, ctx, &c, pitch));
+            copper[j] = Some(c);
+            fresh[j] = true;
+        }
+    }
     // A run with a deadline or a budget keeps a share of it for what comes after routing.
     let shares = Shares::of(options, planes_on);
     // The work kept for the joining of zones' pieces, of the budget as it is now.
@@ -1422,7 +1454,7 @@ fn route_all<'a>(
             }
         };
         while let Some(j) = queue.pop_front() {
-            tell(&copper, &missing, &apart, queue.len() + 1);
+            tell(&jobs, &copper, &missing, &apart, queue.len() + 1);
             if run.poll() {
                 break 'passes;
             }
@@ -1434,7 +1466,9 @@ fn route_all<'a>(
             let job = &jobs[j];
             tried[j] = true;
             // A net routed in part is completed from its copper, if it still has it.
-            let rest = completing[j].take().filter(|_| copper[j].is_some());
+            let mut rest = completing[j].take().filter(|_| copper[j].is_some());
+            // A net with nothing but its stubs is routed as any net is for the first time.
+            let first = fresh[j] && rest.is_some();
             let ctx = rest.as_ref().unwrap_or(&job.ctx);
             // A net of many pads is routed a terminal at a time, as stubs to its plane if it
             // has one.
@@ -1447,7 +1481,7 @@ fn route_all<'a>(
             // A net that is mended does not cross the net that cut it: the two would take
             // each other's place in turn. It goes around, or is taken out whole.
             let cutter = cut_by[j].take().filter(|_| rest.is_some());
-            let mending = hurried && rest.is_some();
+            let mending = hurried && rest.is_some() && !first;
             let cutter_was = cutter.map(|n| world.locked(n));
             if let Some(n) = cutter {
                 world.set_locked(n, true);
@@ -1477,8 +1511,12 @@ fn route_all<'a>(
             // keeps what it reaches is not made to wait: what it reached would be searched
             // for again. A run with no budget keeps the nets in their order, shortest
             // first, which on a crowded board ends with fewer vias, if later.
-            let may_wait =
-                hurried && pass == 0 && options.rip_ups > 0 && !plane && !many && rest.is_none();
+            let may_wait = hurried
+                && pass == 0
+                && options.rip_ups > 0
+                && !plane
+                && !many
+                && (rest.is_none() || first);
             let back = may_wait && matches!(waited[j], Wait::NoPath | Wait::OutOfBudget);
             if back {
                 out_of_budget = waited[j] == Wait::OutOfBudget;
@@ -1518,10 +1556,12 @@ fn route_all<'a>(
                         Wait::NoPath
                     };
                     stats.expanded += grow.finish().expanded;
+                    completing[j] = rest.take();
                     queue.push_back(j);
                     continue;
                 }
             }
+            fresh[j] = false;
             if !done && !out_of_budget {
                 match grow.stage(params, None, Some(quiet)) {
                     Ok(()) => {
@@ -1755,6 +1795,8 @@ fn route_all<'a>(
                         debug_assert_eq!(pieces.apart(), t.missing.len());
                         // A net mended whole loses the ends that its cuts left.
                         if pieces.apart() == 0 && job.ctx.terminals < BRANCH_TERMINALS && !plane {
+                            // With the stubs it did without.
+                            c.keep.clear();
                             c.prune(&job.ctx);
                             pieces = c.pieces(&job.ctx);
                         }
@@ -1930,7 +1972,7 @@ fn route_all<'a>(
         .filter(|&j| outside[j] && copper[j].is_some())
         .count();
 
-    tell(&copper, &missing, &apart, 0);
+    tell(&jobs, &copper, &missing, &apart, 0);
     // The escapes and pairs of nets routed are part of their routes.
     let kept = |net: Option<NetId>| net.is_some_and(|n| dropped.binary_search(&n).is_err());
     let mut tracks: Vec<Track> = escapes
@@ -1965,9 +2007,11 @@ fn route_all<'a>(
             })
     };
     // The ends that rip-up left leading nowhere go, before anything is measured.
+    // And the stubs of rows that nothing was routed on from.
     for (job, c) in jobs.iter().zip(copper.iter_mut()) {
         if let Some(c) = c {
             c.unplace(&mut world);
+            c.keep.clear();
             c.prune(&job.ctx);
             c.place(&mut world, &job.ctx);
         }

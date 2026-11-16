@@ -68,6 +68,10 @@ impl Pieces {
 pub(crate) struct NetCopper {
     pub(crate) segs: Vec<Seg>,
     pub(crate) vias: Vec<Point>,
+    /// Points where a track's end or a via is kept though it joins nothing yet: the ends
+    /// of the stubs planned for the pads of a row, which are ways out for as long as
+    /// they are there.
+    pub(crate) keep: Vec<Point>,
     placed: Vec<Placed>,
 }
 
@@ -95,6 +99,7 @@ impl NetCopper {
         let mut copper = NetCopper {
             segs,
             vias,
+            keep: Vec::new(),
             placed: Vec::new(),
         };
         copper.merge(ctx);
@@ -303,6 +308,7 @@ impl NetCopper {
         let mut kept = NetCopper {
             segs,
             vias,
+            keep: self.keep.clone(),
             placed: Vec::new(),
         };
         kept.merge(ctx);
@@ -372,7 +378,8 @@ impl NetCopper {
 
     /// Drops the copper that joins nothing: pieces with no terminal in them, tracks that
     /// end where there is neither a pad, a via nor another track, one after the other,
-    /// and vias with copper on fewer than two layers.
+    /// and vias with copper on fewer than two layers. But what ends at a point that is
+    /// [kept](NetCopper::keep).
     pub(crate) fn prune(&mut self, ctx: &NetCtx) {
         self.drop_floating(ctx);
         self.split_at_joints(ctx);
@@ -383,6 +390,7 @@ impl NetCopper {
             let held = |l: u8, p: Point| {
                 ends.get(&(l, p)).is_some_and(|v| v.len() > 1)
                     || self.vias.contains(&p)
+                    || self.keep.contains(&p)
                     || ctx
                         .pads
                         .iter()
@@ -398,8 +406,11 @@ impl NetCopper {
                 k += 1;
                 !dead[k - 1]
             });
-            let segs = &self.segs;
+            let (segs, keep) = (&self.segs, &self.keep);
             self.vias.retain(|&v| {
+                if keep.contains(&v) && segs.iter().any(|s| s.a == v || s.b == v) {
+                    return true;
+                }
                 let mut layers = ctx
                     .pads
                     .iter()
@@ -422,6 +433,7 @@ impl NetCopper {
         NetCopper {
             segs: self.segs.clone(),
             vias: self.vias.clone(),
+            keep: self.keep.clone(),
             placed: Vec::new(),
         }
     }

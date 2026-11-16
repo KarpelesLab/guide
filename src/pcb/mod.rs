@@ -200,6 +200,7 @@ pub mod place;
 mod planes;
 mod report;
 mod router;
+mod rows;
 pub mod swap;
 mod tune;
 mod verify;
@@ -619,6 +620,15 @@ pub struct RouteOptions {
     /// balls of a BGA of 0.8 mm pitch, gets its dog-bone with this one, if it is smaller
     /// and fits. Every other via of the net is its own, [`NetSpec::via`].
     pub fanout_via: Option<ViaSize>,
+    /// Whether a run with a [budget](RouteOptions::work_budget) or a deadline plans the
+    /// ways out of rows of fine pitch a row at a time, before anything is routed. The
+    /// default is `true`. A row is one in which a via in the way out of a pad is in the way
+    /// out of the pads beside it: its pads then get stubs, a straight track out of either
+    /// end of each and a via at its end where one is needed and fits, chosen for the row
+    /// as a whole so that no stub's via is in another's way. They are routes of their nets,
+    /// which the nets go on from, and which rip-up takes out like any other. A run with no
+    /// budget plans none.
+    pub row_fanout: bool,
     /// A seed for another order of the nets, or `None`, the default, for shortest first.
     /// With a seed, each net's length counts for between three quarters and five quarters
     /// of itself in that order, by a factor drawn from the seed and the net's number: the
@@ -654,6 +664,7 @@ impl Default for RouteOptions {
             fills: true,
             join: true,
             fanout_via: None,
+            row_fanout: true,
             seed: None,
         }
     }
@@ -707,6 +718,9 @@ pub struct Stats {
     pub meanders: f64,
     /// Stubs added to connect nets to their zones, before routing and after.
     pub stubs: usize,
+    /// Ways out planned for the pads of rows of fine pitch
+    /// ([`RouteOptions::row_fanout`]), before routing.
+    pub row_stubs: usize,
     /// Nets whose copper and zones are still in pieces, after the last attempt to join them.
     pub planes_broken: usize,
     /// Work spent: the nodes expanded by every search of the run, those of pairs, stubs

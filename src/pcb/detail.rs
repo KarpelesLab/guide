@@ -100,6 +100,11 @@ pub(crate) struct NetCtx {
     /// The centres of pads with copper on every layer, which join the layers, so that vias
     /// are not needed there.
     through: FastMap<Point, ()>,
+    /// The vias of the copper that the net is completed from, by cell of `via_cell`: a
+    /// search for what is left puts no via of the net's too close to one of them, hole to
+    /// hole, as its route is added to that copper and both would stay.
+    vias: FastMap<(i64, i64), Vec<Point>>,
+    via_cell: i64,
 }
 
 impl NetCtx {
@@ -176,7 +181,36 @@ impl NetCtx {
             centers,
             joined,
             through,
+            vias: FastMap::default(),
+            via_cell: 1,
         }
+    }
+
+    /// The same net with `vias` as those of the copper it is completed from, which its
+    /// new vias keep `reach` from, centre to centre.
+    pub(crate) fn with_vias(mut self, vias: &[Point], reach: i64) -> NetCtx {
+        self.via_cell = reach.max(1);
+        self.vias.clear();
+        for &v in vias {
+            let cell = (v.x.div_euclid(self.via_cell), v.y.div_euclid(self.via_cell));
+            self.vias.entry(cell).or_default().push(v);
+        }
+        self
+    }
+
+    /// The vias of the copper that the net is completed from that are near `p`: within a
+    /// cell of its own.
+    fn vias_near(&self, p: Point) -> impl Iterator<Item = Point> + '_ {
+        let (cx, cy) = (p.x.div_euclid(self.via_cell), p.y.div_euclid(self.via_cell));
+        let cells = (!self.vias.is_empty())
+            .then_some(-1..=1)
+            .into_iter()
+            .flatten();
+        cells
+            .flat_map(move |i| (-1..=1).map(move |j| (cx + i, cy + j)))
+            .filter_map(|cell| self.vias.get(&cell))
+            .flatten()
+            .copied()
     }
 
     /// The same net on the lattice of `origin`, in place of its first pad's.
@@ -738,6 +772,16 @@ impl<'a> DetailSpace<'a> {
         h2h > 0 && dx * dx + dy * dy < reach * reach
     }
 
+    /// Whether a via of the net at `p` is too close to one that the net has: of this
+    /// search, or of the copper it is completed from, anywhere but on it.
+    fn own_via_near(&self, p: Point) -> bool {
+        self.keep_off.iter().any(|&q| self.vias_clash(p, q))
+            || self
+                .ctx
+                .vias_near(p)
+                .any(|q| q != p && self.vias_clash(p, q))
+    }
+
     /// Keeps the net's later vias clear of one at `p`.
     fn keep_off(&mut self, p: Point) {
         self.keep_off.push(p);
@@ -1028,7 +1072,7 @@ impl<'a> RoutingSpace for DetailSpace<'a> {
             && self.layers > 1
             && at_pad.is_none()
         {
-            let verdict = if self.keep_off.iter().any(|&q| self.vias_clash(p, q)) {
+            let verdict = if self.own_via_near(p) {
                 Verdict::Blocked
             } else {
                 *self
@@ -1678,11 +1722,9 @@ impl<'a> NetRun<'a> {
                 }
             }
             let clash = new_vias.iter().enumerate().find_map(|(i, &p)| {
-                let earlier = new_vias[..i].iter().chain(&self.space.keep_off);
-                earlier
-                    .clone()
-                    .any(|&q| self.space.vias_clash(p, q))
-                    .then_some(p)
+                (new_vias[..i].iter().any(|&q| self.space.vias_clash(p, q))
+                    || self.space.own_via_near(p))
+                .then_some(p)
             });
             if let Some(p) = clash {
                 self.retries += 1;

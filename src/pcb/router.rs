@@ -3111,6 +3111,10 @@ pub(super) fn completion(design: &Design, ctx: &NetCtx, copper: &NetCopper, pitc
             pads.push(point(v, design.rules.layers(), piece));
         }
     }
+    // A via of what completes the net keeps clear of those the copper has, hole to hole.
+    let reach = ctx
+        .via
+        .map_or(0, |(_, drill)| drill + design.rules.spec().hole_to_hole);
     NetCtx::new(
         ctx.net,
         ctx.widths.clone(),
@@ -3120,6 +3124,7 @@ pub(super) fn completion(design: &Design, ctx: &NetCtx, copper: &NetCopper, pitc
         LATTICE_REACH * pitch,
     )
     .on_lattice(ctx.lattice())
+    .with_vias(&copper.vias, reach)
 }
 
 /// By net, the centre of its pad with the least room beside it, if no track of the net
@@ -3245,6 +3250,77 @@ mod tests {
         }
         assert_eq!(origins[5], None);
         assert_eq!(origins[0], None);
+    }
+
+    #[test]
+    fn what_completes_a_net_puts_no_via_beside_one_it_has() {
+        use super::super::detail::{DNode, DetailSpace, NetCtx, Params, StepCache, TermPad};
+        use super::super::geometry::{NetCopper, Seg};
+        use super::super::world::World;
+        use super::completion;
+        use crate::geom::{LayerId, LayerSet};
+        use crate::id::NetId;
+        use crate::space::RoutingSpace;
+        // A net with a track from its first pad to a via, and a pad still to join. The
+        // copper is not in the world while a negotiation looks for the rest, and what is
+        // found is added to it: a via a pitch from the one it has would be a via on a via.
+        let d = design(2, vec![smd(0, 0, 1), smd(4 * MM, 3 * MM, 1)], 2);
+        let world = World::new(
+            &d.board,
+            &d.rules,
+            &d.outline,
+            d.edge_clearance,
+            &d.obstacles,
+        )
+        .unwrap();
+        let pad = |x: i64, y: i64, terminal: usize| TermPad {
+            center: Point::new(x, y),
+            layers: LayerSet::EMPTY.with(LayerId(0)),
+            bbox: Rect::new(Point::new(x, y), Point::new(x, y)),
+            terminal,
+        };
+        let via = (600_000, 300_000);
+        let whole = NetCtx::new(
+            NetId(1),
+            vec![200_000; 2],
+            Some(via),
+            vec![pad(0, 0, 0), pad(4 * MM, 3 * MM, 1)],
+            2,
+            8 * 200_000,
+        );
+        let mut copper = NetCopper::default();
+        copper.segs.push(Seg {
+            a: Point::new(0, 0),
+            b: Point::new(2 * MM, 0),
+            l: 0,
+        });
+        copper.vias.push(Point::new(2 * MM, 0));
+        let params = Params {
+            pitch: 200_000,
+            via_cost: 3.0,
+            layer_bias: 0.0,
+            bounds: Rect::new(Point::new(-MM, -MM), Point::new(6 * MM, 6 * MM)),
+            max_expansions: 100_000,
+            under_pads: false,
+            partial: false,
+            stubs: false,
+            forest: false,
+        };
+        let changes_layer = |ctx: &NetCtx, x: i64| {
+            let cache = StepCache::default();
+            let space = DetailSpace::new(&world, ctx, &cache, params, None, None);
+            let from = DNode { x, y: 0, l: 0 };
+            let mut steps = Vec::new();
+            space.expand(NetId(1), from, &mut steps);
+            steps.iter().any(|s| s.to.l != 0)
+        };
+        let rest = completion(&d, &whole, &copper, 200_000);
+        // Hole to hole is 0.25 mm in these rules, and the holes are 0.3 mm.
+        assert!(!changes_layer(&rest, 2 * MM + 200_000));
+        assert!(!changes_layer(&rest, 2 * MM - 400_000));
+        assert!(changes_layer(&rest, 3 * MM));
+        // The net with no copper yet has a via wherever the board has room.
+        assert!(changes_layer(&whole, 2 * MM + 200_000));
     }
 
     #[test]

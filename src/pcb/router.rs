@@ -1440,8 +1440,8 @@ fn route_all<'a>(
     // In a run with a budget, a pass that has stopped gaining ends, and what the passes
     // leave open is settled in the time and the work that this leaves of routing's.
     let settles = hurried && options.rip_ups > 0 && options.settle;
-    // The settings of the last pass that began.
-    let mut last_params = params;
+    // By job, whether a negotiation for it was given up, and is not tried again.
+    let mut spent = vec![0u8; jobs.len()];
     'passes: for pass in 0..=FINE_PASSES {
         if run.poll() {
             break;
@@ -1485,7 +1485,6 @@ fn route_all<'a>(
                 ..params
             }
         };
-        last_params = params;
         // The most connections that the routes made in this pass, and the nodes that the
         // run had expanded when the pass began and when they first made as many.
         let pass_from = stats.expanded;
@@ -2059,6 +2058,58 @@ fn route_all<'a>(
                 }
             }
         }
+        // What the passes leave open is made a connection at a time, each kept only if the
+        // board has more for it.
+        if settles && !run.ending() && !run.poll() {
+            run.phase(Phase::Settle);
+            let mut settle = Settle {
+                design,
+                by_net: &by_net,
+                plane: &plane_net,
+                params,
+                pitch,
+                history: &history,
+                fixed: &pair_nets,
+                pours: pours.as_ref(),
+                expanded: 0,
+                blocked: None,
+                tried: 0,
+                kept: 0,
+                made: 0,
+                chains: pass == FINE_PASSES || !options.fine_pass,
+                negotiate: options.negotiate,
+                negotiated: (0, 0, 0),
+                spent: &mut spent,
+            };
+            let mut routes = Routes {
+                copper: &mut copper,
+                missing: &mut missing,
+                apart: &mut apart,
+            };
+            settle.all(&mut world, &jobs, &mut routes);
+            stats.expanded += settle.expanded;
+            stats.settled.0 += settle.tried;
+            stats.settled.1 += settle.kept;
+            stats.settled.2 += settle.made;
+            stats.negotiated.0 += settle.negotiated.0;
+            stats.negotiated.1 += settle.negotiated.1;
+            stats.negotiated.2 += settle.negotiated.2;
+            if settle.kept + settle.negotiated.1 > 0 {
+                // The routes kept from before are of a board that is no more, and so is
+                // what the nets were to go on from.
+                best = None;
+                for j in 0..jobs.len() {
+                    completing[j] = None;
+                    cut_by[j] = None;
+                    held[j] = false;
+                }
+            }
+            for j in 0..jobs.len() {
+                if copper[j].is_some() && missing[j].is_empty() {
+                    failed[j] = None;
+                }
+            }
+        }
     }
     // A run that was stopped while nets were out goes back to the routes that made the
     // most connections, if what it has now makes fewer.
@@ -2067,39 +2118,6 @@ fn route_all<'a>(
         && b.made > made_by(&jobs, &copper, &apart)
     {
         b.restore(&mut world, &jobs, &mut copper, &mut missing, &mut apart);
-    }
-    // What the passes leave open is made a connection at a time, each kept only if the
-    // board has more for it.
-    if settles && !run.poll() {
-        run.phase(Phase::Settle);
-        let mut settle = Settle {
-            design,
-            by_net: &by_net,
-            plane: &plane_net,
-            params: last_params,
-            pitch,
-            history: &history,
-            fixed: &pair_nets,
-            pours: pours.as_ref(),
-            expanded: 0,
-            blocked: None,
-            tried: 0,
-            kept: 0,
-            made: 0,
-        };
-        let mut routes = Routes {
-            copper: &mut copper,
-            missing: &mut missing,
-            apart: &mut apart,
-        };
-        settle.all(&mut world, &jobs, &mut routes);
-        stats.expanded += settle.expanded;
-        stats.settled = (settle.tried, settle.kept, settle.made);
-        for j in 0..jobs.len() {
-            if copper[j].is_some() && missing[j].is_empty() {
-                failed[j] = None;
-            }
-        }
     }
     // A net ripped up and then not routed again is unrouted too.
     // A plane net's pieces are joined after routing, if they can be, so it isn't unrouted

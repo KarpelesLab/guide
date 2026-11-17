@@ -4354,6 +4354,131 @@ All at 40 million nodes, connections open as cadlab counts them.
   with half of its 40 million nodes, every open connection tried four times.
 - Vias and track. Not looked into here.
 
+## PCB routing negotiated
+
+What was changed after [the release above](#pcb-routing-settled), 0.0.11, for the same
+host, cadlab, and the first of what that section does not show: the pads of rows of fine
+pitch that the routes round them shut in ([what and why](architecture.md#decisions)).
+Measured on 2026-11-17, each run with one thread, six runs at a time, on a machine that
+other work shared with a load of 5 to 9 on its 64 threads.
+
+### How
+
+Through cadlab's adapter, with the rows planned on boards of two layers
+(`RouteOptions::row_fanout`) as its `master`, commit `1a70ba8`, has them for 0.0.11, and
+left off for this, which has `RouteOptions::negotiate`, its default:
+
+```text
+RAYON_NUM_THREADS=1 CADLAB_BENCH_ROUTER=guide CADLAB_BENCH_VERBOSE=1 CADLAB_BENCH_WORK=40000000 [CADLAB_BENCH_SEED=2|3] route_bench --corpus <board>
+RAYON_NUM_THREADS=1 CADLAB_BENCH_ROUTER=guide CADLAB_BENCH_VERBOSE=1 CADLAB_BENCH_BUDGET_MS=60000 [CADLAB_BENCH_SEED=2..6] route_bench --corpus <board>
+```
+
+After a run that its budget of work stopped the adapter makes no second, and cadlab
+counts what the one run leaves open on the board that it fills again. With a deadline
+the adapter gives a first run seven tenths of it and a second, on the board filled again
+with the first run's routes as copper that does not move, the rest.
+
+### Results
+
+cadlab's corpus with a budget of 40 million nodes, vias kept out of pads, in three orders
+of the nets, no seed and seeds 2 and 3. Connections left open as cadlab counts them,
+before → after; vias, track and the seconds the call took are of the first order:
+
+| Board | Layers | Open | Vias | Track, mm | Seconds |
+| --- | --- | --- | --- | --- | --- |
+| `nrfmicro` | 2 | 3, 5, 3 → 2, 4, 3 | 49 → 35 | 500 → 521 | 6 → 11 |
+| `sweep-v2.2` | 2 | 6, 7, 6 → 6, 7, 6 | 42 → 42 | 2231 → 2231 | 53 → 56 |
+| `corne-cherry` | 2 | 40, 45, 42 → 40, 42, 36 | 475 → 483 | 5912 → 6018 | 35 → 40 |
+| `tinytapeout-demo` | 4 | 14, 19, 5 → 16, 19, 5 | 608 → 604 | 5685 → 5655 | 46 → 47 |
+| `buspirate5-rev10` | 4 | 0, 6, 5 → 1, 1, 7 | 502 → 476 | 3818 → 3756 | 37 → 38 |
+| `lumenpnp-mobo` | 4 | 0, 1, 0 → 0, 1, 0 | 713 → 713 | 6544 → 6544 | 32 → 32 |
+| `cynthion` | 4 | 21, 17, 25 → 13, 17, 25 | 613 → 586 | 3618 → 3576 | 44 → 49 |
+| `glasgow-revC3` | 4 | 36, 35, 36 → 36, 37, 36 | 563 → 563 | 3937 → 3937 | 73 → 72 |
+| `glasgow-revD1` | 6 | 170, 145, 139 → 170, 145, 139 | 1067 → 1067 | 7616 → 7616 | 48 → 48 |
+| All, three orders | | 831 → 814 | | | |
+
+`buspirate-flash-sop`, `buspirate-rs232` and `lumenpnp-ringlight` are complete before and
+after, in under a second. No run has an error of cadlab's check.
+
+With a deadline of 60 s, where the first run's routes come back in time for a second,
+`corne-cherry` has 155 connections open over six orders of the nets (17, 19, 35, 25, 29
+and 30) with the rows planned and 160 without (36, 30, 25, 25, 23 and 21), where 0.0.11
+with the rows has 100 over the first three for 71 and 91, and `nrfmicro` 18 and 19 over
+six for 11 over three before and 9 after. So the rows planned make no more with the
+negotiations, and are left off.
+
+What a negotiation is, on `nrfmicro`'s `DATA+`, whose pads in its USB receptacle have
+those of `DATA-` between them, in a build with the negotiations after the last pass: its
+route crosses four nets, twelve nets take part over fourteen rounds, with three to seven
+nets in each other's way until the price is 88, two at 140 and none at 225, in 235,000
+nodes, and the board was complete, where every chain for it was undone. As released,
+with the negotiations after the first pass, that connection's is undone in each of the
+three orders, on a board that the first pass left otherwise. In a first run of `corne-cherry` with 42 s,
+the first pass ends with 390 of 432 connections after 7.6 million nodes, 19 to 35
+negotiations are tried in the 30 million that are left, 7 to 15 of them kept, and they
+make 8 to 27 connections: 408 to 417 when the run is cut. One that is kept costs
+860,000 nodes and makes 1.4 connections, and one that is undone half as much again;
+about half of those kept end with the price at its most and what is still shared given
+up. With four times the deadline the first run ends on its own with 415 or 416: what is
+left is not for want of time.
+
+On the boards of four and six layers the first run of a minute ends in its passes, or
+its open pads are balls of an array with nothing round them that moves:
+`glasgow-revC3` had 34 negotiations for one kept. A negotiation that finds its pad shut
+in by what nothing shares room with ends after a look of 2,000 nodes, and after eight
+undone in a row a settling has no more.
+
+The curated boards, routed with no budget, are as they were, 1150 of 1151 connections
+with 712 vias: a run with neither a budget nor a deadline negotiates nothing.
+
+### What was tried and not kept
+
+At 60 s through the adapter, connections open as cadlab counts them, `corne-cherry`
+unless said.
+
+- *The nets in the way routed again whole*, from nothing, as congestion is negotiated
+  on an FPGA: after one net of `nrfmicro` had crossed four, twenty of its forty-one nets
+  were in each other's way, and no fewer at any price in twenty-four rounds. A net
+  routed again from nothing comes back by another way, across others that had nothing
+  to do with it.
+- *Joined up again from the ends that a crossing leaves*, with nothing more taken out:
+  69 over three orders for 62 to 68 with twelve or six pitches round the place taken
+  out, and tracks that keep every bend they ever made.
+- *A window of twelve pitches* to be joined up again within, for twenty-four: 217 over
+  six orders for 159.
+- *The rounds ended once the same nets are in each other's way twice in a row* at a price
+  over twenty: 82 over three orders for 62. Two nets that cross each other at any price
+  do move, a few rounds on, when the history at that place has made another dearer.
+- *20,000 nodes for a search* in place of 60,000: 84 for 62. *A price that starts at one
+  and rises by 2.2*: 83. *Forty rounds*: 77.
+- *Two more negotiations* for a connection whose first was undone, each cutting by
+  another distance, six and twenty-four pitches, and with the nets' turns in the other
+  order: 166 over six orders for 159, `nrfmicro` 16 for 18.
+- *A negotiation for each net with pads cut off its fill*, the pieces as terminals of
+  their own, before the others: 174 over six orders for 161, `tinytapeout-demo`,
+  `lumenpnp-mobo` and `sweep-v2.2` the same.
+- *The whole board negotiated from nothing* in place of the first pass, every net across
+  every other: after 64 rounds and 36 million nodes, 394 of 432 connections, with one to
+  nineteen nets still in each other's way from one round to the next; the first pass has 390
+  after 3.4 million.
+- *Chains after every pass* as the negotiations are: `glasgow-revC3` 112 open over
+  three orders at 40 million nodes for 109 with the chains after the last pass alone,
+  as before, and 107 with 0.0.11.
+
+### What this does not show
+
+- A board of two layers with QFNs of 0.4 mm routed whole: `corne-cherry` has 21 to 36
+  open at 60 s against 3 for cadlab's router. Of those in an order, some fifteen are
+  pads of its two QFNs, each with a fan of a dozen tracks beside it that would have to
+  move over by one, which thirty-two nets and twenty-four rounds do not do; five to
+  ten are pads that routes cut off the ground's pour, found by the host's fill and
+  given to a second run in which nothing moves; and one or two are the `D+` of a USB
+  receptacle, whose pads have those of `D-` between them.
+- A second run that goes on from the first run's routes, in place of one on a board
+  where they are fixed.
+- Searches that end at their limit of nodes on a wide board: `sweep-v2.2` is as it was.
+- Vias and track, and a board of six layers, whose minute ends in its first pass.
+
 ## PCB differential pairs and lengths
 
 Differential pairs routed side by side, and nets meandered to their lengths, by `pcb::route`

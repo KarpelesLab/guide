@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use super::detail::{NetCtx, Tree};
 use super::world::{Placed, Verdict, World};
-use crate::geom::{LayerId, Point, Shape};
+use crate::geom::{LayerId, Point, Rect, Shape};
 
 /// A straight track of a net.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -308,6 +308,60 @@ impl NetCopper {
         let mut kept = NetCopper {
             segs,
             vias,
+            keep: self.keep.clone(),
+            placed: Vec::new(),
+        };
+        kept.merge(ctx);
+        kept
+    }
+
+    /// What of this copper is outside `rect`: the vias outside it, and of the tracks, looked
+    /// at in steps of `pitch`, the steps with neither end inside it. What is left may be
+    /// in pieces, with ends that lead nowhere, as [`free_in`](NetCopper::free_in) leaves
+    /// it.
+    pub(crate) fn outside(&self, rect: &Rect, ctx: &NetCtx, pitch: i64) -> NetCopper {
+        let inside = |p: Point| {
+            p.x >= rect.min().x && p.x <= rect.max().x && p.y >= rect.min().y && p.y <= rect.max().y
+        };
+        let mut segs = Vec::new();
+        for s in &self.segs {
+            let b = Rect::new(
+                Point::new(s.a.x.min(s.b.x), s.a.y.min(s.b.y)),
+                Point::new(s.a.x.max(s.b.x), s.a.y.max(s.b.y)),
+            );
+            if !b.intersects(rect) {
+                segs.push(*s);
+                continue;
+            }
+            let (dx, dy) = (s.b.x - s.a.x, s.b.y - s.a.y);
+            let n = dx.abs().max(dy.abs()) / pitch.max(1);
+            if n < 2 || (dx != 0 && dy != 0 && dx.abs() != dy.abs()) {
+                if !inside(s.a) && !inside(s.b) {
+                    segs.push(*s);
+                }
+                continue;
+            }
+            let (ux, uy) = (dx.signum() * pitch, dy.signum() * pitch);
+            let at = |k: i64| {
+                if k == n {
+                    s.b
+                } else {
+                    Point::new(s.a.x + k * ux, s.a.y + k * uy)
+                }
+            };
+            for k in 0..n {
+                if !inside(at(k)) && !inside(at(k + 1)) {
+                    segs.push(Seg {
+                        a: at(k),
+                        b: at(k + 1),
+                        l: s.l,
+                    });
+                }
+            }
+        }
+        let mut kept = NetCopper {
+            segs,
+            vias: self.vias.iter().copied().filter(|&v| !inside(v)).collect(),
             keep: self.keep.clone(),
             placed: Vec::new(),
         };

@@ -262,6 +262,52 @@ pub(crate) struct RipUp<'h> {
     pub(crate) history: &'h History,
 }
 
+/// The history of the conflicts of a negotiation, by cell of a grid much finer than the
+/// tiles of [`History`]: what the tracks of every net cost more for where two nets'
+/// routes have been in each other's way, so that the nets with another way take it.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Fine {
+    cell: i64,
+    cost: FastMap<(i64, i64, u8), f32>,
+}
+
+impl Fine {
+    /// No history, kept by cell of `cell` nanometres.
+    pub(crate) fn new(cell: i64) -> Fine {
+        Fine {
+            cell: cell.max(1),
+            cost: FastMap::default(),
+        }
+    }
+
+    /// What a track at `p` on layer `l` costs more for its length.
+    #[inline]
+    pub(crate) fn at(&self, p: Point, l: u8) -> f64 {
+        if self.cost.is_empty() {
+            return 0.0;
+        }
+        let key = (p.x.div_euclid(self.cell), p.y.div_euclid(self.cell), l);
+        self.cost.get(&key).map_or(0.0, |&c| f64::from(c))
+    }
+
+    /// Makes tracks at `p` on layer `l` dearer by `step`.
+    pub(crate) fn add(&mut self, p: Point, l: u8, step: f32) {
+        let key = (p.x.div_euclid(self.cell), p.y.div_euclid(self.cell), l);
+        *self.cost.entry(key).or_insert(0.0) += step;
+    }
+}
+
+/// How a search of a negotiation shares room with other nets' routes: a step within a
+/// clearance of one costs `present` times its length more, a via `present` times a via's
+/// cost, and every step what the history of conflicts where it ends says. Such a search
+/// is one search from the net's tree, as the price of a route crossed is of the order of
+/// the path's length and not many times it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Share<'h> {
+    pub(crate) present: f64,
+    pub(crate) fine: &'h Fine,
+}
+
 /// The settings of a detailed search.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Params {
@@ -488,6 +534,8 @@ pub(crate) struct DetailSpace<'a> {
     params: Params,
     corridor: Option<&'a Corridor>,
     rip: Option<RipUp<'a>>,
+    /// How other nets' routes are shared with, in a negotiation.
+    share: Option<Share<'a>>,
     /// Whether other nets' routes may be crossed, if `rip` has a penalty for it.
     cross: bool,
     /// A box within the bounds that tracks are kept to, if any.
@@ -545,6 +593,7 @@ impl<'a> DetailSpace<'a> {
             params,
             corridor,
             rip,
+            share: None,
             cross: true,
             window: None,
             layers: world.rules().layer_count(),
@@ -570,7 +619,7 @@ impl<'a> DetailSpace<'a> {
 
     /// Whether the search may cross other nets' routes.
     fn crossing(&self) -> bool {
-        self.cross && self.rip.is_some_and(|r| r.penalty.is_some())
+        self.cross && (self.share.is_some() || self.rip.is_some_and(|r| r.penalty.is_some()))
     }
 
     /// Adds a node to the tree, and returns whether it is new to it.
@@ -689,8 +738,16 @@ impl<'a> DetailSpace<'a> {
         self.keep_off.push(p);
     }
 
-    /// What a step costs on top of its length, or `None` if it may not be taken.
-    fn verdict_cost(&self, verdict: Verdict, history: f64) -> Option<f64> {
+    /// What a step of `len` millimetres, or a via at its cost, costs on top of that, or
+    /// `None` if it may not be taken.
+    fn verdict_cost(&self, verdict: Verdict, history: f64, len: f64) -> Option<f64> {
+        if let Some(share) = self.share.filter(|_| self.cross) {
+            return match verdict {
+                Verdict::Free => Some(0.0),
+                Verdict::Routed => Some(share.present * len * (1.0 + history)),
+                Verdict::Blocked => None,
+            };
+        }
         let penalty = self.rip.and_then(|r| r.penalty).filter(|_| self.cross);
         match (verdict, penalty) {
             (Verdict::Free, _) => Some(0.0),
@@ -699,14 +756,15 @@ impl<'a> DetailSpace<'a> {
         }
     }
 
-    /// The history of conflicts at a point, as a cost per millimetre.
-    fn history(&self, at: Point) -> f64 {
-        self.rip.map_or(0.0, |r| {
+    /// The history of conflicts at a point of a layer, as a cost per millimetre.
+    fn history(&self, at: Point, layer: u8) -> f64 {
+        let tiles = self.rip.map_or(0.0, |r| {
             r.history
                 .grid
                 .tile_of(at)
                 .map_or(0.0, |t| r.history.cost[t])
-        })
+        });
+        tiles + self.share.map_or(0.0, |s| s.fine.at(at, layer))
     }
 
     /// The cost factor of a step on `layer` that ends at `to`, or `None` outside the
@@ -781,11 +839,11 @@ impl<'a> DetailSpace<'a> {
                 v
             }
         };
-        let history = self.history(to);
-        let Some(extra) = self.verdict_cost(verdict, history) else {
+        let history = self.history(to, from.l);
+        let len = octile(from.point(), to) * NM;
+        let Some(extra) = self.verdict_cost(verdict, history, len) else {
             return;
         };
-        let len = octile(from.point(), to) * NM;
         if let Some(cost) = Cost::new(len * (factor + history) + extra) {
             out.push(Step {
                 to: DNode {
@@ -975,7 +1033,8 @@ impl<'a> RoutingSpace for DetailSpace<'a> {
                     .entry(p)
                     .or_insert_with(|| self.world.via(self.ctx.net, p, diameter, drill, None))
             };
-            if let Some(extra) = self.verdict_cost(verdict, self.history(p))
+            if let Some(extra) =
+                self.verdict_cost(verdict, self.history(p, from.l), self.params.via_cost)
                 && let Some(cost) = Cost::new(self.params.via_cost + extra)
             {
                 let joined = self.ctx.joined.get(&(p, from.l)).copied();
@@ -1072,6 +1131,10 @@ fn stub_order(ctx: &NetCtx) -> Vec<usize> {
 /// everywhere else first.
 const LOOKS: [(u64, u64); 3] = [(0, 256), (8_000, 2_000), (64_000, 50_000)];
 
+/// How many terminals at most a search of a negotiation is for, for each to have a look
+/// from it first.
+const SHARE_LOOKS: usize = 4;
+
 /// How many pitches around a terminal and the tree a search that may cross other nets'
 /// routes is kept to at first. What crossing a route costs is many times the length of the
 /// path, so such a search goes everywhere it can at each number of routes crossed before it
@@ -1159,6 +1222,12 @@ impl<'a> NetRun<'a> {
         };
         run.join(0);
         run
+    }
+
+    /// Makes the stages that follow those of a negotiation, which share room with other
+    /// nets' routes as `share` says, or not.
+    pub(crate) fn share(&mut self, share: Option<Share<'a>>) {
+        self.space.share = share;
     }
 
     /// Marks a terminal as reached, with every node of it on the tree: a terminal reached
@@ -1350,6 +1419,32 @@ impl<'a> NetRun<'a> {
         budget: &mut u64,
         searched: &mut Vec<(usize, Failure)>,
     ) -> Result<Vec<DNode>, Failure> {
+        // In a negotiation a route crossed costs little more than the track that crosses
+        // it: one search from the tree, which the bound leads.
+        if self.space.share.is_some() {
+            // But for a look from each terminal first: one shut in by what nothing shares
+            // room with is found out in a few nodes, where the search from the tree goes
+            // everywhere else before it says so.
+            let mut to: Vec<usize> = to.to_vec();
+            if to.len() <= SHARE_LOOKS {
+                for &t in &to {
+                    if !self.alive[t] && !self.dead[t] {
+                        match self.backward(t, LOOKS[1].1.min(full), true).0 {
+                            Ok(path) => return Ok(path),
+                            Err(Failure::Budget) => self.alive[t] = true,
+                            Err(Failure::NoPath) => self.dead[t] = true,
+                        }
+                    }
+                }
+                to.retain(|&t| !self.dead[t]);
+                if to.is_empty() {
+                    return Err(Failure::NoPath);
+                }
+            }
+            let (path, expanded) = self.forward(&to, full);
+            *budget = budget.saturating_sub(expanded);
+            return path;
+        }
         let crossing = self.space.crossing();
         for (level, (ahead, back)) in LOOKS.into_iter().enumerate() {
             // No look goes further than the search may.

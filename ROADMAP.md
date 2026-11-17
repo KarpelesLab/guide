@@ -296,13 +296,20 @@ Each item is independently useful, and they can land in any order.
   and joined up again around it at once, each across further nets if it has to, kept if
   the board then has less open, counting the pads that the routes cut off their fills,
   and undone to the track if not (`RouteOptions::settle`)
-  ([benchmarks](docs/benchmarks.md#pcb-routing-settled)). Not yet:
+  ([benchmarks](docs/benchmarks.md#pcb-routing-settled)); and before its chains each
+  open connection is negotiated for: routed across the routes in its way at a price by
+  the length shared, the nets it runs into routed again near there the same way, in
+  rounds at a rising price with a history of where routes were in each other's way,
+  kept if a round ends with none in another's way and the board has less open
+  (`RouteOptions::negotiate`)
+  ([benchmarks](docs/benchmarks.md#pcb-routing-negotiated)). Not yet:
   tracks routed at an area's width, or narrower only near pads, and several via sizes for
   a net beyond its escapes, which the search, with one width and one via for each net, has
   no place for; the balls of an array further in than the ring that its dog-bones' vias
   close, where holes keep copper so far that no track passes between two vias; rip-up
-  that settles where a pad has the routes of four nets round it, as the chains for such
-  a pad are undone seven times in eight, and on a board of six layers, where the turns
+  that settles where a pad of a row of fine pitch has a fan of a dozen tracks to be
+  moved over by one for it, which a negotiation of thirty-two nets does not do, and on a
+  board of six layers, where the turns
   that cross other nets' routes make nothing more once every net has what it reaches
   with nothing moved and a budget ends before its first pass does; a way out of the pads of a QFN of 0.4 mm on a
   board of two layers that holds while routes are moved, where the rows planned as

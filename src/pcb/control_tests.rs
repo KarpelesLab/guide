@@ -890,6 +890,14 @@ fn a_run_with_a_budget_settles_what_its_passes_leave_open_and_one_with_none_does
     };
     let unsettled = route(&d, &plain).unwrap();
     assert_eq!(unsettled.stats.settled, (0, 0, 0));
+    assert_eq!(unsettled.stats.negotiated, (0, 0, 0));
+    // A negotiation comes before the chains, unless it is turned off.
+    assert!(routed.stats.negotiated.0 >= 1, "{:?}", routed.stats);
+    let chains = RouteOptions {
+        negotiate: false,
+        ..options
+    };
+    assert_eq!(route(&d, &chains).unwrap().stats.negotiated, (0, 0, 0));
     assert_eq!(unsettled.tracks, routed.tracks);
     assert_eq!(unsettled.vias, routed.vias);
     // With neither a budget nor a deadline nothing is settled.

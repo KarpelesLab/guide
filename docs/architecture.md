@@ -757,6 +757,80 @@ budget for the chains with no end to the passes; the count without the pours; an
 the chains have made what they can, chains twice and four times as long, deep and wide
 for what is left, which made nothing on four boards.
 
+**Before its chains, what a run with a budget has open is negotiated for, every net near
+it giving way a little.** Measured after the above
+([results](benchmarks.md#pcb-routing-negotiated)). A chain moves one net at a time, and
+each move is final for the nets moved before it: a pad of a row of fine pitch with the
+tracks and vias of four nets round it needs all four to move a little, and seven chains
+in eight for such a pad were undone. This is the detailed level negotiated after all, the
+question left open above, without the engine and without a resource: what two routes
+share is room within a clearance, as the world measures it.
+
+- *Rounds.* The net with the open connection is completed across whatever routes are in
+  its way, where a step within a clearance of another net's route costs its length again
+  times a factor, half at first, so that the route is near the shortest. The nets it
+  runs into are then in its way and it in theirs, in the world as it is: each has a turn,
+  in which it loses what it has within twelve pitches of where it is in another's way and
+  is joined up again there, within twenty-four pitches, across the others at the same
+  price or around them, whichever is cheaper. What that runs into has its turn in the
+  next round. The price rises by 1.6 from round to round, to a thousand, and each step
+  of a route that is in another's way at the end of a round makes every track there
+  dearer from then on, by cell of two pitches, and room shared there dearer by as much
+  again: the history, without which two nets that can only cross each other at one
+  place go on doing so at any price, each with no other way while the other stays. A
+  net that the others of a round have moved away from keeps its route. A round with no
+  route in another's way ends the negotiation; twenty-four rounds, thirty-two nets or
+  three million nodes end it too.
+- *An end with nothing shared.* If routes are still in each other's way then, each net
+  gives up the steps that are, the net that the negotiation is for last, so that it
+  keeps its own, and the nets left in pieces are joined up again with nothing shared,
+  that net first. Half the negotiations that are kept end so.
+- *Kept or undone, as a chain is.* If no route is in another's way and what is open, by
+  the count of the chains, is less than it was, the routes are kept, and if not every net
+  has the copper back that it had. A negotiation that was undone is not tried again in
+  the run; after eight undone in a row, what is left is the chains', which come after
+  every connection has had its negotiation.
+- *After each pass.* The settling comes after the first pass and again after each pass
+  on the finer lattice, in place of once after them all: what the first pass leaves is
+  mostly the pads that the routes round them shut in, which the passes on the finer
+  lattice spent three times the first pass's nodes on for a dozen connections, and a
+  negotiation is on the lattice of the first pass.
+- *One search, with a look first.* A search that shares room at a price of the order of
+  the path's length is one search from the tree, led by its bound, with none of the
+  steps that a search across routes at many times that price takes; but a look of
+  2,000 nodes from each terminal, for four or fewer, finds a pad shut in by what
+  nothing shares room with, where the search from the tree goes everywhere else
+  first.
+
+`RouteOptions::negotiate`, on by default, in a run that settles; `Stats::negotiated`
+says how many were tried and kept and what they made. A run with neither a budget nor a
+deadline has none, and the curated boards are as they were. With a budget of 40 million
+nodes, over three orders of the nets, the nine boards of cadlab's corpus that a budget
+cuts have 814 connections open for 831: `corne-cherry` 118 for 127, `cynthion` 55 for 63,
+`buspirate5-rev10` 9 for 11, `nrfmicro` 9 for 11, and `tinytapeout-demo` 40 for 38 and
+`glasgow-revC3` 109 for 107 the other way. The chains come after the last pass alone, as
+they did: after every pass they took `glasgow-revC3` to 112.
+
+Tried and not kept: the nets in the way routed again whole, from nothing, as the
+congestion negotiation of an FPGA router does, where a round of `nrfmicro` had twenty
+nets of forty-one in each other's way after one net had crossed four, and none fewer at
+any price; joined up again from the ends that a crossing leaves, with nothing more
+taken out, which is as many connections and tracks that keep every bend they ever made;
+a window of twelve pitches in place of twenty-four, 217 connections open on
+`corne-cherry` over six orders for 159; the rounds ended once the same nets were in each
+other's way twice at a price over twenty, 82 over three orders for 62; a search limited
+to 20,000 nodes for 60,000, 84; a price that starts at one and rises by 2.2, 83; forty
+rounds, 77; two more negotiations for a connection whose first was undone, each cutting
+by another distance and taking the nets in the other order, 166 over six orders for 159;
+a negotiation for each net with pads cut off its fill, the pieces as terminals of their
+own, 174 for 161; and the whole board negotiated from nothing in place of the first
+pass, every net across every other for sixty-four rounds, which had 394 of
+`corne-cherry`'s 432 connections after 36 million nodes where the first pass has 390
+after 3.4 million. With the negotiations the rows planned for a host
+(`RouteOptions::row_fanout`) make no more on the boards of two layers that they were a
+gain on: `corne-cherry` 160 open over six orders without them for 155 with, `nrfmicro`
+19 for 18.
+
 **The layers that a net joins at a point are those of all its places there.** A track's
 end and a via at the same point are two places of a net, as a stub to a plane has them once
 it is fixed copper of a later run. Asked from the track's layer, the first of the two said

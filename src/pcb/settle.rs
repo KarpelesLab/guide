@@ -65,22 +65,31 @@ const PENALTY: f64 = 10.0;
 /// connection.
 const ROUNDS: usize = 4;
 
+/// How many negotiations in a row may be undone before a settling has no more: on a
+/// board whose open pads are shut in by what does not move, each costs a search.
+const PATIENCE: usize = 8;
+
+/// In what a job has [spent](Settle::spent): whether a negotiation for it was undone, and
+/// whether its chains were.
+const TRIED: u8 = 1;
+const CHAINED: u8 = 2;
+
 /// What a net had before a chain touched it.
-struct Before {
-    job: usize,
-    copper: Option<NetCopper>,
-    missing: Vec<usize>,
-    apart: usize,
+pub(super) struct Before {
+    pub(super) job: usize,
+    pub(super) copper: Option<NetCopper>,
+    pub(super) missing: Vec<usize>,
+    pub(super) apart: usize,
 }
 
 /// How a chain ended, with nothing undone yet.
-struct Chain {
+pub(super) struct Chain {
     /// Whether every net that it cut is whole again, and its routes leave fewer
     /// connections open than there were.
-    whole: bool,
-    journal: Vec<Before>,
+    pub(super) whole: bool,
+    pub(super) journal: Vec<Before>,
     /// The net that could not be joined up again, if that is why it is not whole.
-    culprit: Option<NetId>,
+    pub(super) culprit: Option<NetId>,
 }
 
 /// The routes of a run, as [`Settle`] changes them.
@@ -92,7 +101,7 @@ pub(crate) struct Routes<'a> {
 
 impl Routes<'_> {
     /// How many connections net `k` of `nets` still needs.
-    fn open(&self, nets: &[&NetCtx], k: usize) -> usize {
+    pub(super) fn open(&self, nets: &[&NetCtx], k: usize) -> usize {
         match &self.copper[k] {
             Some(_) => self.apart[k],
             None => nets[k].terminals - 1,
@@ -100,7 +109,7 @@ impl Routes<'_> {
     }
 
     /// How many connections are open in all.
-    fn open_all(&self, nets: &[&NetCtx]) -> usize {
+    pub(super) fn open_all(&self, nets: &[&NetCtx]) -> usize {
         (0..nets.len()).map(|k| self.open(nets, k)).sum()
     }
 }
@@ -127,6 +136,16 @@ pub(crate) struct Settle<'a> {
     pub(crate) tried: usize,
     pub(crate) kept: usize,
     pub(crate) made: usize,
+    /// Whether what is open has its chains: after the last pass, as the passes on the
+    /// finer lattice make more for the work than they do.
+    pub(crate) chains: bool,
+    /// Whether a connection is first looked for by a negotiation, and the negotiations
+    /// tried, those kept, and the connections those made.
+    pub(crate) negotiate: bool,
+    pub(crate) negotiated: (usize, usize, usize),
+    /// By job, whether a negotiation for it was undone and whether its chains all were,
+    /// in this settling or one before it: they are not tried again.
+    pub(crate) spent: &'a mut [u8],
 }
 
 impl Settle<'_> {
@@ -145,25 +164,61 @@ impl Settle<'_> {
         let mut score = self.score(world, jobs, routes);
         // By job, the nets that a try for it could not join up again.
         let mut walls: Vec<Vec<NetId>> = vec![Vec::new(); jobs.len()];
-        'rounds: for _ in 0..ROUNDS {
+        let mut idle = false;
+        // Every connection has its negotiation before any has its chains: a negotiation
+        // makes more for the work than a chain does.
+        let stages: &[bool] = match (self.negotiate, self.chains) {
+            (true, true) => &[true, false],
+            (true, false) => &[true],
+            (false, true) => &[false],
+            (false, false) => &[],
+        };
+        'rounds: for (first, round) in stages
+            .iter()
+            .flat_map(|&first| (0..ROUNDS).map(move |r| (first, r)))
+        {
+            // The rounds of a stage end with the first that makes nothing.
+            if round == 0 {
+                idle = false;
+            } else if idle {
+                continue;
+            }
             let mut gained = false;
+            // How many negotiations in a row were undone.
+            let mut undone = 0;
             for j in 0..jobs.len() {
                 if self.fixed.contains(&jobs[j].ctx.net) {
                     continue;
                 }
+                // After that many, what is left open is left to the chains, and to the
+                // settling after the next pass.
+                if first && undone >= PATIENCE {
+                    break;
+                }
                 let mut tries = 0;
+                // Whether the next try is a negotiation: the first for a connection, and
+                // the first after one that was kept.
+                let mut negotiate = first && self.spent[j] & TRIED == 0;
                 while tries < TRIES {
                     if world.run().is_some_and(|r| r.poll()) {
                         break 'rounds;
                     }
+                    let negotiated = core::mem::take(&mut negotiate);
                     let chain = {
                         let nets: Vec<&NetCtx> = jobs.iter().map(|j| &j.ctx).collect();
-                        if routes.open(&nets, j) == 0 {
+                        if routes.open(&nets, j) == 0
+                            || (!negotiated && (first || self.spent[j] & CHAINED != 0))
+                        {
                             break;
                         }
-                        tries += 1;
-                        self.tried += 1;
-                        self.chain(world, &nets, routes, j, &walls[j])
+                        if negotiated {
+                            self.negotiated.0 += 1;
+                            self.negotiation(world, &nets, routes, j)
+                        } else {
+                            tries += 1;
+                            self.tried += 1;
+                            self.chain(world, &nets, routes, j, &walls[j])
+                        }
                     };
                     let now = if chain.whole {
                         self.score(world, jobs, routes)
@@ -171,8 +226,15 @@ impl Settle<'_> {
                         score
                     };
                     if chain.whole && now < score {
-                        self.kept += 1;
-                        self.made += score - now;
+                        if negotiated {
+                            self.negotiated.1 += 1;
+                            self.negotiated.2 += score - now;
+                            negotiate = true;
+                            undone = 0;
+                        } else {
+                            self.kept += 1;
+                            self.made += score - now;
+                        }
                         score = now;
                         gained = true;
                         tries = 0;
@@ -191,15 +253,25 @@ impl Settle<'_> {
                         routes.missing[b.job] = b.missing;
                         routes.apart[b.job] = b.apart;
                     }
+                    if negotiated {
+                        self.spent[j] |= TRIED;
+                        undone += 1;
+                        continue;
+                    }
                     match chain.culprit {
                         Some(net) if !walls[j].contains(&net) => walls[j].push(net),
                         // Nothing to try another way.
                         _ => break,
                     }
                 }
+                let nets: Vec<&NetCtx> = jobs.iter().map(|j| &j.ctx).collect();
+                if !first && routes.open(&nets, j) > 0 {
+                    self.spent[j] |= CHAINED;
+                }
             }
             if !gained {
-                break;
+                idle = true;
+                continue;
             }
             // What a round changed may let the next cross what this one could not.
             for w in &mut walls {
@@ -297,7 +369,7 @@ impl Settle<'_> {
     }
 
     /// Notes what job `k` has, the first time a chain touches it.
-    fn note(routes: &Routes<'_>, journal: &mut Vec<Before>, k: usize) {
+    pub(super) fn note(routes: &Routes<'_>, journal: &mut Vec<Before>, k: usize) {
         if journal.iter().all(|b| b.job != k) {
             journal.push(Before {
                 job: k,
@@ -510,6 +582,17 @@ mod tests {
     /// Settles the board with net 1 routed straight across and net 2 open. Returns the
     /// tracks and vias of each, and the chains tried and kept.
     fn settled(d: &Design) -> ([(usize, usize); 2], usize, usize) {
+        let (counts, tried, kept, _) = settled_by(d, false);
+        (counts, tried, kept)
+    }
+
+    /// As [`settled`], by a negotiation before the chains if `negotiate`: with the
+    /// negotiations tried and kept and the connections they made.
+    #[allow(clippy::type_complexity)]
+    fn settled_by(
+        d: &Design,
+        negotiate: bool,
+    ) -> ([(usize, usize); 2], usize, usize, (usize, usize, usize)) {
         let options = RouteOptions::default();
         let mut world = World::new(
             &d.board,
@@ -550,6 +633,7 @@ mod tests {
             },
             cost: vec![0.0],
         };
+        let mut spent = vec![0u8; jobs.len()];
         let mut settle = Settle {
             design: d,
             by_net: &by_net,
@@ -573,6 +657,10 @@ mod tests {
             tried: 0,
             kept: 0,
             made: 0,
+            chains: true,
+            negotiate,
+            negotiated: (0, 0, 0),
+            spent: &mut spent,
         };
         let mut routes = Routes {
             copper: &mut copper,
@@ -580,7 +668,7 @@ mod tests {
             apart: &mut apart,
         };
         settle.all(&mut world, &jobs, &mut routes);
-        let (tried, kept) = (settle.tried, settle.kept);
+        let (tried, kept, negotiated) = (settle.tried, settle.kept, settle.negotiated);
         let count = |k: usize| {
             copper[k]
                 .as_ref()
@@ -592,7 +680,35 @@ mod tests {
                 assert_eq!(c.pieces(&jobs[k].ctx).apart(), apart[k]);
             }
         }
-        ([count(one), count(two)], tried, kept)
+        ([count(one), count(two)], tried, kept, negotiated)
+    }
+
+    #[test]
+    fn a_negotiation_makes_the_connection_and_the_net_in_its_way_goes_under_it() {
+        // Net 2 is routed across net 1's track at a price, net 1 is in its way and is
+        // routed again where it was cut, under net 2 through two vias: no route is in
+        // another's way, both nets are whole, and no chain was needed.
+        let d = crossing();
+        let ([one, two], tried, kept, negotiated) = settled_by(&d, true);
+        assert_eq!(negotiated, (1, 1, 1));
+        assert_eq!((tried, kept), (0, 0));
+        assert_eq!(two.1, 0, "{two:?}");
+        assert!(two.0 >= 1, "{two:?}");
+        assert_eq!(one.1, 2, "{one:?}");
+    }
+
+    #[test]
+    fn a_negotiation_that_ends_with_no_more_connections_is_undone_to_the_track() {
+        // With no via for net 1 either, the two stay in each other's way at any price:
+        // the net that the negotiation is for keeps its route, net 1 is left in two
+        // pieces, the board has no more connections, and everything goes back.
+        let mut d = crossing();
+        d.nets[1].via = None;
+        let ([one, two], _, kept, negotiated) = settled_by(&d, true);
+        assert_eq!(negotiated, (1, 0, 0));
+        assert_eq!(kept, 0);
+        assert_eq!(one, (1, 0));
+        assert_eq!(two, (0, 0));
     }
 
     #[test]

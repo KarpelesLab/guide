@@ -202,6 +202,7 @@ mod geometry;
 mod global;
 mod measure;
 mod neck;
+mod negotiate;
 mod pairs;
 pub mod place;
 mod planes;
@@ -668,6 +669,15 @@ pub struct RouteOptions {
     /// of itself in that order, by a factor drawn from the seed and the net's number: the
     /// same seed gives the same result, and another seed a second attempt.
     pub seed: Option<u64>,
+    /// Whether a run that [settles](RouteOptions::settle) looks for each connection left
+    /// open by a negotiation before its chains. The default is `true`. The connection is
+    /// routed across the routes in its way at a price by the length shared, the nets it
+    /// runs into are routed again the same way, across it or around it, and so on in
+    /// rounds, with the price raised each round and a history kept of where routes were in
+    /// each other's way: every net gives way a little, where a chain moves one net at a
+    /// time. The routes are kept if a round ends with none in another's way and the board
+    /// has more connections for them, and are undone to the track if not.
+    pub negotiate: bool,
 }
 
 impl Default for RouteOptions {
@@ -701,6 +711,7 @@ impl Default for RouteOptions {
             row_fanout: false,
             pour_cuts: true,
             settle: true,
+            negotiate: true,
             seed: None,
         }
     }
@@ -765,6 +776,10 @@ pub struct Stats {
     /// ([`RouteOptions::settle`]), those of them kept, and the connections that these
     /// made.
     pub settled: (usize, usize, usize),
+    /// The negotiations tried for the connections that rip-up left open
+    /// ([`RouteOptions::negotiate`]), those of them kept, and the connections that these
+    /// made.
+    pub negotiated: (usize, usize, usize),
     /// Nets whose copper and zones are still in pieces, after the last attempt to join them.
     pub planes_broken: usize,
     /// Work spent: the nodes expanded by every search of the run, those of pairs, stubs

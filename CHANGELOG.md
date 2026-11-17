@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.10](https://github.com/KarpelesLab/guide/compare/v0.0.9...v0.0.10) - 2026-11-17
+
+### Added
+
+- *(pcb)* a run with a budget settles what rip-up leaves open, by chains kept only if the board has more for them
+- *(cli)* --time-limit, --work-budget and -v progress for every long command
+- run control for the placers, the flows, ASIC routing and MAPF
+
+### Other
+
+- run control everywhere, and why there is no Ctrl-C handler
+- *(roadmap)* mark M9 done, to keep improving
+
 ## [0.0.9](https://github.com/KarpelesLab/guide/compare/v0.0.8...v0.0.9) - 2026-11-16
 
 ### Fixed

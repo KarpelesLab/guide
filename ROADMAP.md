@@ -601,17 +601,22 @@ ASIC global routing ([benchmarks](docs/benchmarks.md#asic-global-routing-against
 the `asic` feature reads the ISPD 2007 and 2008 contests' designs, routes them with the engine,
 pattern routes and layer assignment, writes their route files and scores them as the contest's
 own script does, which agrees with `eval2008.pl` on every route file both have scored. All 12 of
-the ISPD 2008 designs that the best routers route free of overflow are free of it, with 0.9%
-more wirelength than the contest's winner, 2.2% more than NCTU-GR 2.0 and 1.0% more than
-FastRoute 4.1, by geometric mean, in seconds to 16 minutes on 12 threads. What took the last
-three there: crowding that rises steeply as an edge fills, nets routed longest first, and
-negotiation that starts again from its best routes, with what it has learned, when it stalls;
-and for wirelength, Steiner trees for pattern routes, Z shapes, a pass that takes back detours,
-and layers that leave room for the nets after. On the four that no router solves, it is within
-the contest's range on bigblue4 and newblue4 and behind its best on newblue3 and newblue7, in 24
-minutes to 1.7 hours where the first results took up to 8. Left for later: those four, where the
-published routers are ahead, and the CPU time, which steep crowding raised on the designs that
-converged before, to up to 8.6 times SGR's on one thread.
+the ISPD 2008 designs that the best routers route free of overflow are free of it, with 0.35%
+more wirelength than the contest's winner, 1.6% more than NCTU-GR 2.0 and 0.4% more than
+FastRoute 4.1, by geometric mean, in 15 s to 52 minutes on one thread: 0.4 to 4.3 times the CPU
+time of NCTU-GR 2.0's single-threaded SGR on the ten that converge without restarts, and 4.4 and
+22 times on bigblue2 and newblue1. What took the hardest there: crowding that rises steeply as
+an edge fills, nets routed longest first, and negotiation that starts again from its best
+routes, with what it has learned, when it stalls; for wirelength and time, a first try at mild
+crowding, which settles eight of the twelve in a few cheap iterations, with 1.8 to 5 times fewer
+expansions, and Steiner trees for pattern routes, Z shapes, a pass that takes back detours, and
+layers that leave room for the nets after. On the four that no router solves, newblue3 went from
+twice the published routers' overflow to within 1.2% of NTHU-Route's and 2.3% of the contest's
+best, once layer assignment stopped piling the nets of edges short on every layer onto one layer
+and the overflow left was routed again at the price of what each net adds; bigblue4 and newblue4
+are within the contest's range, and newblue7 behind its best, in 50 minutes to 3 hours on 3
+threads. Left for later: those three, where the published routers are ahead, and the designs
+that the first try does not settle, which spend it for nothing.
 
 ## Not yet scheduled
 

@@ -169,24 +169,33 @@ scored. The flow is the one most of the contests' routers use:
   that the engine only routes again what overflows.
 - **The engine negotiates the rest**, longest nets first, by maze routing within a box around
   each net's pins that grows while the net stays on an edge that overflows, with
-  `EngineOptions::crowding` pricing edges steeply as they fill, to the 8th power of how full
-  they would be. When negotiation stalls, with a few edges one net over, it starts again from
-  its best routes with the history it has learned and the present factor reset; that is what
-  makes the hardest designs converge. A last pass routes again, with `Engine::rip_up`, the nets
+  `EngineOptions::crowding` pricing edges as they fill, to the 8th power of how full they would
+  be: mildly in a first try, which settles most designs in a few cheap iterations, and steeply
+  from the start again on a design that the first try does not settle quickly. When
+  negotiation stalls, with a few edges one net over, it starts again from its best routes with
+  the history it has learned and the present factor reset; that is what makes the hardest
+  designs converge. On a design that cannot be routed without overflow, the nets on what is
+  left are routed again priced at the overflow each would add
+  (`EngineOptions::marginal_overuse`). A last pass routes again, with `Engine::rip_up`, the nets
   that took detours, by their shortest ways that overflow nothing.
 - **Layers** are then given to each net's tree exactly for the fewest vias that fit, by dynamic
   programming over the tree as in COLA, nets with the least wire per pin first, each on the
-  emptier of two layers that take as many vias.
+  emptier of two layers that take as many vias, and the nets on an edge that overflows on a
+  layer while another has room are given layers again.
 
 Nothing of the engine or search code is specific to it: the domain is the space, the pattern
-routes, the layer assignment and the file formats. The engine gained three general things for
-it, which change nothing for a run that does not use them: `EngineOptions::crowding`, off by
-default, `EngineOptions::crowding_exponent`, the square by default, and `Engine::rip_up`. The
+routes, the layer assignment and the file formats. The engine gained general things for it,
+which change nothing for a run that does not use them: `EngineOptions::crowding`, off by
+default, `EngineOptions::crowding_exponent`, the square by default,
+`EngineOptions::marginal_overuse`, off by default, `Engine::rip_up`, and
+`RoutingSpace::lower_bound_to_targets`, whose default is what searches did before. The
 [results](benchmarks.md#asic-global-routing-against-the-ispd-contests) compare it with the
 contests' winners and later routers: on the ISPD 2008 designs, all 12 that they route free of
-overflow are free of it here, with 0.9% more wirelength than the contest's winner and 2.2% more
-than NCTU-GR 2.0. On the four that no router solves, it is within the contest's range on
-bigblue4 and newblue4, and behind its best on newblue3 and newblue7.
+overflow are free of it here, with 0.35% more wirelength than the contest's winner and 1.6%
+more than NCTU-GR 2.0, in 0.4 to 4.3 times the CPU time of NCTU-GR 2.0's single-threaded router
+on the ten that converge without restarts. On the four that no router solves, it is within
+1.2% of the contest's winner on newblue3, within the contest's range on bigblue4 and newblue4,
+and behind its best on newblue7.
 
 ## Multi-agent path finding
 

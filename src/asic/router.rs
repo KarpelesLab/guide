@@ -1,7 +1,8 @@
 //! The flow: nets routed on the plane by the negotiated-congestion engine, then given layers.
 
+use crate::control::{Progress, Run, RunControl, Stage, Stopped};
 use crate::cost::Cost;
-use crate::engine::{Engine, EngineOptions, IterationReport, Outcome};
+use crate::engine::{Engine, EngineOptions, IterationReport, Outcome, StopReason};
 use crate::id::{NetId, NodeId};
 use crate::net::{AccessPoint, Edge, Net, Route, Terminal};
 
@@ -146,6 +147,8 @@ pub struct AsicRouting {
     pub refined_nets: usize,
     /// Overflow left on the plane, in tracks, summed over edges.
     pub planar_overflow: u64,
+    /// Why routing was stopped before its end, if it was: see [`route_design_with`].
+    pub stopped: Option<Stopped>,
 }
 
 /// How many passes of negotiation in a row may end without a new least overflow before it
@@ -162,6 +165,28 @@ const REFINE_CROWDING: u32 = 1;
 ///
 /// The result is the same for any number of [threads](AsicOptions::threads).
 pub fn route_design(design: &Design, options: &AsicOptions) -> AsicRouting {
+    route_design_with(design, options, &RunControl::default())
+}
+
+/// [`route_design`], under a [`RunControl`].
+///
+/// Its work budget counts the nodes that the engine expands, over every restart and the
+/// refinement. Its flag and deadline stop negotiation through a thread that sets the engine's
+/// cancel flag. A run that is stopped skips what is left of negotiation and the refinement,
+/// and gives layers to the best routes it had, so every net still has a route, with the
+/// overflow they leave; layer assignment runs to its end. [`AsicRouting::stopped`] says why.
+/// Its listener hears of each iteration of negotiation, with the restart as the round, and of
+/// the start of layer assignment. With the default control, the result is [`route_design`]'s.
+pub fn route_design_with(
+    design: &Design,
+    options: &AsicOptions,
+    control: &RunControl<'_>,
+) -> AsicRouting {
+    let run = Run::new(control);
+    run.watch(None, || route_in(design, options, &run))
+}
+
+fn route_in(design: &Design, options: &AsicOptions, run: &Run<'_>) -> AsicRouting {
     let capacities = design.capacities();
     let tracks = |layer: usize, capacity: u32| -> u32 {
         let pitch = design.min_width[layer] + design.min_spacing[layer];
@@ -255,6 +280,8 @@ pub fn route_design(design: &Design, options: &AsicOptions) -> AsicRouting {
         first_present: Cost::new(options.first_present).unwrap_or(Cost::ONE),
         initial_present: Cost::new(options.initial_present).unwrap_or(Cost::ONE),
         present_growth: Cost::new(options.present_growth).unwrap_or(Cost::ONE),
+        cancel: run.engine_flag(None),
+        max_expansions: run.budget(u64::MAX),
         ..EngineOptions::default()
     };
     let mut engine = Engine::new(&plane, &engine_nets, engine_options)
@@ -293,7 +320,10 @@ pub fn route_design(design: &Design, options: &AsicOptions) -> AsicRouting {
     loop {
         let (mut least, mut least_at) = (u64::MAX, 0);
         let mut stalled = false;
+        let mut expanded = 0;
         while let Some(report) = engine.step_parallel(options.threads) {
+            expanded += report.nodes_expanded;
+            run.tell_iteration(&report, expanded);
             if report.total_overuse.saturating_mul(100) < least.saturating_mul(99) {
                 (least, least_at) = (report.total_overuse, report.iteration);
             }
@@ -324,6 +354,8 @@ pub fn route_design(design: &Design, options: &AsicOptions) -> AsicRouting {
         }
         reports.extend_from_slice(engine.reports());
         let outcome = engine.outcome();
+        run.charge(outcome.routes.stats.nodes_expanded);
+        run.engine_stopped(outcome.stop);
         let overuse = outcome
             .overused
             .iter()
@@ -344,18 +376,21 @@ pub fn route_design(design: &Design, options: &AsicOptions) -> AsicRouting {
             || restarts >= options.restarts
             || fruitless >= FRUITLESS_RESTARTS
             || budget == 0
+            || run.stopped().is_some()
         {
             break;
         }
         // Negotiation again from the best routes so far, with the history it has learned and
         // the present factor back where it starts.
         restarts += 1;
+        run.set_round(restarts);
         let history = engine.history();
         engine = Engine::new(
             &plane,
             &engine_nets,
             EngineOptions {
                 max_iterations: budget,
+                max_expansions: run.budget(u64::MAX),
                 ..engine_options
             },
         )
@@ -372,8 +407,10 @@ pub fn route_design(design: &Design, options: &AsicOptions) -> AsicRouting {
         unreachable!("set in the first pass")
     };
     let mut refined_nets = 0;
-    if options.refine && outcome.overused.is_empty() {
+    if options.refine && outcome.overused.is_empty() && run.stopped().is_none() {
         let refine_options = EngineOptions {
+            cancel: run.engine_flag(None),
+            max_expansions: run.budget(u64::MAX),
             max_iterations: 1,
             batch_size: options.batch_size,
             // Nothing a net could save on length is worth an overflow.
@@ -405,9 +442,17 @@ pub fn route_design(design: &Design, options: &AsicOptions) -> AsicRouting {
         refined_nets = again.rip_up(detoured);
         while again.step_parallel(options.threads).is_some() {}
         let refined = again.outcome();
+        run.charge(refined.routes.stats.nodes_expanded);
+        run.engine_stopped(refined.stop);
         // Only the nets routed again move, each to a way that overflows nothing, so this
-        // holds; but a result with overflow is never traded for this one.
-        if refined.overused.is_empty() {
+        // holds; but a result with overflow is never traded for this one, nor one that was
+        // stopped before it routed again every net it took up.
+        if refined.overused.is_empty()
+            && !matches!(
+                refined.stop,
+                StopReason::Cancelled | StopReason::BudgetExhausted
+            )
+        {
             reports.extend_from_slice(again.reports());
             outcome = refined;
         }
@@ -440,6 +485,7 @@ pub fn route_design(design: &Design, options: &AsicOptions) -> AsicRouting {
         let pins = t.pins.iter().filter(|p| p.is_some()).count().max(1);
         (t.cells.len() * 100 / pins, design_index[k])
     });
+    run.tell(Progress::new(Stage::Layers, 0), 0);
     let mut grid = LayerGrid::new(design, &capacities, &plane);
     layers::assign(&mut grid, &plane, &mut nets, &order, options.layer_passes);
 
@@ -454,6 +500,7 @@ pub fn route_design(design: &Design, options: &AsicOptions) -> AsicRouting {
         restarts,
         refined_nets,
         planar_overflow,
+        stopped: run.stopped(),
     }
 }
 

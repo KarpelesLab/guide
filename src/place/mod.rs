@@ -24,12 +24,17 @@
 //!   temperature that falls by how many are, and cost updated incrementally, net by net. It is
 //!   a state machine like the routing
 //!   [`Engine`](crate::engine::Engine): [`step`](Annealer::step) runs one temperature, and a
-//!   run stops at its move budget or a cancel flag with the best placement it has seen.
-//!   [`anneal`] runs one from a random legal placement.
+//!   run stops at its move budget, its deadline or a cancel flag with the best placement it
+//!   has seen. [`anneal`] runs one from a random legal placement.
 //! - [`place_analytic`] is analytic placement after SimPL: a quadratic placement with
 //!   bound-to-bound net models, solved by conjugate gradients, alternates with spreading by
 //!   recursive bisection, which anchors the next solve. The spread result is then made legal by
 //!   [`legalize`], and improved by annealing at a low temperature over short distances.
+//!
+//! Each has an entry point that takes a [`RunControl`](crate::control::RunControl) as well,
+//! [`anneal_with`], [`place_analytic_with`] and [`place_incremental_with`], with a deadline, a
+//! cancel flag, a work budget in moves and a progress callback: a run it stops returns the best
+//! legal placement so far, with [`PlaceOutcome::stop`] saying why.
 //!
 //! Both are deterministic for a seed: they use no threads, no hash map whose order could
 //! matter, and only `f64` operations in a fixed order, with [`crate::math::exp`] for the
@@ -43,7 +48,7 @@
 //! distinct columns and rows, or multiples of the free space's pitch.
 
 mod abacus;
-mod analytic;
+pub(crate) mod analytic;
 mod anneal;
 mod check;
 mod congestion;
@@ -61,14 +66,18 @@ mod tests;
 
 use core::fmt;
 
-pub use analytic::{AnalyticOptions, AnalyticReport, Inflation, place_analytic};
-pub use anneal::{AnnealOptions, Annealer, PlaceOutcome, PlaceStop, TemperatureReport, anneal};
+pub use analytic::{
+    AnalyticOptions, AnalyticReport, Inflation, place_analytic, place_analytic_with,
+};
+pub use anneal::{
+    AnnealOptions, Annealer, PlaceOutcome, PlaceStop, TemperatureReport, anneal, anneal_with,
+};
 pub use check::{Violation, check};
 pub use congestion::{CongestionCost, CongestionEstimate, CongestionGrid};
 pub use cost::{CostTerm, NetView, Wirelength};
 pub use eco::{
     Displacement, IncrementalOptions, IncrementalOutcome, PlacementChange, Prior, Restricted,
-    place_incremental, placement_change, restrict,
+    place_incremental, place_incremental_with, placement_change, restrict,
 };
 pub use legalize::legalize;
 pub use problem::{

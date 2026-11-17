@@ -128,7 +128,7 @@ use crate::geom::drc::{self, Item};
 pub use board::read;
 pub use flow::{
     FlowError, FlowOptions, FlowReport, PadNetChange, Round, Score, pad_changes, place_and_route,
-    swap_group, swap_groups,
+    place_and_route_with, swap_group, swap_groups,
 };
 pub use place::{
     COURTYARD_FALLBACK, FixedBecause, fixed_because, footprint_outline, placement_design,

@@ -74,28 +74,11 @@ impl Progress {
     }
 }
 
-/// Why a run stopped before it was done.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum Stopped {
-    /// [`RouteOptions::work_budget`](super::RouteOptions::work_budget) was spent. The result
-    /// is the same for the same budget, on any machine.
-    WorkBudget,
-    /// [`RunControl::deadline`] passed. The result depends on when.
-    Deadline,
-    /// [`RunControl::cancel`] was set. The result depends on when.
-    Cancelled,
-}
-
-impl fmt::Display for Stopped {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Stopped::WorkBudget => "the work budget was spent",
-            Stopped::Deadline => "the deadline passed",
-            Stopped::Cancelled => "the run was cancelled",
-        })
-    }
-}
+/// Why a run stopped before it was done: the crate's [`Stopped`](crate::control::Stopped),
+/// which every domain's runs share. [`RouteOptions::work_budget`](super::RouteOptions::work_budget)
+/// is PCB routing's work budget, [`RunControl::deadline`] its deadline and
+/// [`RunControl::cancel`] its flag.
+pub use crate::control::Stopped;
 
 /// What may stop a run from outside, and who hears of its progress.
 ///

@@ -64,6 +64,7 @@ mod space;
 pub use graph::{Agent, Graph, GraphError};
 pub use space::{Instance, InstanceError, Resource, State, TimeSpace};
 
+use crate::control::{Progress, Run, RunControl, Stage, Stopped};
 use crate::cost::Cost;
 use crate::engine::{Engine, EngineOptions, StopReason};
 
@@ -153,6 +154,8 @@ pub struct Solution {
     pub improve_passes: u32,
     /// How many nodes shortening expanded.
     pub improve_expanded: u64,
+    /// Why the solve was stopped before its end, if it was: see [`solve_with`].
+    pub stopped: Option<Stopped>,
 }
 
 impl Solution {
@@ -225,6 +228,26 @@ impl Solution {
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub fn solve(instance: &Instance<'_>, options: &SolveOptions<'_>) -> Solution {
+    solve_with(instance, options, &RunControl::default())
+}
+
+/// [`solve`], under a [`RunControl`].
+///
+/// Its work budget counts nodes expanded, as the engine's
+/// [`max_expansions`](EngineOptions::max_expansions) in [`SolveOptions::engine`] does, and
+/// the solve stops at whichever runs out first. Its flag and deadline stop it through a
+/// thread that sets the engine's cancel flag. A solve stopped before a legal solution has no
+/// plans, as one that runs out of rounds; one stopped while [shortening](self#shortening) has
+/// the plans shortened so far, which are legal. [`Solution::stopped`] says why. Its listener
+/// hears of each iteration, with the round. With the default control, the result is
+/// [`solve`]'s.
+pub fn solve_with(
+    instance: &Instance<'_>,
+    options: &SolveOptions<'_>,
+    control: &RunControl<'_>,
+) -> Solution {
+    let run = Run::new(control);
+    let own_flag = options.engine.cancel;
     let nets = instance.nets();
     let mut horizon = instance.longest_shortest().saturating_add(options.slack);
     let mut rounds = Vec::new();
@@ -232,9 +255,11 @@ pub fn solve(instance: &Instance<'_>, options: &SolveOptions<'_>) -> Solution {
     let mut history = Vec::new();
     let mut budget = options.engine.max_expansions;
     for round in 0..options.rounds.max(1) {
+        run.set_round(round);
         let space = TimeSpace::new(instance, horizon);
         let mut engine_options = options.engine;
-        engine_options.max_expansions = budget;
+        engine_options.max_expansions = run.budget(budget);
+        engine_options.cancel = run.engine_flag(own_flag);
         let Ok(mut engine) = Engine::new(&space, &nets, engine_options) else {
             // Nets are numbered by agent, so they can't share an ID.
             unreachable!("agents have distinct nets");
@@ -244,10 +269,18 @@ pub fn solve(instance: &Instance<'_>, options: &SolveOptions<'_>) -> Solution {
             let _ = engine.seed_routes(seeds.drain(..));
             let _ = engine.seed_history(history.drain(..));
         }
-        while engine.step_parallel(options.threads).is_some() {}
-        let outcome = engine.outcome();
+        let outcome = run.watch(own_flag, || {
+            let mut expanded = 0;
+            while let Some(report) = engine.step_parallel(options.threads) {
+                expanded += report.nodes_expanded;
+                run.tell_iteration(&report, expanded);
+            }
+            engine.outcome()
+        });
         let stats = outcome.routes.stats;
         budget = budget.saturating_sub(stats.nodes_expanded);
+        run.charge(stats.nodes_expanded);
+        run.engine_stopped(outcome.stop);
         rounds.push(Round {
             horizon,
             stop: outcome.stop,
@@ -266,27 +299,34 @@ pub fn solve(instance: &Instance<'_>, options: &SolveOptions<'_>) -> Solution {
                 negotiated_sum_of_costs: None,
                 improve_passes: 0,
                 improve_expanded: 0,
+                stopped: None,
             };
             solution.negotiated_sum_of_costs = solution.sum_of_costs();
             if let Some(plans) = solution.plans.as_mut()
                 && options.improve_passes > 0
             {
-                let improved = improve::improve(
-                    &space,
-                    plans,
-                    options.improve_passes,
-                    budget,
-                    options.engine.cancel,
-                );
+                run.tell(Progress::new(Stage::Improve, 0), 0);
+                let improved = run.watch(own_flag, || {
+                    improve::improve(
+                        &space,
+                        plans,
+                        options.improve_passes,
+                        run.budget(budget),
+                        run.engine_flag(own_flag),
+                    )
+                });
+                run.charge(improved.nodes_expanded);
                 solution.improve_passes = improved.passes;
                 solution.improve_expanded = improved.nodes_expanded;
             }
+            solution.stopped = run.stopped();
             return solution;
         }
         if matches!(
             outcome.stop,
             StopReason::Cancelled | StopReason::BudgetExhausted
-        ) {
+        ) || run.stopped().is_some()
+        {
             break;
         }
         history = engine.history();
@@ -303,6 +343,7 @@ pub fn solve(instance: &Instance<'_>, options: &SolveOptions<'_>) -> Solution {
         negotiated_sum_of_costs: None,
         improve_passes: 0,
         improve_expanded: 0,
+        stopped: run.stopped(),
     }
 }
 

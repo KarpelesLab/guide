@@ -12,9 +12,10 @@ use core::fmt;
 use super::ImportError;
 use super::design::{Design, NetOptions, resolve_nets};
 use super::netlist::PackedNetlist;
-use super::placer::{PlaceDelayModel, PlaceProblem, RefineOptions, refine_placement};
+use super::placer::{PlaceDelayModel, PlaceProblem, RefineOptions, refine_placement_in};
 use super::rr_graph::{NodeKind, RrGraph};
 use super::timing::DesignTiming;
+use crate::control::{Run, RunControl, Stopped};
 use crate::engine::{Engine, EngineError, EngineOptions, Outcome, OverusedResource};
 use crate::id::NodeId;
 use crate::net::RouteSet;
@@ -321,6 +322,8 @@ pub struct LoopResult {
     pub rounds: Vec<LoopRound>,
     /// What the router found, over all rounds.
     pub congestion: RouterCongestion,
+    /// Why the loop was stopped before its end, if it was: see [`place_route_loop_with`].
+    pub stopped: Option<Stopped>,
 }
 
 /// Why [`place_route_loop`] failed.
@@ -355,20 +358,25 @@ impl std::error::Error for LoopError {
     }
 }
 
-/// Runs an engine to the end, adding what each iteration overuses to `congestion`.
+/// Runs an engine to the end, adding what each iteration overuses to `congestion`, and
+/// telling `run` of each iteration.
 fn negotiate<S>(
     mut engine: Engine<'_, S>,
     device: &RrGraph,
     congestion: &mut RouterCongestion,
     threads: usize,
+    run: &Run<'_>,
 ) -> Outcome<NodeId, NodeId>
 where
     S: RoutingSpace<Node = NodeId, Resource = NodeId> + Sync,
     S::Slots: Send,
     S::ResourceSlots: Send + Sync,
 {
-    while engine.step_parallel(threads).is_some() {
+    let mut expanded = 0;
+    while let Some(report) = engine.step_parallel(threads) {
         congestion.add_overuse(device, &engine.overused());
+        expanded += report.nodes_expanded;
+        run.tell_iteration(&report, expanded);
     }
     engine.outcome()
 }
@@ -380,9 +388,9 @@ where
 /// `engine_options`, timing-driven if `timing` is given, as `vtr_route` routes. If that is
 /// legal, the loop ends. Otherwise the [`RouterCongestion`] of the routing, the wire it used
 /// beyond placement's estimate and the history of what each iteration overused, added up over
-/// rounds, goes into [`refine_placement`], which places again the blocks within
-/// [`margin`](LoopOptions::margin) tiles of what the best iteration overused, or the whole
-/// device with [`whole`](LoopOptions::whole), with its seed changed each round.
+/// rounds, goes into [`refine_placement`](super::refine_placement), which places again the
+/// blocks within [`margin`](LoopOptions::margin) tiles of what the best iteration overused, or
+/// the whole device with [`whole`](LoopOptions::whole), with its seed changed each round.
 ///
 /// `problem` is the placement problem `start` is of, which may be built on another graph of
 /// the same device, such as one with wider channels, and `delays` its delay model.
@@ -392,11 +400,52 @@ where
 /// [`LoopError`] if a placement doesn't resolve to the device's nets, the engine refuses them,
 /// or `start` is not a legal placement of `problem`.
 #[allow(clippy::too_many_arguments)]
+pub fn place_route_loop(
+    device: &RrGraph,
+    netlist: &PackedNetlist,
+    problem: &PlaceProblem,
+    delays: &PlaceDelayModel,
+    timing: Option<(&mut DesignTiming, &Constraints)>,
+    net_options: &NetOptions,
+    engine_options: EngineOptions<'_>,
+    start: crate::place::Placement,
+    options: &LoopOptions,
+) -> Result<LoopResult, LoopError> {
+    place_route_loop_with(
+        device,
+        netlist,
+        problem,
+        delays,
+        timing,
+        net_options,
+        engine_options,
+        start,
+        options,
+        &RunControl::default(),
+    )
+}
+
+/// [`place_route_loop`], under a [`RunControl`].
+///
+/// Its work budget counts the nodes that routing expands and the moves that placing again
+/// tries, together, on top of `engine_options`' own budget for each routing. Its flag and
+/// deadline stop routing, through a thread that sets the engine's cancel flag, and placing
+/// again. A loop that is stopped ends with the best placement it routed and that routing, as
+/// one that runs out of rounds does, and [`LoopResult::stopped`] says why: a routing that was
+/// stopped is still a candidate, with the best routes it had; a placement that was stopped is
+/// not routed. Its listener hears of each iteration of routing and each temperature of
+/// placing again, with the round. With the default control, the result is
+/// [`place_route_loop`]'s.
+///
+/// # Errors
+///
+/// As [`place_route_loop`].
+#[allow(clippy::too_many_arguments)]
 #[expect(
     clippy::missing_panics_doc,
     reason = "the loop routes at least once, so there is always a best round"
 )]
-pub fn place_route_loop(
+pub fn place_route_loop_with(
     device: &RrGraph,
     netlist: &PackedNetlist,
     problem: &PlaceProblem,
@@ -406,7 +455,10 @@ pub fn place_route_loop(
     engine_options: EngineOptions<'_>,
     start: crate::place::Placement,
     options: &LoopOptions,
+    control: &RunControl<'_>,
 ) -> Result<LoopResult, LoopError> {
+    let run = Run::new(control);
+    let own_flag = engine_options.cancel;
     let mut congestion = RouterCongestion::new(problem);
     let mut placement = start;
     let mut rounds = Vec::new();
@@ -419,6 +471,12 @@ pub fn place_route_loop(
     let mut round = 0u32;
     let mut seeds: Option<Vec<(crate::id::NetId, crate::net::Route<NodeId>)>> = None;
     loop {
+        run.set_round(round);
+        let engine_options = EngineOptions {
+            cancel: run.engine_flag(own_flag),
+            max_expansions: run.budget(engine_options.max_expansions),
+            ..engine_options
+        };
         let file = problem.to_placement(netlist, &placement, "", "");
         let design =
             resolve_nets(device, netlist, &file, net_options).map_err(LoopError::Import)?;
@@ -426,7 +484,7 @@ pub fn place_route_loop(
             Some((t, c)) => super::estimate_slack(problem, delays, t, c, &placement),
             None => None,
         };
-        let outcome = match timing.as_mut() {
+        let outcome = run.watch(own_flag, || match timing.as_mut() {
             Some((t, c)) => {
                 let timed = device.timed_graph();
                 t.estimate_delays(&timed, &design);
@@ -436,7 +494,13 @@ pub fn place_route_loop(
                 if let Some(seeds) = seeds.take() {
                     engine.seed_routes(seeds).map_err(LoopError::Engine)?;
                 }
-                negotiate(engine, device, &mut congestion, options.threads)
+                Ok(negotiate(
+                    engine,
+                    device,
+                    &mut congestion,
+                    options.threads,
+                    &run,
+                ))
             }
             None => {
                 let mut engine = Engine::new(device.graph(), design.nets(), engine_options)
@@ -444,9 +508,17 @@ pub fn place_route_loop(
                 if let Some(seeds) = seeds.take() {
                     engine.seed_routes(seeds).map_err(LoopError::Engine)?;
                 }
-                negotiate(engine, device, &mut congestion, options.threads)
+                Ok(negotiate(
+                    engine,
+                    device,
+                    &mut congestion,
+                    options.threads,
+                    &run,
+                ))
             }
-        };
+        })?;
+        run.charge(outcome.routes.stats.nodes_expanded);
+        run.engine_stopped(outcome.stop);
         let legal = outcome.is_success();
         let mut record = LoopRound {
             legal,
@@ -458,7 +530,7 @@ pub fn place_route_loop(
             bb_estimate: problem.bb_estimate(&placement),
             worst_slack,
         };
-        let last = legal || round >= options.rounds;
+        let last = legal || round >= options.rounds || run.stopped().is_some();
         let windows = if last {
             Vec::new()
         } else if options.whole {
@@ -485,7 +557,7 @@ pub fn place_route_loop(
                 ..options.refine
             };
             let reborrowed = timing.as_mut().map(|(t, c)| (&mut **t, *c));
-            let refined = refine_placement(
+            let refined = refine_placement_in(
                 problem,
                 delays,
                 reborrowed,
@@ -493,6 +565,7 @@ pub fn place_route_loop(
                 &windows,
                 Some(&congestion),
                 &refine,
+                &run,
             )
             .map_err(LoopError::Place)?;
             record.windows = windows.len();
@@ -527,8 +600,9 @@ pub fn place_route_loop(
             best = Some((overused, placement.clone(), design, outcome));
         }
         match next {
-            Some(next) => placement = next,
-            None => break,
+            // A placement that was stopped is not routed.
+            Some(next) if run.stopped().is_none() => placement = next,
+            _ => break,
         }
         round += 1;
     }
@@ -539,5 +613,6 @@ pub fn place_route_loop(
         outcome,
         rounds,
         congestion,
+        stopped: run.stopped(),
     })
 }

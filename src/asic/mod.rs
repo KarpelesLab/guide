@@ -89,4 +89,4 @@ pub use format::{
     Segment, read_design, read_routes, write_net_route,
 };
 pub use planar::PlanarSpace;
-pub use router::{AsicOptions, AsicRouting, MAX_PINS, route_design};
+pub use router::{AsicOptions, AsicRouting, MAX_PINS, route_design, route_design_with};

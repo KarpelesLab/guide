@@ -32,7 +32,7 @@
 //!    fixed where it put them;
 //! 3. the front again, from where it was, with the back's fixed.
 //!
-//! Each pass is [`place_analytic`], or legalization from the
+//! Each pass is [`place_analytic`](place::place_analytic), or legalization from the
 //! last, then annealing at a low temperature with the routing term below.
 //!
 //! Where a side is fuller than [`PlaceOptions::fill`], surface-mount parts go to the other
@@ -71,11 +71,12 @@
 
 use std::collections::BTreeMap;
 
+use crate::control::{Run, RunControl, Stopped};
 use crate::geom::{Point, Rect, Shape};
 use crate::id::NetId;
 use crate::place::{
     self, AnalyticOptions, AnnealOptions, Annealer, CongestionCost, CongestionGrid, CostTerm,
-    ItemId, Layout, NetView, Pin, PlaceError, Placement, PlacementProblem, place_analytic,
+    ItemId, Layout, NetView, Pin, PlaceError, Placement, PlacementProblem,
 };
 
 type PPoint = place::Point;
@@ -273,6 +274,9 @@ pub struct PlaceReport {
     pub wirelength: (u64, u64),
     /// The highest ratio of RUDY's demand to capacity in any square millimetre, at the end.
     pub peak_congestion: f64,
+    /// Why placement was stopped before its end, if it was: see [`place_components_with`].
+    /// The placement is then legal, with what each pass had placed.
+    pub stopped: Option<Stopped>,
 }
 
 /// Why a net is in a problem.
@@ -674,6 +678,8 @@ struct Model<'d> {
     nets: Vec<NetDef>,
     decoupling: Vec<(usize, usize)>,
     raster: Raster,
+    /// The run this is part of, whose control stops the placers and hears of them.
+    run: Option<&'d Run<'d>>,
 }
 
 impl<'d> Model<'d> {
@@ -717,6 +723,7 @@ impl<'d> Model<'d> {
                 front: Vec::new(),
                 back: Vec::new(),
             },
+            run: None,
         };
         model.raster = model.rasterize(scale);
         if let Some(chosen) = chosen {
@@ -1302,9 +1309,23 @@ impl<'d> Model<'d> {
                     factor_permille: self.options.congestion_permille,
                 },
             );
-            Annealer::new(&built.problem, both, start, options)?.run()
+            let mut annealer = Annealer::new(&built.problem, both, start, options)?;
+            match self.run {
+                Some(run) => {
+                    annealer.attach(run);
+                    annealer.run_in(run)
+                }
+                None => annealer.run(),
+            }
         } else {
-            Annealer::new(&built.problem, cost, start, options)?.run()
+            let mut annealer = Annealer::new(&built.problem, cost, start, options)?;
+            match self.run {
+                Some(run) => {
+                    annealer.attach(run);
+                    annealer.run_in(run)
+                }
+                None => annealer.run(),
+            }
         };
         Ok(outcome.placement)
     }
@@ -1320,7 +1341,15 @@ impl<'d> Model<'d> {
             }),
             ..AnalyticOptions::default()
         };
-        let (outcome, _) = place_analytic(&built.problem, self.cost(&built.roles), options)?;
+        let (outcome, _) = match self.run {
+            Some(run) => place::analytic::place_analytic_in(
+                &built.problem,
+                self.cost(&built.roles),
+                options,
+                run,
+            )?,
+            None => place::place_analytic(&built.problem, self.cost(&built.roles), options)?,
+        };
         let mut now = at.to_vec();
         self.take(built, &outcome.placement, &mut now, &|_| true);
         self.refine(built, outcome.placement, &now)
@@ -1462,6 +1491,34 @@ pub fn place_components(
     design: &PlacementDesign,
     options: &PlaceOptions,
 ) -> Result<PlaceReport, PlaceError> {
+    place_components_with(design, options, &RunControl::default())
+}
+
+/// [`place_components`], under a [`RunControl`].
+///
+/// Its work budget counts the moves of annealing, over every pass, and its flag and deadline
+/// stop global placement at its next iteration and annealing within a thousand moves or so.
+/// The passes after that are still made, each legalized and with no annealing, so the
+/// placement is legal; [`PlaceReport::stopped`] says why it stopped. Its listener hears of
+/// global placement and annealing. With the default control, the result is
+/// [`place_components`]'s.
+///
+/// # Errors
+///
+/// As [`place_components`].
+pub fn place_components_with(
+    design: &PlacementDesign,
+    options: &PlaceOptions,
+    control: &RunControl<'_>,
+) -> Result<PlaceReport, PlaceError> {
+    place_components_in(design, options, &Run::new(control))
+}
+
+pub(crate) fn place_components_in(
+    design: &PlacementDesign,
+    options: &PlaceOptions,
+    run: &Run<'_>,
+) -> Result<PlaceReport, PlaceError> {
     let movable = design.components.iter().filter(|c| !c.fixed).count();
     let unmoved = Model::new(design, options, (1, 1), None);
     let original: Vec<(PPoint, i32)> = design
@@ -1486,7 +1543,8 @@ pub fn place_components(
             if k > 0 && !options.flip {
                 break;
             }
-            let model = Model::new(design, options, scale, Some(fill));
+            let mut model = Model::new(design, options, scale, Some(fill));
+            model.run = Some(run);
             match model.run(scale) {
                 Ok(at) => {
                     result = Some((at, spacing, model));
@@ -1529,6 +1587,7 @@ pub fn place_components(
         spacing,
         wirelength: (before, model.wirelength(&at)),
         peak_congestion: model.congestion(&at).peak_utilization(),
+        stopped: run.stopped(),
     })
 }
 
@@ -1573,6 +1632,38 @@ pub fn refine_components(
     feedback: &Feedback,
     options: &PlaceOptions,
 ) -> Result<PlaceReport, PlaceError> {
+    let run = Run::new(&RunControl::default());
+    refine_components_in(design, placed, spacing, feedback, options, &run)
+}
+
+/// [`refine_components`], under a [`RunControl`]: its flag, deadline and work budget, in
+/// moves, stop the annealing of each side, which is legalized first, so the placement is
+/// legal, and [`PlaceReport::stopped`] says why it stopped. With the default control, the
+/// result is [`refine_components`]'s.
+///
+/// # Errors
+///
+/// As [`refine_components`].
+pub fn refine_components_with(
+    design: &PlacementDesign,
+    placed: &[Placed],
+    spacing: i64,
+    feedback: &Feedback,
+    options: &PlaceOptions,
+    control: &RunControl<'_>,
+) -> Result<PlaceReport, PlaceError> {
+    let run = Run::new(control);
+    refine_components_in(design, placed, spacing, feedback, options, &run)
+}
+
+pub(crate) fn refine_components_in(
+    design: &PlacementDesign,
+    placed: &[Placed],
+    spacing: i64,
+    feedback: &Feedback,
+    options: &PlaceOptions,
+    run: &Run<'_>,
+) -> Result<PlaceReport, PlaceError> {
     let scale = if options.spacing > 0 {
         (spacing.clamp(0, options.spacing), options.spacing)
     } else {
@@ -1605,6 +1696,7 @@ pub fn refine_components(
                 (u64::from(net.weight) * u64::from(percent) / 100).clamp(1, 1 << 20) as u32;
         }
     }
+    model.run = Some(run);
     let model = model;
     // Where everything is, in the frames of the sides it is on now.
     let mut at: Vec<(PPoint, i32)> = (0..comps.len())
@@ -1719,6 +1811,7 @@ pub fn refine_components(
         spacing: options.spacing * scale.0 / scale.1,
         wirelength: (model.wirelength(&original), model.wirelength(&at)),
         peak_congestion: model.congestion(&at).peak_utilization(),
+        stopped: run.stopped(),
     })
 }
 

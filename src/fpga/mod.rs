@@ -201,6 +201,7 @@ pub use design::{Design, GlobalPort, NetInfo, NetOptions, NetPin, NetStatus, res
 pub use eco::{placement_priors, route_seeds};
 pub use feedback::{
     LoopError, LoopOptions, LoopResult, LoopRound, RouterCongestion, place_route_loop,
+    place_route_loop_with,
 };
 pub use lookahead::{LookaheadOptions, MapLookahead};
 pub use netlist::{
@@ -211,7 +212,7 @@ pub use place::{PlacedBlock, Placement, read_placement, write_placement};
 pub use placer::{
     ChannelDemand, PlaceDelayModel, PlaceMethod, PlaceProblem, PlaceResult, PlacerOptions,
     ProblemOptions, RefineOptions, build_place_problem, estimate_slack, place_design,
-    refine_placement,
+    place_design_with, refine_placement, refine_placement_with,
 };
 pub use rotation::{
     LutRotation, RotatableLut, rotatable_luts, rotate_luts_for_timing, write_rotated_netlist,

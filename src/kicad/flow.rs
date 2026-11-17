@@ -7,11 +7,12 @@ use std::time::Instant;
 
 use super::place::{footprint_outline, placement_design, replace_pad_nets, replace_placement};
 use super::{KicadBoard, KicadError, read, replace_routing_and_fills};
+use crate::control::{self, Progress, Run, RunControl, Stopped};
 use crate::geom::{Point, Rect};
 use crate::id::NetId;
 use crate::pcb::eco::{self, Change};
 use crate::pcb::place::{
-    Feedback, PlaceOptions, Placed, PlacementDesign, place_components, refine_components,
+    Feedback, PlaceOptions, Placed, PlacementDesign, place_components_in, refine_components_in,
 };
 use crate::pcb::swap::{PinSwap, SwapGroup, apply_swaps, optimize_swaps, two_pin_groups};
 use crate::pcb::{self, Design, RouteError, RouteOptions, Routed};
@@ -161,6 +162,8 @@ pub struct FlowReport {
     pub first_seconds: (f64, f64),
     /// The rounds after it.
     pub rounds: Vec<Round>,
+    /// Why the flow was stopped before its end, if it was: see [`place_and_route_with`].
+    pub stopped: Option<Stopped>,
 }
 
 /// Why [`place_and_route`] failed.
@@ -474,7 +477,8 @@ fn feedback(
 /// round while it pays, places again the parts that routing found most trouble with, and
 /// reroutes only what that moved.
 ///
-/// 1. [`place_components`] places the board, from [`placement_design`].
+/// 1. [`place_components`](crate::pcb::place::place_components) places the board, from
+///    [`placement_design`].
 /// 2. With [`FlowOptions::swaps`], [`optimize_swaps`] exchanges pins' nets within their
 ///    groups, and the pads get their new nets, in the text too.
 /// 3. [`pcb::route`] routes it: the one-pass flow, [`FlowReport::first`].
@@ -482,9 +486,9 @@ fn feedback(
 ///    and those left unrouted, choose the parts to place again, a share of the movable ones
 ///    that shrinks each round; their nets weigh more, routing's use of the board prices
 ///    congestion, and a part whose connections are mostly on the other side goes there.
-///    [`refine_components`] places them, near where they were, around everything else, and
-///    [`eco::reroute`] routes again what moved, keeping the rest. The result is kept if it
-///    is [better](Score::better). The loop stops after [`FlowOptions::rounds`] rounds, or
+///    [`refine_components`](crate::pcb::place::refine_components) places them, near where
+///    they were, around everything else, and [`eco::reroute`] routes again what moved,
+///    keeping the rest. The result is kept if it is [better](Score::better). The loop stops after [`FlowOptions::rounds`] rounds, or
 ///    [`FlowOptions::patience`] in a row that keep nothing.
 ///
 /// # Errors
@@ -495,10 +499,75 @@ pub fn place_and_route(
     project: Option<&str>,
     options: &FlowOptions,
 ) -> Result<FlowReport, FlowError> {
+    place_and_route_with(pcb, project, options, &RunControl::default())
+}
+
+/// The PCB routing's control for a run: the run's flag and deadline, what the run's budget
+/// leaves of the routing's own, and a listener that tells the run's.
+fn route_control<'a>(
+    run: &Run<'_>,
+    control: &RunControl<'a>,
+    options: &RouteOptions,
+    listen: &'a dyn Fn(&pcb::Progress),
+) -> (pcb::RunControl<'a>, RouteOptions) {
+    let routing = pcb::RunControl {
+        cancel: control.cancel,
+        deadline: control.deadline,
+        progress: control.progress.map(|_| listen),
+        progress_interval: control.progress_interval,
+        ..pcb::RunControl::default()
+    };
+    let mut options = *options;
+    if let Some(left) = run.work_left() {
+        options.work_budget = Some(options.work_budget.map_or(left, |own| own.min(left)));
+    }
+    (routing, options)
+}
+
+/// Charges `run` with a routing's work, and stops it if the routing was stopped by the clock
+/// or the flag.
+fn charge_routing(run: &Run<'_>, routed: &Routed) {
+    run.charge(routed.stats.work);
+    if matches!(routed.stopped, Some(Stopped::Deadline | Stopped::Cancelled)) {
+        run.poll();
+    }
+}
+
+/// [`place_and_route`], under a [`RunControl`].
+///
+/// Its work budget counts annealing's moves and the search nodes of routing, together, and
+/// each routing has what is left of it as its
+/// [`work_budget`](RouteOptions::work_budget), or its own if that is less: a routing with a
+/// budget routes [for the most connections soonest](crate::pcb#stopping-a-run-and-what-is-left-open),
+/// so a flow with a budget routes differently from one without even when it is not spent.
+/// Its flag and deadline stop placement and routing as [`pcb::route_with`]'s do. A flow that
+/// is stopped returns the best board it has: if placement is stopped, the legal placement it
+/// had, routed until the stop, and if a round is stopped, the best board of the rounds before
+/// unless the stopped one is [better](Score::better). [`FlowReport::stopped`] says why. Its
+/// listener hears of placement, and of routing as [`Stage::Route`](control::Stage::Route) and [`Stage::Reroute`](control::Stage::Reroute) for
+/// the rounds, with the round and the connections left open as the conflicts. With the
+/// default control, the result is [`place_and_route`]'s.
+///
+/// # Errors
+///
+/// As [`place_and_route`].
+pub fn place_and_route_with(
+    pcb: &str,
+    project: Option<&str>,
+    options: &FlowOptions,
+    control: &RunControl<'_>,
+) -> Result<FlowReport, FlowError> {
+    let run = Run::new(control);
+    let stage_now = core::cell::Cell::new(control::Stage::Route);
+    let listen = |p: &pcb::Progress| {
+        let mut progress = Progress::new(stage_now.get(), 0);
+        progress.conflicts = Some(p.connections.saturating_sub(p.connected) as u64);
+        run.tell(progress, p.work);
+    };
     let board = read(pcb, project).map_err(FlowError::Read)?;
     let mut pd = placement_design(&board);
     let start = Instant::now();
-    let report = place_components(&pd, &options.place).map_err(FlowError::Place)?;
+    let report = place_components_in(&pd, &options.place, &run).map_err(FlowError::Place)?;
     let spacing = report.spacing;
     let swaps = if options.swaps.is_empty() {
         Vec::new()
@@ -512,7 +581,10 @@ pub fn place_and_route(
     let first_placed = report.placed.clone();
     let mut best = stage(pcb, project, &board, report.placed, &pads)?;
     let start = Instant::now();
-    let mut routed = pcb::route(&best.design, &options.route).map_err(FlowError::Route)?;
+    let (routing, route_options) = route_control(&run, control, &options.route, &listen);
+    let mut routed =
+        pcb::route_with(&best.design, &route_options, &routing).map_err(FlowError::Route)?;
+    charge_routing(&run, &routed);
     // Counted over the whole board, as the loop's are.
     let all = routed.board(&best.design);
     let (nets, done, needed, made, _) = pcb::connectivity(&best.design, &all);
@@ -535,10 +607,12 @@ pub fn place_and_route(
     let mut rounds = Vec::new();
     let mut misses = 0;
     let mut share = 0.4;
+    stage_now.set(control::Stage::Reroute);
     for round in 0..options.rounds {
-        if misses >= options.patience {
+        if misses >= options.patience || run.stopped().is_some() {
             break;
         }
+        run.set_round(round as u32 + 1);
         let start = Instant::now();
         let fb = feedback(&pd, &best, &routed, options, share);
         if fb.window.is_empty() {
@@ -546,12 +620,12 @@ pub fn place_and_route(
         }
         let mut place = options.place.clone();
         place.seed = options.place.seed.wrapping_add(round as u64 + 1);
-        let refined = match refine_components(&pd, &best.placed, spacing, &fb, &place) {
+        let refined = match refine_components_in(&pd, &best.placed, spacing, &fb, &place, &run) {
             Ok(r) => Ok(r),
             Err(PlaceError::NoRoom(_)) if !fb.flips.is_empty() => {
                 let mut fb = fb.clone();
                 fb.flips.clear();
-                refine_components(&pd, &best.placed, spacing, &fb, &place)
+                refine_components_in(&pd, &best.placed, spacing, &fb, &place, &run)
             }
             Err(e) => Err(e),
         };
@@ -598,18 +672,21 @@ pub fn place_and_route(
             .flatten()
             .collect();
         let change = Change::new(nets, areas).after(&routed.unrouted);
-        let mut rerouted = eco::reroute(
+        let (routing, route_options) = route_control(&run, control, &options.route, &listen);
+        let mut rerouted = eco::reroute_with(
             &next.design,
             &routed.tracks,
             &routed.vias,
             &change,
-            &options.route,
+            &route_options,
+            &routing,
         )
         .map_err(FlowError::Route)?;
+        charge_routing(&run, &rerouted.routed);
         let mut s = Score::of(&next.design, &rerouted.routed);
         // Reliefs that routing starved of spokes get them back, if that pays.
         for _ in 0..RELIEFS {
-            if s.starved == 0 {
+            if s.starved == 0 || run.stopped().is_some() {
                 break;
             }
             let Some(r) = eco::relieve(
@@ -666,5 +743,6 @@ pub fn place_and_route(
         first_placed,
         first_seconds: (place_seconds, route_seconds),
         rounds,
+        stopped: run.stopped(),
     })
 }

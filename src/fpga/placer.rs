@@ -20,11 +20,11 @@ use super::netlist::PackedNetlist;
 use super::place::{PlacedBlock, Placement};
 use super::rr_graph::{NodeKind, PinClassKind, RrGraph};
 use super::timing::DesignTiming;
+use crate::control::{Run, RunControl, Stopped};
 use crate::id::{NetId, NodeId};
 use crate::place::{
     AnalyticOptions, AnnealOptions, Annealer, CostTerm, Fixed, Inflation, Item, ItemId, Layout,
     NetView, Pin, PlaceError, PlacementProblem, Point, Rect, Site, SiteId, Wirelength, legalize,
-    place_analytic,
 };
 use crate::rng::Rng;
 use crate::space::{RoutingSpace, Step};
@@ -897,9 +897,10 @@ fn pick_corners(tiles: &[(u32, u32)]) -> Vec<(u32, u32)> {
 pub enum PlaceMethod {
     /// Annealing from a random placement, hot, as VPR did before version 9.
     Anneal,
-    /// [`place_analytic`]'s global placement and legalization, by wirelength, and then
-    /// annealing that starts cold over short distances, as VPR 9 starts cold from a placement
-    /// that puts each block near the centroid of its neighbours. The default.
+    /// [`place_analytic`](crate::place::place_analytic)'s global placement and legalization,
+    /// by wirelength, and then annealing that starts cold over short distances, as VPR 9
+    /// starts cold from a placement that puts each block near the centroid of its neighbours.
+    /// The default.
     Analytic,
 }
 
@@ -987,6 +988,9 @@ pub struct PlaceResult {
     pub temperatures: u32,
     /// Moves annealing tried.
     pub moves: u64,
+    /// Why the run was stopped before its end, if it was: see [`place_design_with`]. The
+    /// placement is then the best so far, and legal.
+    pub stopped: Option<Stopped>,
 }
 
 /// The total of a placement's cost, made to stay near this, so that the temperature, which is
@@ -1257,8 +1261,9 @@ fn exponent(range: f64, max_range: f64, (first, last): (u32, u32)) -> u32 {
 ///
 /// [`Annealer`]'s, with VPR's schedule and moves, and median moves, with
 /// [`inner_num`](PlacerOptions::inner_num). [`PlaceMethod::Anneal`] starts from a random legal
-/// placement, as VPR does; [`PlaceMethod::Analytic`] from [`place_analytic`]'s legalized
-/// placement, by plain wirelength, at a low temperature with a short range.
+/// placement, as VPR does; [`PlaceMethod::Analytic`] from
+/// [`place_analytic`](crate::place::place_analytic)'s legalized placement, by plain
+/// wirelength, at a low temperature with a short range.
 ///
 /// # Errors
 ///
@@ -1269,6 +1274,44 @@ pub fn place_design(
     delays: &PlaceDelayModel,
     timing: Option<(&mut DesignTiming, &Constraints)>,
     options: &PlacerOptions,
+) -> Result<PlaceResult, PlaceError> {
+    place_design_in(
+        problem,
+        delays,
+        timing,
+        options,
+        &Run::new(&RunControl::default()),
+    )
+}
+
+/// [`place_design`], under a [`RunControl`].
+///
+/// The control's flag and deadline stop global placement at its next iteration and annealing
+/// within a thousand moves or so, and its work budget counts annealing's moves; what was
+/// placed until then is legalized, so the placement is legal, the best annealing had, and
+/// [`PlaceResult::stopped`] says why it stopped. The listener hears of each iteration of
+/// global placement and each temperature. With the default control, the result is
+/// [`place_design`]'s.
+///
+/// # Errors
+///
+/// As [`place_design`].
+pub fn place_design_with(
+    problem: &PlaceProblem,
+    delays: &PlaceDelayModel,
+    timing: Option<(&mut DesignTiming, &Constraints)>,
+    options: &PlacerOptions,
+    control: &RunControl<'_>,
+) -> Result<PlaceResult, PlaceError> {
+    place_design_in(problem, delays, timing, options, &Run::new(control))
+}
+
+fn place_design_in(
+    problem: &PlaceProblem,
+    delays: &PlaceDelayModel,
+    timing: Option<(&mut DesignTiming, &Constraints)>,
+    options: &PlacerOptions,
+    run: &Run<'_>,
 ) -> Result<PlaceResult, PlaceError> {
     let places = &problem.problem;
     places.validate()?;
@@ -1305,7 +1348,9 @@ pub fn place_design(
             };
             anneal_options.initial_temperature_factor = options.detailed_temperature;
             anneal_options.initial_range = Some(options.detailed_range);
-            place_analytic(places, Wirelength, analytic)?.0.placement
+            crate::place::analytic::place_analytic_in(places, Wirelength, analytic, run)?
+                .0
+                .placement
         }
     };
     let start_bb_estimate = problem.bb_estimate(&start);
@@ -1317,7 +1362,8 @@ pub fn place_design(
     let (first, last) = options.criticality_exponents;
     let cost = weigher.cost(&start, first);
     let mut annealer = Annealer::new(places, cost, start, anneal_options)?;
-    while annealer.step().is_some() {
+    annealer.attach(run);
+    while annealer.step_in(run).is_some() {
         if annealer.stop_reason().is_some() {
             break;
         }
@@ -1334,6 +1380,7 @@ pub fn place_design(
         worst_slack,
         temperatures: outcome.temperatures,
         moves: outcome.moves,
+        stopped: run.stopped(),
     })
 }
 
@@ -1458,6 +1505,48 @@ pub fn refine_placement(
     congestion: Option<&RouterCongestion>,
     options: &RefineOptions,
 ) -> Result<PlaceResult, PlaceError> {
+    let run = Run::new(&RunControl::default());
+    refine_placement_in(
+        problem, delays, timing, start, windows, congestion, options, &run,
+    )
+}
+
+/// [`refine_placement`], under a [`RunControl`]: its flag, deadline and work budget, in moves,
+/// stop the annealing, whose best placement, which is legal, is the result, with
+/// [`PlaceResult::stopped`] saying why; its listener hears of each temperature. With the
+/// default control, the result is [`refine_placement`]'s.
+///
+/// # Errors
+///
+/// As [`refine_placement`].
+#[allow(clippy::too_many_arguments)]
+pub fn refine_placement_with(
+    problem: &PlaceProblem,
+    delays: &PlaceDelayModel,
+    timing: Option<(&mut DesignTiming, &Constraints)>,
+    start: &crate::place::Placement,
+    windows: &[Rect],
+    congestion: Option<&RouterCongestion>,
+    options: &RefineOptions,
+    control: &RunControl<'_>,
+) -> Result<PlaceResult, PlaceError> {
+    let run = Run::new(control);
+    refine_placement_in(
+        problem, delays, timing, start, windows, congestion, options, &run,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn refine_placement_in(
+    problem: &PlaceProblem,
+    delays: &PlaceDelayModel,
+    timing: Option<(&mut DesignTiming, &Constraints)>,
+    start: &crate::place::Placement,
+    windows: &[Rect],
+    congestion: Option<&RouterCongestion>,
+    options: &RefineOptions,
+    run: &Run<'_>,
+) -> Result<PlaceResult, PlaceError> {
     let places = problem.windowed(start, windows);
     let anneal_options = AnnealOptions {
         seed: options.seed,
@@ -1478,7 +1567,8 @@ pub fn refine_placement(
         start.clone(),
         anneal_options,
     )?;
-    while annealer.step().is_some() {
+    annealer.attach(run);
+    while annealer.step_in(run).is_some() {
         if annealer.stop_reason().is_some() {
             break;
         }
@@ -1495,6 +1585,7 @@ pub fn refine_placement(
         worst_slack,
         temperatures: outcome.temperatures,
         moves: outcome.moves,
+        stopped: run.stopped(),
     })
 }
 

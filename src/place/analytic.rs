@@ -10,6 +10,7 @@ use super::legalize::{legalize_units, unit_box};
 use super::netlist::{NO_UNIT, Netlist};
 use super::problem::rotate;
 use super::{Fixed, Layout, PlaceError, Placement, PlacementProblem, Point, Rect};
+use crate::control::{Progress, Run, RunControl, Stage};
 use crate::id::NetId;
 use crate::rng::Rng;
 
@@ -842,6 +843,41 @@ pub fn place_analytic<C: CostTerm>(
     cost: C,
     options: AnalyticOptions<'_>,
 ) -> Result<(PlaceOutcome, AnalyticReport), PlaceError> {
+    place_analytic_with(problem, cost, options, &RunControl::default())
+}
+
+/// [`place_analytic`], under a [`RunControl`].
+///
+/// The control's flag and deadline stop global placement at its next iteration, as
+/// [`AnalyticOptions::cancel`] does, and detailed placement within a thousand moves or so;
+/// what was placed until then is still legalized, so the result is legal. Its work budget
+/// counts detailed placement's moves: global placement is bounded by
+/// [`max_iterations`](AnalyticOptions::max_iterations), and legalization runs to its end. Its
+/// listener hears of each iteration of global placement, as [`Stage::Global`] with the
+/// spread placement's wirelength as the cost, and of each temperature of detailed placement.
+/// [`PlaceOutcome::stop`] says if and why the run was stopped. With the default control, the
+/// result is [`place_analytic`]'s.
+///
+/// # Errors
+///
+/// As [`place_analytic`].
+pub fn place_analytic_with<C: CostTerm>(
+    problem: &PlacementProblem,
+    cost: C,
+    options: AnalyticOptions<'_>,
+    control: &RunControl<'_>,
+) -> Result<(PlaceOutcome, AnalyticReport), PlaceError> {
+    let run = Run::new(control);
+    place_analytic_in(problem, cost, options, &run)
+}
+
+/// [`place_analytic`], as part of `run`.
+pub(crate) fn place_analytic_in<C: CostTerm>(
+    problem: &PlacementProblem,
+    cost: C,
+    options: AnalyticOptions<'_>,
+    run: &Run<'_>,
+) -> Result<(PlaceOutcome, AnalyticReport), PlaceError> {
     problem.validate()?;
     let model = Model::new(problem, Netlist::new(problem));
     let units = model.netlist.units.len();
@@ -867,6 +903,14 @@ pub fn place_analytic<C: CostTerm>(
         options
             .cancel
             .is_some_and(|flag| flag.load(Ordering::Relaxed))
+            || run.poll().is_some()
+    };
+    let tell = |step: u32, wirelength: f64| {
+        if run.listening() {
+            let mut progress = Progress::new(Stage::Global, u64::from(step));
+            progress.cost = Some(wirelength);
+            run.tell(progress, 0);
+        }
     };
 
     for _ in 0..options.wirelength_iterations {
@@ -881,6 +925,7 @@ pub fn place_analytic<C: CostTerm>(
     let mut alpha = options.anchor_weight;
     let mut lower_wl = model.wirelength(&anchors);
     let mut upper_wl = model.wirelength(&upper);
+    tell(0, upper_wl);
     while iterations < options.max_iterations && !cancelled() {
         if upper_wl <= lower_wl * (1.0 + options.stop_gap) {
             break;
@@ -894,6 +939,7 @@ pub fn place_analytic<C: CostTerm>(
         lower_wl = model.wirelength(&anchors);
         upper_wl = model.wirelength(&upper);
         alpha *= options.anchor_growth;
+        tell(iterations, upper_wl);
     }
 
     let targets: Vec<Point> = upper
@@ -913,7 +959,10 @@ pub fn place_analytic<C: CostTerm>(
             if detailed.cancel.is_none() {
                 detailed.cancel = options.cancel;
             }
-            Annealer::with_netlist(problem, cost, legal, detailed, model.netlist).run()
+            let mut annealer =
+                Annealer::with_netlist(problem, cost, legal, detailed, model.netlist);
+            annealer.attach(run);
+            annealer.run_in(run)
         }
         None => {
             let annealer = Annealer::with_netlist(
@@ -924,7 +973,7 @@ pub fn place_analytic<C: CostTerm>(
                 model.netlist,
             );
             let mut outcome = annealer.outcome();
-            outcome.stop = PlaceStop::Converged;
+            outcome.stop = PlaceStop::of(run.stopped());
             outcome
         }
     };

@@ -1,12 +1,14 @@
 //! Simulated annealing, after VPR.
 
 use core::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use super::cost::{CostTerm, NetView};
 use super::legalize::{legalize_units, snap, typical_size, unit_box, unit_fits};
 use super::netlist::{NO_UNIT, Netlist};
 use super::spatial::SpatialIndex;
 use super::{ItemId, Layout, PlaceError, Placement, PlacementProblem, Point, Rect, SiteId, check};
+use crate::control::{Progress, Run, RunControl, Stage, Stopped};
 use crate::id::NetId;
 use crate::math::exp;
 use crate::rng::Rng;
@@ -14,7 +16,7 @@ use crate::rng::Rng;
 /// No item on a site.
 const EMPTY: u32 = u32::MAX;
 
-/// How many moves go by between reads of the cancel flag.
+/// How many moves go by between reads of the cancel flag and the clock.
 const CANCEL_EVERY: u64 = 1024;
 
 /// The fewest moves tried at a temperature, so that tiny problems still settle.
@@ -50,6 +52,10 @@ pub struct AnnealOptions<'c> {
     pub max_moves: u64,
     /// A flag that stops the run once set, from any thread. The default is none.
     pub cancel: Option<&'c AtomicBool>,
+    /// When to stop, by the clock, read with the flag every thousand moves or so. The default
+    /// is none. A run stopped by it depends on the machine and its load: the reproducible way
+    /// to bound a run is [`max_moves`](AnnealOptions::max_moves).
+    pub deadline: Option<Instant>,
 }
 
 impl Default for AnnealOptions<'_> {
@@ -63,6 +69,7 @@ impl Default for AnnealOptions<'_> {
             exit_factor: 0.005,
             max_moves: u64::MAX,
             cancel: None,
+            deadline: None,
         }
     }
 }
@@ -94,6 +101,40 @@ pub enum PlaceStop {
     Cancelled,
     /// The run hasn't stopped: its result was asked for before it finished.
     NotFinished,
+    /// The [`deadline`](AnnealOptions::deadline) passed.
+    Deadline,
+}
+
+impl PlaceStop {
+    /// The stop of a run that ended at its end unless `stopped` says otherwise.
+    pub(crate) fn of(stopped: Option<Stopped>) -> PlaceStop {
+        match stopped {
+            None => PlaceStop::Converged,
+            Some(Stopped::WorkBudget) => PlaceStop::BudgetExhausted,
+            Some(Stopped::Deadline) => PlaceStop::Deadline,
+            Some(Stopped::Cancelled) => PlaceStop::Cancelled,
+        }
+    }
+
+    /// Why the run was stopped before its end, if it was: a budget, the deadline or the flag,
+    /// and `None` for a run that converged or hasn't stopped.
+    pub fn stopped(self) -> Option<Stopped> {
+        match self {
+            PlaceStop::BudgetExhausted => Some(Stopped::WorkBudget),
+            PlaceStop::Cancelled => Some(Stopped::Cancelled),
+            PlaceStop::Deadline => Some(Stopped::Deadline),
+            PlaceStop::Converged | PlaceStop::NotFinished => None,
+        }
+    }
+}
+
+/// What stops a run that an [`Annealer`] is part of: its caller's flag and deadline, and the
+/// flag set once it has to stop for any reason.
+#[derive(Clone, Copy, Debug, Default)]
+struct Outer<'a> {
+    cancel: Option<&'a AtomicBool>,
+    deadline: Option<Instant>,
+    stop: Option<&'a AtomicBool>,
 }
 
 /// What one temperature of an [`Annealer`] did.
@@ -259,6 +300,13 @@ pub struct Annealer<'a, C> {
     /// By item, whether it keeps its rotation, for incremental placement. Empty, for no item,
     /// unless [`hold_rotations`](Annealer::hold_rotations) says otherwise.
     held_rotations: Vec<bool>,
+    /// What stops the run this is part of, if any, as well as the options do.
+    outer: Outer<'a>,
+    /// The most moves this may try: [`max_moves`](AnnealOptions::max_moves), or less if the
+    /// run's budget leaves less.
+    limit: u64,
+    /// Moves charged to the run so far.
+    charged: u64,
 }
 
 /// Shows where the run is, as the routing engine's does, and leaves out the tables.
@@ -379,6 +427,9 @@ impl<'a, C: CostTerm> Annealer<'a, C> {
             reports: Vec::new(),
             held_rotations: Vec::new(),
             netlist,
+            outer: Outer::default(),
+            limit: options.max_moves,
+            charged: 0,
         };
         let mut total = 0u64;
         for net in 0..problem.net_count() {
@@ -467,8 +518,8 @@ impl<'a, C: CostTerm> Annealer<'a, C> {
         if self.stop.is_some() {
             return None;
         }
-        if self.cancelled() {
-            self.stop = Some(PlaceStop::Cancelled);
+        if let Some(stop) = self.interrupted() {
+            self.stop = Some(stop);
             return None;
         }
         if self.phase == Phase::Start {
@@ -490,12 +541,14 @@ impl<'a, C: CostTerm> Annealer<'a, C> {
         let mut accepted = 0;
         let mut priced = 0u64;
         while tried < self.moves_per_temperature {
-            if self.moves >= self.options.max_moves {
+            if self.moves >= self.limit {
                 self.stop = Some(PlaceStop::BudgetExhausted);
                 break;
             }
-            if self.moves % CANCEL_EVERY == CANCEL_EVERY - 1 && self.cancelled() {
-                self.stop = Some(PlaceStop::Cancelled);
+            if self.moves % CANCEL_EVERY == CANCEL_EVERY - 1
+                && let Some(stop) = self.interrupted()
+            {
+                self.stop = Some(stop);
                 break;
             }
             self.moves += 1;
@@ -570,10 +623,64 @@ impl<'a, C: CostTerm> Annealer<'a, C> {
         }
     }
 
-    fn cancelled(&self) -> bool {
-        self.options
-            .cancel
-            .is_some_and(|flag| flag.load(Ordering::Relaxed))
+    /// Why the run has to stop now, if it has to: its flag, its deadline, or those of the
+    /// run it is part of. That run having stopped for any reason reads as cancelled here, and
+    /// [`step_in`](Annealer::step_in) says why.
+    fn interrupted(&self) -> Option<PlaceStop> {
+        let set = |flag: Option<&AtomicBool>| flag.is_some_and(|f| f.load(Ordering::Relaxed));
+        if set(self.options.cancel) || set(self.outer.cancel) || set(self.outer.stop) {
+            return Some(PlaceStop::Cancelled);
+        }
+        let now = || Instant::now();
+        if self.options.deadline.is_some_and(|d| now() >= d)
+            || self.outer.deadline.is_some_and(|d| now() >= d)
+        {
+            return Some(PlaceStop::Deadline);
+        }
+        None
+    }
+
+    /// Makes this part of `run`, before the first step: its flag and deadline stop this too,
+    /// and its budget limits the moves. Step it with [`step_in`](Annealer::step_in).
+    pub(crate) fn attach(&mut self, run: &'a Run<'_>) {
+        self.limit = run
+            .budget(self.options.max_moves)
+            .saturating_add(self.moves);
+        self.outer = Outer {
+            cancel: run.cancel(),
+            deadline: run.deadline(),
+            stop: Some(run.flag()),
+        };
+    }
+
+    /// [`step`](Annealer::step), as part of the run it is [attached](Annealer::attach) to:
+    /// charges the run with its moves, says why it stopped as the run has it, and tells the
+    /// run's listener of the temperature.
+    pub(crate) fn step_in(&mut self, run: &Run<'_>) -> Option<TemperatureReport> {
+        let report = self.step();
+        run.charge(self.moves - self.charged);
+        self.charged = self.moves;
+        if let Some(stop) = self.stop.filter(|&s| s != PlaceStop::Converged) {
+            if matches!(stop, PlaceStop::Cancelled | PlaceStop::Deadline) {
+                // Stopped by the run's flag or deadline, if not by the options' own.
+                run.poll();
+            }
+            if let Some(why) = run.stopped() {
+                self.stop = Some(PlaceStop::of(Some(why)));
+            }
+        }
+        if run.listening() {
+            let mut progress = Progress::new(Stage::Anneal, u64::from(self.temperatures));
+            progress.cost = Some(self.total as f64);
+            run.tell(progress, 0);
+        }
+        report
+    }
+
+    /// [`run`](Annealer::run), with [`step_in`](Annealer::step_in).
+    pub(crate) fn run_in(mut self, run: &Run<'_>) -> PlaceOutcome {
+        while self.step_in(run).is_some() {}
+        self.outcome()
     }
 
     /// Measures the first temperature, or returns false if the run stopped while doing so.
@@ -583,7 +690,7 @@ impl<'a, C: CostTerm> Annealer<'a, C> {
         let mut squares = 0.0;
         let mut count = 0u32;
         for _ in 0..samples {
-            if self.moves >= self.options.max_moves {
+            if self.moves >= self.limit {
                 self.stop = Some(PlaceStop::BudgetExhausted);
                 return false;
             }
@@ -1229,6 +1336,36 @@ pub fn anneal<C: CostTerm>(
     cost: C,
     options: AnnealOptions<'_>,
 ) -> Result<PlaceOutcome, PlaceError> {
+    anneal_with(problem, cost, options, &RunControl::default())
+}
+
+/// [`anneal`], under a [`RunControl`]: its flag and deadline stop the run as the options' own
+/// do, its work budget counts moves as [`max_moves`](AnnealOptions::max_moves) does, and its
+/// listener hears of each temperature, as [`Stage::Anneal`]. A run that is stopped returns
+/// the best placement so far, which is legal, and says why in
+/// [`PlaceOutcome::stop`]; see [`PlaceStop::stopped`]. With the default control, the result
+/// is [`anneal`]'s.
+///
+/// # Errors
+///
+/// As [`anneal`].
+pub fn anneal_with<C: CostTerm>(
+    problem: &PlacementProblem,
+    cost: C,
+    options: AnnealOptions<'_>,
+    control: &RunControl<'_>,
+) -> Result<PlaceOutcome, PlaceError> {
+    let run = Run::new(control);
+    anneal_in(problem, cost, options, &run)
+}
+
+/// [`anneal`], as part of `run`.
+pub(crate) fn anneal_in<C: CostTerm>(
+    problem: &PlacementProblem,
+    cost: C,
+    options: AnnealOptions<'_>,
+    run: &Run<'_>,
+) -> Result<PlaceOutcome, PlaceError> {
     problem.validate()?;
     let netlist = Netlist::new(problem);
     let mut rng = Rng::new(options.seed ^ 0x9E37_79B9_7F4A_7C15);
@@ -1249,7 +1386,9 @@ pub fn anneal<C: CostTerm>(
         .map(|unit| problem.item(unit.members[0].0).rotations[0])
         .collect();
     let start = legalize_units(problem, &netlist, &anchors, &rotations)?;
-    Ok(Annealer::with_netlist(problem, cost, start, options, netlist).run())
+    let mut annealer = Annealer::with_netlist(problem, cost, start, options, netlist);
+    annealer.attach(run);
+    Ok(annealer.run_in(run))
 }
 
 #[cfg(test)]

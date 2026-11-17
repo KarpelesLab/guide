@@ -34,7 +34,9 @@
 //! ```
 //!
 //! [`place`] places items on sites or in free space, by simulated annealing or analytic
-//! placement, and needs no feature. [`eco`] routes and places again after a small change to a
+//! placement, and needs no feature. [`control`] is how every long run, in any domain, is
+//! stopped by a deadline, a cancel flag or a reproducible work budget, with its best legal
+//! result so far, and how its progress is heard. [`eco`] routes and places again after a small change to a
 //! problem, keeping what did not change. Results are deterministic: the same inputs, seed and
 //! options give the same result, for any thread count and on any platform.
 //!
@@ -57,6 +59,7 @@
 
 #[cfg(feature = "asic")]
 pub mod asic;
+pub mod control;
 pub mod cost;
 #[cfg(feature = "dsn")]
 pub mod dsn;

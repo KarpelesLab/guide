@@ -11,6 +11,7 @@ use super::netlist::{Netlist, Unit};
 use super::problem::rotate;
 use super::spatial::SpatialIndex;
 use super::{Fixed, ItemId, Layout, PlaceError, Placement, PlacementProblem, Point, SiteId};
+use crate::control::{Run, RunControl};
 use crate::id::NetId;
 
 /// Where an item was before a change: its origin and rotation, and on sites, its site.
@@ -331,7 +332,27 @@ pub fn place_incremental<C: CostTerm>(
     priors: &[Option<Prior>],
     options: IncrementalOptions<'_>,
 ) -> Result<IncrementalOutcome, PlaceError> {
+    place_incremental_with(problem, cost, priors, options, &RunControl::default())
+}
+
+/// [`place_incremental`], under a [`RunControl`]: its flag, deadline and work budget, in
+/// moves, stop the annealing, and its listener hears of each temperature. Legalization runs
+/// to its end, so a run that is stopped returns a legal placement, the best annealing had,
+/// and says why in [`PlaceOutcome::stop`]. With the default control, the result is
+/// [`place_incremental`]'s.
+///
+/// # Errors
+///
+/// As [`place_incremental`].
+pub fn place_incremental_with<C: CostTerm>(
+    problem: &PlacementProblem,
+    cost: C,
+    priors: &[Option<Prior>],
+    options: IncrementalOptions<'_>,
+    control: &RunControl<'_>,
+) -> Result<IncrementalOutcome, PlaceError> {
     problem.validate()?;
+    let run = Run::new(control);
     let netlist = Netlist::new(problem);
     let prior = |item: ItemId| priors.get(item.index()).copied().flatten();
     let targets = targets(problem, &netlist, &prior);
@@ -349,11 +370,12 @@ pub fn place_incremental<C: CostTerm>(
         netlist,
     );
     annealer.hold_rotations(held);
+    annealer.attach(&run);
     let outcome = match options.anneal {
-        Some(_) => annealer.run(),
+        Some(_) => annealer.run_in(&run),
         None => {
             let mut outcome = annealer.outcome();
-            outcome.stop = super::PlaceStop::Converged;
+            outcome.stop = super::PlaceStop::of(run.stopped());
             outcome
         }
     };

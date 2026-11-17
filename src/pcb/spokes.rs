@@ -17,6 +17,14 @@ use super::zones::{CopperZone, ZoneConnection};
 use crate::geom::{LayerId, LayerSet, Point, Rect};
 use crate::id::NetId;
 
+/// In the cells of a spoke that is [held](Spokes::plan), the net's index plus one has this
+/// bit set.
+pub(crate) const HELD: u32 = 1 << 31;
+
+/// How many times what a track costs in the room of a spoke it costs in the room of one
+/// that is held.
+pub(crate) const HELD_TIMES: f64 = 8.0;
+
 /// Where spokes will be, by cell of a grid and layer.
 #[derive(Clone, Debug)]
 pub(crate) struct Spokes {
@@ -75,23 +83,41 @@ impl Spokes {
             count: 0,
         };
         let stack = design.rules.layers();
-        // The host's own spokes, if it gave any, are all there are.
+        // The host's own spokes, if it gave any, are all there are. Those of a pad that
+        // has no more of them on a layer than it is held to are held: a track there costs
+        // many times what it costs in the room of a spoke that the pad can spare.
+        let least = usize::from(design.zones.min_spokes);
+        let mut by_pad: std::collections::BTreeMap<(usize, u8), usize> =
+            std::collections::BTreeMap::new();
         for spoke in &design.zones.spokes {
-            let net = design.board.pads.get(spoke.pad).and_then(|p| p.net);
-            let (Some(net), true) = (net, stack.contains(spoke.layer)) else {
-                continue;
-            };
-            if out.tracks.is_empty() {
-                out.tracks = vec![0; layers * cols * rows];
+            *by_pad.entry((spoke.pad, spoke.layer.0)).or_default() += 1;
+        }
+        // The held ones first: a cell is of the first spoke that marks it.
+        for held in [true, false] {
+            for spoke in &design.zones.spokes {
+                let net = design.board.pads.get(spoke.pad).and_then(|p| p.net);
+                let (Some(net), true) = (net, stack.contains(spoke.layer)) else {
+                    continue;
+                };
+                let few = by_pad
+                    .get(&(spoke.pad, spoke.layer.0))
+                    .is_some_and(|&n| n <= least);
+                if few != held {
+                    continue;
+                }
+                if out.tracks.is_empty() {
+                    out.tracks = vec![0; layers * cols * rows];
+                }
+                out.count += 1;
+                out.mark(
+                    spoke.layer,
+                    net,
+                    spoke.from,
+                    spoke.to,
+                    spoke.width / 2 + need,
+                    held,
+                );
             }
-            out.count += 1;
-            out.mark(
-                spoke.layer,
-                net,
-                spoke.from,
-                spoke.to,
-                spoke.width / 2 + need,
-            );
         }
         let zones: &[CopperZone] = if design.zones.spokes.is_empty() {
             &design.zones.zones
@@ -137,7 +163,7 @@ impl Spokes {
                     }
                     out.count += 1;
                     for l in shared.iter() {
-                        out.mark(l, net, a, e, half + need);
+                        out.mark(l, net, a, e, half + need, false);
                     }
                 }
             }
@@ -147,7 +173,7 @@ impl Spokes {
 
     /// Marks the cells of a layer whose centres are within `reach` of the segment from `a`
     /// to `b`, where no other net has marked them.
-    fn mark(&mut self, layer: LayerId, net: NetId, a: Point, b: Point, reach: i64) {
+    fn mark(&mut self, layer: LayerId, net: NetId, a: Point, b: Point, reach: i64, held: bool) {
         let lo = (a.x.min(b.x) - reach, a.y.min(b.y) - reach);
         let hi = (a.x.max(b.x) + reach, a.y.max(b.y) + reach);
         let col =
@@ -173,7 +199,7 @@ impl Spokes {
                 let at = r as usize * self.cols + c as usize;
                 let slot = &mut self.tracks[usize::from(layer.0) * self.cols * self.rows + at];
                 if *slot == 0 {
-                    *slot = net.0 + 1;
+                    *slot = (net.0 + 1) | if held { HELD } else { 0 };
                 }
             }
         }
@@ -188,6 +214,20 @@ impl Spokes {
         (c < self.cols && r < self.rows).then(|| r * self.cols + c)
     }
 
+    /// The net whose pad's spoke a track on `layer` ending at `p` would be in the way of,
+    /// as its index plus one, or zero, and what that costs over the track's length.
+    pub(crate) fn toll(&self, layer: u8, p: Point) -> (u32, f64) {
+        let n = self
+            .at(p)
+            .and_then(|at| {
+                self.tracks
+                    .get(usize::from(layer) * self.cols * self.rows + at)
+            })
+            .copied()
+            .unwrap_or(0);
+        (n, self.cost)
+    }
+
     /// What a track of `net` on `layer` ending at `p` costs for its length: more where a
     /// spoke of another net's pad will be.
     #[inline]
@@ -196,7 +236,9 @@ impl Spokes {
             self.tracks
                 .get(usize::from(layer) * self.cols * self.rows + at)
         }) {
-            Some(&n) if n != 0 && n != net.0 + 1 => 1.0 + self.cost,
+            Some(&n) if n != 0 && n & !HELD != net.0 + 1 => {
+                1.0 + self.cost * if n & HELD != 0 { HELD_TIMES } else { 1.0 }
+            }
             _ => 1.0,
         }
     }
@@ -288,6 +330,58 @@ mod tests {
     use super::Spokes;
     use crate::geom::{LayerSet, Point, Rect};
     use crate::id::NetId;
+
+    #[test]
+    fn the_spokes_of_a_pad_with_none_to_spare_are_held() {
+        // Two pads of net 1 with spokes that the host gives: the first has two, the
+        // second four, and a pad is to keep two.
+        let mut d = design(
+            2,
+            vec![
+                smd(5 * MM, 5 * MM, 1),
+                smd(15 * MM, 5 * MM, 1),
+                smd(8 * MM, 8 * MM, 2),
+            ],
+            3,
+        );
+        let spoke = |pad: usize, x: i64, dx: i64, dy: i64| super::super::Spoke {
+            pad,
+            layer: crate::geom::LayerId(0),
+            from: Point::new(x + dx * 300_000, 5 * MM + dy * 300_000),
+            to: Point::new(x + dx * 900_000, 5 * MM + dy * 900_000),
+            width: 300_000,
+        };
+        d.zones.spokes = vec![
+            spoke(0, 5 * MM, 1, 0),
+            spoke(0, 5 * MM, -1, 0),
+            spoke(1, 15 * MM, 1, 0),
+            spoke(1, 15 * MM, -1, 0),
+            spoke(1, 15 * MM, 0, 1),
+            spoke(1, 15 * MM, 0, -1),
+        ];
+        let bounds = Rect::new(Point::new(-MM, -MM), Point::new(21 * MM, 11 * MM));
+        let plan =
+            |d: &super::super::Design| Spokes::plan(d, bounds, 100_000, 300_000, 4.0).unwrap();
+        let (few, many) = (
+            Point::new(5_600_000, 5 * MM),
+            Point::new(15_600_000, 5 * MM),
+        );
+        // With no number to keep, every spoke costs the same.
+        let s = plan(&d);
+        assert_eq!(s.count, 6);
+        assert_eq!(
+            (s.factor(NetId(2), 0, few), s.factor(NetId(2), 0, many)),
+            (5.0, 5.0)
+        );
+        // Held to two, the pad with two has none to spare.
+        d.zones.min_spokes = 2;
+        let s = plan(&d);
+        assert_eq!(
+            (s.factor(NetId(2), 0, few), s.factor(NetId(2), 0, many)),
+            (33.0, 5.0)
+        );
+        assert_eq!(s.factor(NetId(1), 0, few), 1.0);
+    }
 
     #[test]
     fn the_room_of_a_pad_s_spokes_is_marked_for_other_nets() {

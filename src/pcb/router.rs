@@ -22,6 +22,7 @@ use super::rows;
 use super::settle::{Routes, Settle};
 use super::spokes;
 use super::tune;
+use super::whole;
 use super::world::{Placed, Planes, Verdict, World};
 use super::zones::{self, Fill};
 use super::{
@@ -1726,7 +1727,84 @@ fn route_all<'a>(
     }
     let pours = (hurried && options.pour_cuts && !planned.is_empty() && !run.poll())
         .then(|| Pours::plan(design, &world, &planned, &jobs, bounds, pitch));
-    if hurried && options.row_fanout && !run.poll() {
+    // Every net against every other at once, on one grid: what that ends with is each
+    // net's copper as the passes begin, less what the world does not allow of it.
+    let mut negotiated_whole = false;
+    if options.whole && given.is_empty() && !run.poll() {
+        run.phase(Phase::Whole);
+        let was = run.cut();
+        let share = options.whole_share.clamp(0.0, 1.0);
+        run.part(share, share);
+        // A world for each thread of its own: the board as this one has it, the pairs
+        // routed first locked in it, and no run.
+        let make = || {
+            let mut w = World::new(
+                &before_pairs.board,
+                rules,
+                &before_pairs.outline,
+                before_pairs.edge_clearance,
+                &before_pairs.obstacles,
+            )
+            .ok()?;
+            w.configure(before_pairs, options);
+            for (i, r) in pairs_first.routes.iter().enumerate() {
+                if let Some(r) = r {
+                    let _ = pairs::Undo::place(&mut w, &r.tracks, &r.vias);
+                    for net in [design.pairs[i].positive, design.pairs[i].negative] {
+                        w.set_locked(net, true);
+                    }
+                }
+            }
+            Some(w)
+        };
+        let whole = whole::route(
+            design,
+            &world,
+            &make,
+            &jobs,
+            pours.as_ref(),
+            options,
+            run,
+            pitch,
+            bounds,
+        );
+        run.resume(was);
+        if let Some(w) = whole {
+            negotiated_whole = true;
+            stats.whole = (w.rounds, w.shared, w.taken_out, 0);
+            stats.whole_made.1 = w.vias_saved;
+            stats.pour_cuts += w.pour_cuts;
+            for (k, sites) in &w.sites {
+                jobs[*k].ctx = pours::with_sites(&jobs[*k].ctx, sites, pitch);
+            }
+            for (j, tree) in w.trees.iter().enumerate() {
+                let Some(tree) = tree else { continue };
+                let ctx = &jobs[j].ctx;
+                let mut c = NetCopper::from_tree(ctx, tree).free_in(&world, ctx, w.pitch);
+                if ctx.terminals < BRANCH_TERMINALS {
+                    c.drop_floating(ctx);
+                } else {
+                    c.prune(ctx);
+                }
+                if c.is_empty() {
+                    continue;
+                }
+                c.place(&mut world, ctx);
+                let pieces = c.pieces(ctx);
+                missing[j] = pieces.missing();
+                apart[j] = pieces.apart();
+                stats.whole.3 += 1;
+                stats.whole_made.0 += ctx.terminals - 1 - apart[j];
+                if apart[j] > 0 {
+                    completing[j] = Some(completion(design, ctx, &c, pitch));
+                    fresh[j] = true;
+                }
+                tried[j] = true;
+                copper[j] = Some(c);
+            }
+        }
+    }
+    if hurried && options.row_fanout && !negotiated_whole && !run.poll() {
         let mut stubs: Vec<Option<NetCopper>> = vec![None; jobs.len()];
         for s in rows::plan(design, &mut world, pitch, &jobs, options.via_cost) {
             let c = stubs[s.job].get_or_insert_with(NetCopper::default);

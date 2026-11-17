@@ -228,6 +228,7 @@ mod spokes;
 pub mod swap;
 mod tune;
 mod verify;
+mod whole;
 mod world;
 mod zones;
 
@@ -486,6 +487,8 @@ impl Design {
                 keepouts: Vec::new(),
                 fills: Vec::new(),
                 spokes: Vec::new(),
+                spare_spokes: Vec::new(),
+                min_spokes: 0,
             },
         }
     }
@@ -731,6 +734,25 @@ pub struct RouteOptions {
     /// routes its boards with (`docs/benchmarks.md`, "Room for the spokes of thermal
     /// reliefs").
     pub spoke_cost: f64,
+    /// Whether every net is routed against every other at once before the passes that
+    /// route a net at a time. The default is `false`. On one grid over the board, each
+    /// net is routed across the others at a price for every point where its copper would
+    /// be too close to theirs, by how many nets are there and by how often the point was
+    /// shared before; the nets in each other's way are routed again, round after round at
+    /// prices that rise, until none is (PathFinder). What is still shared when the rounds
+    /// end is taken out, and each net is then routed once more for fewer vias. The routes
+    /// are the nets' copper as the first pass begins, less what the board's rules, asked
+    /// exactly, do not allow of them, and the passes route what is left and may move the
+    /// rest. In a run with a [budget](RouteOptions::work_budget) or a deadline it has
+    /// [`whole_share`](RouteOptions::whole_share) of it at most. Not in a run
+    /// [from routes](route_from) that it is given.
+    pub whole: bool,
+    /// The share of the time that a deadline leaves, and of the work that a budget
+    /// leaves, that [`whole`](RouteOptions::whole) may spend. The default is 0.5.
+    pub whole_share: f64,
+    /// How many threads [`whole`](RouteOptions::whole) routes nets on, side by side where
+    /// their pads are apart. The default is 1; the routes are the same for any number.
+    pub threads: usize,
 }
 
 impl Default for RouteOptions {
@@ -769,6 +791,9 @@ impl Default for RouteOptions {
             crossings: true,
             spoke_cost: 0.0,
             seed: None,
+            whole: false,
+            whole_share: 0.5,
+            threads: 1,
         }
     }
 }
@@ -851,6 +876,13 @@ pub struct Stats {
     /// [`Design::zones`]), less one, and how many fewer pieces the result leaves, through
     /// its tracks, vias and fills. What is not made is listed in [`Routed::open`].
     pub islands: (usize, usize),
+    /// Of the negotiation for every net at once ([`RouteOptions::whole`]): its rounds, the
+    /// points that were still shared after the best of them, the nets taken out for
+    /// those, and the nets whose routes the first pass began with.
+    pub whole: (usize, usize, usize, usize),
+    /// The connections that those routes made, and the vias that routing each net again
+    /// for fewer of them saved.
+    pub whole_made: (usize, usize),
 }
 
 /// The result of [`route`].
@@ -1139,5 +1171,7 @@ mod model_tests;
 mod pair_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod whole_tests;
 #[cfg(test)]
 mod zone_tests;

@@ -917,6 +917,60 @@ them (`Zones::spokes`): a connection that differs by layer, a width fitted to th
 and directions of its own are the host's to know, and with any spoke given none is
 worked out here.
 
+**Every net can be routed against every other at once, on one grid, before the passes**
+([results](benchmarks.md#pcb-routing-of-every-net-at-once)). The passes route a net and
+take others out for it, and what they leave open on a crowded board are nets that were
+taken out and found no way back past neighbours that had settled by then: the two
+packages of fine pitch of `corne-cherry`, which four rounds of ways out, chains,
+places and windows did not close. `RouteOptions::whole` is the other way round
+(`pcb::whole`), as PathFinder has it and as the router that `guide` replaces in cadlab
+does it:
+
+- *One grid.* Cells a pitch apart over the board, the pitch taken to a divisor of the
+  pitch that most pads of fine pitch have, where that is within 6 % above it, and the
+  origin where the most of those pads are on its lines: a pad on a line leaves along
+  it, and one off it turns onto one beside its neighbours.
+- *What the board allows is asked of the world, exactly, once.* A step between two cells
+  is a track of the net's width that `World` says is free of the board's own copper,
+  asked for a block of cells the first time a search reaches it, for every net that is
+  judged alike at once: nets of one width, clearance, via and layers, with no rule of
+  their own, differ only in whose copper they may touch, and the answer names that
+  net.
+- *What nets do to each other is a count.* A route claims the points of the grid, and
+  those halfway between, where a track's centre or a via's of another net would be too
+  close to it. A search pays for each claimed point it enters: by how many nets claim
+  it, times a price that rises every round, and by how often it was claimed by more
+  than one. After each round the wires that are in another net's way are routed
+  again, the others kept, until none is. What is still shared when the rounds end is
+  taken out and routed once more where nothing is claimed, and each net is then routed
+  again with vias four times as dear, kept if it has fewer and is little longer.
+- *The pads.* A route ends on a cell at a pad's centre, or beside it by a straight
+  track to the centre, or, for a pad of a row off the lines, by a way out along the pad
+  that turns onto a line. The negotiation chooses among them as it chooses paths.
+- *Pours.* When the rounds end, the pads that the routes cut off their fills are told
+  (`Pours::rejoin`), their nets are planned again with those pads as terminals, and the
+  rounds go on at the prices as they are, so that the nets round such a pad make room
+  for its stub: three times at most. With the host's spokes given, a pad is joined to
+  its fill by the spokes that nothing crosses and by nothing else, the spare ones
+  among them (`Zones::spare_spokes`); the ring of cells round a pad that stood for its
+  relief told a pad joined that the host's fill then left on its own.
+- *What it ends with is copper of the nets.* Each net's route is given to the passes as
+  the routes of an earlier run are: what the world does not allow of it beside the
+  others is left out, a net left in pieces is completed from them, and the passes,
+  the settling, the pours and cleanup go on as they do.
+- *A share, and a way back.* In a run with a deadline or a budget it has half of what
+  there is. The first round takes the nets in strides through their order, and once it
+  has routed 15 % of their length it says what the round costs: a board with no room
+  for three such rounds in its share is given up there and routed by the passes alone,
+  as before. A round that the share ends in is as it was before it, and the best round
+  is what is kept.
+- *Threads.* Nets whose regions are apart are routed side by side against the same
+  claims, on `RouteOptions::threads` threads, each with a world of its own to ask;
+  the batches are told by the nets alone, so the routes are the same on any number.
+
+It is off by default: without a budget the passes complete the curated boards as they
+are, and a host that routes under one sets it.
+
 **Two halves that the board keeps apart are found once.** A board in two parts that
 only the schematic joins has nets with pads on both, and no route for them: the search
 for each goes over all of one half to find that out, in every pass, every chain and

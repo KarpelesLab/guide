@@ -38,6 +38,9 @@ pub enum Phase {
     Lengths,
     /// The report of what is left open.
     Report,
+    /// Every net routed against every other at once, on one grid, before the first pass
+    /// ([`RouteOptions::whole`](super::RouteOptions::whole)).
+    Whole,
 }
 
 /// Where a run is, as [`RunControl::progress`] hears it.
@@ -325,6 +328,30 @@ impl<'a> Run<'a> {
             Some(why) => self.halt(why),
             None => self.stop.store(self.why.get().is_some(), Ordering::Relaxed),
         }
+    }
+
+    /// How long the part under way has left, if it has a time to end at.
+    pub(crate) fn part_left(&self) -> Option<Duration> {
+        self.part_until
+            .get()
+            .or(self.control.deadline)
+            .map(|t| t.saturating_duration_since(Instant::now()))
+    }
+
+    /// What ended a part early, if anything did.
+    pub(crate) fn cut(&self) -> Option<Stopped> {
+        self.cut.get()
+    }
+
+    /// Ends a part that leaves what it had not got to for the parts after it: the run is
+    /// stopped only if it was before, or if a part before this one was ended early, which
+    /// `was` says.
+    pub(crate) fn resume(&self, was: Option<Stopped>) {
+        self.paused.set(false);
+        self.part_until.set(None);
+        self.part_work.set(u64::MAX);
+        self.cut.set(was);
+        self.stop.store(self.why.get().is_some(), Ordering::Relaxed);
     }
 
     /// The flag that is set once the run has to stop, for what takes a flag of its own,

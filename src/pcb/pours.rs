@@ -59,6 +59,11 @@ struct Net {
     /// nothing routed, by position in the job's: joined by a neck that is narrower than
     /// a cell, they are never told to be cut off.
     exempt: Vec<usize>,
+    /// The spokes that the host's fill joins pads to it by: for each, the pad's box, the
+    /// layer by position in `layers`, and the cells along it, the last in the fill. A pad
+    /// with any on a layer is joined to its fill there by those that no route crosses,
+    /// and by nothing else.
+    spokes: Vec<(Rect, usize, Vec<usize>)>,
 }
 
 /// The planned fills of a design, as cells.
@@ -112,9 +117,11 @@ impl Pours {
             nets: Vec::new(),
         };
         let rules = &design.rules;
+        let zones = &design.zones;
         for (j, job) in jobs.iter().enumerate().filter(|(_, j)| j.plane) {
             let net = job.ctx.net;
             let mut layers: Vec<Layer> = Vec::new();
+            let mut spokes: Vec<(Rect, usize, Vec<usize>)> = Vec::new();
             for f in planned {
                 let Some(zone) = design
                     .zones
@@ -142,7 +149,47 @@ impl Pours {
                 // cells are too coarse to see.
                 let gap = zone.thermal_gap.max(0) + cell;
                 for p in job.ctx.pads.iter().filter(|p| own_pad(p)) {
-                    if p.layers.contains(f.layer) && f.shape.bbox().intersects(&p.bbox) {
+                    if !(p.layers.contains(f.layer) && f.shape.bbox().intersects(&p.bbox)) {
+                        continue;
+                    }
+                    // A host that fills its zones says where the spokes are: they are
+                    // then what joins the pad, each for as long as nothing crosses it.
+                    let mut any = spokes.iter().any(|(b, l, _)| *b == p.bbox && *l == at);
+                    for s in zones.spokes.iter().chain(&zones.spare_spokes) {
+                        let own =
+                            s.layer == f.layer
+                                && design.board.pads.get(s.pad).is_some_and(|q| {
+                                    q.net == Some(net) && q.shape.bbox() == p.bbox
+                                });
+                        if !own
+                            || spokes.iter().any(|(b, l, c)| {
+                                *b == p.bbox && *l == at && pours.cell_of(s.to) == c.last().copied()
+                            })
+                        {
+                            continue;
+                        }
+                        let (dx, dy) = (s.to.x - s.from.x, s.to.y - s.from.y);
+                        let steps = (dx.abs().max(dy.abs()) / (cell / 2).max(1)).max(1);
+                        let mut cells: Vec<usize> = Vec::new();
+                        for k in 0..=steps {
+                            let q =
+                                Point::new(s.from.x + dx * k / steps, s.from.y + dy * k / steps);
+                            if let Some(c) = pours.cell_of(q)
+                                && cells.last() != Some(&c)
+                            {
+                                cells.push(c);
+                            }
+                        }
+                        if cells.is_empty() {
+                            continue;
+                        }
+                        for &c in &cells {
+                            layers[at].fill[c] = true;
+                        }
+                        spokes.push((p.bbox, at, cells));
+                        any = true;
+                    }
+                    if !any {
                         pours.each_cell(&p.bbox.expand(gap), |k| layers[at].fill[k] = true);
                     }
                 }
@@ -153,6 +200,7 @@ impl Pours {
                     job: j,
                     layers,
                     exempt: Vec::new(),
+                    spokes,
                 });
             }
         }
@@ -396,6 +444,24 @@ impl Pours {
             let pad = &ctx.pads[p];
             for l in pad.layers.iter() {
                 let Some(at) = at_layer(l) else { continue };
+                // By its spokes, where the host gave them: those with every cell left.
+                let mut spoked = false;
+                for (_, _, cells) in net
+                    .spokes
+                    .iter()
+                    .filter(|(b, l, _)| *b == pad.bbox && *l == at)
+                {
+                    spoked = true;
+                    if let Some(&last) = cells.last()
+                        && cells.iter().all(|&c| open[at][c])
+                        && piece[at][last] != 0
+                    {
+                        union(&mut parent, pad_node(i), piece[at][last]);
+                    }
+                }
+                if spoked {
+                    continue;
+                }
                 self.each_cell(&pad.bbox.expand(self.cell), |k| {
                     if piece[at][k] != 0 {
                         union(&mut parent, pad_node(i), piece[at][k]);
@@ -752,6 +818,76 @@ mod tests {
         // On another layer it cuts nothing.
         copper[other].as_mut().unwrap().segs[0].l = 1;
         assert!(rejoin(&copper).is_none());
+    }
+
+    #[test]
+    fn a_pad_is_joined_by_the_spokes_that_its_host_gives_and_by_nothing_else() {
+        // The strip's pad at 3 mm, with the two spokes that a host's fill makes for it,
+        // to the left and to the right, and a spare one upwards.
+        let mut d = strip();
+        let spoke = |dx: i64, dy: i64| super::super::Spoke {
+            pad: 0,
+            layer: crate::geom::LayerId(0),
+            from: Point::new(3 * MM + dx * 300_000, 2 * MM + dy * 300_000),
+            to: Point::new(3 * MM + dx * 1_100_000, 2 * MM + dy * 1_100_000),
+            width: 300_000,
+        };
+        d.zones.spokes = vec![spoke(-1, 0), spoke(1, 0)];
+        let options = RouteOptions::default();
+        let fills = fill_zones(&d.board, &d).unwrap();
+        let mut grouped = d.clone();
+        grouped
+            .board
+            .zones
+            .extend(fills.iter().map(|f| f.to_zone(&d)));
+        let pieces = planes::pieces_by_net(&d, &fills);
+        let mut world = World::new(
+            &d.board,
+            &d.rules,
+            &d.outline,
+            d.edge_clearance,
+            &d.obstacles,
+        )
+        .unwrap();
+        world.configure(&d, &options);
+        let pitch = router::pitch(&d, &options);
+        let jobs = router::jobs(&grouped, &world, pitch, &pieces, &[]);
+        let ground = jobs.iter().position(|j| j.ctx.net == NetId(1)).unwrap();
+        let other = jobs.iter().position(|j| j.ctx.net == NetId(2)).unwrap();
+        let bounds = Rect::new(Point::new(-5 * MM, -5 * MM), Point::new(25 * MM, 12 * MM));
+        // Tracks of the other net across each spoke, close to the pad, and no further:
+        // the fill is whole beside them, above the pad and below it.
+        let across = |xs: &[i64]| {
+            let mut c = NetCopper::default();
+            for &x in xs {
+                c.segs.push(Seg {
+                    a: Point::new(x, 1_600_000),
+                    b: Point::new(x, 2_400_000),
+                    l: 0,
+                });
+            }
+            Some(c)
+        };
+        let cut = |d: &Design, xs: &[i64]| {
+            let pours = Pours::plan(d, &world, &fills, &jobs, bounds, pitch);
+            let mut copper: Vec<Option<NetCopper>> = vec![None; jobs.len()];
+            copper[other] = across(xs);
+            pours
+                .rejoin(&world, d, &jobs, &copper, ground, pitch)
+                .map(|r| r.cut)
+        };
+        // One spoke crossed leaves the other; both crossed, the pad is cut off, though
+        // the fill is beside it.
+        assert_eq!(cut(&d, &[3_800_000]), None);
+        assert_eq!(cut(&d, &[2_200_000, 3_800_000]), Some(1));
+        // With a spare spoke that nothing crosses, it is still joined.
+        let mut spare = d.clone();
+        spare.zones.spare_spokes = vec![spoke(0, 1)];
+        assert_eq!(cut(&spare, &[2_200_000, 3_800_000]), None);
+        // And a host that gives no spokes has the pad joined by the fill beside it.
+        let mut none = d.clone();
+        none.zones.spokes.clear();
+        assert_eq!(cut(&none, &[2_200_000, 3_800_000]), None);
     }
 
     #[test]

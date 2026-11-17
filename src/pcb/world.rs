@@ -81,6 +81,17 @@ pub(crate) enum Verdict {
     Blocked,
 }
 
+/// What the board's own copper says of a track or a via of a class of nets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Class {
+    /// Nothing is in any net's way.
+    Free,
+    /// Something is in every net's way.
+    Blocked,
+    /// Only this net's copper is there: it may pass, and no other.
+    Only(NetId),
+}
+
 /// The obstacles, by layer.
 pub(crate) struct World<'r> {
     rules: &'r Rules,
@@ -759,6 +770,161 @@ impl<'r> World<'r> {
             }
         }
         verdict
+    }
+
+    /// Whether `net` is judged by rules that are its own: a clearance to another net, a
+    /// keepout that excepts it, a net tie that it may touch. The others are judged as their
+    /// width, their clearance and their layers say, whichever net they are.
+    pub(crate) fn alone(&self, net: NetId) -> bool {
+        self.excepts.iter().any(|e| e.contains(&net))
+            || self.ties.iter().any(|t| t.contains(&net))
+            || self
+                .rules
+                .spec()
+                .pairs
+                .iter()
+                .any(|&(a, b, _)| a == net || b == net)
+    }
+
+    /// The layers that tracks of `net` may be on, as a mask.
+    pub(crate) fn layer_mask(&self, net: NetId) -> u64 {
+        *self
+            .track_layers
+            .get(net.index())
+            .unwrap_or(&self.run_layers)
+    }
+
+    /// The net whose plane a track on `layer` ending at `at` is in, as its index plus one,
+    /// or zero, and what a track of another net costs there over its length.
+    pub(crate) fn plane_toll(&self, layer: u8, at: Point) -> (u32, f64) {
+        let Some(p) = &self.planes else {
+            return (0, 0.0);
+        };
+        let Some(tile) = p.grid.tile_of(at) else {
+            return (0, 0.0);
+        };
+        let cells = p.grid.cols * p.grid.rows;
+        (
+            p.nets
+                .get(usize::from(layer) * cells + tile)
+                .copied()
+                .unwrap_or(0),
+            p.cost,
+        )
+    }
+
+    /// The net whose pad's spoke a track on `layer` ending at `at` is in the room of, as
+    /// [`plane_toll`](World::plane_toll) says of planes.
+    pub(crate) fn spoke_toll(&self, layer: u8, at: Point) -> (u32, f64) {
+        self.spokes.as_ref().map_or((0, 0.0), |s| s.toll(layer, at))
+    }
+
+    /// What the copper that is not a route's says of a track of any net that is judged as
+    /// `net` is, but for which net's copper it is: [`track_among`](World::track_among) for
+    /// all of them at once. Routes that are not locked are not looked at.
+    pub(crate) fn track_class(
+        &self,
+        net: NetId,
+        layer: LayerId,
+        shape: &Shape,
+        near: &[EntryId],
+    ) -> Class {
+        let l = usize::from(layer.0);
+        let Some(index) = self.layers.get(l) else {
+            return Class::Blocked;
+        };
+        if self.restricted && !self.on_layer(net, l) {
+            return Class::Blocked;
+        }
+        let within = shape.bbox().expand(self.reach);
+        let ours = self.clearance(Some(net), layer);
+        let mut only: Option<NetId> = None;
+        for &id in near {
+            let Some(other) = index.get(id) else { continue };
+            if !other.bbox().intersects(&within) {
+                continue;
+            }
+            let meta = self.meta[l][id.slot() as usize];
+            if let Owner::Routed(n) = meta.owner
+                && !self.locked(n)
+            {
+                continue;
+            }
+            // Whether it is in the way of every net, or of every net but its own.
+            let (hit, all) = match meta.kind {
+                Kind::Copper => (
+                    self.copper_hit(shape, other, (net, ours), meta, layer),
+                    false,
+                ),
+                Kind::Hole => (self.hole_hit(shape, other, None, meta.own), false),
+                Kind::Keepout { tracks, .. } => (tracks && shape.touches(other), true),
+                Kind::Edge => (self.edge_hit(shape, other), true),
+                Kind::Mask { margin } => (violates(shape, other, margin + MASK_GUARD), false),
+            };
+            if !hit {
+                continue;
+            }
+            match meta.net {
+                Some(n) if !all && only.is_none_or(|o| o == n) => only = Some(n),
+                _ => return Class::Blocked,
+            }
+        }
+        only.map_or(Class::Free, Class::Only)
+    }
+
+    /// [`track_class`](World::track_class) for a through via at `at`.
+    pub(crate) fn via_class(&self, net: NetId, at: Point, diameter: i64, drill: i64) -> Class {
+        let (Ok(copper), Ok(hole)) = (Shape::circle(at, diameter), Shape::circle(at, drill)) else {
+            return Class::Blocked;
+        };
+        let mut only: Option<NetId> = None;
+        let mut near = self.scratch.borrow_mut();
+        for (l, index) in self.layers.iter().enumerate() {
+            let layer = LayerId(l as u8);
+            let ours = self.clearance(Some(net), layer);
+            index.query(&copper.bbox().expand(self.reach), &mut near);
+            for &id in near.iter() {
+                let meta = self.meta[l][id.slot() as usize];
+                let Some(other) = index.get(id) else { continue };
+                if let Owner::Routed(n) = meta.owner
+                    && !self.locked(n)
+                {
+                    continue;
+                }
+                let (hit, all) = match meta.kind {
+                    Kind::Copper => {
+                        if !self.vias_in_pads && meta.smd && copper.touches(other) {
+                            (true, true)
+                        } else {
+                            (
+                                self.copper_hit(&copper, other, (net, ours), meta, layer)
+                                    || self.hole_hit(other, &hole, None, meta.own),
+                                false,
+                            )
+                        }
+                    }
+                    Kind::Hole if l == 0 => {
+                        if self.hole_to_hole(&hole, other) {
+                            (true, true)
+                        } else {
+                            (self.hole_hit(&copper, other, meta.own, None), false)
+                        }
+                    }
+                    Kind::Hole => (false, false),
+                    Kind::Keepout { vias, .. } => (vias && copper.touches(other), true),
+                    Kind::Edge => (self.edge_hit(&copper, other), true),
+                    Kind::Mask { margin } => (violates(&copper, other, margin + MASK_GUARD), false),
+                };
+                if !hit {
+                    continue;
+                }
+                match meta.net {
+                    Some(n) if !all && only.is_none_or(|o| o == n) => only = Some(n),
+                    _ => return Class::Blocked,
+                }
+            }
+        }
+        only.map_or(Class::Free, Class::Only)
     }
 
     /// Whether the segment from `a` to `b` touches the board's edge.

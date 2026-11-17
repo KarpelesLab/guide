@@ -155,6 +155,20 @@ pub struct Zones {
     /// a connection that differs by layer, a width fitted to the pad, directions of its
     /// own, and which pads are soldered and held to a number of spokes.
     pub spokes: Vec<Spoke>,
+    /// The spokes that the host's fill makes in place of those of
+    /// [`spokes`](Zones::spokes) that have no room: the other directions that it falls
+    /// back to. Their room is not kept, and a pad that the routes leave none of the first
+    /// is still joined to its fill by one of these that nothing crosses, which a run with
+    /// a [budget](super::RouteOptions::work_budget) counts on when it tells the pads that
+    /// routes cut off their fills.
+    pub spare_spokes: Vec<Spoke>,
+    /// How many spokes a pad that a thermal relief joins is to keep, on each layer, as
+    /// the host's rules have it. A pad whose [`spokes`](Zones::spokes) on a layer are no
+    /// more than that has none to spare, and the room of each costs other nets' tracks
+    /// eight times what the room of a spoke costs
+    /// ([`RouteOptions::spoke_cost`](super::RouteOptions::spoke_cost)). Zero, the
+    /// default, holds none harder than another.
+    pub min_spokes: u8,
 }
 
 /// One spoke of a thermal relief that the host's fill will make: a strip of copper from a

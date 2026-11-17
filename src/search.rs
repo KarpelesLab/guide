@@ -896,7 +896,7 @@ impl<S: RoutingSpace> Search<S> {
     where
         T: RoutingSpace<Node = S::Node>,
     {
-        let bound = min_lower_bound(space, net, node, targets);
+        let bound = space.lower_bound_to_targets(net, node, targets);
         if self.bound_weight == 1.0 {
             bound
         } else {
@@ -961,25 +961,6 @@ impl<S: RoutingSpace> Search<S> {
             cost,
         }
     }
-}
-
-/// Returns the search heuristic for `node`: the lowest bound over `targets`, each with the
-/// cost of finishing at that target.
-#[inline]
-fn min_lower_bound<T: RoutingSpace>(
-    space: &T,
-    net: NetId,
-    node: T::Node,
-    targets: &[Target<T::Node>],
-) -> Cost {
-    let mut lowest = Cost::MAX;
-    for target in targets {
-        lowest = lowest.min(space.lower_bound(net, node, target.node) + target.cost);
-        if lowest == Cost::ZERO {
-            break;
-        }
-    }
-    lowest
 }
 
 #[cfg(test)]

@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::cost::Cost;
 use crate::id::NetId;
+use crate::search::Target;
 
 pub mod graph;
 pub mod grid;
@@ -81,6 +82,29 @@ pub trait RoutingSpace {
     /// optimality guarantee. [`Cost::ZERO`] is always correct, and turns A\* into
     /// Dijkstra's algorithm.
     fn lower_bound(&self, net: NetId, from: Self::Node, to: Self::Node) -> Cost;
+
+    /// Returns the least, over `targets`, of [`lower_bound`](RoutingSpace::lower_bound) from
+    /// `from` to the target plus the target's cost, or [`Cost::MAX`] for no targets: the
+    /// heuristic of a search with those targets.
+    ///
+    /// The default asks for each bound in turn. A space can work it out faster, for many
+    /// targets, but must give exactly the same answer, as searches depend on it.
+    #[inline]
+    fn lower_bound_to_targets(
+        &self,
+        net: NetId,
+        from: Self::Node,
+        targets: &[Target<Self::Node>],
+    ) -> Cost {
+        let mut lowest = Cost::MAX;
+        for target in targets {
+            lowest = lowest.min(self.lower_bound(net, from, target.node) + target.cost);
+            if lowest == Cost::ZERO {
+                break;
+            }
+        }
+        lowest
+    }
 
     /// Appends the resources `net` consumes by stepping from `from` to `to` to `out`.
     ///

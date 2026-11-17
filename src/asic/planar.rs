@@ -5,6 +5,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::cost::Cost;
 use crate::id::{NetId, NodeId};
+use crate::search::Target;
 use crate::space::{DenseSlots, RoutingSpace, Step};
 
 use super::format::{Capacities, EdgeAt};
@@ -26,6 +27,8 @@ use super::format::{Capacities, EdgeAt};
 pub struct PlanarSpace {
     cols: usize,
     rows: usize,
+    /// 2^64 over the columns, rounded up, for [`row_of`](Self::row_of).
+    inverse: u64,
     /// By resource, how many nets the edge takes.
     capacity: Vec<u32>,
     /// What a turn costs on top of the step.
@@ -61,6 +64,7 @@ impl PlanarSpace {
         PlanarSpace {
             cols,
             rows,
+            inverse: (u64::MAX / cols.max(1) as u64).wrapping_add(1),
             capacity,
             bend: Cost::ZERO,
             boxes: Vec::new(),
@@ -93,7 +97,19 @@ impl PlanarSpace {
     /// The column and row of a cell.
     #[inline]
     pub fn cell_xy(&self, cell: usize) -> (usize, usize) {
-        (cell % self.cols, cell / self.cols)
+        let row = self.row_of(cell);
+        (cell - row * self.cols, row)
+    }
+
+    /// The row of a cell: its number over the columns, by a multiplication rather than a
+    /// division, which searches do for every step and every bound.
+    #[inline]
+    fn row_of(&self, cell: usize) -> usize {
+        match u32::try_from(cell) {
+            // Exact for every 32-bit numerator (Lemire, Kaser and Kurz, 2019).
+            Ok(n) if self.cols > 1 => ((u128::from(self.inverse) * u128::from(n)) >> 64) as usize,
+            _ => cell / self.cols.max(1),
+        }
     }
 
     /// The cell of a node.
@@ -112,9 +128,10 @@ impl PlanarSpace {
     /// The resource of the edge between two neighbouring cells, if they are neighbours.
     pub fn edge(&self, a: usize, b: usize) -> Option<usize> {
         let (lo, hi) = (a.min(b), a.max(b));
-        if hi == lo + 1 && hi % self.cols != 0 {
-            let (x, y) = (lo % self.cols, lo / self.cols);
-            Some(y * (self.cols - 1) + x)
+        let y = self.row_of(lo);
+        // Not the last of its row, which has no neighbour on the right.
+        if hi == lo + 1 && lo + 1 - y * self.cols < self.cols {
+            Some(lo - y)
         } else if hi == lo + self.cols {
             Some(self.horizontal_edges() + lo)
         } else {
@@ -147,6 +164,18 @@ impl PlanarSpace {
         Some([0, 1, 2, 3].map(|i| b[i].load(Ordering::Relaxed)))
     }
 
+    /// Puts the box of a net, if it has one, back to `to`, as the lowest and highest column
+    /// and row. Like [`grow_box`](Self::grow_box), this takes `&self`, and must not be called
+    /// while an engine searches.
+    pub(crate) fn reset_box(&self, net: NetId, to: [u32; 4]) {
+        let at = net.index() * 4;
+        if let Some(b) = self.boxes.get(at..at + 4) {
+            for (slot, v) in b.iter().zip(to) {
+                slot.store(v, Ordering::Relaxed);
+            }
+        }
+    }
+
     /// Grows the box of a net by `by` cells on every side, within the grid.
     ///
     /// This takes `&self` so that it can be called between iterations of an engine that
@@ -169,6 +198,24 @@ impl PlanarSpace {
         }
     }
 
+    /// The least a way from a cell, arrived at along a column or not, to another cell can
+    /// cost: a step for each edge between, and a turn if it takes one.
+    #[inline]
+    fn bound(
+        &self,
+        along_column: bool,
+        (ax, ay): (usize, usize),
+        (bx, by): (usize, usize),
+    ) -> Cost {
+        let (dx, dy) = (ax.abs_diff(bx), ay.abs_diff(by));
+        let distance = Cost::from((dx + dy) as u32);
+        if turns(along_column, dx, dy) {
+            distance + self.bend
+        } else {
+            distance
+        }
+    }
+
     /// Whether a cell is within a net's box.
     #[inline]
     fn allowed(&self, net: NetId, x: usize, y: usize) -> bool {
@@ -179,6 +226,14 @@ impl PlanarSpace {
             None => true,
         }
     }
+}
+
+/// Whether a way from a cell arrived at along a column, or not, to one `dx` columns and `dy`
+/// rows away must turn. Going both ways takes a turn, and so does going the other way from
+/// the one arrived along. The target can be arrived at either way.
+#[inline]
+fn turns(along_column: bool, dx: usize, dy: usize) -> bool {
+    (dx > 0 && dy > 0) || (dx > 0 && along_column) || (dy > 0 && !along_column)
 }
 
 impl RoutingSpace for PlanarSpace {
@@ -234,17 +289,55 @@ impl RoutingSpace for PlanarSpace {
     fn lower_bound(&self, _net: NetId, from: NodeId, to: NodeId) -> Cost {
         let along_column = from.index() % 2 == 1;
         let (ax, ay) = self.cell_xy(self.cell_of(from));
-        let (bx, by) = self.cell_xy(self.cell_of(to));
-        let (dx, dy) = (ax.abs_diff(bx), ay.abs_diff(by));
-        // Going both ways takes a turn, and so does going the other way from the one arrived
-        // along. The target can be arrived at either way.
-        let turns = (dx > 0 && dy > 0) || (dx > 0 && along_column) || (dy > 0 && !along_column);
-        let distance = Cost::from((dx + dy) as u32);
-        if turns {
-            distance + self.bend
-        } else {
-            distance
+        self.bound(along_column, (ax, ay), self.cell_xy(self.cell_of(to)))
+    }
+
+    /// The bound of [`lower_bound`](RoutingSpace::lower_bound) for each target in turn, with
+    /// the cell of `from` found once rather than for each, and the second node of a cell
+    /// skipped when it follows the first at the same cost, as a terminal's two do: the bound
+    /// does not depend on which way the target is arrived at.
+    fn lower_bound_to_targets(
+        &self,
+        _net: NetId,
+        from: NodeId,
+        targets: &[Target<NodeId>],
+    ) -> Cost {
+        let along_column = from.index() % 2 == 1;
+        let at = self.cell_xy(self.cell_of(from));
+        let mut lowest = Cost::MAX;
+        // Targets that cost nothing to finish at, as a terminal's access points do here, by
+        // the least distance with no turn and with one, in whole steps: the bound is one of
+        // the two, and the least of them is the least bound, as adding the bend keeps order.
+        let (mut straight, mut turning) = (usize::MAX, usize::MAX);
+        let mut previous = None;
+        for target in targets {
+            let cell = self.cell_of(target.node);
+            if previous == Some((cell, target.cost)) {
+                continue;
+            }
+            previous = Some((cell, target.cost));
+            let to = self.cell_xy(cell);
+            if target.cost == Cost::ZERO {
+                let (dx, dy) = (at.0.abs_diff(to.0), at.1.abs_diff(to.1));
+                if turns(along_column, dx, dy) {
+                    turning = turning.min(dx + dy);
+                } else {
+                    straight = straight.min(dx + dy);
+                    if straight == 0 {
+                        return Cost::ZERO;
+                    }
+                }
+            } else {
+                lowest = lowest.min(self.bound(along_column, at, to) + target.cost);
+            }
         }
+        if straight != usize::MAX {
+            lowest = lowest.min(Cost::from(straight as u32));
+        }
+        if turning != usize::MAX {
+            lowest = lowest.min(Cost::from(turning as u32) + self.bend);
+        }
+        lowest
     }
 
     fn resources(&self, _net: NetId, from: NodeId, to: NodeId, out: &mut Vec<NodeId>) {
@@ -255,5 +348,55 @@ impl RoutingSpace for PlanarSpace {
 
     fn capacity(&self, resource: NodeId) -> u32 {
         self.edge_capacity(resource.index())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::asic::read_design;
+
+    fn plane(cols: usize, rows: usize) -> PlanarSpace {
+        let text = format!(
+            "grid {cols} {rows} 2\nvertical capacity 0 2\nhorizontal capacity 2 0\n\
+             minimum width 1 1\nminimum spacing 1 1\nvia spacing 1 1\n0 0 10 10\nnum net 0\n"
+        );
+        let design = read_design(text.as_bytes()).unwrap();
+        PlanarSpace::new(&design.capacities(), |_, c| c / 2)
+    }
+
+    #[test]
+    fn cells_and_edges_are_numbered_as_by_division() {
+        for (cols, rows) in [(1, 5), (2, 3), (7, 4), (973, 3), (1024, 2)] {
+            let plane = plane(cols, rows);
+            let cells = cols * rows;
+            let by_division = |a: usize, b: usize| {
+                let (lo, hi) = (a.min(b), a.max(b));
+                if hi == lo + 1 && hi % cols != 0 {
+                    Some((lo / cols) * (cols - 1) + lo % cols)
+                } else if hi == lo + cols {
+                    Some(plane.horizontal_edges() + lo)
+                } else {
+                    None
+                }
+            };
+            for cell in 0..cells {
+                assert_eq!(plane.cell_xy(cell), (cell % cols, cell / cols));
+                for other in [cell + 1, cell + cols, cell + 2, cell + cols + 1] {
+                    assert_eq!(plane.edge(cell, other), by_division(cell, other));
+                    assert_eq!(plane.edge(other, cell), by_division(cell, other));
+                }
+            }
+        }
+        // Numbers beyond the grid still divide exactly, past 32 bits too.
+        let plane = plane(973, 3);
+        for cell in [
+            u32::MAX as usize,
+            u32::MAX as usize - 1,
+            1 << 31,
+            (1 << 32) + 5,
+        ] {
+            assert_eq!(plane.cell_xy(cell), (cell % 973, cell / 973));
+        }
     }
 }

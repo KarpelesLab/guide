@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.11](https://github.com/KarpelesLab/guide/compare/v0.0.10...v0.0.11) - 2026-11-17
+
+### Added
+
+- *(scripts)* route reticle's designs with guide and with reticle's router
+- *(engine)* aim each search of a tree at its nearest terminals
+
+### Fixed
+
+- *(pcb)* the chains of a run that settles are for connections, not for the pads cut off their fills
+
+### Other
+
+- *(benchmarks)* routing reticle's designs against reticle's router
+
 ## [0.0.10](https://github.com/KarpelesLab/guide/compare/v0.0.9...v0.0.10) - 2026-11-17
 
 ### Added

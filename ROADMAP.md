@@ -289,7 +289,11 @@ Each item is independently useful, and they can land in any order.
   fine pitch for the whole row, a straight stub out of either end of each pad and a via
   where one is needed and fits, so that no stub's via is in the way of the pad beside
   it, as routes of their nets that rip-up moves like any other
-  (`RouteOptions::row_fanout`, off by default, as it is no gain on every board)
+  (`RouteOptions::row_fanout`, off by default, as it is no gain on every board);
+  and two nets whose pads take turns along such a row with no room to cross on its
+  layer, as a USB receptacle's data lines with a part close in front, have the crossing
+  planned on another layer as fixed copper (`RouteOptions::crossings`,
+  [benchmarks](docs/benchmarks.md#pcb-routing-of-two-nets-that-cross-in-a-row))
   ([benchmarks](docs/benchmarks.md#pcb-routing-with-a-second-wait)). A pass of such a
   run ends where it has stopped gaining, and what the passes leave open is settled: a
   route for each open connection across other nets' routes, with the nets it crosses cut

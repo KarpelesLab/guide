@@ -90,7 +90,7 @@ fn length(way: usize, d: i64) -> i64 {
     if way < 2 { d } else { d * 7071 / 10_000 }
 }
 
-fn sides(way: usize) -> [(i64, i64); 2] {
+pub(super) fn sides(way: usize) -> [(i64, i64); 2] {
     match way {
         0 => [(0, 1), (0, -1)],
         1 => [(1, 0), (-1, 0)],
@@ -102,12 +102,12 @@ fn sides(way: usize) -> [(i64, i64); 2] {
 /// A row: its pads in order along it, the way it runs, the distance from a pad to the
 /// next, the layer, and how far a pad goes on from its centre across the row.
 #[derive(Clone, Debug)]
-struct Row {
-    pads: Vec<usize>,
-    way: usize,
-    pitch: i64,
-    layer: LayerId,
-    half: i64,
+pub(super) struct Row {
+    pub(super) pads: Vec<usize>,
+    pub(super) way: usize,
+    pub(super) pitch: i64,
+    pub(super) layer: LayerId,
+    pub(super) half: i64,
 }
 
 /// How far a shape goes on from `center` in the direction of `side`, to a micrometre.
@@ -136,7 +136,7 @@ fn extent(shape: &Shape, center: Point, (sx, sy): (i64, i64)) -> i64 {
 /// The rows of pads with no hole on one layer, of one size, in line at one pitch, along
 /// x, y or a diagonal, that are not part of an area array: its pads are in rows more than
 /// one way.
-fn rows(design: &Design, reach: i64) -> Vec<Row> {
+pub(super) fn rows(design: &Design, reach: i64) -> Vec<Row> {
     let stack = design.rules.layers();
     let pads = &design.board.pads;
     // Pad, centre, half sizes, layer.

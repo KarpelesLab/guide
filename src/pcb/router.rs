@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use super::cleanup;
 use super::control::{Phase, Run};
+use super::cross;
 use super::detail::{
     self, Corridor, Failure, History, NetCtx, NetRun, Params, RipUp, StepCache, TermPad,
 };
@@ -1233,10 +1234,44 @@ fn route_all<'a>(
         &with_fixed
     };
     // Escapes from fine-pitch footprints, which become fixed copper of their nets.
+    let mut crossings = 0;
     let escapes = {
         let mut world = world_of(design)?;
         // In a run with a budget, for the balls deep in an area array too.
-        escape::plan(design, &mut world, pitch, options.fanout_via, run.bounded())
+        let mut escapes =
+            escape::plan(design, &mut world, pitch, options.fanout_via, run.bounded());
+        // And in a run with a budget, the crossings of the rows of fine pitch, around the
+        // escapes: fixed copper of their nets as those are, as a route that rip-up may
+        // take out is gone before the nets beside it have settled.
+        if run.bounded() && options.crossings && !run.poll() {
+            let jobs = jobs(design, &world, pitch, &[], &[]);
+            let bottom = LayerId((rules.layer_count() - 1) as u8);
+            for s in cross::plan(design, &mut world, &jobs) {
+                let ctx = &jobs[s.job].ctx;
+                let net = Some(ctx.net);
+                escapes.push(escape::Escape {
+                    net: ctx.net,
+                    tracks: vec![Track {
+                        start: s.seg.a,
+                        end: s.seg.b,
+                        mid: None,
+                        width: ctx.widths[usize::from(s.seg.l)],
+                        layer: LayerId(s.seg.l),
+                        net,
+                    }],
+                    via: s.via.zip(ctx.via).map(|(at, (diameter, drill))| Via {
+                        at,
+                        drill,
+                        diameter,
+                        from: LayerId(0),
+                        to: bottom,
+                        net,
+                    }),
+                });
+                crossings += usize::from(s.via.is_some());
+            }
+        }
+        escapes
     };
     let with_escapes;
     let design = if escapes.is_empty() {
@@ -1387,6 +1422,7 @@ fn route_all<'a>(
         nets: jobs.len(),
         connections: jobs.iter().map(|j| j.ctx.terminals - 1).sum(),
         necked: necked_nets,
+        crossings,
         ..Stats::default()
     };
     let has_job = |net: NetId| jobs.iter().any(|j| j.ctx.net == net);

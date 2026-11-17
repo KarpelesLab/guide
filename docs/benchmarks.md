@@ -4682,6 +4682,139 @@ At 60 s through the adapter, four orders, the nine boards above (923 open with 0
 - The pads of a USB receptacle, a board of six layers whose first pass does not end in a
   minute, vias and track: as in the sections above.
 
+## PCB routing of two nets that cross in a row
+
+What was changed after [the release above](#pcb-routing-from-an-earlier-runs-routes),
+0.0.14, for the same host, cadlab: the crossing of two nets whose pads take turns along a
+row of fine pitch is planned before anything is routed, where it has no room on the row's
+layer (`RouteOptions::crossings`, on by default), and cleanup takes out the hops that
+its search for a whole net with dearer vias leaves. Measured on 2026-11-17 and 18, each
+run with one thread, five to twelve runs at a time, on a machine that other work shared.
+
+### What
+
+The four data pads of a USB receptacle are in the order D+ D− D+ D− at 0.5 mm, with the
+board's edge behind them. On their layer one of the two nets joins its pads by a track
+round the pad of the other between them, and that pad then needs a via at its end, which
+is in the way of the tracks out of the pads beside it unless both step aside. Where the
+track round has room, rip-up and the negotiations find that. On `nrfmicro` a diode's pad
+is 1.9 mm in front of the row: there is no room for a via and a track round it, the two
+nets have to cross under the board, and no run found that. Every connection that
+`nrfmicro` had open in every order, 2 to 5 of 85, was of that place: a pad of D+ between
+two of D− shut in, or the nets pushed out of it.
+
+`pcb::cross` looks at each row of fine pitch for a pad between two pads of another net
+with a pad of its own net two along. It plans a via straight out of that pad, at the
+least depth at which the via is legal and the two pads beside it have a way past it:
+straight on, a step aside at 45° by what the via needs, straight on to the via's depth.
+If a track of the other net then fits round the via from one way to the other, the
+crossing is left to the routing. If not, the net's other pad gets a via of its own, clear
+of the way between the two, and a track on the layer furthest from the row's joins the two
+vias; the pads further along that a way steps towards get a step aside of their own, each
+by less, until one has room straight on. All of it is fixed copper of its nets from then
+on, as the escapes of an array are (`Stats::crossings` counts the vias).
+
+Cleanup routes each net with vias again with vias ten times as dear, within a limit of
+nodes, and keeps the result if it has fewer. A net of two pads with a dozen vias is where
+that search reaches its limit and nothing changes. `fewer_hops` then takes each run of
+tracks between two vias that both go back to the layer the net came on, and looks for
+tracks on that layer between the two, within sixteen pitches of them and 20,000 nodes,
+with no via to place: found, and no longer than the run by more than a via's price in
+that search, they replace the run and its two vias.
+
+### Results
+
+Through cadlab's adapter as it was for 0.0.14, 60 s, four orders of the nets (no seed, 2,
+3, 4), connections open as cadlab counts them on the board filled again, 0.0.14 and this
+release measured one after the other:
+
+| Board | 0.0.14 | With this | Vias, first order |
+| --- | --- | --- | --- |
+| `nrfmicro` | 5, 2, 3, 3 | 1, 1, 1, 3 | 44 → 55 |
+| `sweep-v2.2` | 3, 3, 3, 3 | 3, 3, 3, 3 | 48 → 48 |
+| `corne-cherry` | 15, 27, 19, 26 | 15, 22, 19, 23 | 529 → 526 |
+| `tinytapeout-demo` | 9, 7, 1, 16 | 9, 7, 1, 16 | 605 → 593 |
+| `buspirate5-rev10` | 0, 2, 3, 0 | 0, 1, 1, 0 | 484 → 482 |
+| `lumenpnp-mobo` | 0, 1, 0, 0 | 0, 0, 0, 0 | 712 → 706 |
+| `cynthion` | 15, 15, 25, 17 | 14, 15, 25, 15 | 512 → 515 |
+| `glasgow-revC3` | 33, 31, 35, 34 | 33, 31, 35, 34 | 560 → 558 |
+| `glasgow-revD1` | 162, 136, 124, 124 | 162, 137, 124, 120 | 1085 → 1085 |
+| All twelve | 902 | 877 | |
+
+The three small boards have nothing open in either. `nrfmicro` is the board the plan is
+for: one crossing, two vias. `corne-cherry`'s two receptacles, `buspirate5-rev10`'s and
+`tinytapeout-demo`'s have room round the via and get no plan; what those boards differ by
+is the hops, and one run of a board that differs by as much from itself.
+
+At 40 million nodes, one run of guide, three orders, the same on any machine:
+
+| Board | 0.0.14 | With this |
+| --- | --- | --- |
+| `nrfmicro` | 5, 2, 3 | 1, 1, 1 |
+| `sweep-v2.2` | 5, 6, 5 | 5, 6, 5 |
+| `corne-cherry` | 38, 38, 32 | 39, 41, 32 |
+| `tinytapeout-demo` | 16, 19, 1 | 16, 19, 1 |
+| `buspirate5-rev10` | 0, 5, 7 | 0, 5, 7 |
+| `lumenpnp-mobo` | 0, 1, 0 | 0, 0, 0 |
+| `cynthion` | 14, 17, 25 | 14, 17, 25 |
+| `glasgow-revC3` | 32, 35, 37 | 32, 35, 37 |
+| `glasgow-revD1` | 170, 145, 139 | 170, 145, 139 |
+| The nine | 797 | 793 |
+
+Vias there: `lumenpnp-mobo` 712, 699 and 738 → 706, 682 and 719; `tinytapeout-demo` 604,
+646 and 488 → 600, 640 and 472. The hops are a few vias in a hundred. Of
+`lumenpnp-mobo`'s 712, 221 are of its ground and 71 of its 3.3 V, a stub through a via
+from each pad to the plane inside, where cadlab's own router has 25 and 52: its fill of
+the pours on the outer layers joins most of those pads without one. That is the host's to
+tell, as it is the host's fill: see what was not kept.
+
+The curated boards, routed with no budget, plan no crossing: 1150 of 1151 connections
+with 712 vias, as before, and 11 mm more track on `GB-LIVE32` (2284 for 2273).
+
+### What was tried and not kept
+
+- *Every crossing planned*, those with room round the via too, the via, the two ways
+  and the track round it as fixed copper: at 60 s over six orders `nrfmicro` 11 open for
+  20, `corne-cherry` 154 for 137, `tinytapeout-demo` 67 for 54, `buspirate5-rev10` 7 for
+  6. The copper is in the way of the pads beside it, the receptacle's CC pads on
+  `corne-cherry`, which had room when nothing was fixed.
+- *The crossing as routes of their nets*, which the nets go on from and rip-up may take
+  out, as the stubs of `row_fanout` are: `nrfmicro` 3, 3, 2 and 4 open for 5, 2, 3 and
+  3. The via is gone the first time a net crosses the place.
+- *The via and the two ways alone*, with no via for the net's other pad: 2, 3, 2 and 4.
+  That pad is then shut in between the way beside it and the pad of no net next to it.
+- *The parts of a board that its edge keeps apart told from a flood of its area*, for the
+  connections of `sweep-v2.2` that no route makes not to be searched for: its outline is
+  one, and its two halves are one area. What keeps them apart is not the edge. Not
+  released.
+- *The pours of outer layers planned on too*, where a net has a plane inside, so that a
+  pad on its net's pour needs no stub: at 40 million nodes over three orders
+  `lumenpnp-mobo` 576, 584 and 554 vias for 712, 699 and 738 with 3 open in each order
+  for 0, 1 and 0, `tinytapeout-demo` 153 open for 36, `buspirate5-rev10` 113 for 12,
+  `cynthion` 130 for 56, `glasgow-revD1` 837 for 454. Routes cut an outer pour, and the
+  pads counted as joined by it are then not.
+- *The negotiations for places made cheaper*, at 60 s over four orders through an adapter
+  that asks for them: as they are `corne-cherry` 89 open for 80 without and `cynthion`
+  74 for 70; with the price rising by 1.6 a round once six nets or fewer are in each
+  other's way, 15,000 nodes for the search of a net that is whole, 2.5 million nodes a
+  place and the two largest places alone, 94 and 78; with the faster price from ten
+  nets, 4 million nodes a place and two places, 89 and 71. What a place costs is not
+  what keeps it from gaining in a minute: its rounds take the time of the run that moves
+  routes after the fill, which makes more.
+- *The hops before the search for the whole net*: `GB-LIVE32` 195 vias for 189, the
+  curated boards 718 for 712. After it they are 712.
+
+### What this does not show
+
+- `corne-cherry` level with cadlab's own router: 15 to 23 open at 60 s for its 0 to 4.
+  The pads of its two QFNs of 0.4 mm are what is open, as before, and nothing here is
+  for them.
+- The connection that `nrfmicro` still has open in each order, of one of the two data
+  nets or a net beside them: the crossing is made, and the room behind the receptacle is
+  what is short. Its run ends after 20 s of 60.
+- Vias as few as a router that plans on the host's fill has them, a board of six layers
+  whose first pass does not end in a minute, `sweep-v2.2` at its deadline: not touched.
+
 ## PCB differential pairs and lengths
 
 Differential pairs routed side by side, and nets meandered to their lengths, by `pcb::route`

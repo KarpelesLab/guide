@@ -67,8 +67,10 @@
 //!    one lattice goes through both. A lattice that starts at a pad's centre has a line
 //!    in such a place by chance alone.
 //! 4. **Cleanup**: nets with vias are rerouted with dearer vias, kept only if they lose
-//!    vias; then each run of tracks between pads, vias and branches is pulled tight, by
-//!    replacing runs with straight or 45° shortcuts where those are legal.
+//!    vias; a run of tracks between two vias that both go back to one layer is replaced
+//!    by tracks on that layer where they fit near it; then each run of tracks between
+//!    pads, vias and branches is pulled tight, by replacing runs with straight or 45°
+//!    shortcuts where those are legal.
 //! 5. **Differential pairs**, [`Design::pairs`]: each pair's two routes are taken out, and
 //!    the pair is routed side by side in their place, at its gap, where it fits: a search
 //!    for its centreline, wide enough for both tracks, offset into the two tracks, with
@@ -172,7 +174,10 @@
 //! made at their best goes back to those. Once routing is over, the pads that routes cut
 //! off the fill that their net was planned on are joined to it again by stubs
 //! ([`RouteOptions::pour_cuts`]), and if asked, the ways out of rows of fine pitch are
-//! planned a row at a time before anything is routed ([`RouteOptions::row_fanout`]).
+//! planned a row at a time before anything is routed ([`RouteOptions::row_fanout`]). Two
+//! nets whose pads take turns along such a row, with no room to cross on its layer, have
+//! their crossing on another layer planned first, as fixed copper
+//! ([`RouteOptions::crossings`]).
 //!
 //! [`Routed::failed`] has the nets left open whose own search found no way: the others
 //! were tried and lost their routes to another net's, and a host that routes again on the
@@ -194,6 +199,7 @@
 
 mod cleanup;
 mod control;
+mod cross;
 mod detail;
 pub mod eco;
 mod escape;
@@ -689,6 +695,18 @@ pub struct RouteOptions {
     /// to eight million nodes, which a run of a minute does not have for each of them
     /// beside what else it does, and one of four minutes does.
     pub negotiate_places: bool,
+    /// Whether a run with a [budget](RouteOptions::work_budget) or a deadline plans the
+    /// crossings of rows of fine pitch before anything is routed. The default is `true`.
+    /// Where the pads of two nets take turns along such a row, as those of the two data
+    /// lines of a USB receptacle do, only one net can join its pads on their layer, round
+    /// a via out of the pad of the other between them. Where that track has no room, as
+    /// with another part's pad close in front of the row, the two nets cross on another
+    /// layer: the pad between gets its via, the pads beside it their ways past it, the
+    /// net's other pad a via of its own and a track on another layer to the first, all
+    /// as fixed copper of their nets, like the escapes of an array
+    /// ([`Stats::crossings`]). A crossing with room on the row's layer is left to the
+    /// routing, and a run with no budget plans none.
+    pub crossings: bool,
 }
 
 impl Default for RouteOptions {
@@ -724,6 +742,7 @@ impl Default for RouteOptions {
             settle: true,
             negotiate: true,
             negotiate_places: false,
+            crossings: true,
             seed: None,
         }
     }
@@ -780,6 +799,9 @@ pub struct Stats {
     /// Ways out planned for the pads of rows of fine pitch
     /// ([`RouteOptions::row_fanout`]), before routing.
     pub row_stubs: usize,
+    /// The vias planned for the crossings of rows of fine pitch
+    /// ([`RouteOptions::crossings`]), before routing.
+    pub crossings: usize,
     /// Pieces of fill with pads on them found cut off the fill that their net is planned
     /// on, each time the net was given a turn to join them to it again
     /// ([`RouteOptions::pour_cuts`]).

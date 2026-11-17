@@ -863,6 +863,20 @@ of pads needs, each moved over by one, and it does settle, in thirty to forty ro
 it is off by default because that many rounds of thirty nets are four to eight million
 nodes a place.
 
+**Two nets that cross in a row of fine pitch have the crossing planned, where it has to be
+on another layer** ([results](benchmarks.md#pcb-routing-of-two-nets-that-cross-in-a-row)).
+A search for one net at a time finds the track that joins two pads round the pad between
+them, and the price of crossing it never opens the place for that pad's via, which needs
+the tracks on both sides to step aside at once. With room for the track round the via,
+rip-up and the negotiations do find it, and copper fixed there cost three boards more
+than it made on one; with none, the nets cross under the board by two vias and a track,
+which nothing found. So `pcb::cross` plans only that case, and as fixed copper, like the
+escapes of an array: as routes that rip-up may take out, it was gone the first time a
+net crossed the place. Cleanup's search for a net with dearer vias ends at its limit of
+nodes on the nets with the most vias, so the hops it leaves, a run between two vias that
+both go back to one layer, are each looked for a way on that layer on their own
+(`cleanup::fewer_hops`), after it: before it, a board had more vias for it.
+
 **The layers that a net joins at a point are those of all its places there.** A track's
 end and a via at the same point are two places of a net, as a stub to a plane has them once
 it is fixed copper of a later run. Asked from the track's layer, the first of the two said

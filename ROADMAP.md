@@ -306,7 +306,12 @@ Each item is independently useful, and they can land in any order.
   what it reaches begins another tree from a terminal that it leaves out, so that the
   pads that nothing joins to a net's first, on a board in two parts that only its
   schematic joins, are joined among themselves
-  ([benchmarks](docs/benchmarks.md#pcb-routing-of-a-board-in-two-parts)). Not yet:
+  ([benchmarks](docs/benchmarks.md#pcb-routing-of-a-board-in-two-parts)). A run can go
+  on from the routes of an earlier one and move them, for a host that fills the zones
+  itself between two runs (`pcb::route_from`), and can negotiate first for each place
+  where several pads are open near each other, among all the nets there
+  (`RouteOptions::negotiate_places`, off by default: a place costs millions of nodes)
+  ([benchmarks](docs/benchmarks.md#pcb-routing-from-an-earlier-runs-routes)). Not yet:
   tracks routed at an area's width, or narrower only near pads, and several via sizes for
   a net beyond its escapes, which the search, with one width and one via for each net, has
   no place for; the balls of an array further in than the ring that its dog-bones' vias

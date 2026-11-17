@@ -4583,6 +4583,105 @@ At 60 s through the adapter, `tinytapeout-demo` over six orders of the nets, whi
 - Whether a net left in two trees should be joined across other nets' routes first: a
   net's later turns go on from its pieces as they do for a net that was cut.
 
+## PCB routing from an earlier run's routes
+
+What was changed after [the release above](#pcb-routing-of-a-board-in-two-parts), 0.0.13,
+for the same host, cadlab: a run that goes on from the routes of an earlier one and may
+move them (`pcb::route_from`), and a negotiation for each place where several pads are
+open near each other (`RouteOptions::negotiate_places`, off by default). Measured on
+2026-11-17, each run with one thread, four to six runs at a time, on a machine that other
+work shared with a load of 6 to 15 on its 64 threads.
+
+### What
+
+cadlab fills the zones itself. With a deadline its adapter gave a first run seven tenths
+of it, filled the board with that run's routes, and gave the nets left open to a second
+run on a board where those routes were copper that does not move: a pad that the fill no
+longer reached had a stub if there was room for one as the routes lay, and a pad that the
+first run left shut in stayed so.
+
+`route_from` takes the tracks and vias of an earlier run beside the design. They are the
+routes of their nets from the start: a net that they join whole has no turn until another
+net moves it, one that they leave in pieces is completed from them, with its turns as a
+net routed for the first time has them (nothing moved until every net has had one, across
+other nets' routes after), and what the run returns holds them as they are then. A track
+that is not as wide as its net is routed, an arc, a via of another size or a net with
+nothing to join stays as copper of the board, and `Routed::taken_back` says which nets
+were taken. The stubs of a net with a plane end where the fill was: each end that a piece
+of the fill still holds is a place of that piece's terminal, as the places looked for
+beside a pad are. A net that the run does not move is not cleaned up again: its routes
+are returned as they were given.
+
+The adapter now has up to three runs: the first, the second on the fixed board as
+before, and a third with `route_from` and every net left open, in what time the second
+leaves, kept if cadlab's count of what is open is less for it.
+
+### Results
+
+Through cadlab's adapter, 60 s, four orders of the nets (no seed, 2, 3 and 4), connections
+left open as cadlab counts them, 0.0.13 behind the adapter with two runs and this release's
+source behind the one with three:
+
+| Board | Open before | Open after |
+| --- | --- | --- |
+| `nrfmicro` | 5, 2, 3, 3 | 5, 2, 3, 3 |
+| `sweep-v2.2` | 3, 3, 3, 3 | 3, 3, 3, 3 |
+| `corne-cherry` | 33, 27, 21, 26 | 15, 27, 19, 26 |
+| `tinytapeout-demo` | 9, 7, 5, 16 | 9, 7, 1, 16 |
+| `buspirate5-rev10` | 0, 5, 4, 0 | 0, 1, 0, 0 |
+| `lumenpnp-mobo` | 0, 1, 0, 1 | 0, 1, 0, 0 |
+| `cynthion` | 14, 15, 23, 15 | 14, 15, 20, 15 |
+| `glasgow-revC3` | 33, 31, 35, 34 | 33, 31, 35, 34 |
+| `glasgow-revD1` | 162, 136, 124, 121 | 162, 136, 124, 124 |
+| All, four orders | 923 | 890 |
+
+No board has more open in an order but `glasgow-revD1` in one, by three, in its first run,
+which the two builds share: a third run is only kept if it leaves less open than the two
+before it. With a budget of 40 million nodes a run that its budget stops is the same to
+the track (`corne-cherry` 38, 38 and 32, `cynthion` 14, 17 and 25, as before), and one
+that ends within it goes on: `tinytapeout-demo` 16, 19 and 1 for 16, 19 and 5.
+
+The negotiations for places, with `corne-cherry`'s first run given 168 s of a budget of
+four minutes, which it does not use up: 9 and 11 connections open in two orders with them
+for 13 and 16 without, and 8 in a third run of the second order. In such a run a place
+of five to twelve pads has twenty to thirty-two nets, its negotiation costs three to
+eight million nodes, and four of five are kept, for 24 of the 55 connections and pieces
+of fill that the first pass leaves open.
+
+### What was tried and not kept
+
+At 60 s through the adapter, four orders, the nine boards above (923 open with 0.0.13).
+
+- *The second run itself from the first run's routes*, in place of a run on the fixed
+  board: `sweep-v2.2` 15 to 21 over the four orders for 12, as its second run then has
+  searches across routes for the three connections that no route makes, and is cut before
+  it has joined what a run on the fixed board joins; `lumenpnp-mobo` 5 for 2.
+- *Every net cleaned up again* at the end of such a run: `lumenpnp-mobo` 5 to 10 over
+  four orders for 1 without. A route pulled tight lies where the host's fill has copper, and
+  the fill after it is cut where it was whole.
+- *The routes of nets with a plane left as copper of the board*, only the others taken
+  back: `corne-cherry` 114 for 88 to 92 with them taken back, whose zones are tracks as
+  wide as a pad; 926 on the nine boards.
+- *The nets completed as nets that are mended are*, near where they were and across
+  other nets' routes at once: `sweep-v2.2` 21 for 16 with the turns of a first pass.
+- *The negotiations for places in a run of 60 s*: `corne-cherry` 71, 84 and 87 over four
+  orders in three builds for 87 without, `cynthion` 75 for 64, `sweep-v2.2` 14 for 12,
+  `nrfmicro` 10 for 13: three or four places take the nodes of the first run, and what
+  they make the negotiations for single connections made before.
+- *A place's nets kept to its window*, each joined up again within twelve pitches of it:
+  the nets with a pad open have their other pad far off, stay open through every round,
+  and no negotiation is kept. *As many nets as a negotiation for one connection may
+  have*, sixteen more than it begins with: ended in the second round, as nets routed
+  over the board run into others.
+
+### What this does not show
+
+- `corne-cherry` level with cadlab's own router, which has 0 to 4 open in 35 s: 15 to
+  27 at 60 s, 9 to 11 with four minutes and the places.
+- A negotiation for a place that a run of a minute can pay for.
+- The pads of a USB receptacle, a board of six layers whose first pass does not end in a
+  minute, vias and track: as in the sections above.
+
 ## PCB differential pairs and lengths
 
 Differential pairs routed side by side, and nets meandered to their lengths, by `pcb::route`

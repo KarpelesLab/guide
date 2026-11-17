@@ -678,6 +678,17 @@ pub struct RouteOptions {
     /// time. The routes are kept if a round ends with none in another's way and the board
     /// has more connections for them, and are undone to the track if not.
     pub negotiate: bool,
+    /// Whether a run that [negotiates](RouteOptions::negotiate) first has a negotiation
+    /// for each place where two pads or more that nothing is joined to are near each
+    /// other, after its first pass: the pads of a package of fine pitch that the routes
+    /// round them shut in. Every net of at most eight terminals with a pad or a route near
+    /// the place takes part, each loses all that it has there in every round that it is
+    /// in another's way in, and is routed again across the others at a price that rises by
+    /// a quarter a round, so that a fan of tracks beside the pads spreads before it sets;
+    /// kept or undone as any negotiation is. The default is `false`: a place costs four
+    /// to eight million nodes, which a run of a minute does not have for each of them
+    /// beside what else it does, and one of four minutes does.
+    pub negotiate_places: bool,
 }
 
 impl Default for RouteOptions {
@@ -712,6 +723,7 @@ impl Default for RouteOptions {
             pour_cuts: true,
             settle: true,
             negotiate: true,
+            negotiate_places: false,
             seed: None,
         }
     }
@@ -838,6 +850,11 @@ pub struct Routed {
     /// out and put back since, and a run on the board as it is returned may find a way
     /// for some of these too. Only after a run that ended on its own is the list final.
     pub failed: Vec<NetId>,
+    /// In [`route_from`], the nets whose routes of the earlier run were taken back, in
+    /// order: [`tracks`](Routed::tracks) and [`vias`](Routed::vias) hold what they have
+    /// now, in place of what was given for them. What was given for any other net is
+    /// not in the result, and stays on the board as the host has it.
+    pub taken_back: Vec<NetId>,
 }
 
 impl Routed {
@@ -1009,6 +1026,62 @@ pub fn route_with(
     control: &RunControl<'_>,
 ) -> Result<Routed, RouteError> {
     router::run(design, options, control)
+}
+
+/// The routes of an earlier run of a design, for [`route_from`] to go on from.
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
+pub struct Earlier {
+    /// Its tracks, each with its net.
+    pub tracks: Vec<Track>,
+    /// Its vias, each with its net.
+    pub vias: Vec<Via>,
+}
+
+impl Earlier {
+    /// These tracks and vias, as a run returned them in [`Routed::tracks`] and
+    /// [`Routed::vias`], or what a host kept of them.
+    pub fn new(tracks: Vec<Track>, vias: Vec<Via>) -> Earlier {
+        Earlier { tracks, vias }
+    }
+}
+
+/// Routes a design as [`route_with`] does, going on from the routes of an earlier run: the
+/// tracks and vias of `earlier` are routes of their nets from the start, which this run may
+/// move for another net as it moves its own, where the same copper among
+/// [`Board::tracks`](crate::geom::drc::Board) is fixed and can only be gone round.
+///
+/// A net that the routes given join whole is not routed again unless another net moves
+/// it, and one that they leave in pieces is completed from them. What the run returns
+/// holds the routes it took back as they are then, moved or not, so that it stands in
+/// place of them, not beside them. The design is the one that the earlier run had, or one
+/// changed since: what of the routes given is no longer legal on it is left out, and their
+/// nets are routed again there. With no routes it is [`route_with`].
+///
+/// This is for a host that fills the zones itself between two runs, or checks the first
+/// run's routes by its own rules: the second run has the new fill and what the host kept,
+/// and can still move a route for a pad that the fill no longer reaches. It is of use in
+/// a run with a deadline or a budget, where nets are moved aside and mended; a run with
+/// neither routes the nets left as [`route_with`] does.
+///
+/// Routes are taken back for a net that is routed ([`NetSpec::route`]) and has no zone,
+/// if its tracks are straight, each as wide as the net is routed on its layer, and its
+/// vias are of the net's size ([`NetSpec::via`]) through every layer, as a run returns
+/// them. The copper of any other net stays where it is, as copper of the board:
+/// a net with a zone has stubs to its fill, which go where the fill is, and a net with
+/// nothing to route has no route to move. [`Routed::taken_back`] lists the nets whose
+/// routes were taken back; what was given for the others is not in the result.
+///
+/// # Errors
+///
+/// As [`route`].
+pub fn route_from(
+    design: &Design,
+    earlier: &Earlier,
+    options: &RouteOptions,
+    control: &RunControl<'_>,
+) -> Result<Routed, RouteError> {
+    router::run_from(design, Some(earlier), options, control)
 }
 
 #[cfg(test)]

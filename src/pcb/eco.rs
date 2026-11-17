@@ -570,6 +570,7 @@ fn route_kept(
         via_kinds: vec![CopperKind::Kept; kept_vias.len()],
         tried: routed.tried,
         failed: routed.failed,
+        taken_back: Vec::new(),
     };
     all.tracks.extend(routed.tracks);
     all.vias.extend(routed.vias);

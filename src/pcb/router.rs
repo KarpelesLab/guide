@@ -1,7 +1,7 @@
 //! The whole run: nets from the design, escapes, global routing, detailed routing with
 //! rip-up, cleanup, pairs side by side, and meanders.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use super::cleanup;
 use super::control::{Phase, Run};
@@ -10,7 +10,7 @@ use super::detail::{
 };
 use super::escape;
 use super::gates::Gates;
-use super::geometry::NetCopper;
+use super::geometry::{NetCopper, Seg};
 use super::global::{self, GlobalSpace, Probe, TerminalPads};
 use super::neck;
 use super::pairs;
@@ -22,7 +22,9 @@ use super::settle::{Routes, Settle};
 use super::tune;
 use super::world::{Placed, Planes, Verdict, World};
 use super::zones::{self, Fill};
-use super::{CopperKind, Design, DiffPair, RouteError, RouteOptions, Routed, RunControl, Stats};
+use super::{
+    CopperKind, Design, DiffPair, Earlier, RouteError, RouteOptions, Routed, RunControl, Stats,
+};
 use crate::geom::drc::{Board, Track, Via};
 use crate::geom::{LayerId, LayerSet, Point, Rect, Shape, SpatialIndex};
 use crate::id::NetId;
@@ -35,6 +37,8 @@ pub(crate) struct Job {
     span: i64,
     /// Whether its first terminal is a plane of its, which its routes are stubs to.
     pub(crate) plane: bool,
+    /// The pieces of fill of that plane, by position among the net's.
+    fills: Vec<usize>,
 }
 
 /// What a penalty for crossing another net's route costs, in millimetres, and how much a
@@ -272,6 +276,7 @@ pub(crate) fn jobs(
         let mut groups = terminals(design, net);
         // The main fill's terminal goes first, empty if the fill reaches no pad.
         let mut plane: Option<Vec<&planes::Piece>> = None;
+        let mut plane_fills: Vec<usize> = Vec::new();
         if let Some((_, fills)) = planes.iter().find(|(n, _)| *n == net) {
             let pieces = planes::pieces(&design.board, design, net, fills);
             if let Some(m) = pieces.main(fills) {
@@ -286,6 +291,7 @@ pub(crate) fn jobs(
                     None => groups.insert(0, (Vec::new(), Vec::new())),
                 }
                 plane = Some(pieces.fills[m].iter().map(|&f| &fills[f]).collect());
+                plane_fills.clone_from(&pieces.fills[m]);
             }
         }
         if groups.len() < 2 {
@@ -394,6 +400,7 @@ pub(crate) fn jobs(
             corridor: None,
             span,
             plane: stubs,
+            fills: if stubs { plane_fills } else { Vec::new() },
         });
     }
     out
@@ -571,11 +578,21 @@ pub(crate) fn run(
     options: &RouteOptions,
     control: &RunControl<'_>,
 ) -> Result<Routed, RouteError> {
+    run_from(design, None, options, control)
+}
+
+/// As [`run`], going on from the routes of an earlier run if there are any.
+pub(crate) fn run_from(
+    design: &Design,
+    earlier: Option<&Earlier>,
+    options: &RouteOptions,
+    control: &RunControl<'_>,
+) -> Result<Routed, RouteError> {
     report::validate(design)?;
     let run = Run::new(control, options.work_budget);
     run.phase(Phase::Prepare);
     run.poll();
-    let (mut routed, mut failed, mut counted, narrow) = route_all(design, options, &run)?;
+    let (mut routed, mut failed, mut counted, narrow) = route_all(design, earlier, options, &run)?;
     if options.tune_lengths && !design.lengths.is_empty() && !run.poll() {
         run.phase(Phase::Lengths);
         tune::run(design, &mut routed, options).map_err(RouteError::Geometry)?;
@@ -1048,9 +1065,95 @@ type Outcome = (
     Vec<Option<i64>>,
 );
 
+/// By net, the tracks and vias of an earlier run that are taken back as its route, and the
+/// tracks and vias that stay as copper of the board.
+type TakenBack = (
+    BTreeMap<NetId, (Vec<Seg>, Vec<Point>)>,
+    (Vec<Track>, Vec<Via>),
+);
+
+/// The routes of an earlier run, by net: those that this run can have as routes of its
+/// own, and the others. A net's are taken back if the net is routed and has pads to join,
+/// its tracks are straight and as wide as the net is routed on their layers, and its vias
+/// are the net's, through every layer.
+fn taken_back(design: &Design, earlier: &Earlier) -> TakenBack {
+    let rules = &design.rules;
+    let layers = rules.layer_count();
+    let bottom = LayerId(layers.saturating_sub(1) as u8);
+    // By net, whether it is routed and has pads to join.
+    let mut routable: BTreeMap<NetId, bool> = BTreeMap::new();
+    for n in earlier
+        .tracks
+        .iter()
+        .map(|t| t.net)
+        .chain(earlier.vias.iter().map(|v| v.net))
+        .flatten()
+    {
+        routable.entry(n).or_insert_with(|| {
+            design.nets.get(n.index()).is_some_and(|s| s.route) && terminals(design, n).len() >= 2
+        });
+    }
+    let spec = |net: Option<NetId>| {
+        net.filter(|n| routable.get(n).copied().unwrap_or(false))
+            .and_then(|n| design.nets.get(n.index()).map(|s| (n, s)))
+    };
+    let track_fits = |t: &Track| {
+        spec(t.net).is_some_and(|(n, s)| {
+            t.mid.is_none()
+                && usize::from(t.layer.0) < layers
+                && rules.layers().contains(t.layer)
+                && t.width == s.track_width.max(rules.track_width(Some(n), t.layer))
+        })
+    };
+    let via_fits = |v: &Via| {
+        spec(v.net).is_some_and(|(_, s)| {
+            layers > 1
+                && v.from == LayerId(0)
+                && v.to == bottom
+                && s.via
+                    .is_some_and(|size| size.diameter == v.diameter && size.drill == v.drill)
+        })
+    };
+    // A net with one piece that does not fit keeps all of it where it is.
+    let mut fixed: BTreeSet<Option<NetId>> = BTreeSet::new();
+    fixed.extend(
+        earlier
+            .tracks
+            .iter()
+            .filter(|t| !track_fits(t))
+            .map(|t| t.net),
+    );
+    fixed.extend(earlier.vias.iter().filter(|v| !via_fits(v)).map(|v| v.net));
+    let mut routes: BTreeMap<NetId, (Vec<Seg>, Vec<Point>)> = BTreeMap::new();
+    let mut kept: (Vec<Track>, Vec<Via>) = Default::default();
+    for t in &earlier.tracks {
+        match t.net.filter(|_| !fixed.contains(&t.net)) {
+            Some(n) => routes.entry(n).or_default().0.push(Seg {
+                a: t.start,
+                b: t.end,
+                l: t.layer.0,
+            }),
+            None => kept.0.push(t.clone()),
+        }
+    }
+    for v in &earlier.vias {
+        match v.net.filter(|_| !fixed.contains(&v.net)) {
+            Some(n) => {
+                let vias = &mut routes.entry(n).or_default().1;
+                if !vias.contains(&v.at) {
+                    vias.push(v.at);
+                }
+            }
+            None => kept.1.push(v.clone()),
+        }
+    }
+    (routes, kept)
+}
+
 /// Routes everything but meanders.
 fn route_all<'a>(
     design: &'a Design,
+    earlier: Option<&Earlier>,
     options: &RouteOptions,
     run: &'a Run<'a>,
 ) -> Result<Outcome, RouteError> {
@@ -1105,6 +1208,21 @@ fn route_all<'a>(
     // The fill made to tell the planes is the one that nets are planned on, for as long
     // as nothing is added to the board.
     let unchanged = design;
+    // The routes of an earlier run are routes of their nets from the start, which this run
+    // may move, but those that can't be: they are copper of the board, as the host's own,
+    // and the fill made to tell the planes is not of that board.
+    let (mut taken_back, kept_fixed) =
+        earlier.map_or_else(Default::default, |e| taken_back(design, e));
+    let with_earlier;
+    let design = if kept_fixed.0.is_empty() && kept_fixed.1.is_empty() {
+        design
+    } else {
+        let mut d = design.clone();
+        d.board.tracks.extend(kept_fixed.0);
+        d.board.vias.extend(kept_fixed.1);
+        with_earlier = d;
+        &with_earlier
+    };
     let with_fixed;
     let design = if is_plane.iter().all(|&p| p) {
         design
@@ -1402,6 +1520,138 @@ fn route_all<'a>(
     let mut fresh = vec![false; jobs.len()];
     // In a run with a budget, the fills that nets are planned on are kept as cells, to
     // tell what the routes cut off them once routing is over.
+    // What an earlier run routed is where each net was left: a net that it joins whole has
+    // no turn until another moves it, and one in pieces is completed from them. What of it
+    // is not legal on the board as it is now, beside the nets taken back before it, goes.
+    let mut given: Vec<NetId> = Vec::new();
+    // By job, the routes it began with, in order, to tell at the end if they were moved.
+    let mut as_given: Vec<Option<(Vec<Seg>, Vec<Point>)>> = vec![None; jobs.len()];
+    for j in 0..jobs.len() {
+        let net = jobs[j].ctx.net;
+        let Some((segs, vias)) = taken_back.remove(&net) else {
+            continue;
+        };
+        given.push(net);
+        // The stubs of a net with a plane end where its fill was: a place that a piece of
+        // the fill still holds is one of the terminal that the piece is of, the plane's
+        // or a pad's that the piece reaches, as the places looked for beside the pads are.
+        if jobs[j].plane
+            && let Some((_, fills)) = plane_pieces.iter().find(|(n, _)| *n == net)
+        {
+            let pieces = planes::pieces(&terminal_design.board, terminal_design, net, fills);
+            let ctx = &jobs[j].ctx;
+            let mut of_fill: Vec<Option<usize>> = vec![None; fills.len()];
+            for &f in &jobs[j].fills {
+                of_fill[f] = Some(0);
+            }
+            for (pads, theirs) in pieces.pads.iter().zip(&pieces.fills) {
+                let terminal = pads.iter().find_map(|&p| {
+                    let bbox = terminal_design.board.pads[p].shape.bbox();
+                    ctx.pads.iter().find(|t| t.bbox == bbox).map(|t| t.terminal)
+                });
+                for &f in theirs {
+                    of_fill[f] = of_fill[f].or(terminal);
+                }
+            }
+            let held = |q: Point, on: Option<u8>| {
+                fills.iter().zip(&of_fill).find_map(|(f, &terminal)| {
+                    let terminal = terminal?;
+                    (on.is_none_or(|l| f.layer == LayerId(l))
+                        && f.bbox.intersects(&Rect::new(q, q))
+                        && f.holds(q))
+                    .then(|| TermPad {
+                        center: q,
+                        layers: LayerSet::EMPTY.with(f.layer),
+                        bbox: Rect::new(q, q),
+                        terminal,
+                    })
+                })
+            };
+            let same = |p: &TermPad, s: &TermPad| {
+                p.terminal == s.terminal && p.center == s.center && p.layers == s.layers
+            };
+            let mut sites: Vec<TermPad> = Vec::new();
+            let ends = segs
+                .iter()
+                .flat_map(|s| [(s.a, Some(s.l)), (s.b, Some(s.l))]);
+            for (q, on) in vias.iter().map(|&v| (v, None)).chain(ends) {
+                if let Some(site) = held(q, on)
+                    && !sites.iter().any(|p| same(p, &site))
+                    && !ctx.pads.iter().any(|p| same(p, &site))
+                {
+                    sites.push(site);
+                }
+            }
+            if !sites.is_empty() {
+                jobs[j].ctx = pours::with_sites(&jobs[j].ctx, &sites, pitch);
+            }
+        }
+        let ctx = &jobs[j].ctx;
+        let mut theirs = NetCopper::default();
+        theirs.segs = segs;
+        theirs.vias = vias;
+        theirs.merge(ctx);
+        let mut c = theirs.free_in(&world, ctx, pitch);
+        if ctx.terminals < BRANCH_TERMINALS {
+            c.drop_floating(ctx);
+        } else {
+            c.prune(ctx);
+        }
+        if c.is_empty() {
+            continue;
+        }
+        c.place(&mut world, ctx);
+        let pieces = c.pieces(ctx);
+        missing[j] = pieces.missing();
+        apart[j] = pieces.apart();
+        as_given[j] = Some({
+            let (mut segs, mut vias) = (c.segs.clone(), c.vias.clone());
+            segs.sort_unstable();
+            vias.sort_unstable();
+            (segs, vias)
+        });
+        if apart[j] > 0 {
+            completing[j] = Some(completion(design, ctx, &c, pitch));
+            // It has its turns as a net routed for the first time has them: with nothing
+            // moved until every net has had one, and across other nets' routes after.
+            fresh[j] = true;
+        }
+        copper[j] = Some(c);
+    }
+    // A net with nothing to route has no route to take back: what was given for it stays
+    // where it is, in the way of the others as copper of the board is.
+    for (net, (segs, vias)) in core::mem::take(&mut taken_back) {
+        let spec = &design.nets[net.index()];
+        let tracks: Vec<Track> = segs
+            .iter()
+            .map(|s| Track {
+                start: s.a,
+                end: s.b,
+                mid: None,
+                width: spec
+                    .track_width
+                    .max(rules.track_width(Some(net), LayerId(s.l))),
+                layer: LayerId(s.l),
+                net: Some(net),
+            })
+            .collect();
+        let bottom = LayerId((rules.layer_count() - 1) as u8);
+        let vias: Vec<Via> = spec
+            .via
+            .into_iter()
+            .flat_map(|size| {
+                vias.iter().map(move |&at| Via {
+                    at,
+                    drill: size.drill,
+                    diameter: size.diameter,
+                    from: LayerId(0),
+                    to: bottom,
+                    net: Some(net),
+                })
+            })
+            .collect();
+        let _ = pairs::Undo::place(&mut world, &tracks, &vias);
+    }
     let pours = (hurried && options.pour_cuts && !planned.is_empty() && !run.poll())
         .then(|| Pours::plan(design, &world, &planned, &jobs, bounds, pitch));
     if hurried && options.row_fanout && !run.poll() {
@@ -1417,6 +1667,10 @@ fn route_all<'a>(
         }
         for (j, c) in stubs.into_iter().enumerate() {
             let Some(mut c) = c else { continue };
+            // A net that has its routes of an earlier run goes on from those.
+            if copper[j].is_some() {
+                continue;
+            }
             let ctx = &jobs[j].ctx;
             c.place(&mut world, ctx);
             let pieces = c.pieces(ctx);
@@ -2089,6 +2343,7 @@ fn route_all<'a>(
                 chains: pass == FINE_PASSES || !options.fine_pass,
                 negotiate: options.negotiate,
                 negotiated: (0, 0, 0),
+                places: pass == 0 && options.negotiate_places,
                 spent: &mut spent,
             };
             let mut routes = Routes {
@@ -2261,7 +2516,20 @@ fn route_all<'a>(
     }
     if options.cleanup && !run.poll() {
         run.phase(Phase::Cleanup);
-        stats.expanded += cleanup::run(&mut world, &jobs, &mut copper, params, options);
+        // A net that this run has not moved is as the earlier run's cleanup left it.
+        let still: Vec<bool> = (0..jobs.len())
+            .map(|j| match (&as_given[j], &copper[j]) {
+                (Some((segs, vias)), Some(c)) => {
+                    let mut now = c.segs.clone();
+                    now.sort_unstable();
+                    let mut at = c.vias.clone();
+                    at.sort_unstable();
+                    *segs == now && *vias == at
+                }
+                _ => false,
+            })
+            .collect();
+        stats.expanded += cleanup::run(&mut world, &jobs, &mut copper, params, options, &still);
     }
     // Pairs side by side, in place of the routes they were given as two nets.
     let mut paired = (0, 0.0);
@@ -2391,6 +2659,10 @@ fn route_all<'a>(
             nets
         },
         failed: Vec::new(),
+        taken_back: {
+            given.sort_unstable();
+            given
+        },
     };
     let counted = counted.or(Some(first_fills).filter(|f| !f.is_empty()));
     Ok((routed, failed, counted, narrow))
@@ -3007,7 +3279,7 @@ mod tests {
             stubs: false,
             forest: false,
         };
-        cleanup::run(&mut world, &jobs, &mut copper, params, &options);
+        cleanup::run(&mut world, &jobs, &mut copper, params, &options, &[]);
         // The search for the first net's route with no vias spent the budget, and the
         // second net is straight all the same: it was pulled tight before.
         assert_eq!(run.stopped(), Some(Stopped::WorkBudget));

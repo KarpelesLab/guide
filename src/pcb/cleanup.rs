@@ -40,8 +40,11 @@ pub(crate) fn run(
     copper: &mut [Option<NetCopper>],
     params: Params,
     options: &RouteOptions,
+    still: &[bool],
 ) -> u64 {
     let mut expanded = 0;
+    // A net whose routes are as an earlier run left them was cleaned up by that run.
+    let still = |j: usize| still.get(j).copied().unwrap_or(false);
     // A run that has to stop leaves the nets not yet cleaned up as they are.
     let stopped = |world: &World<'_>| world.run().is_some_and(super::control::Run::poll);
     // In a run with a budget, the nets with the most vias first, as the time may not be
@@ -58,12 +61,14 @@ pub(crate) fn run(
     // if it was routed anew, where they used to have all of it on a board that a budget
     // cuts, and the tracks of every net were left as rip-up had them.
     if bounded {
-        for (job, slot) in jobs.iter().zip(copper.iter_mut()) {
+        for (j, (job, slot)) in jobs.iter().zip(copper.iter_mut()).enumerate() {
             let Some(c) = slot else { continue };
             if stopped(world) {
                 return expanded;
             }
-            tidy(world, &job.ctx, c);
+            if !still(j) {
+                tidy(world, &job.ctx, c);
+            }
         }
     }
     for j in order {
@@ -72,7 +77,7 @@ pub(crate) fn run(
         if stopped(world) {
             break;
         }
-        if !c.vias.is_empty() && !(bounded && job.plane) {
+        if !c.vias.is_empty() && !(bounded && job.plane) && !still(j) {
             let before = (c.vias.len(), c.segs.len());
             expanded += fewer_vias(world, job, c, params, options);
             if bounded && before != (c.vias.len(), c.segs.len()) {
@@ -83,12 +88,14 @@ pub(crate) fn run(
     if bounded {
         return expanded;
     }
-    for (job, slot) in jobs.iter().zip(copper.iter_mut()) {
+    for (j, (job, slot)) in jobs.iter().zip(copper.iter_mut()).enumerate() {
         let Some(c) = slot else { continue };
         if stopped(world) {
             break;
         }
-        tidy(world, &job.ctx, c);
+        if !still(j) {
+            tidy(world, &job.ctx, c);
+        }
     }
     expanded
 }

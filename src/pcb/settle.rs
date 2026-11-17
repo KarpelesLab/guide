@@ -27,9 +27,11 @@ use std::collections::{BTreeMap, VecDeque};
 use super::Design;
 use super::detail::{self, History, NetCtx, NetRun, Params, RipUp, StepCache};
 use super::geometry::NetCopper;
+use super::negotiate::{PLACE_TERMINALS, Scope};
 use super::pours::Pours;
 use super::router::{Job, completion};
 use super::world::World;
+use crate::geom::{Point, Rect};
 use crate::id::NetId;
 
 /// How many nets a chain moves at most, the one it is for included.
@@ -71,6 +73,23 @@ const PATIENCE: usize = 8;
 
 /// In what a job has [spent](Settle::spent): whether a negotiation for it was undone, and
 /// whether its chains were.
+/// How many pitches from another a pad with nothing joined to it is at most to be of
+/// its place, how many pitches round a place its nets lose what they have, and how many
+/// more they are joined up again within.
+const NEAR: i64 = 12;
+const PLACE_CUT: i64 = 16;
+const PLACE_REACH: i64 = 12;
+
+/// How many rounds a negotiation for a place has, what its price is multiplied by from
+/// one to the next, how many nets may come into it beside those it begins with, and how
+/// many nodes it may expand: a place has thirty nets, each routed again in every round
+/// that it is in another's way in, and the price has to rise slowly for a fan of tracks
+/// to spread before it sets.
+const PLACE_ROUNDS: usize = 48;
+const PLACE_GROWTH: f64 = 1.25;
+const PLACE_MEMBERS: usize = 200;
+const PLACE_NODES: u64 = 8_000_000;
+
 const TRIED: u8 = 1;
 const CHAINED: u8 = 2;
 
@@ -143,6 +162,9 @@ pub(crate) struct Settle<'a> {
     /// tried, those kept, and the connections those made.
     pub(crate) negotiate: bool,
     pub(crate) negotiated: (usize, usize, usize),
+    /// Whether the places with several pads open have a negotiation each, before any
+    /// connection has its own.
+    pub(crate) places: bool,
     /// By job, whether a negotiation for it was undone and whether its chains all were,
     /// in this settling or one before it: they are not tried again.
     pub(crate) spent: &'a mut [u8],
@@ -162,6 +184,11 @@ impl Settle<'_> {
         }
         // What is open: connections, and pieces of fill that are cut off.
         let mut score = self.score(world, jobs, routes);
+        // First of all, the places where several pads near each other are open have a
+        // negotiation among all the nets there.
+        if self.negotiate && self.places {
+            score = self.places(world, jobs, routes, score);
+        }
         // By job, the nets that a try for it could not join up again.
         let mut walls: Vec<Vec<NetId>> = vec![Vec::new(); jobs.len()];
         let mut idle = false;
@@ -284,6 +311,150 @@ impl Settle<'_> {
         for (&net, was) in self.fixed.iter().zip(fixed) {
             world.set_locked(net, was);
         }
+    }
+
+    /// The negotiations for places: the pads with nothing joined to them, of nets with
+    /// connections open, are taken in groups of those within [`NEAR`] pitches of another,
+    /// largest first, and each group of two or more has a negotiation among all the nets
+    /// with copper or a pad within [`PLACE_CUT`] pitches of it, which each lose what they
+    /// have there, round after round, and are joined up again across each other at a
+    /// price that rises slowly. Kept or undone as any negotiation is. Returns the score.
+    fn places(
+        &mut self,
+        world: &mut World<'_>,
+        jobs: &[Job],
+        routes: &mut Routes<'_>,
+        mut score: usize,
+    ) -> usize {
+        let near = NEAR * self.pitch;
+        let cut = PLACE_CUT * self.pitch;
+        let reach = PLACE_REACH * self.pitch;
+        let nets: Vec<&NetCtx> = jobs.iter().map(|j| &j.ctx).collect();
+        // The pads with nothing joined to them.
+        let mut lone: Vec<Point> = Vec::new();
+        let mut owner: Vec<usize> = Vec::new();
+        for (k, ctx) in nets.iter().enumerate() {
+            if routes.open(&nets, k) == 0
+                || self.fixed.contains(&ctx.net)
+                || ctx.terminals > PLACE_TERMINALS
+            {
+                continue;
+            }
+            let joined: Vec<bool> = match routes.copper[k].as_ref() {
+                None => vec![false; ctx.terminals],
+                Some(c) => {
+                    let pieces = c.pieces(ctx);
+                    (0..ctx.terminals)
+                        .map(|t| {
+                            pieces
+                                .segs
+                                .iter()
+                                .chain(&pieces.vias)
+                                .any(|&p| p == pieces.terminals[t])
+                        })
+                        .collect()
+                }
+            };
+            for p in &ctx.pads {
+                if !joined[p.terminal] && p.bbox.min() != p.bbox.max() && !lone.contains(&p.center)
+                {
+                    lone.push(p.center);
+                    owner.push(k);
+                }
+            }
+        }
+        // In groups, by single linkage.
+        let mut group: Vec<usize> = (0..lone.len()).collect();
+        for a in 0..lone.len() {
+            for b in 0..a {
+                let d = (lone[a].x - lone[b].x)
+                    .abs()
+                    .max((lone[a].y - lone[b].y).abs());
+                if d <= near && group[a] != group[b] {
+                    let (from, to) = (group[a], group[b]);
+                    for g in &mut group {
+                        if *g == from {
+                            *g = to;
+                        }
+                    }
+                }
+            }
+        }
+        // By group, its pads' box and the nets that they are of.
+        let mut boxes: BTreeMap<usize, (Rect, Vec<usize>)> = BTreeMap::new();
+        for (i, &g) in group.iter().enumerate() {
+            let r = Rect::new(lone[i], lone[i]);
+            let (b, of) = boxes.entry(g).or_insert((r, Vec::new()));
+            *b = b.union(&r);
+            of.push(owner[i]);
+        }
+        let mut places: Vec<(Rect, Vec<usize>)> =
+            boxes.into_values().filter(|p| p.1.len() >= 2).collect();
+        places.sort_by_key(|(r, of)| (core::cmp::Reverse(of.len()), r.min().x, r.min().y));
+        for (r, of) in places {
+            if world.run().is_some_and(|r| r.poll()) {
+                break;
+            }
+            // A place that an earlier one's negotiation left nothing open in has none.
+            if of.iter().all(|&k| routes.open(&nets, k) == 0) {
+                continue;
+            }
+            let window = r.expand(cut);
+            let inside = |p: Point| {
+                p.x >= window.min().x
+                    && p.x <= window.max().x
+                    && p.y >= window.min().y
+                    && p.y <= window.max().y
+            };
+            let first: Vec<usize> = (0..jobs.len())
+                .filter(|&k| !self.fixed.contains(&nets[k].net))
+                .filter(|&k| {
+                    nets[k].pads.iter().any(|p| inside(p.center))
+                        || routes.copper[k].as_ref().is_some_and(|c| {
+                            c.segs.iter().any(|s| {
+                                Rect::new(s.a, s.a)
+                                    .union(&Rect::new(s.b, s.b))
+                                    .intersects(&window)
+                            })
+                        })
+                })
+                // A net of many pads is not one to spread.
+                .filter(|&k| nets[k].terminals <= PLACE_TERMINALS)
+                .collect();
+            let scope = Scope {
+                cut: window,
+                bounds: window.expand(reach),
+                rounds: PLACE_ROUNDS,
+                growth: PLACE_GROWTH,
+                members: first.len() + PLACE_MEMBERS,
+                nodes: PLACE_NODES,
+            };
+            self.negotiated.0 += 1;
+            let chain = self.negotiate_for(world, &nets, routes, first, None, Some(scope));
+            let now = if chain.whole {
+                self.score(world, jobs, routes)
+            } else {
+                score
+            };
+            if chain.whole && now < score {
+                self.negotiated.1 += 1;
+                self.negotiated.2 += score - now;
+                score = now;
+                continue;
+            }
+            for b in chain.journal.into_iter().rev() {
+                if let Some(mut c) = routes.copper[b.job].take() {
+                    c.unplace(world);
+                }
+                routes.copper[b.job] = b.copper.map(|mut c| {
+                    c.place(world, nets[b.job]);
+                    c
+                });
+                routes.missing[b.job] = b.missing;
+                routes.apart[b.job] = b.apart;
+            }
+        }
+        score
     }
 
     /// What the routes leave open: the connections, and the pieces of fill with pads on
@@ -580,6 +751,10 @@ mod tests {
         d
     }
 
+    /// The tracks and vias of nets 1 and 2, the chains tried and kept, and the negotiations
+    /// tried, those kept and the connections they made.
+    type Settled = ([(usize, usize); 2], usize, usize, (usize, usize, usize));
+
     /// Settles the board with net 1 routed straight across and net 2 open. Returns the
     /// tracks and vias of each, and the chains tried and kept.
     fn settled(d: &Design) -> ([(usize, usize); 2], usize, usize) {
@@ -590,10 +765,12 @@ mod tests {
     /// As [`settled`], by a negotiation before the chains if `negotiate`: with the
     /// negotiations tried and kept and the connections they made.
     #[allow(clippy::type_complexity)]
-    fn settled_by(
-        d: &Design,
-        negotiate: bool,
-    ) -> ([(usize, usize); 2], usize, usize, (usize, usize, usize)) {
+    fn settled_by(d: &Design, negotiate: bool) -> Settled {
+        settled_at(d, negotiate, false)
+    }
+
+    /// As [`settled_by`], with a negotiation for each place first if `places`.
+    fn settled_at(d: &Design, negotiate: bool, places: bool) -> Settled {
         let options = RouteOptions::default();
         let mut world = World::new(
             &d.board,
@@ -662,6 +839,7 @@ mod tests {
             chains: true,
             negotiate,
             negotiated: (0, 0, 0),
+            places,
             spent: &mut spent,
         };
         let mut routes = Routes {
@@ -693,6 +871,24 @@ mod tests {
         let d = crossing();
         let ([one, two], tried, kept, negotiated) = settled_by(&d, true);
         assert_eq!(negotiated, (1, 1, 1));
+        assert_eq!((tried, kept), (0, 0));
+        assert_eq!(two.1, 0, "{two:?}");
+        assert!(two.0 >= 1, "{two:?}");
+        assert_eq!(one.1, 2, "{one:?}");
+    }
+
+    #[test]
+    fn a_place_with_two_pads_open_has_one_negotiation_among_its_nets() {
+        // Nets 2 and 3, a millimetre apart, both across net 1's track: their pads with
+        // nothing joined to them are one place, and one negotiation among the three nets
+        // makes both connections, with net 1 under them.
+        let mut d = crossing();
+        let two = d.nets[2];
+        d.nets.push(two);
+        d.board.pads.push(smd(6 * MM, 2 * MM, 3));
+        d.board.pads.push(smd(6 * MM, -2 * MM, 3));
+        let ([one, two], tried, kept, negotiated) = settled_at(&d, true, true);
+        assert_eq!(negotiated, (1, 1, 2));
         assert_eq!((tried, kept), (0, 0));
         assert_eq!(two.1, 0, "{two:?}");
         assert!(two.0 >= 1, "{two:?}");

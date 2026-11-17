@@ -60,6 +60,11 @@ const ALL_NODES: u64 = 3_000_000;
 const CUT: i64 = 12;
 const WINDOW: i64 = 24;
 
+/// How many terminals a net has at most to lose all that it has in the place that a
+/// negotiation is for, and how many rounds at the highest price a negotiation has.
+pub(super) const PLACE_TERMINALS: usize = 8;
+const AT_MOST: usize = 3;
+
 /// How many nodes a search may expand once the rounds are over, when nothing is shared
 /// any more.
 const LEGAL_NODES: u64 = 200_000;
@@ -125,6 +130,21 @@ fn overlaps(
     (nets, at)
 }
 
+/// Where the nets of a negotiation for a place are routed again: each loses all that it
+/// has in `cut` in every round that it has a turn in, and is joined up again within
+/// `bounds`.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Scope {
+    pub(super) cut: Rect,
+    pub(super) bounds: Rect,
+    /// How many rounds it has, what the price is multiplied by from one to the next, and
+    /// how many nets and nodes it may take.
+    pub(super) rounds: usize,
+    pub(super) growth: f64,
+    pub(super) members: usize,
+    pub(super) nodes: u64,
+}
+
 impl Settle<'_> {
     /// One negotiation for job `j`. Nothing is undone: what it changed is in the journal
     /// of what it returns, which is whole if it ended with no route in another's way and
@@ -136,17 +156,37 @@ impl Settle<'_> {
         routes: &mut Routes<'_>,
         j: usize,
     ) -> Chain {
+        self.negotiate_for(world, nets, routes, vec![j], Some(j), None)
+    }
+
+    /// A negotiation among the nets `first`, which all have a turn in its first round,
+    /// with `last` the net that keeps its own when the rounds end with routes shared, if
+    /// it is for one, and within `scope` if it is for a place.
+    pub(super) fn negotiate_for(
+        &mut self,
+        world: &mut World<'_>,
+        nets: &[&NetCtx],
+        routes: &mut Routes<'_>,
+        first: Vec<usize>,
+        last: Option<usize>,
+        scope: Option<Scope>,
+    ) -> Chain {
         let open_before = routes.open_all(nets);
         let mut journal: Vec<Before> = Vec::new();
         let mut fine = Fine::new(2 * self.pitch);
         let mut present = PRESENT;
+        let rounds = scope.map_or(ROUNDS, |s| s.rounds);
+        let growth = scope.map_or(GROWTH, |s| s.growth);
+        let most_members = scope.map_or(MEMBERS, |s| s.members);
+        let most_nodes = scope.map_or(ALL_NODES, |s| s.nodes);
         // The nets that take part, in the order they came in, and those with a turn in
         // this round.
-        let mut members: Vec<usize> = vec![j];
-        let mut turn: Vec<usize> = vec![j];
+        let mut members: Vec<usize> = first.clone();
+        let mut turn: Vec<usize> = first;
         let began = self.expanded;
         let mut settled = false;
-        'rounds: for round in 0..ROUNDS {
+        let mut at_most = 0;
+        'rounds: for round in 0..rounds {
             for &k in &turn {
                 if world.run().is_some_and(|r| r.poll()) {
                     break 'rounds;
@@ -165,7 +205,7 @@ impl Settle<'_> {
                     present,
                     fine: &fine,
                 };
-                self.renew(world, nets, routes, k, Some(share), &mut journal);
+                self.renew(world, nets, routes, k, (Some(share), scope), &mut journal);
             }
             // The routes in another's way, and whose.
             let mut hot: Vec<usize> = Vec::new();
@@ -210,7 +250,7 @@ impl Settle<'_> {
                 turn = open;
                 continue;
             }
-            if foreign || members.len() > MEMBERS || self.expanded - began > ALL_NODES {
+            if foreign || members.len() > most_members || self.expanded - began > most_nodes {
                 break;
             }
             hot.sort_unstable();
@@ -222,7 +262,14 @@ impl Settle<'_> {
                 }
             }
             turn = hot;
-            present = (present * GROWTH).min(MOST);
+            // What is still shared in a place at the highest price has no other way.
+            if scope.is_some() && present >= MOST {
+                at_most += 1;
+                if at_most >= AT_MOST {
+                    break;
+                }
+            }
+            present = (present * growth).min(MOST);
         }
         // Rounds that end with routes still in each other's way leave few of them: each
         // net gives up what it has in another's way, the net that the negotiation is for
@@ -230,9 +277,13 @@ impl Settle<'_> {
         // again with nothing shared, that net first.
         let stopped = world.run().is_some_and(|r| r.poll());
         if !settled && !stopped {
-            let mut order: Vec<usize> = members.iter().copied().filter(|&k| k != j).collect();
+            let mut order: Vec<usize> = members
+                .iter()
+                .copied()
+                .filter(|&k| Some(k) != last)
+                .collect();
             order.sort_unstable_by(|a, b| b.cmp(a));
-            order.push(j);
+            order.extend(last);
             for &k in &order {
                 let Some(c) = routes.copper[k].as_ref() else {
                     continue;
@@ -269,7 +320,7 @@ impl Settle<'_> {
                     break;
                 }
                 if routes.open(nets, k) > 0 {
-                    self.renew(world, nets, routes, k, None, &mut journal);
+                    self.renew(world, nets, routes, k, (None, None), &mut journal);
                 }
             }
             settled = members.iter().all(|&k| {
@@ -296,7 +347,7 @@ impl Settle<'_> {
         nets: &[&NetCtx],
         routes: &mut Routes<'_>,
         k: usize,
-        share: Option<Share<'_>>,
+        (share, scope): (Option<Share<'_>>, Option<Scope>),
         journal: &mut Vec<Before>,
     ) {
         let whole: &NetCtx = nets[k];
@@ -314,18 +365,33 @@ impl Settle<'_> {
                     .map(|&(p, _)| Rect::new(p, p))
                     .reduce(|a, b| a.union(&b))
             });
-        let near = hits.map(|r| {
+        // In a negotiation for a place, all that it has there goes too, if it is a net of
+        // few pads: one of many is routed a pad at a time, and comes back in pieces.
+        let place = scope.filter(|_| share.is_some() && whole.terminals <= PLACE_TERMINALS);
+        let clip = |r: Rect| {
             let b = self.params.bounds;
-            let r = r.expand(WINDOW * self.pitch);
             Rect::new(
                 Point::new(r.min().x.max(b.min().x), r.min().y.max(b.min().y)),
                 Point::new(r.max().x.min(b.max().x), r.max().y.min(b.max().y)),
             )
-        });
+        };
+        let near = match place {
+            // A net with connections open, or with nothing to go on from, has the board.
+            Some(s) => {
+                let out = routes.copper[k].is_none() || routes.open(nets, k) > 0;
+                let all = hits.map_or(s.bounds, |r| s.bounds.union(&r.expand(WINDOW * self.pitch)));
+                (!out).then(|| clip(all))
+            }
+            None => hits.map(|r| clip(r.expand(WINDOW * self.pitch))),
+        };
         let kept = routes.copper[k].take().and_then(|mut old| {
             old.unplace(world);
             // What it has near where it is in another's way goes, and what is in nobody's
             // way further off stays.
+            let old = match place {
+                Some(s) => old.outside(&s.cut, whole, self.pitch),
+                None => old,
+            };
             let mut kept = match hits {
                 Some(r) => old
                     .outside(&r.expand(CUT * self.pitch), whole, self.pitch)

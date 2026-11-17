@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use super::tests::{MM, design, outline, route_checked, smd};
 use super::{
-    Blocker, Cause, CopperKind, Design, DesignItem, Phase, Progress, RouteError, RouteOptions,
-    Routed, RunControl, Stopped, route, route_with, unconnected,
+    Blocker, Cause, CopperKind, Design, DesignItem, Earlier, Phase, Progress, RouteError,
+    RouteOptions, Routed, RunControl, Stopped, route, route_from, route_with, unconnected,
 };
 use crate::geom::drc::{self, Keepout, Pad, Track};
 use crate::geom::{LayerId, LayerSet, Point, Rect, Shape};
@@ -958,4 +958,96 @@ fn a_net_with_pads_that_nothing_joins_to_its_first_has_those_joined_among_themse
         .filter(|t| t.start.y.max(t.end.y) < 20 * MM)
         .count();
     assert!(below >= 1 && above >= 1, "{:?}", routed.tracks);
+}
+
+/// A strip with net 1 from end to end and net 2, which has no via, across it.
+fn strip() -> Design {
+    let pads = vec![
+        smd(0, 0, 1),
+        smd(10 * MM, 0, 1),
+        smd(5 * MM, 2 * MM, 2),
+        smd(5 * MM, -2 * MM, 2),
+    ];
+    let mut d = design(2, pads, 3);
+    d.nets[0].route = false;
+    d.nets[2].via = None;
+    d.outline = outline(Rect::new(
+        Point::new(-600_000, -2_600_000),
+        Point::new(10_600_000, 2_600_000),
+    ));
+    d.edge_clearance = 200_000;
+    d
+}
+
+/// Net 1's track straight across the strip, on the layer of the pads.
+fn across() -> Track {
+    Track {
+        start: Point::new(0, 0),
+        end: Point::new(10 * MM, 0),
+        mid: None,
+        width: 200_000,
+        layer: LayerId(0),
+        net: Some(NetId(1)),
+    }
+}
+
+#[test]
+fn the_routes_of_an_earlier_run_are_moved_where_the_same_copper_on_the_board_is_not() {
+    let options = RouteOptions {
+        work_budget: Some(50_000_000),
+        ..RouteOptions::default()
+    };
+    // As copper of the board, net 1's track is a wall that net 2 has no way through.
+    let mut fixed = strip();
+    fixed.board.tracks.push(across());
+    let routed = route(&fixed, &options).unwrap();
+    check(&fixed, &routed);
+    assert_eq!(routed.unrouted, [NetId(2)]);
+    // As a route of an earlier run it is net 1's to move: net 2 goes across on the layer
+    // of the pads, and net 1 under it. The result holds both nets' routes.
+    let d = strip();
+    let earlier = Earlier::new(vec![across()], Vec::new());
+    let routed = route_from(&d, &earlier, &options, &RunControl::default()).unwrap();
+    check(&d, &routed);
+    assert_eq!(routed.unrouted, []);
+    assert_eq!(routed.taken_back, [NetId(1)]);
+    assert_eq!(routed.vias.len(), 2, "{:?}", routed.vias);
+    assert!(routed.vias.iter().all(|v| v.net == Some(NetId(1))));
+    // With nothing in its way a route given is kept as it is, and counts as routed.
+    let mut alone = strip();
+    alone.nets[2].route = false;
+    alone.board.pads.truncate(2);
+    let routed = route_from(&alone, &earlier, &options, &RunControl::default()).unwrap();
+    check(&alone, &routed);
+    assert_eq!(routed.unrouted, []);
+    assert_eq!(routed.stats.expanded, 0);
+    assert_eq!(routed.tracks.len(), 1);
+    assert_eq!(
+        (routed.tracks[0].start, routed.tracks[0].end),
+        (Point::new(0, 0), Point::new(10 * MM, 0))
+    );
+}
+
+#[test]
+fn routes_that_can_not_be_a_net_s_own_stay_as_copper_of_the_board() {
+    // A track of another width than the net is routed at is not one of its routes: it is
+    // kept where it is, and joins the pads as copper of the board does.
+    let mut alone = strip();
+    alone.nets[2].route = false;
+    alone.board.pads.truncate(2);
+    let wide = Track {
+        width: 300_000,
+        ..across()
+    };
+    let earlier = Earlier::new(vec![wide], Vec::new());
+    let routed = route_from(
+        &alone,
+        &earlier,
+        &RouteOptions::default(),
+        &RunControl::default(),
+    )
+    .unwrap();
+    assert_eq!(routed.taken_back, []);
+    assert_eq!(routed.unrouted, []);
+    assert!(routed.tracks.is_empty(), "{:?}", routed.tracks);
 }

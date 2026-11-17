@@ -845,6 +845,24 @@ that does not do it is the first pass's with nothing moved, before a net's turn 
 other nets' routes: what that leaves is copper that waits, and it was in the way of nets
 that had room without it.
 
+**A run can begin with routes, and a place can have a negotiation of its own**
+([results](benchmarks.md#pcb-routing-from-an-earlier-runs-routes)). Copper on the board is
+fixed, and a host that fills the zones between two runs could only give the first run's
+routes to the second as that: `route_from` takes them as routes, so that the second run
+is the first gone on with, on the host's fill. The routes given become the copper of
+their nets before the first pass, as the stubs planned for a row are; the pass skips a
+net that is whole, and completes one in pieces with the turns of a first pass. Two things
+keep such a run from undoing what the host saw: a net that it does not move is returned
+as it was given, not pulled tight again, since the host's fill is cut round the routes as
+they lay; and the host keeps the earlier result unless its own count is better. A
+negotiation for a place is the negotiation for a connection with three things changed:
+it begins with every net of few pads near the place, each loses all it has there in each
+of its turns, not only what is near where it is in another's way, and the price rises by
+a quarter a round, not by six tenths. That is what a fan of a dozen tracks beside a row
+of pads needs, each moved over by one, and it does settle, in thirty to forty rounds;
+it is off by default because that many rounds of thirty nets are four to eight million
+nodes a place.
+
 **The layers that a net joins at a point are those of all its places there.** A track's
 end and a via at the same point are two places of a net, as a stub to a plane has them once
 it is fixed copper of a later run. Asked from the track's layer, the first of the two said

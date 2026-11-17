@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.12](https://github.com/KarpelesLab/guide/compare/v0.0.11...v0.0.12) - 2026-11-17
+
+### Added
+
+- *(pcb)* a run that settles negotiates for each open connection before its chains
+- *(asic)* a first try at mild crowding, and overflow priced at what it adds
+- *(scripts)* place reticle's designs with guide, route them with reticle
+- *(place)* shared resources, macro slots and a target density
+- *(scripts)* every MovingAI map, even scenarios, the tracker's best known, bounded runs
+- *(mapf)* negotiate over safe intervals, with a first solution by LaCAM
+- *(scripts)* route reticle's timing-driven designs by reticle's model exactly
+- *(engine)* reticle's guards on critical connections, and criticality against the latest path
+
+### Fixed
+
+- *(asic)* raise layer prices only where another layer of the edge has room
+- *(scripts)* exact tiles for guide's columns, clock regions, forbidden sites
+
+### Other
+
+- *(benchmarks)* ISPD third round, CPU time and newblue3
+- *(asic)* cheaper bounds and cell numbers on the plane
+- *(benchmarks)* placing reticle's designs, against reticle's placer
+- *(scripts)* tables for reticle placement runs
+- *(benchmarks)* every MovingAI map, even scenarios, and the tracker's best known
+- *(benchmarks)* reticle's timing-driven designs, routed by reticle's model
+
 ## [0.0.11](https://github.com/KarpelesLab/guide/compare/v0.0.10...v0.0.11) - 2026-11-17
 
 ### Added

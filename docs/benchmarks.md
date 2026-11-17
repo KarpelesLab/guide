@@ -551,6 +551,7 @@ done so far are below. There are no results for the others yet.
 | FPGA placement and routing in a loop, LUT rotation | The one-pass flow, checked by VPR 9.0.0 | VTR's MCNC circuits and Verilog suite | [Done](#fpga-placement-and-routing-in-a-loop) |
 | FPGA placement | nextpnr | VTR benchmarks, ISPD 2016/2017 contest sets | Not yet done |
 | FPGA routing | reticle's own router, both checked by reticle down to the decoded bitstream | reticle's designs on the XC7A35T, LFE5U-12F and GW2A-18 | [Done](#routing-reticles-designs) |
+| FPGA placement | reticle's own placer, both routed and checked by reticle down to the decoded bitstream | reticle's designs on the LFE5U-12F, XC7A35T and its synthetic iCE40 | [Done, but for the 7 series' carry chains](#placing-reticles-designs) |
 | PCB clearance checks | KiCad 10.0.3 | [Curated open-source KiCad boards](../testdata/kicad/README.md) | [Done](#pcb-clearance-checks-against-kicad) |
 | PCB DSN import, SES export | KiCad 10.0.3's reading of the same boards, and its session import | The same boards | [Done](#pcb-dsn-designs-against-kicad-boards) |
 | PCB routing | Freerouting 2.5.0, both checked by KiCad 10.0.3 | The same boards | [First results](#pcb-routing-against-freerouting) |
@@ -2467,6 +2468,245 @@ and their latest paths are a few connections long.
   `Routing` from routes, such as a `Routing::set(Route)`, and for its own `route` to be
   callable from the flow with another router in its place, so that a flow's post-routing steps
   (`apply_lut_moves`, the bitstream, its checks) are not copied out of its command line.
+
+## Placing reticle's designs
+
+reticle, an HDL compiler with its own placer and router for real FPGAs, is expected to adopt
+`guide`, so `guide` has to place reticle's own designs on reticle's own devices at least as well
+as reticle's placer does. This compares the two, both placements routed by reticle's router and
+held to the checks reticle's own flow makes.
+
+### How
+
+`scripts/reticle/place` is a standalone crate that runs reticle's flow (reticle at commit
+`1b20721c`, read and built, not changed) up to placement, places with either placer, and runs
+the rest of the flow on the result: reticle's router with the options its command line gives
+the family, the walk of every sink back to its driver, and, on the ECP5, everything
+`reticle fpga --bitstream` checks before it writes a bitstream: block RAMs that do not overlap,
+every clock pin reached over a global network, no bit an arc needs clear set by something else,
+and **every set bit decoding back through Project Trellis' database to exactly the arcs the
+router chose**. reticle's placer runs at the options `reticle fpga` gives it, its default
+schedule and effort. Wirelength is reticle's own measure, `place::hpwl`: half-perimeter in tiles
+over every signal, clocks included.
+
+`guide`'s placement problem is built from reticle's routing graph and netlist alone, through
+reticle's public API:
+
+- a site for every site of the graph, of its kind, at its tile, with the slices of a tile a
+  step apart, and columns and rows counted only where the commonest kind has sites, so that a
+  carry chain that runs slice to slice and on to the next tile, or up a column past a clock row,
+  is a rigid macro;
+- cells on package pins fixed there;
+- macros from dedicated wiring as reticle finds it: a sink pin that a short walk back through
+  the graph reaches from exactly one site of its driver's kind, with each member on its own
+  slot of its point (`PlacementProblem::add_macro_in_slots`);
+- reticle's site rules as shared resources (`place::Shared`): pins of two sites that are one
+  wire carry one signal; sites that exclude each other (a carry and its tables, a distributed
+  RAM and six tables) hold one cell; a pool of a tile's own control wires (two clocks and two
+  resets an ECP5 tile, a clock enable a slice) carries as many signals as it has wires, a bel's
+  output in it a source that carries only its own signal and a way through a lookup table shut
+  by a cell on it; an 18-bit block RAM leaves its neighbour empty; and a clock buffer driven by a
+  pad is kept off the buffer sites that pad cannot reach, found by a sweep of the graph.
+
+It places by analytic placement with a target density of a half
+(`AnalyticOptions::target_density`), then annealing from a temperature of half the spread of
+the first moves' cost changes, three times the default moves, with a cost of half-perimeter
+wirelength in tiles, clocks left out. The run is one thread, as reticle's is.
+
+Measured on 2026-11-17 with rustc 1.97.1, on an AMD Ryzen Threadripper PRO 9995WX shared with
+other work, every run under `nice -n 19` and at most four at a time, reticle at `1b20721c`.
+Each design was placed with seeds 1, 2 and 3 by each placer. Placement and routing times are of
+seed 1, whose runs of both placers were made at the same load; the counted columns (wirelength,
+pips) are means over the seeds whose runs passed, and are the same on any machine.
+
+### Results
+
+**ECP5** (`ecp5-12f-CABGA256`, LFE5U-12F, Project Trellis), every design of reticle's
+`testdata/fpga/ecp5` and `testdata/fpga/cynthion` that `reticle fpga --bitstream` builds
+for the part: passed is the runs whose route was walked back sink by sink and whose bitstream's
+every set bit decoded to exactly the router's arcs. Wirelength is reticle's, in tiles; guide's
+ratio to reticle's in brackets.
+
+| design | cells | passed, reticle | passed, guide | place s, reticle | guide | wirelength, reticle | guide | pips, reticle | guide | route s, reticle | guide |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| leds | 6 | 3/3 | 3/3 | 0.2 | 0.3 | 0 | 0 | 0 | 0 | 0.1 | 0.1 |
+| button_led | 8 | 3/3 | 3/3 | 0.2 | 0.3 | 46 | 46 (1.000) | 22 | 22 (1.000) | 0.1 | 0.1 |
+| block_ram_1bit | 28 | 3/3 | 3/3 | 0.5 | 0.5 | 576 | 572 (0.992) | 255 | 286 (1.122) | 0.3 | 0.3 |
+| carry_chain_16 | 60 | 3/3 | 3/3 | 0.6 | 0.5 | 436 | 467 (1.070) | 452 | 451 (0.998) | 0.7 | 0.6 |
+| block_ram_2048 | 57 | 3/3 | 3/3 | 0.5 | 0.5 | 1365 | 1386 (1.015) | 636 | 634 (0.997) | 0.8 | 1.0 |
+| fifo_sync_16 | 71 | 3/3 | 3/3 | 0.6 | 0.5 | 341 | 363 (1.067) | 747 | 728 (0.975) | 1.1 | 0.9 |
+| block_ram_18bit_pair | 96 | 3/3 | 3/3 | 0.5 | 0.5 | 859 | 805 (0.937) | 949 | 938 (0.988) | 1.6 | 1.4 |
+| wide_state | 10 | 0/3 | 0/3 | - | - | - | - | - | - | - | - |
+| clock_blink | 106 | 3/3 | 3/3 | 0.6 | 0.6 | 159 | 141 (0.889) | 1033 | 1019 (0.986) | 1.2 | 1.6 |
+| quiesce | 7 | 3/3 | 3/3 | 0.2 | 0.3 | 0 | 0 | 0 | 0 | 0.1 | 0.1 |
+| fifo_sync_64 | 124 | 3/3 | 3/3 | 0.8 | 0.6 | 512 | 621 (1.213) | 1750 | 1790 (1.023) | 1.8 | 1.2 |
+| bidir_bus | 155 | 3/3 | 3/3 | 0.7 | 0.6 | 482 | 457 (0.949) | 1560 | 1525 (0.978) | 2.0 | 1.8 |
+| target_ulpi_loopback | 118 | 3/3 | 3/3 | 0.6 | 0.6 | 294 | 284 (0.964) | 1182 | 1155 (0.978) | 1.2 | 1.3 |
+| lutram_reset_64 | 340 | 3/3 | 3/3 | 1.8 | 1.1 | 1385 | 1407 (1.016) | 6008 | 6001 (0.999) | 5.8 | 7.5 |
+| usb_ulpi_device | 1458 | 3/3 | 3/3 | 10.2 | 8.4 | 3482 | 2849 (0.818) | 18207 | 17631 (0.968) | 24.6 | 19.4 |
+| usb_bram | 2093 | 3/3 | 3/3 | 21.8 | 17.7 | 6510 | 5742 (0.882) | 27962 | 27081 (0.968) | 39.9 | 26.4 |
+| usb_cdc_uart | 2793 | 3/3 | 3/3 | 29.4 | 30.9 | 6802 | 5309 (0.781) | 34649 | 33066 (0.954) | 41.0 | 42.5 |
+| nanos_seph_usb | 4103 | 1/3 | 0/3 | - | - | - | - | - | - | - | - |
+| smartcard_serial | 3922 | 3/3 | 3/3 | 68.4 | 53.4 | 11403 | 10489 (0.920) | 62049 | 60457 (0.974) | 97.7 | 65.7 |
+| usb_hub_target | 3492 | 3/3 | 3/3 | 42.2 | 41.6 | 7984 | 7162 (0.897) | 41498 | 40043 (0.965) | 63.6 | 45.1 |
+| usb_inflate | 4405 | 3/3 | 3/3 | 72.3 | 66.5 | 14133 | 13103 (0.927) | 58996 | 56811 (0.963) | 85.8 | 69.3 |
+| usb_host_target | 4449 | 3/3 | 3/3 | 66.3 | 65.7 | 11312 | 9950 (0.880) | 55474 | 53826 (0.970) | 76.3 | 69.0 |
+| usb_proxy_target | 4551 | 3/3 | 3/3 | 66.0 | 71.5 | 11815 | 9708 (0.822) | 56258 | 53917 (0.958) | 76.0 | 63.3 |
+| usb_ulpi_trace | 3326 | 3/3 | 3/3 | 37.5 | 104.5 | 5493 | 3805 (0.693) | 35057 | 31835 (0.908) | 114.2 | 74.3 |
+| usb_crypto_console | 11499 | 3/3 | 3/3 | 66.1 | 721.3 | 75079 | 53091 (0.707) | 154657 | 149423 (0.966) | 201.2 | 201.0 |
+| usb_mjpeg | 7033 | 3/3 | 3/3 | 138.8 | 164.8 | 22096 | 18520 (0.838) | 89100 | 85539 (0.960) | 119.7 | 89.5 |
+
+Every placement of `guide`'s that reticle's router routed passed every check, as did reticle's.
+Over the 22 designs both placed and routed with any wire, `guide`'s placements are **8.6%
+shorter** by reticle's own measure, need **1.9% fewer pips**, route in **0.89 times** the time,
+and place in 1.14 times reticle's placer's time. On the 11 designs of more than a thousand cells that both pass
+`guide` needs fewer pips on every one, 2.6% to 9.2%, with wire 7% to 31% shorter. The small
+designs go both ways: `block_ram_1bit`, 28 cells, needs 12% more pips, `fifo_sync_64` 2.3%
+more and 21% more wire.
+
+Three rows have no comparison. `wide_state` fails reticle's check that every clock reaches its
+flip-flops on a global network, from either placer: a fault of the design or of reticle, not of
+either placement. `nanos_seph_usb` fails the bitstream check on two of reticle's three seeds and
+all three of `guide`'s, with one set bit that no feature of the database explains; it is
+reticle's (below), and with its two block RAM sites kept empty (`--forbid`), `guide`'s three
+seeds all pass, at 9,942 tiles of wire and 57,187 pips against reticle's passing seed's 10,872
+and 58,871, placed in 54 s against 65 and routed in 70 against 90.
+
+Where `guide` is slow is the largest designs: `usb_crypto_console`, 11,499 cells, takes 721 s
+against reticle's 66, and `usb_ulpi_trace` 105 against 38, because annealing at three times the
+default moves per temperature, from a warm start, runs 94 million moves on the first; reticle's
+placer stops when its anneal stops improving (`flat_steps`). With the default moves per temperature
+(`--inner-num 1`), one run each at a lighter load: `usb_crypto_console` places in 208 s to
+53,685 tiles and 150,163 pips, and `usb_ulpi_trace` in 30 s to 4,078 tiles and 32,656 pips,
+against 53,091 and 149,423, and 3,805 and 31,835, at three times the moves, and reticle's 75,079
+and 154,657, and 5,493 and 35,057. Most of the gain is had at a third of the moves; a budget
+that scales with the design, or a stop when the anneal stops improving, is left to do.
+
+**7 series** (`xc7a35t-cpg236`, the Basys 3's XC7A35T, Project X-Ray). Passed is the runs whose
+lookup tables, given the inputs the router reached them on, walked back sink by sink with no
+wire carrying two signals and every clock pin on the global network. Each domain's latest path
+is reticle's own routed estimate, by its fitted delay model at the part's grade.
+
+| design | cells | passed, reticle | passed, guide | place s, reticle | guide | wirelength, reticle | guide | pips, reticle | guide | route s, reticle | guide |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| blink | 87 | 3/3 | 3/3 | 0.9 | 1.8 | 251 | 260 (1.039) | 1721 | 2016 (1.171) | 0.6 | 0.7 |
+| bram_rom | 18 | 3/3 | 3/3 | 0.8 | 1.9 | 1176 | 1176 (1.000) | 2155 | 2155 (1.000) | 0.8 | 0.8 |
+| io_exercise | 195 | 3/3 | 3/3 | 1.5 | 3.0 | 2878 | 2850 (0.990) | 7241 | 7416 (1.024) | 1.1 | 1.1 |
+| lutram | 109 | 3/3 | 2/3 | 0.9 | 1.8 | 1215 | 1071 (0.881) | 3479 | 3538 (1.017) | 0.7 | 0.7 |
+| pll_blink | 166 | 3/3 | 2/3 | 1.0 | 2.0 | 544 | 582 (1.068) | 3519 | 4127 (1.173) | 0.7 | 0.7 |
+| pmod_bidir | 6 | 3/3 | 3/3 | 0.0 | 0.0 | 91 | 91 (1.000) | 212 | 212 (0.998) | 0.0 | 0.0 |
+| sw_led | 4 | 3/3 | 3/3 | 0.0 | 0.0 | 38 | 38 (1.000) | 89 | 88 (0.989) | 0.0 | 0.0 |
+| soc_basys3 | 2147 | 3/3 | 0/0 | - | - | - | - | - | - | - | - |
+
+| design | latest path, reticle, ns | `guide`, ns |
+|---|---:|---:|
+| blink (10 ns) | 3.10, 3.33, 3.48 | 4.11, 4.14, 4.24 |
+| io_exercise (10 ns) | 3.18, 3.32, 3.36 | 3.86, 4.04, 4.39 |
+| lutram (10 ns) | 3.33, 3.49, 3.54 | 3.73, 4.35 |
+| pll_blink (`sys`, 10 ns) | 3.24, 3.29, 3.33 | 3.93, 4.06 |
+
+On the designs it places, `guide`'s wire is as short as reticle's (0.995) and needs 5% more
+pips, and its latest paths are about 20% longer: it is not timing-driven here, and reticle's
+placer, though not timing-driven either by default, draws cells toward their connections with
+median moves and packs a flip-flop with the table that feeds it as Vivado does
+(`registered_outputs`), which the harness does not model. Two of `guide`'s 21 runs do not route
+(`lutram` seed 1, `pll_blink` seed 3): two carry sums from other slices both need one lane's
+bypass input. The designs with long carry chains (`blink_carry`,
+`carry_probe`, `carry_where`, `partsel`, `spi_console`, the `iso*` and `ssd1306` consoles, the
+`soc`, `apple2` and `nes` examples) place legally by `guide`'s model and do not route in reticle's
+100 passes, for the same reason; they are not in the table. reticle's own rule for it is a
+bipartite matching of each pin's signal to the wires of its lane that pin can reach (`fits`,
+`matchable`, private), where `guide`'s shared resources count distinct signals against the
+pool's wires, which is right for a pool every pin reaches whole and too lax for a lane whose
+pins reach different subsets. `selftest` fails to route from reticle's own placement too.
+
+**iCE40** (`ice40-hx1k-tq144`, reticle's synthetic architecture, through
+`fpga::place_and_route`'s steps, the bitstream generated as the check):
+
+| design | cells | passed, reticle | passed, guide | place s, reticle | guide | wirelength, reticle | guide | pips, reticle | guide | route s, reticle | guide |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| blinky_ice40 | 29 | 3/3 | 3/3 | 0.0 | 0.0 | 33 | 37 (1.122) | 150 | 161 (1.073) | 0.0 | 0.0 |
+| carry_ice40 | 51 | 3/3 | 3/3 | 0.0 | 0.0 | 90 | 95 (1.056) | 274 | 267 (0.974) | 0.0 | 0.0 |
+| ram_ice40 | 37 | 3/3 | 2/3 | 0.0 | 0.0 | 186 | 184 (0.989) | 382 | 352 (0.921) | 0.4 | 0.4 |
+| ddr_ice40 | 5 | 3/3 | 3/3 | 0.0 | 0.0 | 0 | 0 | 2 | 2 (1.167) | 0.0 | 0.0 |
+| logicram_ice40 | 415 | 3/3 | 3/3 | 0.0 | 0.7 | 1091 | 1016 (0.931) | 4624 | 4737 (1.024) | 0.6 | 0.6 |
+| pll_ice40 | 13 | 0/3 | 0/3 | - | - | - | - | - | - | - | - |
+
+The iCE40 designs are small; `ram_ice40` seed 1 does not route from `guide`'s placement (a
+block RAM's local input wire wanted by two signals), and `pll_ice40` has no PLL site on the
+part for either placer.
+
+### What it took
+
+Three additions to `place`, each additive, so that a problem without them places exactly as
+before:
+
+- **Shared resources** (`PlacementProblem::add_shared`, `Item::draw`, `place::Shared`): sites
+  that share something of which the items on them may use at most so many distinct values. That
+  one form says every rule of reticle's sites `guide` needed: two pins on one wire carry one
+  signal, a tile's two clock wires carry two clocks, a carry excludes its tables (the key
+  `OCCUPANCY`, under which each item draws itself), a capacity of 0 keeps items off sites, and
+  with `add_shared_with_sources`, a bel's output carries its own signal and no other. The
+  annealer judges each move by the resources its items' sites draw on, the legalizer seats the
+  kinds with fewest sites first and only where the resources allow, and `check` reports
+  `Violation::OverShared`. VPR's clusters and nextpnr's `isValidBelForCell` do the same work;
+  here it is data in the problem, checked independently.
+- **Macro slots** (`PlacementProblem::add_macro_in_slots`): a macro member on a given slot of
+  its point, as the four tables beside a 7-series `CARRY4`, each feeding its own input.
+- **A target density** (`AnalyticOptions::target_density`). Spreading cut every kind's sites
+  where its items parted, over the whole device; on an ECP5 used a few per cent, items the
+  solve had drawn to the pads at one edge were spread in a strip along it, as long as the die
+  (`usb_ulpi_device`: its lookup tables over 14 by 46 tiles). Each kind is now spread over the
+  sites of the smallest window around its items with twice as many sites as items: global
+  placement's wirelength went from 27,020 to 18,351 (in guide's units) and, after the same
+  annealing, reticle's wirelength from 4,453 to 2,989 tiles.
+
+The rest is the harness's: the problem built from reticle's graph, the flows of three families
+copied from reticle's command-line tool, which keeps them in the binary rather than the library,
+and a cost in reticle's tiles. Leaving global clock nets out of the problem, which reticle's
+router carries on the clock network, took `usb_ulpi_device`'s placement from 17 to 11 s with the
+same wirelength. Annealing from a temperature of half the spread of the first moves' cost
+changes, rather than the twentieth `AnnealOptions::detailed` starts at, took its wirelength from
+2,989 to 2,742 tiles, and from 4,453 to 3,014 before the target density: legalizing a sparse fabric's cells under its site rules leaves them far
+from where global placement put them, 6,109 tiles against reticle's final 3,504, and a cold
+start cannot undo that.
+
+### What reticle would need to expose
+
+Everything here goes through reticle's public API; reticle was not changed. What was missing:
+
+- **Its flows.** The steps from a database to a routed design for the ECP5 and the 7 series
+  (`write_ecp5_bitstream`, `write_xc7_bitstream`) are in the command-line binary, so the harness
+  copies some 600 lines of them, which will drift. A library function per family taking a
+  placement callback would let `guide` slot in.
+- **Its site rules.** `SiteRules`, the legality every move of reticle's placer is judged by, is
+  private, as is the audit that checks a placement against it; `guide` rebuilds them from the
+  graph. The 7-series lane outputs are where the copy falls short (below). A public
+  `SiteRules::find_with` with `refusal(placement, instance, site)` and `audit`, or a
+  `legal(placement) -> Vec<String>`, would make every rule exact and checkable;
+  `shared_exits` and `route_throughs_needed` are public already and are used.
+- **The relations of dedicated wiring** (`build_clusters`, `find_relation`), which the harness
+  re-derives with the same walk.
+
+And one fault found on the way, reticle's own: `nanos_seph_usb`'s one block RAM placed at
+`X60Y25/EBR0` or `X62Y25/EBR1`, by `guide` or by reticle's placer told to put it there, leaves a
+set bit no feature of Project Trellis' database explains (`F73B0` of `MIB_EBR0` at column 60,
+`F99B0` of `MIB_EBR2` at column 62), and reticle's flow refuses to write it; its own placer
+happens to choose other sites. Those two sites are kept empty for the row of `nanos_seph_usb`
+marked so, with the harness's `--forbid`.
+
+### What this does not show
+
+- **Timing-driven placement.** Neither placer was timing-driven here; reticle's
+  `--timing-driven` placement and `guide`'s timing cost against reticle's delay model were not
+  compared.
+- **Gowin and UltraScale+.** reticle's GW2A-18 and XCZU7EV flows need Project Apicula's and
+  Project U-Ray's databases, which are not on this machine; the UltraScale+ flow also places
+  inside one library function (`uray::zcu104::implement`) with no way in.
+- **The 7-series designs with long carry chains**, which do not yet route from `guide`'s
+  placements, nor anything bigger than the Basys 3's part.
+- **Bitstreams on a board.** The ECP5 checks are those reticle makes before it writes a
+  bitstream, every set bit decoding included; no bitstream from these placements was loaded.
 
 ## PCB clearance checks against KiCad
 

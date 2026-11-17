@@ -397,7 +397,8 @@ FPGA hookup, building a problem from a VTR netlist and architecture, came with M
   delta-delay table searched on the graph; analytic global placement, then annealing that
   starts cold; a congestion term, the expected use of each channel against the graph's tracks
   each temperature, and `place::Inflation` for analytic placement; and `fpga::write_placement`
-  for VPR. VTR's architectures have no clock regions, so nothing models them yet.
+  for VPR. VTR's architectures have no clock regions; real devices' are said with
+  `place::Shared` (below).
 - **PCB:** fixed connectors and mounting holes, courtyards, both board sides, 90°
   or free rotation, decoupling capacitors kept near their pins, thermal grouping. Done but for
   free rotation, in `pcb::place::place_components`, with `kicad::placement_design` and
@@ -424,6 +425,23 @@ channel width from 0.987 and 1.001 of VPR's to 0.981 and 0.977, 1.5% on every on
 seeds, with as much wire and delay. The large Verilog circuits are now within the spread of
 VPR's own seeds, but blob_merge and mkSMAdapter4B still need 7% and 16% wider channels than
 VPR's placement, where timing costs wire.
+
+On reticle's designs and devices ([results](docs/benchmarks.md#placing-reticles-designs)), placed
+by `guide` from reticle's own routing graph and netlist and routed by reticle's router, every
+placement that routed passed every check reticle's flow makes, down to every set bit of an
+ECP5 bitstream decoding to exactly the router's arcs. On the LFE5U-12F, over 22 designs, three
+seeds each, `guide`'s placements are 8.6% shorter by reticle's measure and need 1.9% fewer
+pips, fewer on every design of more than a thousand cells, routed in 0.89 times the time and
+placed in 1.14 times, though 11 times on the largest. That took three additions to `place`:
+shared resources (`PlacementProblem::add_shared`), which say a real fabric's site rules (shared
+control wires, exclusive sites, wire pools whose bel outputs carry only their own signal, clock
+regions' lines); macro members on given slots (`add_macro_in_slots`); and a target density for
+spreading on a sparsely used device (`AnalyticOptions::target_density`). On the XC7A35T `guide`
+places and routes the designs without long carry chains, as short as reticle's but with paths
+about 20% longer, untimed; those with them do not route yet, since a 7-series lane's outputs
+need reticle's matching of each pin to the wires it reaches, which `Shared`'s count of distinct
+signals only approximates. Left for later: that, timing-driven placement against reticle's
+delay model, a move budget that scales with the design, and Gowin and UltraScale+.
 
 The PCB half is met ([results](docs/benchmarks.md#pcb-placement-of-the-curated-boards)): on all
 eleven curated boards, with the placement of every movable footprint discarded, `guide` places

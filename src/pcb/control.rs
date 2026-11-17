@@ -25,6 +25,9 @@ pub enum Phase {
     Detail,
     /// The passes on the finer lattice, for what the first left.
     Fine,
+    /// What the passes left open, a connection at a time, with the nets in its way moved
+    /// and joined up again, kept if the board has more connections for it.
+    Settle,
     /// Cleanup: fewer vias, tracks pulled tight.
     Cleanup,
     /// Differential pairs put side by side in place of their nets' routes.

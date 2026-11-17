@@ -18,6 +18,7 @@ use super::planes;
 use super::pours::{self, Pours};
 use super::report::{self, Known};
 use super::rows;
+use super::settle::{Routes, Settle};
 use super::tune;
 use super::world::{Placed, Planes, Verdict, World};
 use super::zones::{self, Fill};
@@ -58,7 +59,7 @@ const FINE_RIP_BUDGET: u64 = 4;
 /// room for. In the first pass every net is taken out whole: that is cheap there, and has
 /// the nets that crossed it routed before it comes back. At 8 terminals, a board of two
 /// layers lost its ground net of 24 pads, taken out more often and then with no way back.
-const BRANCH_TERMINALS: usize = 32;
+pub(super) const BRANCH_TERMINALS: usize = 32;
 
 /// How many times in a pass a net may lose branches only, before it is taken out whole.
 const BRANCH_CUTS: u32 = 8;
@@ -85,6 +86,10 @@ const FINE: i64 = 2;
 /// How many passes on the finer lattice there are at most, each for the nets the one
 /// before left, with every net free to be ripped up again.
 const FINE_PASSES: usize = 2;
+
+/// How many nodes a pass of a run that [settles](super::settle) goes on for at least with
+/// no more connections made than it had at its best.
+const STALL_NODES: u64 = 2_000_000;
 
 /// How many pitches from a pad routes may move onto its lattice.
 pub(crate) const LATTICE_REACH: i64 = 8;
@@ -1432,6 +1437,11 @@ fn route_all<'a>(
         1.0
     };
     run.part(shares.routing.0, shares.routing.1 * pour_work);
+    // In a run with a budget, a pass that has stopped gaining ends, and what the passes
+    // leave open is settled in the time and the work that this leaves of routing's.
+    let settles = hurried && options.rip_ups > 0 && options.settle;
+    // The settings of the last pass that began.
+    let mut last_params = params;
     'passes: for pass in 0..=FINE_PASSES {
         if run.poll() {
             break;
@@ -1475,10 +1485,40 @@ fn route_all<'a>(
                 ..params
             }
         };
+        last_params = params;
+        // The most connections that the routes made in this pass, and the nodes that the
+        // run had expanded when the pass began and when they first made as many.
+        let pass_from = stats.expanded;
+        let mut peak = (made_by(&jobs, &copper, &apart), pass_from);
+        // And how many nets have had a turn since.
+        let mut turns = 0usize;
         while let Some(j) = queue.pop_front() {
             tell(&jobs, &copper, &missing, &apart, queue.len() + 1);
             if run.poll() {
                 break 'passes;
+            }
+            // A pass of a run that settles what is left ends once it has gone on for as
+            // long again as it took to make the most connections it has made: rip-up
+            // that moves nets for each other from then on makes few more, and the
+            // settling has the time.
+            if settles {
+                let made = made_by(&jobs, &copper, &apart);
+                if made > peak.0 {
+                    peak = (made, stats.expanded);
+                    turns = 0;
+                }
+                turns += 1;
+                // The first pass makes most of the connections, and is given as long
+                // again as that took; the passes on the finer lattice are for the few left.
+                let patience = if pass == 0 {
+                    STALL_NODES.max(peak.1 - pass_from)
+                } else {
+                    STALL_NODES
+                };
+                if turns > jobs.len() && stats.expanded - peak.1 > patience {
+                    queue.clear();
+                    break;
+                }
             }
             // A net that was cut more than once since its last turn waits more than once,
             // and is whole again after the first.
@@ -2027,6 +2067,41 @@ fn route_all<'a>(
         && b.made > made_by(&jobs, &copper, &apart)
     {
         b.restore(&mut world, &jobs, &mut copper, &mut missing, &mut apart);
+    }
+    // What the passes leave open is made a connection at a time, each kept only if the
+    // board has more for it.
+    if settles && !run.poll() {
+        run.phase(Phase::Settle);
+        let mut settle = Settle {
+            design,
+            by_net: &by_net,
+            plane: &plane_net,
+            params: last_params,
+            pitch,
+            history: &history,
+            fixed: &pair_nets,
+            pours: pours.as_ref(),
+            expanded: 0,
+            blocked: None,
+            tried: 0,
+            kept: 0,
+            made: 0,
+            cut: 0,
+        };
+        let mut routes = Routes {
+            copper: &mut copper,
+            missing: &mut missing,
+            apart: &mut apart,
+        };
+        settle.all(&mut world, &mut jobs, &mut routes);
+        stats.pour_cuts += settle.cut;
+        stats.expanded += settle.expanded;
+        stats.settled = (settle.tried, settle.kept, settle.made);
+        for j in 0..jobs.len() {
+            if copper[j].is_some() && missing[j].is_empty() {
+                failed[j] = None;
+            }
+        }
     }
     // A net ripped up and then not routed again is unrouted too.
     // A plane net's pieces are joined after routing, if they can be, so it isn't unrouted
@@ -2671,7 +2746,7 @@ impl PairsFirst {
 /// A net routed in part as a net to complete: each of the pieces its copper leaves it in
 /// is a terminal, the first terminal's the first, with the pads of the terminals in it and
 /// the ends of its tracks and its vias as the places where routes may join it.
-fn completion(design: &Design, ctx: &NetCtx, copper: &NetCopper, pitch: i64) -> NetCtx {
+pub(super) fn completion(design: &Design, ctx: &NetCtx, copper: &NetCopper, pitch: i64) -> NetCtx {
     let pieces = copper.pieces(ctx);
     // The pieces with a terminal are numbered first, and are the terminals to join.
     let terminals = pieces.terminals.iter().copied().max().map_or(1, |m| m + 1);

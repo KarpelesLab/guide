@@ -701,6 +701,51 @@ eleven boards. What `lumenpnp-mobo` had open was neither: its host did not ask t
 run for the ground that its own fill joined, and asked, the run leaves 1 open over three
 orders for 25.
 
+**What rip-up leaves open in a run with a budget is settled by chains that are kept only
+if the board has more for them.** Measured after the above
+([results](benchmarks.md#pcb-routing-settled)). Rip-up takes a net out for another and
+routes it again when its turn comes, on a board that has changed by then: a pass of
+`corne-cherry` had 395 of its 432 connections after 4 million nodes, and 396 at best
+23 million nodes and some hundreds of nets taken out later.
+
+- *A pass ends where it has stopped gaining.* A pass of a run that settles ends once
+  every net has had a turn since its routes made the most connections they have made,
+  and 2 million nodes have gone since: in the first pass, as many again as it took to
+  get there, if that is more. It then goes back to those routes, as a pass that ends
+  with fewer always did.
+- *Chains.* For each connection still open, a route is looked for as rip-up looks for
+  it: with nothing moved, and then across other nets' routes at rip-up's price, four
+  nets at most. The nets crossed are cut where it crosses them, keep what is free of it,
+  and are joined up again at once, in turn, each across further nets if it finds no way
+  round, three nets deep and twelve nets in all; a net that the chain has routed is not
+  crossed again in it. If every net that was cut is whole again, and the routes then
+  leave less open, they are kept. If not, every net of the chain has the copper back
+  that it had, and the next try for the connection, of four, may not cross the net that
+  was not joined up again. So no chain leaves less than it found, and the order in which
+  nets come back, which is what a pass of rip-up is at the mercy of, is the chain's own.
+- *What is open is what a host will count.* The routes of a chain go through the fills
+  that nets are planned on, as any route does, and a connection made by cutting two pads
+  off their pour is a loss. So what a chain is judged by is the connections that the
+  routes leave open and the pieces of fill with pads on them that are cut off their
+  net's fill, as the grid of `RouteOptions::pour_cuts` tells them, and a net with such
+  pieces has chains of its own first, with each piece as a terminal to join to its fill
+  again across what is in the way. On `corne-cherry` the run then says 34 open where its
+  host finds 45, for 23 and 40 without.
+
+`RouteOptions::settle`, on by default; `Stats::settled` says how many chains were tried
+and kept and what they made, and `Phase::Settle` is told. A run with neither a budget nor
+a deadline settles nothing and ends no pass early, and the curated boards are as they
+were. With a budget of 40 million nodes, over three orders of the nets, the nine boards
+of cadlab's corpus that a budget cuts have 853 connections open for 892: `corne-cherry`
+140 for 169, `cynthion` 63 for 67, `glasgow-revC3` 107 for 111, `buspirate5-rev10` 11 for
+13, and the others the same.
+
+Tried and not kept: chains kept with a net left cut where the routes made more in all,
+which went on to a dozen nets and were undone; chains half as long and half as deep at
+three times the price of a crossing; a window after the chains, the nets of few pads
+beside the open pad taken out whole and routed again after it; a fixed share of the
+budget for the chains with no end to the passes; and the count without the pours.
+
 **The layers that a net joins at a point are those of all its places there.** A track's
 end and a via at the same point are two places of a net, as a stub to a plane has them once
 it is fixed copper of a later run. Asked from the track's layer, the first of the two said

@@ -279,15 +279,21 @@ Each item is independently useful, and they can land in any order.
   where one is needed and fits, so that no stub's via is in the way of the pad beside
   it, as routes of their nets that rip-up moves like any other
   (`RouteOptions::row_fanout`, off by default, as it is no gain on every board)
-  ([benchmarks](docs/benchmarks.md#pcb-routing-with-a-second-wait)). Not yet:
+  ([benchmarks](docs/benchmarks.md#pcb-routing-with-a-second-wait)). A pass of such a
+  run ends where it has stopped gaining, and what the passes leave open is settled: a
+  route for each open connection across other nets' routes, with the nets it crosses cut
+  and joined up again around it at once, each across further nets if it has to, kept if
+  the board then has less open, counting the pads that the routes cut off their fills,
+  and undone to the track if not (`RouteOptions::settle`)
+  ([benchmarks](docs/benchmarks.md#pcb-routing-settled)). Not yet:
   tracks routed at an area's width, or narrower only near pads, and several via sizes for
   a net beyond its escapes, which the search, with one width and one via for each net, has
   no place for; the balls of an array further in than the ring that its dog-bones' vias
   close, where holes keep copper so far that no track passes between two vias; rip-up
-  that settles, which moving nets aside brings nearer and does not reach, as a route that
-  crosses several nets still has each of them cross others in turn, and on a board of
-  six layers the turns that cross other nets' routes make nothing more once every net
-  has what it reaches with nothing moved; a way out of the pads of a QFN of 0.4 mm on a
+  that settles where a pad has the routes of four nets round it, as the chains for such
+  a pad are undone seven times in eight, and on a board of six layers, where the turns
+  that cross other nets' routes make nothing more once every net has what it reaches
+  with nothing moved and a budget ends before its first pass does; a way out of the pads of a QFN of 0.4 mm on a
   board of two layers that holds while routes are moved, where the rows planned as
   routes are cut like any other and planned as walls were worse; a fan for a row
   with one side only, as a connector at a board's edge has, whose pads all leave it the

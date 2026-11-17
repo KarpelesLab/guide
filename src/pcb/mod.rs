@@ -209,6 +209,7 @@ mod pours;
 mod report;
 mod router;
 mod rows;
+mod settle;
 pub mod swap;
 mod tune;
 mod verify;
@@ -652,6 +653,16 @@ pub struct RouteOptions {
     /// time. The grid errs on the side of a cut, and a stub. A run with no budget counts
     /// none.
     pub pour_cuts: bool,
+    /// Whether a run with a [budget](RouteOptions::work_budget) or a deadline settles what
+    /// its passes of rip-up leave open. The default is `true`. Rip-up takes a net out for
+    /// another and routes it again later, on a board that has changed by then, and a pass
+    /// that goes on may end with fewer connections than it had. With this, the passes have
+    /// seven tenths of routing's share of the budget, and in the rest each connection
+    /// still open is looked for a route across other nets' routes, with the nets it
+    /// crosses cut and joined up again around it at once, each across further nets if it
+    /// has to: the chain is kept if the board then has more connections, and undone to
+    /// the track if not. A run with no budget settles nothing.
+    pub settle: bool,
     /// A seed for another order of the nets, or `None`, the default, for shortest first.
     /// With a seed, each net's length counts for between three quarters and five quarters
     /// of itself in that order, by a factor drawn from the seed and the net's number: the
@@ -689,6 +700,7 @@ impl Default for RouteOptions {
             fanout_via: None,
             row_fanout: false,
             pour_cuts: true,
+            settle: true,
             seed: None,
         }
     }
@@ -749,6 +761,10 @@ pub struct Stats {
     /// on, each time the net was given a turn to join them to it again
     /// ([`RouteOptions::pour_cuts`]).
     pub pour_cuts: usize,
+    /// The chains of moves tried for the connections that rip-up left open
+    /// ([`RouteOptions::settle`]), those of them kept, and the connections that these
+    /// made.
+    pub settled: (usize, usize, usize),
     /// Nets whose copper and zones are still in pieces, after the last attempt to join them.
     pub planes_broken: usize,
     /// Work spent: the nodes expanded by every search of the run, those of pairs, stubs

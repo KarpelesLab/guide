@@ -3630,6 +3630,131 @@ budget nor a deadline.
   on `lumenpnp-mobo` and `tinytapeout-demo`.
 - The load of the machine. One build, two hours: 1096 and 851.
 
+## PCB routing settled
+
+What was changed after [the release above](#pcb-routing-with-a-second-wait), 0.0.9, for
+the same host, cadlab, and the first of what that section does not show: rip-up that
+settles ([what and why](architecture.md#decisions)). Measured on 2026-11-17, each run with
+one thread, six runs at a time, on a machine that other work shared with a load of 70 to
+75 on its 64 threads: a run with a deadline made half the nodes that it made for the
+section above, and `glasgow-revD1` left 250 connections open in a minute where it left
+162. So what is compared by is a budget of work, which is the same run on any machine
+and under any load.
+
+### How
+
+Through cadlab's adapter as it is on its `master`, commit `5a50d3a`, with nothing changed
+but the crate:
+
+```text
+RAYON_NUM_THREADS=1 CADLAB_BENCH_ROUTER=guide CADLAB_BENCH_VERBOSE=1 CADLAB_BENCH_WORK=40000000 [CADLAB_BENCH_SEED=2|3] route_bench --corpus <board>
+```
+
+After a run that its budget of work stopped the adapter makes no second, and cadlab
+counts what the one run leaves open on the board that it fills again.
+
+### Results
+
+cadlab's corpus with a budget of 40 million nodes, vias kept out of pads, in three orders
+of the nets, no seed and seeds 2 and 3. Connections left open as cadlab counts them,
+before → after; vias, track and the seconds the call took are of the first order:
+
+| Board | Layers | Open | Vias | Track, mm | Seconds |
+| --- | --- | --- | --- | --- | --- |
+| `nrfmicro` | 2 | 4, 7, 9 → 4, 8, 8 | 62 → 62 | 499 → 497 | 54 → 20 |
+| `sweep-v2.2` | 2 | 6, 7, 6 → 6, 7, 6 | 42 → 42 | 2231 → 2231 | 108 → 111 |
+| `corne-cherry` | 2 | 58, 57, 54 → 50, 43, 47 | 799 → 524 | 8253 → 5855 | 60 → 79 |
+| `tinytapeout-demo` | 4 | 14, 19, 5 → 14, 19, 5 | 608 → 608 | 5685 → 5685 | 89 → 93 |
+| `buspirate5-rev10` | 4 | 2, 6, 5 → 0, 6, 5 | 501 → 502 | 3816 → 3818 | 78 → 74 |
+| `lumenpnp-mobo` | 4 | 0, 1, 0 → 0, 0, 1 | 713 → 709 | 6544 → 6596 | 67 → 69 |
+| `cynthion` | 4 | 25, 17, 25 → 21, 17, 25 | 659 → 613 | 3899 → 3618 | 92 → 94 |
+| `glasgow-revC3` | 4 | 36, 38, 37 → 36, 35, 36 | 563 → 563 | 3937 → 3937 | 156 → 147 |
+| `glasgow-revD1` | 6 | 170, 145, 139 → 170, 145, 139 | 1067 → 1067 | 7616 → 7616 | 77 → 80 |
+| All, three orders | | 892 → 853 | | | |
+
+`buspirate-flash-sop`, `buspirate-rs232` and `lumenpnp-ringlight` are complete before and
+after, in under a second. No run has an error of cadlab's check.
+
+`corne-cherry` is where it tells: 169 → 140. Its first pass has 395 of 432 connections
+after 4 million nodes; before, the passes went on, taking nets out for each other, and
+had 396 at best 23 million nodes later. Now the first pass ends after 7 million nodes
+and the passes on the finer lattice after 12 million, with 397 to 400, and then come the
+chains: 32 to 45 tried in each order, 6 to 8 kept, which make 12 to 15 of the connections
+and pieces of fill that were open, in 6 to 7 million nodes, after which the run ends on
+its own with half its budget. Its vias and track in the first order are those of another
+run altogether, as they are from one order to the next: 433 vias and 5345 mm in the
+second order before.
+
+`nrfmicro` ends after 20 s for 54 with the same 20 open over the three orders: its passes
+stop where they stopped gaining, and of the 6, 30 and 18 chains tried one is kept. Each
+of its open connections is to a pad of its USB receptacle or its module with the routes
+of four other nets round it, and a chain that moves those has a fifth to move.
+`glasgow-revD1`, `cynthion`, `glasgow-revC3` and two orders of `tinytapeout-demo` and
+`buspirate5-rev10` spend their 40 million nodes in their passes, which end sooner or not
+at all, and have no chain: `glasgow-revD1` is the same run. `sweep-v2.2` has one chain
+kept in two orders, for a piece of its pour, and what it has open has no route across
+other nets' either: its searches end at their limits of nodes.
+
+With the ways out of rows of fine pitch planned (`RouteOptions::row_fanout`, which a host
+turns on), and the chains: `nrfmicro` 3, 5 and 3 open for 4, 8 and 8, `corne-cherry` 42,
+46 and 42 for 50, 43 and 47, and on four layers `buspirate5-rev10` 12, 3 and 0 for 0, 6
+and 5, `tinytapeout-demo` 18, 16 and 9 for 14, 19 and 5, `glasgow-revC3` 109 for 107 and
+`cynthion` the same. The boards of two layers gain and those of four lose, as
+[before](#pcb-routing-with-a-second-wait), by less: the option stays off unless asked.
+
+Runs with a deadline are in the host's record: on this machine in this hour a minute
+made half the nodes it had made, and two runs of one build differed by 77 connections in
+one order of `glasgow-revD1`.
+
+The curated boards, routed with no budget, are as they were, 1150 of 1151 connections
+with 712 vias and 6833 mm of track: a run with neither a budget nor a deadline settles
+nothing and ends no pass early.
+
+### What was tried and not kept
+
+All at 40 million nodes, connections open as cadlab counts them.
+
+- *Chains that are kept with a net left cut*, if the routes then make more connections
+  in all, and that go on while they still could: with a deadline of 60 s `corne-cherry`
+  had 122 open over three orders for 120 without them, its chains thirteen nets long
+  with seven more connections open at their end than at their start, and undone. With
+  every cut net whole again or the chain ended there, 276 over six orders for 321.
+- *Chains half as long and half as deep, at three times the price of a crossing*: six
+  nets, two deep, 30 mm for a crossing, 60,000 and 100,000 nodes for a cut net's
+  searches. `corne-cherry` 144 over three orders for 135, `nrfmicro` the same, with
+  twice the chains tried.
+- *Windows.* A connection that no chain made, tried once more with the nets of few pads
+  that have a pad within eight pitches of its open pads taken out whole, eight at most,
+  and routed again after it, the one that found no way first the next time, three
+  times. `corne-cherry` 145 over three orders for 140, every other board the same to the
+  connection: a net taken out whole comes back by another way, and what it is then in
+  the way of is somewhere else.
+- *Seven tenths of routing's share for the passes and the rest for the chains*, with no
+  end to a pass that has stopped gaining: `corne-cherry` 277 over six orders for 274 with
+  the passes ended, and `nrfmicro` 29 for 31, in three times the seconds.
+- *The count without the pours.* With chains counted by the connections of the routes
+  alone, `corne-cherry`'s run counted 23 open of its own and cadlab 40 to 51 on the board
+  filled again: a chain made a connection through the ground's pour and left two pads
+  of the ground behind its track. Counted with the pieces of fill that are cut off, and
+  with a chain for each net that has such pieces, the run's count and its host's are 34
+  and 45 in that order, and the six orders 276 for 274: the same, with a count that says
+  what the host will find.
+
+### What this does not show
+
+- A way out of the pads of a QFN of 0.4 mm on a board of two layers, still.
+  `corne-cherry` has 43 to 50 open at 40 million nodes against 3 for cadlab's router:
+  thirty of them are pads of its two QFNs and its USB receptacles with the tracks and
+  vias of four other nets round them. A chain for such a pad is five nets long before it
+  starts, and the fifth has nowhere to go: seven in eight of the chains tried are undone.
+  What its neighbours need is to have left the row another way from the start.
+- Searches that end at their limit of nodes on a wide board: `sweep-v2.2`'s ground, and
+  what `tinytapeout-demo` has left. A chain for them is not found.
+- A run with a deadline on a machine that is free.
+- What the chains would make of the budget that they leave: on `corne-cherry` a run ends
+  with half of its 40 million nodes, every open connection tried four times.
+- Vias and track. Not looked into here.
+
 ## PCB differential pairs and lengths
 
 Differential pairs routed side by side, and nets meandered to their lengths, by `pcb::route`

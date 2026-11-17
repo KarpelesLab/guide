@@ -866,3 +866,33 @@ fn a_result_says_which_open_nets_had_a_search_that_failed() {
     assert!(!cut.unrouted.is_empty());
     assert!(cut.failed.is_empty(), "{:?}", cut.failed);
 }
+
+#[test]
+fn a_run_with_a_budget_settles_what_its_passes_leave_open_and_one_with_none_does_not() {
+    // Net 2 has no way but the gap that net 1 is in, and net 1 no other: the passes leave
+    // net 2 open, and the settling tries a chain for it, which is undone. The routes are
+    // those of a run that settles nothing.
+    let d = one_gap();
+    let options = RouteOptions {
+        work_budget: Some(50_000_000),
+        ..RouteOptions::default()
+    };
+    let routed = route(&d, &options).unwrap();
+    check(&d, &routed);
+    assert_eq!(routed.stopped, None);
+    assert_eq!(routed.unrouted, [NetId(2)]);
+    let (tried, kept, made) = routed.stats.settled;
+    assert!(tried >= 1, "{:?}", routed.stats);
+    assert_eq!((kept, made), (0, 0));
+    let plain = RouteOptions {
+        settle: false,
+        ..options
+    };
+    let unsettled = route(&d, &plain).unwrap();
+    assert_eq!(unsettled.stats.settled, (0, 0, 0));
+    assert_eq!(unsettled.tracks, routed.tracks);
+    assert_eq!(unsettled.vias, routed.vias);
+    // With neither a budget nor a deadline nothing is settled.
+    let whole = route(&d, &RouteOptions::default()).unwrap();
+    assert_eq!(whole.stats.settled, (0, 0, 0));
+}

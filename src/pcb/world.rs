@@ -98,6 +98,8 @@ pub(crate) struct World<'r> {
     clearances: Vec<i64>,
     /// Where zones of nets are planes, which other nets' tracks pay more to cross.
     planes: Option<Planes>,
+    /// Where the spokes of pads in pours will be, which other nets pay to be in.
+    spokes: Option<super::spokes::Spokes>,
     /// Whether a via may touch a pad with no hole.
     vias_in_pads: bool,
     /// The nets that keepouts except, by the number in [`Kind::Keepout`] less one.
@@ -162,6 +164,7 @@ impl<'r> World<'r> {
             locked: Vec::new(),
             clearances: Vec::new(),
             planes: None,
+            spokes: None,
             vias_in_pads: true,
             excepts: Vec::new(),
             ties: Vec::new(),
@@ -413,6 +416,20 @@ impl<'r> World<'r> {
             Some(&n) if n != 0 && n != net.0 + 1 => 1.0 + p.cost,
             _ => 1.0,
         }
+    }
+
+    /// Sets where the spokes of pads in pours will be.
+    pub(crate) fn set_spokes(&mut self, spokes: Option<super::spokes::Spokes>) {
+        self.spokes = spokes;
+    }
+
+    /// What a track of `net` on `layer` ending at `at` costs for its length: more where a
+    /// spoke of another net's pad will be.
+    #[inline]
+    pub(crate) fn spoke_factor(&self, net: NetId, layer: u8, at: Point) -> f64 {
+        self.spokes
+            .as_ref()
+            .map_or(1.0, |s| s.factor(net, layer, at))
     }
 
     /// Makes a net's routes block like fixed copper, or not.

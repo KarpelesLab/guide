@@ -1051,3 +1051,48 @@ fn routes_that_can_not_be_a_net_s_own_stay_as_copper_of_the_board() {
     assert_eq!(routed.unrouted, []);
     assert!(routed.tracks.is_empty(), "{:?}", routed.tracks);
 }
+
+#[test]
+fn two_halves_that_the_board_keeps_apart_are_told_and_cost_one_look() {
+    use super::Cause;
+    // A keepout for tracks and vias on both layers, from edge to edge of the board, with
+    // a net that has a pad on either side of it and two nets that stay on one side.
+    let mut d = design(
+        2,
+        vec![
+            smd(0, 0, 1),
+            smd(10 * MM, 0, 1),
+            smd(0, 3 * MM, 2),
+            smd(3 * MM, 3 * MM, 2),
+            smd(7 * MM, 3 * MM, 3),
+            smd(10 * MM, 3 * MM, 3),
+        ],
+        4,
+    );
+    d.board.keepouts.push(Keepout {
+        shape: Shape::rect(Rect::new(
+            Point::new(4_800_000, -50 * MM),
+            Point::new(5_200_000, 50 * MM),
+        ))
+        .unwrap(),
+        layers: LayerSet::first(2),
+        tracks: true,
+        vias: true,
+        pads: false,
+        except: Vec::new(),
+    });
+    let options = RouteOptions {
+        work_budget: Some(50_000_000),
+        ..RouteOptions::default()
+    };
+    let routed = route(&d, &options).unwrap();
+    // The run ends on its own, with the two nets that have a way and the third told.
+    assert_eq!(routed.stopped, None);
+    assert_eq!(routed.unrouted, vec![NetId(1)]);
+    assert_eq!(routed.open.len(), 1);
+    assert_eq!(routed.open[0].net, NetId(1));
+    assert_eq!(routed.open[0].cause, Cause::Apart);
+    // And not at the price of every pass and every chain looking over half the board
+    // again: one look with no route on it, and the search that failed before it.
+    assert!(routed.stats.work < 2_000_000, "{}", routed.stats.work);
+}

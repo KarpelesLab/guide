@@ -168,6 +168,9 @@ pub(crate) struct Settle<'a> {
     /// By job, whether a negotiation for it was undone and whether its chains all were,
     /// in this settling or one before it: they are not tried again.
     pub(crate) spent: &'a mut [u8],
+    /// By job, whether it has nothing more to gain: what it has open has no way on the
+    /// board with no route on it. Jobs past the end have.
+    pub(crate) skip: Vec<bool>,
 }
 
 impl Settle<'_> {
@@ -214,7 +217,9 @@ impl Settle<'_> {
             // How many negotiations in a row were undone.
             let mut undone = 0;
             for j in 0..jobs.len() {
-                if self.fixed.contains(&jobs[j].ctx.net) {
+                if self.fixed.contains(&jobs[j].ctx.net)
+                    || self.skip.get(j).copied().unwrap_or(false)
+                {
                     continue;
                 }
                 // After that many, what is left open is left to the chains, and to the
@@ -841,6 +846,7 @@ mod tests {
             negotiated: (0, 0, 0),
             places,
             spent: &mut spent,
+            skip: Vec::new(),
         };
         let mut routes = Routes {
             copper: &mut copper,

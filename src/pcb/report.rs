@@ -127,6 +127,15 @@ pub enum Cause {
     /// The router took the net as routed or had no say on it: a net with zones whose fills
     /// leave it in pieces, for one.
     Unknown,
+    /// The two sides are apart on the board itself: a search for the net with none of the
+    /// run's routes on the board, on the lattice the run routes on, went everywhere it
+    /// could and left the net in as many pieces as it is in now. The board's own copper,
+    /// its keepouts, its holes or its edge are between them on every layer, and no order
+    /// of the nets and no budget joins them: two halves of a board that only the schematic
+    /// joins, for one. Found in a run with a [budget](super::RouteOptions::work_budget) or
+    /// a deadline, the first time a search for the net fails, and such a net then has no
+    /// more turns once it has every other connection.
+    Apart,
 }
 
 /// A connection the result leaves open: two pieces of a net's copper to join, with a pad of
@@ -313,6 +322,8 @@ pub(crate) struct Known<'a> {
     pub(crate) bounds: Rect,
     /// By net, the width it was routed at, if that is narrower than its own.
     pub(crate) widths: &'a [Option<i64>],
+    /// By net, how many of its connections have no way on the board with no route on it.
+    pub(crate) apart: &'a BTreeMap<NetId, usize>,
 }
 
 /// The open connections with their causes. `world` holds the design's items and the
@@ -325,6 +336,11 @@ pub(crate) fn explain(
 ) -> Vec<OpenConnection> {
     let mut items: Option<Items> = None;
     let stack = design.rules.layers().0;
+    // By net, how many connections it has open.
+    let mut counts: BTreeMap<NetId, usize> = BTreeMap::new();
+    for o in &open {
+        *counts.entry(o.net).or_default() += 1;
+    }
     open.into_iter()
         .map(|o| {
             let spec = design.nets.get(o.net.index());
@@ -343,6 +359,12 @@ pub(crate) fn explain(
             );
             let cause = if via.is_none() && piece & rest == 0 {
                 Cause::NoLayer
+            } else if known
+                .apart
+                .get(&o.net)
+                .is_some_and(|&f| counts.get(&o.net).is_some_and(|&c| c <= f))
+            {
+                Cause::Apart
             } else {
                 match known.failed.get(&o.net) {
                     Some(Failure::Budget) => Cause::OutOfBudget,
@@ -710,7 +732,9 @@ mod tests {
         .unwrap();
         let items = Items::new(&d);
         let failed = BTreeMap::new();
+        let apart = BTreeMap::new();
         let known = |widths| Known {
+            apart: &apart,
             failed: &failed,
             stopped: None,
             pitch: 100_000,

@@ -293,7 +293,11 @@ Each item is independently useful, and they can land in any order.
   and two nets whose pads take turns along such a row with no room to cross on its
   layer, as a USB receptacle's data lines with a part close in front, have the crossing
   planned on another layer as fixed copper (`RouteOptions::crossings`,
-  [benchmarks](docs/benchmarks.md#pcb-routing-of-two-nets-that-cross-in-a-row))
+  [benchmarks](docs/benchmarks.md#pcb-routing-of-two-nets-that-cross-in-a-row));
+  the room that the spokes of a pad in a pour of its net need can cost other nets'
+  tracks (`RouteOptions::spoke_cost`), and the connections of a board in two parts that
+  only the schematic joins are found once and told (`Cause::Apart`,
+  [benchmarks](docs/benchmarks.md#pcb-routing-with-room-for-spokes))
   ([benchmarks](docs/benchmarks.md#pcb-routing-with-a-second-wait)). A pass of such a
   run ends where it has stopped gaining, and what the passes leave open is settled: a
   route for each open connection across other nets' routes, with the nets it crosses cut

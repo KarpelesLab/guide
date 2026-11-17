@@ -887,6 +887,46 @@ a via on a via, which a host's check took out with the piece it was on. The plac
 point are merged by the layers they share, and the answer is the same from either side
 (`NetCtx::joins`).
 
+**What completes a net keeps its vias clear of those the net has.** A net that is
+completed is searched for from the copper it keeps, and what is found is added to that
+copper. A search keeps the vias of its own path apart, hole to hole, as the world keeps
+them from other nets' holes; of the copper it goes on from it knew the ends as places to
+join, and in a negotiation that copper is out of the world while the net is looked for.
+A via a pitch from one the net kept was then free, and the two stayed: a via on a via of
+one net, once in some forty runs of a board, which a host's check took out with the piece
+they were on. The net as it is completed (`completion`) has the vias of its copper, by
+cell, and a via of its search is as far from them as from those of its path
+(`NetCtx::with_vias`). Asking the world instead, with the net's own holes there as what
+may not be moved, was tried first and cost a board in three a tenth of its connections:
+a negotiation routes a net across its own old route too, which then goes.
+
+**The room of a thermal relief's spokes costs other nets' tracks**
+([results](benchmarks.md#pcb-routing-with-room-for-spokes)). A pad in a pour of its net is
+joined to it by a few spokes across a gap, and nothing in a search for another net says
+that the room beside the pad is wanted. `RouteOptions::spoke_cost` marks that room before
+anything is routed, by layer and cell of the lattice: for each pad that a zone of its net
+on that layer joins through a relief, each spoke from the pad's edge across its gap and a
+pitch into the zone, as wide as the spoke and what a track beside it needs
+(`pcb::spokes`). A track of another net that ends in a marked cell costs that much more
+for its length, as one in another net's plane does. It is a price and no wall, so a pad
+that only has the way past another's spoke takes it. Vias pay nothing: a price on them
+left one board with connections open that it had made, for no fewer pads short of
+spokes. The default is none, as the price moves the routes of every board with zones;
+a host whose own fill makes the reliefs sets it.
+
+**Two halves that the board keeps apart are found once.** A board in two parts that
+only the schematic joins has nets with pads on both, and no route for them: the search
+for each goes over all of one half to find that out, in every pass, every chain and
+every negotiation, and a run with a deadline spends it there. The first time a search
+for a net fails in such a run, the net is looked for on a world with the board's own
+copper and none of the run's routes, with the gates, on the lattice of the pass and
+then on the finest one if that leaves it in pieces: the pieces that leaves it in, less
+one, are connections that nothing joins (`router::apart_on`). A net that has all the
+others has no more turns in the passes or in the settling, and what it has open is
+reported as `Cause::Apart`. Not a net with a plane, whose terminals on that world are
+places on a fill that the other nets' routes have not cut yet: counted there it was
+left with more open than it has.
+
 **Differential pairs are routed side by side last, in place of their nets' routes.** Routing
 pairs first, before anything else, as fixed copper, coupled `udb-s`'s USB pair a little better,
 60% of its length side by side in place of 50%, but cost other nets their room: `GB-LIVE32`

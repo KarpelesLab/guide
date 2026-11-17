@@ -177,7 +177,14 @@
 //! planned a row at a time before anything is routed ([`RouteOptions::row_fanout`]). Two
 //! nets whose pads take turns along such a row, with no room to cross on its layer, have
 //! their crossing on another layer planned first, as fixed copper
-//! ([`RouteOptions::crossings`]).
+//! ([`RouteOptions::crossings`]). A net whose pads the board itself keeps apart, as on a
+//! board in two parts that only the schematic joins, is looked for once on the board with
+//! no route on it when a search for it fails, and has no more turns once it has every
+//! connection that there is a way for ([`Cause::Apart`]).
+//!
+//! A host whose fill makes thermal reliefs can have the room of their spokes kept: tracks
+//! of other nets then pay to be where a pad's spoke will be
+//! ([`RouteOptions::spoke_cost`]).
 //!
 //! [`Routed::failed`] has the nets left open whose own search found no way: the others
 //! were tried and lost their routes to another net's, and a host that routes again on the
@@ -217,6 +224,7 @@ mod report;
 mod router;
 mod rows;
 mod settle;
+mod spokes;
 pub mod swap;
 mod tune;
 mod verify;
@@ -707,6 +715,18 @@ pub struct RouteOptions {
     /// ([`Stats::crossings`]). A crossing with room on the row's layer is left to the
     /// routing, and a run with no budget plans none.
     pub crossings: bool,
+    /// What a track costs for its length where a thermal relief's spoke of another net's
+    /// pad will be, over its length anywhere else, as a fraction of its length. A pad
+    /// that a [zone](Design::zones) of its net joins through a thermal relief is joined
+    /// by its spokes, and a track of another net beside the pad takes one away: the room
+    /// that each spoke needs, from the pad's edge across its gap and into the zone, on
+    /// the zone's layers, is marked before anything is routed, and tracks of other nets
+    /// keep out of it while they have another way, and go through it when they have
+    /// none. The default is 0, which
+    /// marks nothing: a host whose fill makes the reliefs sets it, and 4 is what cadlab
+    /// routes its boards with (`docs/benchmarks.md`, "Room for the spokes of thermal
+    /// reliefs").
+    pub spoke_cost: f64,
 }
 
 impl Default for RouteOptions {
@@ -743,6 +763,7 @@ impl Default for RouteOptions {
             negotiate: true,
             negotiate_places: false,
             crossings: true,
+            spoke_cost: 0.0,
             seed: None,
         }
     }

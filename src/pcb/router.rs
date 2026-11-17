@@ -20,6 +20,7 @@ use super::pours::{self, Pours};
 use super::report::{self, Known};
 use super::rows;
 use super::settle::{Routes, Settle};
+use super::spokes;
 use super::tune;
 use super::world::{Placed, Planes, Verdict, World};
 use super::zones::{self, Fill};
@@ -593,7 +594,8 @@ pub(crate) fn run_from(
     let run = Run::new(control, options.work_budget);
     run.phase(Phase::Prepare);
     run.poll();
-    let (mut routed, mut failed, mut counted, narrow) = route_all(design, earlier, options, &run)?;
+    let (mut routed, mut failed, mut counted, narrow, apart) =
+        route_all(design, earlier, options, &run)?;
     if options.tune_lengths && !design.lengths.is_empty() && !run.poll() {
         run.phase(Phase::Lengths);
         tune::run(design, &mut routed, options).map_err(RouteError::Geometry)?;
@@ -701,6 +703,7 @@ pub(crate) fn run_from(
             pitch: if fine { (base / FINE).max(1000) } else { base },
             bounds: bounds_of(design),
             widths: &narrow,
+            apart: &apart,
         };
         routed.open = report::explain(design, &world, survey.open, &known);
     }
@@ -1057,13 +1060,15 @@ const POUR_WORK: f64 = 0.03;
 
 /// What [`route_all`] returns: the result, how the last search of each net that failed
 /// ended, for the nets left open, the fill that the joining of zones' pieces ended on,
-/// if it was made, and by net the width it was routed at where that is narrower than its
-/// own.
+/// if it was made, by net the width it was routed at where that is narrower than its
+/// own, and by net how many of its connections the board with no route on it has no way
+/// for.
 type Outcome = (
     Routed,
     BTreeMap<NetId, Failure>,
     Option<Vec<Fill>>,
     Vec<Option<i64>>,
+    BTreeMap<NetId, usize>,
 );
 
 /// By net, the tracks and vias of an earlier run that are taken back as its route, and the
@@ -1488,6 +1493,18 @@ fn route_all<'a>(
         ));
     }
 
+    // Where the spokes of pads in zones of their nets will be, which other nets' tracks pay
+    // to be in.
+    if options.spoke_cost > 0.0 && !design.zones.zones.is_empty() && !run.poll() {
+        world.set_spokes(spokes::Spokes::plan(
+            design,
+            bounds,
+            pitch,
+            common_width / 2 + rules.spec().clearance,
+            options.spoke_cost,
+        ));
+    }
+
     // Nets with planned fills, whose routes are stubs to them.
     let plane_net = |net: NetId| {
         planned
@@ -1531,6 +1548,22 @@ fn route_all<'a>(
     let mut failed: Vec<Option<Failure>> = vec![None; jobs.len()];
     // And how its last search that failed ended, whatever came after.
     let mut last_failure: Vec<Option<Failure>> = vec![None; jobs.len()];
+    // By job, once a search for it has failed in a run with a budget, how many of its
+    // connections have no way on the board with no route on it: what fixed copper, keepouts
+    // and the edge keep apart on every layer stays apart whatever is moved, and a net that
+    // has all the rest has no more turns, in the passes or in the settling.
+    let mut floor: Vec<Option<usize>> = vec![None; jobs.len()];
+    let mut bare: Option<World<'_>> = None;
+    // The finest lattice that the passes search on.
+    let finest = if options.fine_pass {
+        Params {
+            pitch: (pitch / FINE).max(1000),
+            under_pads: options.vias_in_pads,
+            ..params
+        }
+    } else {
+        params
+    };
     // What the progress hears of: nets with a route, connections made, nets waiting.
     let tell = |jobs: &[Job],
                 copper: &[Option<NetCopper>],
@@ -1810,6 +1843,14 @@ fn route_all<'a>(
                     queue.clear();
                     break;
                 }
+            }
+            if stuck(
+                floor[j],
+                jobs[j].ctx.terminals,
+                copper[j].is_some(),
+                apart[j],
+            ) {
+                continue;
             }
             // A net that was cut more than once since its last turn waits more than once,
             // and is whole again after the first.
@@ -2184,6 +2225,21 @@ fn route_all<'a>(
                 None => why,
             };
             last_failure[j] = failed[j].or(last_failure[j]);
+            // The first time a net finds no way, it is looked for one on the board with no
+            // route on it. Not a net with a plane: its terminals there are places on a fill
+            // that the routes of the others have not cut yet.
+            if hurried && failed[j].is_some() && floor[j].is_none() && !plane {
+                if bare.is_none() {
+                    let mut world = world_of(before_pairs)?;
+                    world.set_gates(Gates::plan(before_pairs, pitch).finer_than(pitch));
+                    bare = Some(world);
+                }
+                if let Some(bare) = &bare {
+                    let (apart, expanded) = apart_on(bare, &job.ctx, params, finest);
+                    floor[j] = Some(apart);
+                    stats.expanded += expanded;
+                }
+            }
             if let Some(t) = tree {
                 let mut c = NetCopper::from_tree(ctx, &t);
                 match (&rest, copper[j].take()) {
@@ -2381,6 +2437,16 @@ fn route_all<'a>(
                 negotiated: (0, 0, 0),
                 places: pass == 0 && options.negotiate_places,
                 spent: &mut spent,
+                skip: (0..jobs.len())
+                    .map(|j| {
+                        stuck(
+                            floor[j],
+                            jobs[j].ctx.terminals,
+                            copper[j].is_some(),
+                            apart[j],
+                        )
+                    })
+                    .collect(),
             };
             let mut routes = Routes {
                 copper: &mut copper,
@@ -2701,7 +2767,57 @@ fn route_all<'a>(
         },
     };
     let counted = counted.or(Some(first_fills).filter(|f| !f.is_empty()));
-    Ok((routed, failed, counted, narrow))
+    let floors: BTreeMap<NetId, usize> = jobs
+        .iter()
+        .zip(&floor)
+        .filter_map(|(j, f)| f.filter(|&f| f > 0).map(|f| (j.ctx.net, f)))
+        .collect();
+    Ok((routed, failed, counted, narrow, floors))
+}
+
+/// How many nodes the search for a net on the board with no route on it may expand.
+const APART_NODES: u64 = 4_000_000;
+
+/// How many of a net's connections have no way on `bare`, a world with the board's own
+/// copper and no route: the pieces that its terminals are left in there, less one, by a
+/// search that keeps what it reaches and joins the rest among itself, on the lattice of
+/// `params`. If that leaves any, the finest lattice that the run searches on has the say,
+/// where it has one within [`APART_NODES`]: a way that only it has, past a pad that is off
+/// the lattice, is near the pad, and found long before the half of a board that a search
+/// to the other half goes over. Zero if the first search ran out of nodes, which says
+/// nothing. With the nodes expanded.
+fn apart_on(bare: &World<'_>, ctx: &NetCtx, params: Params, finest: Params) -> (usize, u64) {
+    let look = |params: Params| {
+        let p = Params {
+            partial: true,
+            stubs: ctx.terminals > detail::BUDGET_TERMINALS,
+            forest: true,
+            max_expansions: APART_NODES,
+            ..params
+        };
+        let steps = StepCache::default();
+        match detail::route_net(bare, ctx, &steps, p, None, None) {
+            Ok(t) if !t.out_of_budget => (
+                Some(NetCopper::from_tree(ctx, &t).pieces(ctx).apart()),
+                t.expanded,
+            ),
+            Ok(t) => (None, t.expanded),
+            Err((_, expanded)) => (None, expanded),
+        }
+    };
+    let (apart, expanded) = look(params);
+    let apart = apart.unwrap_or(0);
+    if apart == 0 || finest.pitch == params.pitch {
+        return (apart, expanded);
+    }
+    let (finer, more) = look(finest);
+    (finer.map_or(apart, |f| f.min(apart)), expanded + more)
+}
+
+/// Whether a net has no more to gain: `floor` of its connections have no way on the board
+/// with no route on it, and it has all the others, or there are no others.
+fn stuck(floor: Option<usize>, terminals: usize, routed: bool, apart: usize) -> bool {
+    floor.is_some_and(|f| f > 0 && ((routed && apart <= f) || f + 1 >= terminals))
 }
 
 /// Whether a net in the way of another loses only its branches in the way, rather than

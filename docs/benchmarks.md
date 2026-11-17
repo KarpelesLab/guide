@@ -4815,6 +4815,150 @@ with 712 vias, as before, and 11 mm more track on `GB-LIVE32` (2284 for 2273).
 - Vias as few as a router that plans on the host's fill has them, a board of six layers
   whose first pass does not end in a minute, `sweep-v2.2` at its deadline: not touched.
 
+## PCB routing with room for spokes
+
+What was changed after [the release above](#pcb-routing-of-two-nets-that-cross-in-a-row),
+0.0.15, for the same host, cadlab: a net that is completed puts no via beside one it has,
+the room of a thermal relief's spokes can cost other nets' tracks
+(`RouteOptions::spoke_cost`, off by default), and the connections of a board that its own
+copper keeps apart are found once and told (`Cause::Apart`). Measured on 2026-11-18, each
+run with one thread, four to nine runs at a time, on a machine that other work shared;
+the counts of pads are cadlab's, from its fill of each routed board (`board::thermal`).
+
+### What
+
+**A via on a via.** One run in four of `buspirate5-rev10` at 60 s, in one order of its
+nets, ended with two vias of its ground 0.18 mm apart, and cadlab's check took the piece
+out. A net that is completed is searched for from the copper it keeps, and what the
+search finds is added to it. In a negotiation that copper is out of the world while the
+net is looked for, so nothing was at the place of a via it kept. The net as it is
+completed now has the vias of its copper, and its search keeps its own from them as from
+those of its path.
+
+**Spokes.** A pad in a pour of its net is joined by a few spokes across a gap. A track of
+another net beside the pad takes one away, and after a run more pads had one spoke or
+none than on the boards as their projects route them. With `spoke_cost`, each spoke of
+each pad that a zone of its net joins through a relief is marked on a grid, by layer:
+from the pad's edge across its gap and a pitch into the zone, as wide as the spoke and
+what a track beside it needs. A track of another net that ends in a marked cell costs
+that many times its length more.
+
+**Apart.** `sweep-v2.2` is two halves of a keyboard on one board, joined by the schematic
+alone: three nets have pads on both, and no route. Each search for one of them went over
+a half of the board to find that out, in every pass and every chain. The first time a
+search for a net fails in a run with a budget, the net is now looked for on the board
+with none of the run's routes on it; the connections that has no way for are counted, a
+net that has all its others has no more turns, and they are reported as `Cause::Apart`.
+
+### Results
+
+The twelve corpus boards through cadlab's adapter at 60 s, two orders of the nets, with
+`spoke_cost` 4 as cadlab sets it. Pads in pours by the necks that reach them, pads short
+of the two that cadlab asks for, and connections open:
+
+| | necks 0 / 1 / 2 / 3 / 4+ | short of two | open |
+| --- | --- | --- | --- |
+| 0.0.15, first order | 5 / 390 / 360 / 238 / 416 | 195 | 237 |
+| 0.0.15, second order | 8 / 368 / 353 / 263 / 405 | 169 | 215 |
+| this, first order | 4 / 328 / 329 / 268 / 462 | 127 | 231 |
+| this, second order | 1 / 325 / 333 / 268 / 458 | 127 | 177 |
+
+By board in the first order, short of two before and after: `buspirate5-rev10` 62 and
+43, `glasgow-revD1` 69 and 52, `tinytapeout-demo` 33 and 24, `lumenpnp-mobo` 20 and 0,
+`corne-cherry` 5 and 4, `sweep-v2.2` 3 and 1, `cynthion` 1 and 3, the other five 2 and
+0. Open, before and after, over the two orders: `corne-cherry` 15 and 22 for 26 and 17,
+`tinytapeout-demo` 9 and 7 for 7 and 5, `cynthion` 14 and 15 for 14 and 10,
+`glasgow-revC3` 33 and 31 for 34 and 31, `glasgow-revD1` 162 and 136 for 145 and 111,
+`nrfmicro` 1 and 1 for 2 and 0, `buspirate5-rev10` 0 and 0 for both, `lumenpnp-mobo`
+0 and 0 for both, `sweep-v2.2` 3 and 3 for both. None of these runs had copper taken out
+by cadlab's check.
+
+`sweep-v2.2` over four orders at 60 s: 3 open in each, where 0.0.15 has 3, 4, 4 and 4.
+Two of the three are told as apart; the third is of its ground, which has a pour and is
+not looked at (below). Its first run ends after 25 s of 42 with those two nets out of
+its passes, and the rest of the minute goes to the runs for the ground.
+
+At 40 million nodes over three orders, the nine boards that a budget cuts, 0.0.15 with
+the fix for the via alone and this with the price on: 782 open and 733 (`glasgow-revD1`
+440 and 389, `corne-cherry` 113 and 105, `sweep-v2.2` 16 and 9, `buspirate5-rev10` 12 and
+21, `tinytapeout-demo` 35 and 40, `cynthion` 56 and 58, `glasgow-revC3` 104 and 106,
+`nrfmicro` 6 and 5, `lumenpnp-mobo` 0 and 0).
+
+The curated boards route as before, 1150 of 1151 connections with 712 vias, with the
+price off as it is by default; with it at 4 they have the same, and two boards a
+millimetre more track.
+
+### What was tried
+
+- *A via beside the net's own hole refused by the world*, whatever the search: the
+  holes of a net's own routes as what may not be moved. Six orders at 40 million nodes:
+  `nrfmicro` 22 open for 1, `corne-cherry` 299 for 231, `buspirate5-rev10` 40 for 15. A
+  negotiation routes a net across its own old route, which then goes, and it could no
+  longer. With the vias told by the net as it is completed, the same runs have 4, 234
+  and 17.
+- *The price by its size*, with a via in a marked place costing as many more vias: at
+  2, 4 and 12 the pads short of two were 135 and 129, 117 and 122, 121 and 111 over the
+  two orders, for 200 and 163 with none; open 260 and 229, 240 and 250, 289 and 305, for
+  255 and 212. Past 4 it costs connections and saves no more pads.
+- *A price on vias too.* Four orders of three boards at 60 s, open and short of two
+  summed: with it `lumenpnp-mobo` 3 open (0, 3, 0, 0) and 0 short, `buspirate5-rev10` 7
+  and 179, `tinytapeout-demo` 27 and 79; with tracks alone 0 and 4, 1 and 177, 48 and
+  102; with neither 0 and 67, 8 and 234, 33 and 113. `lumenpnp-mobo` had no connection
+  open in any run before, and has none with tracks alone. `tinytapeout-demo` is 0 to 19
+  open in these runs whatever is asked.
+- *The spokes marked to the end of their gap only*, with no pitch into the pour: 13
+  short on `lumenpnp-mobo` for 0, and `buspirate5-rev10` 16 open over four orders.
+- *Ways out that stay for the pads of a row that the routes leave shut in*, in a run
+  that goes on from an earlier run's routes: a straight track out of an end of the pad
+  to a via, as fixed copper, at the place in the way of the fewest routes, which are
+  then cut and joined up again around it. `corne-cherry` at 60 s over four orders: 102
+  open for 89; at 120 s 84 for 84, and the run that plans 17 of them has 87 open after
+  40 s where it began with 22. Only at places in no route's way: 90 for 89, with one to
+  five pads a run. The pads of its two QFNs that stay open are those of nets taken out
+  and not routed again, by other nets that are locked by then, and a via fixed in front
+  of a row shuts the pads beside it for good. cadlab's own router plans no way out for
+  the first of the two parts at all, whose pads are on its grid, and straight stubs with
+  no via for two rows of the second: what it does that this does not is to route every
+  net across every other at a price, on one grid, until none is in another's way.
+- *More rounds of cleanup, and a shorter way for each net*: every net routed again as
+  routing does, the others where they are, kept if it has no more vias and is 3 %
+  shorter, for up to four rounds while a round gains. `lumenpnp-mobo` 657 and 680 vias
+  for 706 and 510, in 27 s of cleanup for 5, which is the time cadlab takes the needless
+  stubs out in; `tinytapeout-demo` 601 and 631 for 593 and 616; track 1 % shorter on two
+  boards and longer on two.
+- *Dearer vias.* At 2 and 3 mm of track a via, for 1: 10 to 25 % fewer vias at 40
+  million nodes (`lumenpnp-mobo` 491, 467 and 461 at 3 for 706, 510 and 571), and
+  `buspirate5-rev10` 28 and 19 open for 12, `glasgow-revD1` 602 and 601 for 440,
+  `cynthion` 46 and 69 for 56, `corne-cherry` 89 and 93 for 113. On the three boards of
+  two layers at 60 s over four orders: `corne-cherry` 75 and 83 for 89, `nrfmicro` 5 and
+  2 for 5, `sweep-v2.2` 16 and 12 for 15. Left at 1.
+- *A pass of rip-up given four times as long with no gain before it ends*: 232 open for
+  222 on five boards at 40 million nodes. *A net ripped up eight times before it is
+  locked*, for four: `buspirate5-rev10` 33 for 12, `cynthion` 65 for 56.
+- *Nets with a plane looked for on the bare board too*: `sweep-v2.2` 4 and 5 open for
+  3. Their terminals there are places on a fill that no route has cut, and the count of
+  what is apart comes out higher than what the net is left with.
+- *The finest lattice alone as what says that two pads are apart*: `sweep-v2.2`'s halves
+  are more than 4 million nodes on it, and nothing was told. It has the say where it
+  ends within that; where it does not, the lattice of the pass has.
+
+### What this does not show
+
+- `corne-cherry` level with cadlab's own router, 15 to 26 open in these runs for its 0
+  to 4, nor `nrfmicro`'s last connection, which is of a data net across the board with
+  the nets beside it settled in its way: both are what one-net-at-a-time rip-up leaves,
+  and nothing here changes that.
+- Half as many vias as now. Of `lumenpnp-mobo`'s 706, 309 are stubs to planes and some
+  400 are of its other nets, against 344 in all for cadlab's router, which prices a via
+  at 2 mm and routes every net against every other; routing a net again with dearer
+  vias, the others where they are, takes few away.
+- Spokes on every pad. 127 pads of 2350 are still short of two, most of them on two
+  boards whose pads in pours are close together.
+- The time of `sweep-v2.2`, which still ends at its deadline for the one connection of
+  its ground that has no way.
+- Rule areas with a track width of their own, and a board of six layers in a minute:
+  not touched.
+
 ## PCB differential pairs and lengths
 
 Differential pairs routed side by side, and nets meandered to their lengths, by `pcb::route`

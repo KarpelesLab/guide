@@ -1,0 +1,19 @@
+# Places reticle's designs with guide, and routes them with reticle's own router.
+#
+# A standalone crate: not part of guide's package (scripts/ is excluded) and not a
+# workspace member. reticle is expected beside guide's checkout, as
+# ../reticle from guide's root; see README.md here.
+[package]
+name = "reticle-place"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+guide = { path = "../../.." }
+reticle = { path = "../../../../reticle", default-features = false, features = ["verilog", "synth", "fpga"] }
+
+[profile.release]
+debug = 1

@@ -148,6 +148,29 @@ pub struct Zones {
     /// them so, and a host fills its zones again around the routes in any case. A fill that
     /// nothing comes close to is returned as it was given.
     pub fills: Vec<Fill>,
+    /// The spokes of thermal reliefs as the host's fill makes them, for a host that fills
+    /// its zones itself: with any, these are the spokes whose room routing keeps
+    /// ([`RouteOptions::spoke_cost`](super::RouteOptions::spoke_cost)), and none is worked
+    /// out from the zones and what the pads say. A host knows what this model does not:
+    /// a connection that differs by layer, a width fitted to the pad, directions of its
+    /// own, and which pads are soldered and held to a number of spokes.
+    pub spokes: Vec<Spoke>,
+}
+
+/// One spoke of a thermal relief that the host's fill will make: a strip of copper from a
+/// pad into the pour of its net, on one layer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Spoke {
+    /// The pad, by position in [`Board::pads`]: the spoke is copper of its net.
+    pub pad: usize,
+    /// The layer.
+    pub layer: LayerId,
+    /// Where it starts, in the pad or on its edge.
+    pub from: Point,
+    /// Where it ends, in the pour past the gap around the pad.
+    pub to: Point,
+    /// Its width.
+    pub width: i64,
 }
 
 impl Zones {

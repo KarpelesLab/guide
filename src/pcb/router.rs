@@ -1495,7 +1495,10 @@ fn route_all<'a>(
 
     // Where the spokes of pads in zones of their nets will be, which other nets' tracks pay
     // to be in.
-    if options.spoke_cost > 0.0 && !design.zones.zones.is_empty() && !run.poll() {
+    if options.spoke_cost > 0.0
+        && !(design.zones.zones.is_empty() && design.zones.spokes.is_empty())
+        && !run.poll()
+    {
         world.set_spokes(spokes::Spokes::plan(
             design,
             bounds,

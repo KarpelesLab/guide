@@ -912,7 +912,10 @@ for its length, as one in another net's plane does. It is a price and no wall, s
 that only has the way past another's spoke takes it. Vias pay nothing: a price on them
 left one board with connections open that it had made, for no fewer pads short of
 spokes. The default is none, as the price moves the routes of every board with zones;
-a host whose own fill makes the reliefs sets it.
+a host whose own fill makes the reliefs sets it, and gives the spokes as that fill makes
+them (`Zones::spokes`): a connection that differs by layer, a width fitted to the pad
+and directions of its own are the host's to know, and with any spoke given none is
+worked out here.
 
 **Two halves that the board keeps apart are found once.** A board in two parts that
 only the schematic joins has nets with pads on both, and no route for them: the search

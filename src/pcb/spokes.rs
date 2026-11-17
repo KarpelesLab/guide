@@ -75,7 +75,30 @@ impl Spokes {
             count: 0,
         };
         let stack = design.rules.layers();
-        for zone in &design.zones.zones {
+        // The host's own spokes, if it gave any, are all there are.
+        for spoke in &design.zones.spokes {
+            let net = design.board.pads.get(spoke.pad).and_then(|p| p.net);
+            let (Some(net), true) = (net, stack.contains(spoke.layer)) else {
+                continue;
+            };
+            if out.tracks.is_empty() {
+                out.tracks = vec![0; layers * cols * rows];
+            }
+            out.count += 1;
+            out.mark(
+                spoke.layer,
+                net,
+                spoke.from,
+                spoke.to,
+                spoke.width / 2 + need,
+            );
+        }
+        let zones: &[CopperZone] = if design.zones.spokes.is_empty() {
+            &design.zones.zones
+        } else {
+            &[]
+        };
+        for zone in zones {
             let Some(net) = zone.net else { continue };
             if zone.outline.len() < 3 {
                 continue;
@@ -302,5 +325,23 @@ mod tests {
         // A zone that joins its pads solidly has no spokes to keep.
         d.zones.zones[0].connection = ZoneConnection::Solid;
         assert!(Spokes::plan(&d, bounds, 100_000, 300_000, 4.0).is_none());
+        // Spokes that the host gives are those that count, whatever the zones say: one
+        // along a diagonal, on the second layer.
+        d.zones.spokes.push(super::super::Spoke {
+            pad: 0,
+            layer: crate::geom::LayerId(1),
+            from: Point::new(5 * MM, 5 * MM),
+            to: Point::new(6 * MM, 6 * MM),
+            width: 200_000,
+        });
+        let s = Spokes::plan(&d, bounds, 100_000, 300_000, 4.0).unwrap();
+        assert_eq!(s.count, 1);
+        let on_it = Point::new(5 * MM + 700_000, 5 * MM + 700_000);
+        assert_eq!(s.factor(NetId(2), 1, on_it), 5.0);
+        assert_eq!(s.factor(NetId(2), 0, on_it), 1.0);
+        assert_eq!(s.factor(NetId(1), 1, on_it), 1.0);
+        // And nothing where the zone's own would have been, on the pad's other side.
+        assert_eq!(s.factor(NetId(2), 0, Point::new(4 * MM, 5 * MM)), 1.0);
+        assert_eq!(s.factor(NetId(2), 1, Point::new(4 * MM, 5 * MM)), 1.0);
     }
 }

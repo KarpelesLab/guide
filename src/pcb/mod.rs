@@ -245,7 +245,9 @@ pub use report::{Blocker, Cause, CopperKind, DesignItem, Endpoint, OpenConnectio
 pub(crate) use router::connectivity;
 pub use verify::unconnected;
 pub(crate) use zones::starved_reliefs;
-pub use zones::{CopperZone, Fill, Islands, PadConnection, ZoneConnection, Zones, fill_zones};
+pub use zones::{
+    CopperZone, Fill, Islands, PadConnection, Spoke, ZoneConnection, Zones, fill_zones,
+};
 
 /// The size of a net's through vias.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -483,6 +485,7 @@ impl Design {
                 pads: Vec::new(),
                 keepouts: Vec::new(),
                 fills: Vec::new(),
+                spokes: Vec::new(),
             },
         }
     }
@@ -722,7 +725,8 @@ pub struct RouteOptions {
     /// that each spoke needs, from the pad's edge across its gap and into the zone, on
     /// the zone's layers, is marked before anything is routed, and tracks of other nets
     /// keep out of it while they have another way, and go through it when they have
-    /// none. The default is 0, which
+    /// none. A host that fills its zones itself gives the spokes as its fill makes them,
+    /// [`Zones::spokes`], and those are then the ones marked. The default is 0, which
     /// marks nothing: a host whose fill makes the reliefs sets it, and 4 is what cadlab
     /// routes its boards with (`docs/benchmarks.md`, "Room for the spokes of thermal
     /// reliefs").

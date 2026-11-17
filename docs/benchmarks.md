@@ -2321,28 +2321,113 @@ tables' fast inputs claimed, clean-up passes and a refinement after the route is
 harness places that way and gives reticle's router the same `route::Timing` the command line
 builds (it does not give a placement whose cells moved after the route another route, as the
 command line's `refine_bels` does). `guide` is shown routing for wire, as above, and routing
-by reticle's model (`guide:timed`): reticle's `PlaceTiming` as a `guide` timing graph, a
-point a pin, cells' delays as cell arcs, each domain a clock of its own period, connections
-starting at reticle's estimates from the placement; reticle's node delays as step delays; and
-a picosecond weighed against congestion as reticle weighs it (`delay_scale`). Three designs
-were run, three at a time:
+by reticle's model (`guide:timed`), with reticle's settings for it (below).
 
-| Design | Time, s (reticle / guide / guide:timed) | Iterations | Programmable pips | Latest path, ns (reticle / guide / guide:timed) |
+Measured on 2026-11-17 as above, every XC7A35T design, four at a time, with `guide` at
+`0b91aa3`; reticle has a fitted delay model for no other family. The timing-driven
+placement differs from the default one, and on it `iso_display`, `selftest` and `spi_console`
+have a carry chain's sum with no wire to the flip-flop it feeds (`no path exists`), for both
+routers; four designs have no timed path. That leaves 14. The comparison without timing
+above was run again at that commit, all 43 designs: every one came out as in the table
+above, legal or not alike, with the same pips and iterations for both routers.
+
+| Design | Signals | Time, s (reticle / guide / guide:timed) | Iterations | Programmable pips | Latest path, ns (reticle / guide / guide:timed) |
+| --- | ---: | --- | --- | --- | --- |
+| nes_basys3 | 5342 | 38.61 / 4.99 / 22.82 | 34 / 13 / 17 | 47916 / 46270 / 44838 | 16.90 / 26.65 / 17.30 |
+| iso7816_terminal | 5183 | 8.84 / 2.51 / 4.82 | 27 / 8 / 15 | 31632 / 29381 / 28525 | 8.14 / 11.53 / 8.06 |
+| apple2_basys3 | 2605 | 26.00 / 3.87 / 19.29 | 35 / 9 / 17 | 29248 / 28088 / 26937 | 19.74 / 27.67 / 19.24 |
+| soc_basys3 | 2508 | 20.18 / 2.73 / 11.75 | 23 / 9 / 15 | 21672 / 21133 / 20081 | 12.27 / 18.21 / 12.23 |
+| ssd1306_console | 2095 | 3.00 / 1.45 / 2.68 | 18 / 8 / 14 | 12581 / 11323 / 11099 | 6.86 / 8.12 / 6.95 |
+| iso7816_probe | 1834 | 3.32 / 1.21 / 3.49 | 14 / 8 / 17 | 9722 / 8810 / 8722 | 4.77 / 7.19 / 4.78 |
+| partsel | 1220 | 9.41 / 1.68 / 11.17 | 28 / 9 / 18 | 9415 / 8813 / 8562 | 8.33 / 13.87 / 8.52 |
+| carry_probe | 195 | 1.11 / 0.58 / 1.33 | 29 / 9 / 13 | 1099 / 965 / 940 | 4.33 / 5.34 / 4.37 |
+| carry_where | 195 | 1.25 / 0.55 / 1.14 | 32 / 7 / 16 | 1162 / 967 / 980 | 2.98 / 3.56 / 3.27 |
+| io_exercise | 167 | 1.47 / 0.85 / 1.65 | 24 / 7 / 16 | 1872 / 1366 / 1380 | 2.44 / 3.14 / 2.73 |
+| pll_blink | 165 | 2.10 / 0.55 / 2.70 | 24 / 6 / 16 | 1051 / 946 / 1003 | 2.36 / 3.21 / 2.60 |
+| lutram | 106 | 1.67 / 0.54 / 1.65 | 30 / 6 / 16 | 965 / 694 / 726 | 2.42 / 3.03 / 2.61 |
+| blink_carry | 105 | 0.44 / 0.84 / 1.06 | 6 / 7 / 7 | 554 / 319 / 320 | 2.53 / 2.66 / 2.53 |
+| blink | 86 | 1.07 / 0.59 / 1.39 | 20 / 8 / 13 | 543 / 510 / 535 | 2.43 / 2.95 / 2.56 |
+
+| By geometric mean, over reticle's | Designs | Time | Programmable pips | Latest path |
 | --- | ---: | ---: | ---: | ---: |
-| soc_basys3 | 19.9 / 2.5 / 129.6 | 23 / 9 / 27 | 21672 / 21133 / 20748 | 12.27 / 18.22 / 14.64 |
-| apple2_basys3 | 28.8 / 3.6 / 231.5 | 35 / 9 / 36 | 29248 / 28088 / 27561 | 19.74 / 27.67 / 20.31 |
-| iso7816_terminal | 8.7 / 2.5 / 108.9 | 27 / 8 / 20 | 31632 / 29381 / 29717 | 8.14 / 11.53 / 10.70 |
+| guide:timed, all | 14 | 0.98 | 0.86 | 1.03 |
+| guide:timed, 1000 signals or more | 7 | 0.77 | 0.91 | 1.00 |
+| guide:timed, under 1000 signals | 7 | 1.25 | 0.80 | 1.07 |
+| guide, for wire alone, all | 14 | 0.34 | 0.86 | 1.34 |
 
-All nine are legal by reticle's checks. **Here reticle is ahead.** Routing by reticle's model
-brings `guide`'s latest paths from 1.43 to 1.17 times reticle's, by geometric mean, with
-fewer pips than either, but in 6 to 12 times reticle's time. Its critical searches flood:
-reticle gives up on a critical search after four million nodes and makes it again as an
-uncritical one (`CRITICAL_SEARCH_BUDGET`), estimates the rest of a critical connection's
-way from a tile delay fitted to its fabric, lets a critical connection take a table's fast
-input from a slack one, and refines the late tables' inputs once the route is legal; the
-timing graph here also leaves out what the module docs of `timed.rs` list, a branch's load
-among them, which reticle's analysis charges. Closing this gap is the next step for reticle's
-timing-driven builds; without timing, reticle's default, `guide` is ahead as above.
+All 51 results of the 17 designs routed are legal by reticle's checks, down to the decoded
+bitstream, and every one of `guide:timed`'s 21 830 signals came back from the replay with
+exactly its pips. **On the seven
+designs of 1000 signals or more, `guide` routing by reticle's model matches reticle's
+timing-driven router**: latest paths from 0.975 to 1.023 times reticle's, 1.00 by geometric
+mean, in 0.77 times its time and with 9% fewer pips. On the seven small ones it is 1.00 to 1.12
+times reticle's, 1.07 by geometric mean, and its time there is mostly building its physical
+graph (0.5 to 0.9 s), which a caller routing one graph several times would build once.
+
+Before this, on the three designs then run, `guide:timed` took 6 to 12 times reticle's time
+for latest paths 1.17 times reticle's:
+
+| Design | Time, s (before / now) | Latest path, ns (reticle / before / now) |
+| --- | --- | --- |
+| soc_basys3 | 129.6 / 11.75 | 12.27 / 14.64 / 12.23 |
+| apple2_basys3 | 231.5 / 19.29 | 19.74 / 20.31 / 19.24 |
+| iso7816_terminal | 108.9 / 4.82 | 8.14 / 10.70 / 8.06 |
+
+What closed it, in the order it was found, on those three designs (each step measured with the
+ones before it; the ratios are of latest path and time to reticle's, by geometric mean):
+
+| Step | Latest path | Time |
+| --- | ---: | ---: |
+| Before | 1.17 | 8.35 |
+| A picosecond weighed as reticle weighs it, its exponent of 2 | 1.16 | 0.38 |
+| Reticle's guards on critical connections (below) | 1.11 | 0.48 |
+| The timing graph timed as reticle times it, criticality against the latest path | 1.13 | 0.60 |
+| A long line charged for both its ends | 1.11 | 0.54 |
+| Connections with no wire of their own timed | 0.99 | 0.55 |
+
+- **The delay scale.** The harness turned a picosecond into cost by reticle's `delay_scale`
+  without its weight, counting the wires the 7-series flow closes at a base cost of a million
+  (`TIE_BASE`): that made delay far dearer than reticle makes it under its fitted model, which
+  leaves those out and weighs the rest by `FITTED_DELAY_WEIGHT`. Every critical
+  search then weighed delay alone, against a lower bound of 35 ps a tile, and flooded: 221
+  million expansions on `soc_basys3` where reticle took 33 million, and 7 million after.
+- **The model `guide` routes by is now reticle's, to the picosecond.** On the routes of either
+  router, `guide`'s analysis of the timing graph and reticle's own (`path_criticality`, with no
+  branch load) give the same latest path; the harness prints both. Three things were missing.
+  A connection with no wire of its own to route, such as a carry chain's carry from one slice to
+  the next, or a flip-flop's reset on the slice's one wire, had no arc, so every path through a
+  carry chain was cut and the router never saw the paths reticle found latest. A long line has
+  its delay on both of its ends, and reticle's analysis charges both to a route that crosses it
+  (`LVB12` and `LVB0` are 322 ps each); a step now charges a node with delays on several names
+  all of them, the crossing exactly and a turn back where it came in, which reticle charges
+  once, too much. And the cells: each input's own delay to each output (a carry in reaches its
+  carry out in a fifth of a select input's time), each pin's own launch and capture, false and
+  multicycle paths, and each of reticle's path groups (pads and registers) as a pair of `guide`
+  clocks, so that each is weighed against its own latest path as reticle weighs it.
+- **Criticality against the latest path**, met or not (`TimingDriven::against_latest`, new), as
+  reticle's `against_longest`: `iso7816_terminal` meets its period, and against the period no
+  connection of its latest path was near fully critical, still less after the exponent. That
+  alone took it from 1.04 to 1.00 times reticle's.
+- **Reticle's guards on critical connections**, new in the engine and off by default: a budget
+  for a critical connection's search, after which it is searched for again as an uncritical one
+  (`TimingDriven::search_budget`), a cap on the present factor a critical search pays
+  (`present_cap`, lifted once the overuse stalls), each connection's highest criticality kept
+  (`keep_criticality`), and the nets routed most critical first (`critical_first`). With them,
+  and the critical nets routed again in the first four iterations as reticle's first passes do,
+  `guide:timed` is reticle's settings for the flow. On these designs the budget and the cap
+  never came into play; with the timing model right, the other two and the early rerouting
+  moved the latest paths by a percent or two either way, design by design, and 1.034 against
+  1.042 times reticle's over the 14, for 1.5 times the time (`guide:timed:plain`, without
+  them).
+
+What reticle still does that `guide` does not: its refinement after a legal route, which gives
+the late lookup tables' inputs their pins again as a matching, and its clean-up passes, which
+route the critical signals again once the route is legal (an engine option for them, which
+reroutes the critical nets only after a legal iteration and lets the present factor go on
+growing, moved nothing measurable, and was left out); and a branch's load, which reticle's
+analysis charges and a step delay cannot: up to 0.96 ns of the latest path here. The
+small designs, where `guide` is behind, meet their period with three quarters of it to spare,
+and their latest paths are a few connections long.
 
 ### What it took
 

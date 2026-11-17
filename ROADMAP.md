@@ -46,8 +46,12 @@ For reticle's router that bar is met on routing, without timing: on the 43 desig
 builds bitstreams for on its 7-series, ECP5 and Gowin devices, `guide` routes legally every one
 reticle routes legally, by reticle's own checks down to the decoded bitstream, in 0.77 times its
 time with 0.90 times the pips and latest paths 0.96 times as long, by geometric mean
-([results](docs/benchmarks.md#routing-reticles-designs)). Left: reticle's `--timing-driven`
-routing, which `guide` does not match yet, and cadlab.
+([results](docs/benchmarks.md#routing-reticles-designs)). With reticle's `--timing-driven`, on
+its XC7A35T designs, `guide` routing by reticle's timing model matches it on the designs of 1000
+signals or more, latest paths 1.00 times reticle's by geometric mean in 0.77 times its time, and
+is 1.07 times behind on the small ones ([timing-driven](docs/benchmarks.md#timing-driven-routing-1)).
+Left: those small designs, where reticle's refinement of the lookup tables' inputs after a legal
+route is what `guide` lacks, and cadlab.
 
 ## Milestones
 
@@ -531,9 +535,12 @@ the first routing on the small boards.
   the decoded bitstream: every design legal that reticle's router routes legally, in 0.77 times
   its time, with 0.90 times the pips and latest paths 0.96 times as long
   ([results](docs/benchmarks.md#routing-reticles-designs)), after aiming each search at one
-  terminal (`EngineOptions::target_terminals`). Left: reticle's timing-driven routing, where
-  `guide` routing by reticle's model is still behind; the UltraScale+, which needs a vendor
-  overlay; reticle's placer, measured separately; and cadlab.
+  terminal (`EngineOptions::target_terminals`). Timing-driven, by reticle's own model on the
+  XC7A35T: matched on the designs of 1000 signals or more and 1.07 times behind on the small
+  ones, after timing the model exactly as reticle does and adding reticle's guards on critical
+  connections to the engine (`TimingDriven::search_budget`, `present_cap`, `keep_criticality`,
+  `critical_first`, `against_latest`). Left: the small timing-driven designs; the UltraScale+,
+  which needs a vendor overlay; reticle's placer, measured separately; and cadlab.
 - Command-line tool. **Done:** `guide`, behind the `cli` feature (`cargo install guide
   --features cli`), with no dependency: `guide <domain> <action>` for `fpga route|place|flow`,
   `pcb route|place|flow|drc`, `dsn route` (a drop-in for Freerouting in KiCad's DSN workflow),

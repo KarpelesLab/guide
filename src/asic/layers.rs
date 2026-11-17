@@ -7,9 +7,11 @@
 //! full costs far more than any number of vias, so nets go up a layer before they overflow one,
 //! and one nearly full a twentieth of a via, rising with the square of its use, so that of two
 //! layers that take as many vias a net goes on the emptier, which leaves room on the lower
-//! layers for the nets after it. Nets go one at a time, each against the usage of those before, and the nets on edges that
-//! still overflow are then assigned again a few times, with the price of those edges raised
-//! each time, as negotiation does.
+//! layers for the nets after it. Nets go one at a time, each against the usage of those before,
+//! and the nets on edges that still overflow on a layer while another layer of the edge has
+//! room are then assigned again a few times, with the price of those edges raised each time, as
+//! negotiation does. An edge that the plane left short on every layer is not raised: its
+//! overflow is the same whatever layers its nets take, as long as each layer is full.
 
 use super::format::{Capacities, Design, EdgeAt, Gcell, Segment};
 use super::planar::PlanarSpace;
@@ -49,6 +51,9 @@ pub(crate) struct LayerGrid {
     used: Vec<u32>,
     /// By layer then edge, what using it costs on top, raised where it overflowed.
     history: Vec<u64>,
+    /// By edge on the plane, whether it overflows on a layer while another has room, as of
+    /// the last [`raise_history`](Self::raise_history).
+    avoidable: Vec<bool>,
     /// The layers that have capacity for horizontal edges, then for vertical ones.
     candidates: [Vec<u8>; 2],
 }
@@ -90,6 +95,7 @@ impl LayerGrid {
             layers,
             used: vec![0; capacity.len()],
             history: vec![0; capacity.len()],
+            avoidable: vec![false; edges],
             capacity,
             candidates: [
                 pick(&design.horizontal_capacity),
@@ -118,21 +124,41 @@ impl LayerGrid {
         self.used[i] = (i64::from(self.used[i]) + width) as u32;
     }
 
-    /// Whether edge `e` overflows on `layer`.
+    /// Whether edge `e` overflows on `layer` where another layer of it has room: an overflow
+    /// that giving layers again could take away.
     fn overflows(&self, layer: usize, e: usize) -> bool {
         let i = layer * self.edges + e;
-        self.used[i] > self.capacity[i]
+        self.used[i] > self.capacity[i] && self.avoidable[e]
     }
 
-    /// Raises the price of every edge that overflows, by `step` for each unit, and returns
-    /// how many overflow.
+    /// Raises the price of every edge that overflows on a layer while another layer of the
+    /// same edge has room, by `step` for each unit, and returns how many such edges there
+    /// are.
+    ///
+    /// An edge that overflows on every layer it has, as the plane left it, would overflow
+    /// whatever layers its nets took. Raising its price on the layers it overflows on would
+    /// only send all its nets to whichever layer was cheapest, overflowing that one by more
+    /// than the edge is short, so those are left as they are.
     fn raise_history(&mut self, step: u64) -> usize {
         let mut count = 0;
-        for i in 0..self.used.len() {
-            let over = self.used[i].saturating_sub(self.capacity[i]);
-            if over > 0 {
+        for e in 0..self.edges {
+            let (mut used, mut capacity, mut over) = (0u64, 0u64, 0u64);
+            for layer in 0..self.layers {
+                let i = layer * self.edges + e;
+                used += u64::from(self.used[i]);
+                capacity += u64::from(self.capacity[i]);
+                over += u64::from(self.used[i].saturating_sub(self.capacity[i]));
+            }
+            let avoidable = over > used.saturating_sub(capacity);
+            self.avoidable[e] = avoidable;
+            if !avoidable {
+                continue;
+            }
+            count += 1;
+            for layer in 0..self.layers {
+                let i = layer * self.edges + e;
+                let over = self.used[i].saturating_sub(self.capacity[i]);
                 self.history[i] += step * u64::from(over);
-                count += 1;
             }
         }
         count
@@ -492,6 +518,37 @@ mod tests {
         // The first takes the lower; the second, which would fill it, the other.
         assert_eq!(nets[0].tree.layer[1], 0);
         assert_eq!(nets[1].tree.layer[1], 2);
+    }
+
+    #[test]
+    fn an_edge_short_on_every_layer_keeps_its_nets_spread() {
+        // One track on each of layers 0 and 2 for eight nets: six too many, whatever layers
+        // they take, as long as neither layer is left empty. Raising the price of the layers
+        // that overflow would leave one empty, with history dearer than overflowing the other.
+        let text = "grid 2 1 3\nvertical capacity 0 4 0\nhorizontal capacity 2 0 2\n\
+                    minimum width 1 1 1\nminimum spacing 1 1 1\nvia spacing 1 1 1\n0 0 10 10\n\
+                    num net 0\n";
+        let design = read_design(text.as_bytes()).unwrap();
+        let caps = design.capacities();
+        let plane = PlanarSpace::new(&caps, |_, c| c / 2);
+        let net = || LayerNet {
+            tree: PlanarTree {
+                cells: vec![0, 1],
+                parent: vec![u32::MAX, 0],
+                pins: vec![Some((1, 1)), Some((1, 1))],
+                layer: Vec::new(),
+            },
+            width: vec![2, 2, 2],
+        };
+        let order: Vec<usize> = (0..8).collect();
+        for passes in 0..5 {
+            let mut grid = LayerGrid::new(&design, &caps, &plane);
+            let mut nets: Vec<LayerNet> = (0..8).map(|_| net()).collect();
+            assign(&mut grid, &plane, &mut nets, &order, passes);
+            let on = |layer: u8| nets.iter().filter(|n| n.tree.layer[1] == layer).count();
+            assert_eq!(on(0) + on(2), 8);
+            assert!(on(0) >= 1 && on(2) >= 1, "{passes} passes");
+        }
     }
 
     #[test]

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.15](https://github.com/KarpelesLab/guide/compare/v0.0.14...v0.0.15) - 2026-11-17
+
+### Added
+
+- *(pcb)* two nets that cross in a row of fine pitch have the crossing planned on another layer where the row's has no room, and cleanup takes out the hops between two vias
+
 ## [0.0.14](https://github.com/KarpelesLab/guide/compare/v0.0.13...v0.0.14) - 2026-11-17
 
 ### Added

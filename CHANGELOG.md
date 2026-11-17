@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.16](https://github.com/KarpelesLab/guide/compare/v0.0.15...v0.0.16) - 2026-11-17
+
+### Added
+
+- *(pcb)* a host that fills its zones gives the spokes of its reliefs
+- *(pcb)* the room of a thermal relief's spokes can cost other nets' tracks, and what the board keeps apart is found once and told
+
+### Fixed
+
+- *(pcb)* what completes a net puts no via beside one the net has
+
+### Other
+
+- *(benchmarks)* the spokes as the host's fill makes them, measured
+
 ## [0.0.15](https://github.com/KarpelesLab/guide/compare/v0.0.14...v0.0.15) - 2026-11-17
 
 ### Added

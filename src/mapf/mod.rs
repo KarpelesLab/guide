@@ -1,4 +1,4 @@
-//! Multi-agent path finding, by the negotiated-congestion engine.
+//! Multi-agent path finding, by negotiated congestion.
 //!
 //! Agents start on vertices of a graph and have to reach their goals, one step or one wait per
 //! time step, without two of them ever being on the same vertex at once or swapping places
@@ -7,21 +7,79 @@
 //! vertex and swap conflicts, agents that stay at their targets, and the sum of costs as the
 //! objective.
 //!
-//! Nothing here is a new algorithm. [`TimeSpace`] expands an [`Instance`] in time, as a
-//! [`RoutingSpace`](crate::space::RoutingSpace) whose nodes are a vertex at a time and whose
-//! resources are a vertex at a time and an edge during a move, each of capacity 1, and
-//! [`solve`] hands it to [`crate::engine`], which negotiates the conflicts away as PathFinder
-//! does on an FPGA. Agents are nets, and each net has two terminals, its start at time 0 and
-//! its goal. This is what MAPF-LNS2 (Li et al., AAAI 2022) calls soft conflicts: an agent may
-//! collide at a price, and the price rises until nobody does. [`solve`] has an example.
+//! Nothing here is a new algorithm. Agents are planned one at a time, each seeing the others'
+//! plans at a price, and the price rises until nobody collides, as PathFinder does on an FPGA
+//! and as MAPF-LNS2 (Li et al., AAAI 2022) calls soft conflicts. [`solve`] does it two ways,
+//! as [`SolveOptions::method`] says:
 //!
-//! # Staying on the goal
+//! - [`Method::SafeIntervals`], the default: each agent is planned over [safe
+//!   intervals](#safe-intervals), with the engine's schedule and prices, and a first solution
+//!   by LaCAM to fall back on.
+//! - [`Method::TimeExpanded`]: [`TimeSpace`] expands an [`Instance`] in time, as a
+//!   [`RoutingSpace`](crate::space::RoutingSpace) whose nodes are a vertex at a time and whose
+//!   resources are a vertex at a time and an edge during a move, each of capacity 1, and
+//!   [`crate::engine`] negotiates over it unchanged. Agents are nets, and each net has two
+//!   terminals, its start at time 0 and its goal.
 //!
-//! An agent that arrives on its goal for good at time `t` goes on from there through a
-//! [`State::Stay`] at each time to the horizon, which holds the goal at that time, and then into
-//! [`State::Goal`], the target of every route. Another agent passing through later conflicts
-//! with a stay, so the engine sees the rule like any other. Moves and waits cost 2 and stays 1,
-//! so that a route's cost is the horizon plus 1 plus its arrival time: [`TimeSpace`] has why.
+//! [`solve`] has an example.
+//!
+//! # Safe intervals
+//!
+//! A time-expanded space has a state for each vertex at each time to a horizon, and a search
+//! that has to wait for a corridor to clear tries every place and length of wait there is. On
+//! the large MovingAI maps, with paths of a thousand steps and more, that made each iteration
+//! of negotiation take seconds to minutes. Safe-interval path planning (SIPP, Phillips and
+//! Likhachev, ICRA 2011) has a state for each vertex and interval of time over which nobody
+//! arrives or leaves: an agent arrives in an interval as early as it can and may stay to its
+//! end. There is no horizon, and a vertex has as many states as agents pass through it.
+//!
+//! Negotiation needs conflicts priced, not forbidden. So an interval here is one over which
+//! neither who else is on the vertex nor its history changes, and one with someone in it may
+//! be entered, at the engine's price, `h + (1 + h) * present * o` on top of the step's cost of
+//! 1, with `o` the agents there and `h` its history; edges are priced the same way, for swaps.
+//! That is SIPPS's idea (Li et al., AAAI 2022), with prices for collisions. Earliest arrival
+//! is no longer exact once intervals have prices, as arriving later in a dear interval after a
+//! wait where it was cheap can pay less, so the planner keeps every arrival in an interval that
+//! no other beats once it has waited for it. Negotiation only needs prices to point the way;
+//! once they are high, a plan through free intervals alone is the cheapest there is, and that
+//! search is exact.
+//!
+//! The engine's table of resources, a hash map from a resource to who holds it, can't tell a
+//! search when a vertex is next free without a lookup per time step, so this negotiation keeps
+//! its own table, per vertex and in time order, and runs the engine's loop over it: every agent
+//! planned in the first iteration at a present factor of `first_present`, then only those in
+//! conflict when their turn comes, with the present factor growing by `present_growth` up to
+//! `max_present`, history adding `history_factor` per unit of overuse each iteration, and the
+//! engine's iteration limit, budget and cancel flag. The engine itself is unchanged.
+//!
+//! One thing had to be added. Two agents in a dead end, one holding its goal at the mouth and
+//! one that has to pass it to reach its own, deeper, can end up each answering the other's
+//! plan: the second waits outside until the first is there, passes, and conflicts, and history
+//! on that time sends it a step later the next iteration, and the next, without end. Once the
+//! present factor is at its most, history from a conflict on a goal goes on every time from the
+//! holder's arrival on, so that arriving early, and passing late, both get dear. On maze-128-128-2
+//! with 100 agents, that took negotiation from 100 iterations without a solution to 19.
+//!
+//! # A first solution
+//!
+//! Before negotiating, [`solve`] finds a [first solution](first_solution) by LaCAM (Okumura,
+//! AAAI 2023) over PIBT, which moves every agent a step at a time and takes milliseconds where
+//! negotiation takes seconds. On the 1500 instances of the six MovingAI maps of
+//! `docs/benchmarks.md`, its sums of costs were 37% higher than negotiation's in all, and up
+//! to twice as high; negotiation's was never higher. So negotiation's solution is the one
+//! returned when it settles, and the first one is returned, shortened, when negotiation hits its
+//! iteration limit or is stopped, with [`Solution::fell_back`] set. Prioritized planning over
+//! hard safe intervals as negotiation's first iteration gave sums of costs up to 4% higher and
+//! was no faster, and a legal solution leaves negotiation nothing to do.
+//!
+//! # Staying on the goal, through time
+//!
+//! In a [`TimeSpace`], an agent that arrives on its goal for good at time `t` goes on from
+//! there through a [`State::Stay`] at each time to the horizon, which holds the goal at that
+//! time, and then into [`State::Goal`], the target of every route. Another agent passing
+//! through later conflicts with a stay, so the engine sees the rule like any other. Moves and
+//! waits cost 2 and stays 1, so that a route's cost is the horizon plus 1 plus its arrival
+//! time: [`TimeSpace`] has why.
 //!
 //! The first version held the goal to the horizon in one step from the goal into
 //! [`State::Goal`]. That step had to be priced over every time to the horizon each time a search
@@ -31,7 +89,7 @@
 //!
 //! # The horizon
 //!
-//! Time has to stop somewhere, and the horizon is a trade: too short and no solution fits, too
+//! In a [`TimeSpace`], time has to stop somewhere, and the horizon is a trade: too short and no solution fits, too
 //! long and every final step holds more resources. [`solve`] starts from the longest of the
 //! agents' shortest paths plus [`slack`](SolveOptions::slack), and, if negotiation doesn't
 //! settle within the engine's iterations, lengthens it and runs again from the routes and
@@ -41,9 +99,10 @@
 //! # Shortening
 //!
 //! Negotiation stops at the first legal solution, found at prices that no longer hold. With
-//! [`improve_passes`](SolveOptions::improve_passes), as by default, [`solve`] then plans each agent again in
-//! turn, by an exact search against the others as hard reservations, and keeps what arrives
-//! sooner, until a pass changes nothing. No agent gets worse, and the solution stays legal.
+//! [`improve_passes`](SolveOptions::improve_passes), as by default, [`solve`] then plans each
+//! agent again in turn, by an exact search against the others as hard reservations, over safe
+//! intervals or through time as the method has it, and keeps what arrives sooner, until a pass
+//! changes nothing. No agent gets worse, and the solution stays legal.
 //!
 //! Routing small groups of agents again by negotiation after that, a late agent and those in
 //! the way of its shortest path, with everyone else's resources at a capacity of 0, as MAPF-LNS
@@ -59,6 +118,9 @@ pub mod check;
 mod graph;
 mod improve;
 pub mod movingai;
+mod negotiate;
+mod pibt;
+mod sipp;
 mod space;
 
 pub use graph::{Agent, Graph, GraphError};
@@ -91,6 +153,27 @@ pub struct SolveOptions<'c> {
     /// On the MovingAI maps of `docs/benchmarks.md`, it took sums of costs up to 2% lower, least
     /// on the large maps, for 15% to 30% more time.
     pub improve_passes: u32,
+    /// What agents are planned through. The default is [`Method::SafeIntervals`].
+    pub method: Method,
+    /// Whether to find a [first solution](first_solution) before negotiating, to fall back
+    /// on if negotiation doesn't settle or is stopped, with [`Method::SafeIntervals`]. The
+    /// default is true.
+    pub first: bool,
+}
+
+/// What [`solve`] plans agents through.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Method {
+    /// A [`TimeSpace`], negotiated by [`crate::engine::Engine`], with a horizon that grows
+    /// over [`rounds`](SolveOptions::rounds).
+    TimeExpanded,
+    /// Safe intervals, negotiated with the engine's schedule and prices, as [safe
+    /// intervals](self#safe-intervals) has it. [`slack`](SolveOptions::slack),
+    /// [`rounds`](SolveOptions::rounds), [`threads`](SolveOptions::threads) and the engine's
+    /// options other than its schedule, history, limits and cancel flag don't apply.
+    #[default]
+    SafeIntervals,
 }
 
 impl Default for SolveOptions<'_> {
@@ -101,6 +184,8 @@ impl Default for SolveOptions<'_> {
             rounds: 4,
             threads: 1,
             improve_passes: 10,
+            method: Method::default(),
+            first: true,
         }
     }
 }
@@ -156,6 +241,12 @@ pub struct Solution {
     pub improve_expanded: u64,
     /// Why the solve was stopped before its end, if it was: see [`solve_with`].
     pub stopped: Option<Stopped>,
+    /// The sum of costs of the [first solution](first_solution), if one was looked for and
+    /// found.
+    pub first_sum_of_costs: Option<u64>,
+    /// Whether the plans are the first solution's, shortened, because negotiation didn't
+    /// settle.
+    pub fell_back: bool,
 }
 
 impl Solution {
@@ -198,8 +289,7 @@ impl Solution {
     }
 }
 
-/// Solves `instance` with the negotiated-congestion engine. See the [module
-/// documentation](self).
+/// Solves `instance` by negotiated congestion. See the [module documentation](self).
 ///
 /// The result is the same for any number of threads and on any platform.
 ///
@@ -207,10 +297,11 @@ impl Solution {
 ///
 /// Two agents swap ends of a corridor with a siding. At best, one steps into the siding to let
 /// the other by, which takes it 4 steps, and the other waits a step, which takes it 3.
-/// Negotiation is not exact, and here both wait a step more than they need to.
+/// Negotiation over safe intervals finds that; through time, it is not exact, and here has
+/// both wait a step more than they need to.
 ///
 /// ```
-/// use guide::mapf::{Agent, Graph, Instance, SolveOptions, check, solve};
+/// use guide::mapf::{Agent, Graph, Instance, Method, SolveOptions, check, solve};
 ///
 /// //  0 - 1 - 2
 /// //      |
@@ -222,9 +313,12 @@ impl Solution {
 /// let solution = solve(&instance, &SolveOptions::default());
 /// let plans = solution.plans.as_ref().expect("the siding lets them pass");
 /// let summary = check::check(&graph, &agents, plans).expect("the plans are legal");
-/// assert_eq!(summary.sum_of_costs, 9);
-/// assert_eq!(solution.sum_of_costs(), Some(9));
+/// assert_eq!(summary.sum_of_costs, 7);
 /// assert!(summary.sum_of_costs >= instance.sum_of_shortest());
+///
+/// let mut options = SolveOptions::default();
+/// options.method = Method::TimeExpanded;
+/// assert_eq!(solve(&instance, &options).sum_of_costs(), Some(9));
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub fn solve(instance: &Instance<'_>, options: &SolveOptions<'_>) -> Solution {
@@ -247,6 +341,9 @@ pub fn solve_with(
     control: &RunControl<'_>,
 ) -> Solution {
     let run = Run::new(control);
+    if options.method == Method::SafeIntervals {
+        return solve_safe_intervals(instance, options, &run);
+    }
     let own_flag = options.engine.cancel;
     let nets = instance.nets();
     let mut horizon = instance.longest_shortest().saturating_add(options.slack);
@@ -300,6 +397,8 @@ pub fn solve_with(
                 improve_passes: 0,
                 improve_expanded: 0,
                 stopped: None,
+                first_sum_of_costs: None,
+                fell_back: false,
             };
             solution.negotiated_sum_of_costs = solution.sum_of_costs();
             if let Some(plans) = solution.plans.as_mut()
@@ -344,7 +443,136 @@ pub fn solve_with(
         improve_passes: 0,
         improve_expanded: 0,
         stopped: run.stopped(),
+        first_sum_of_costs: None,
+        fell_back: false,
     }
+}
+
+/// How many configurations [`first_solution`] may reach in [`solve`]: as many as take
+/// about 240 MB, 10 million agent positions, and at least 1000.
+pub fn first_configurations(instance: &Instance<'_>) -> u32 {
+    let agents = instance.agents().len().max(1) as u64;
+    (10_000_000 / agents).clamp(1000, u64::from(u32::MAX)) as u32
+}
+
+/// A first solution, fast and far from the best, by LaCAM (Okumura, AAAI 2023) over PIBT
+/// (Okumura et al., *Artificial Intelligence* 310, 2022): one plan per agent, up to its last
+/// arrival on its goal, if one was found among at most `max_configurations` configurations
+/// and 10 million constraints, about 160 MB, before `cancel`, if given, was set.
+///
+/// PIBT moves every agent a step at a time, each to the free neighbour nearest its goal in
+/// order of priority, with agents in the way pushed aside; LaCAM searches over the
+/// configurations it reaches, depth first, and tries PIBT's step under ever more constraints
+/// where it gets stuck, which makes it complete. This is LaCAM's first search, without the
+/// refinements of LaCAM\* and LaCAM3 after it. [`solve`] starts with it, by default, to fall
+/// back on if negotiation doesn't settle.
+pub fn first_solution(
+    instance: &Instance<'_>,
+    max_configurations: u32,
+    cancel: Option<&core::sync::atomic::AtomicBool>,
+) -> Option<Vec<Vec<u32>>> {
+    pibt::lacam(instance, max_configurations, cancel)
+}
+
+/// [`solve_with`] by [`Method::SafeIntervals`].
+fn solve_safe_intervals(
+    instance: &Instance<'_>,
+    options: &SolveOptions<'_>,
+    run: &Run<'_>,
+) -> Solution {
+    let own_flag = options.engine.cancel;
+    let first = if options.first {
+        run.watch(own_flag, || {
+            pibt::lacam(
+                instance,
+                first_configurations(instance),
+                run.engine_flag(own_flag),
+            )
+        })
+    } else {
+        None
+    };
+    // Negotiation starts: a listener hears it, step 0, once the first solution is there.
+    run.tell(Progress::new(Stage::Route, 0), 0);
+    let mut engine_options = options.engine;
+    engine_options.max_expansions = run.budget(options.engine.max_expansions);
+    let (negotiated, state) = run.watch(own_flag, || {
+        engine_options.cancel = run.engine_flag(own_flag);
+        negotiate::negotiate(
+            instance,
+            &engine_options,
+            &|iteration, conflicts, expanded| {
+                if run.listening() {
+                    let mut progress = Progress::new(Stage::Route, iteration);
+                    progress.conflicts = Some(conflicts);
+                    run.tell(progress, expanded);
+                }
+            },
+        )
+    });
+    run.charge(negotiated.nodes_expanded);
+    run.engine_stopped(negotiated.stop);
+    let first_sum_of_costs = first.as_ref().map(|plans| {
+        plans
+            .iter()
+            .map(|plan| u64::from(check::plan_cost(plan)))
+            .sum()
+    });
+    let mut solution = Solution {
+        plans: negotiated.plans,
+        rounds: Vec::new(),
+        negotiated_sum_of_costs: None,
+        improve_passes: 0,
+        improve_expanded: 0,
+        stopped: None,
+        first_sum_of_costs,
+        fell_back: false,
+    };
+    solution.rounds.push(Round {
+        horizon: solution.makespan().unwrap_or(0),
+        stop: negotiated.stop,
+        iterations: negotiated.iterations,
+        nodes_expanded: negotiated.nodes_expanded,
+        conflicts: negotiated.conflicts,
+    });
+    solution.negotiated_sum_of_costs = solution.sum_of_costs();
+    let mut state = state;
+    if solution.plans.is_none()
+        && let Some(first) = first
+    {
+        let mut table = negotiate::State::new(instance);
+        table.add_all(&first);
+        state = Some(table);
+        solution.plans = Some(first);
+        solution.fell_back = true;
+    }
+    if let (Some(plans), Some(mut state)) = (solution.plans.as_mut(), state)
+        && options.improve_passes > 0
+        && run.stopped().is_none()
+    {
+        run.tell(Progress::new(Stage::Improve, 0), 0);
+        let budget = run.budget(
+            options
+                .engine
+                .max_expansions
+                .saturating_sub(negotiated.nodes_expanded),
+        );
+        let shortened = run.watch(own_flag, || {
+            negotiate::shorten(
+                instance,
+                &mut state,
+                plans,
+                options.improve_passes,
+                budget,
+                run.engine_flag(own_flag),
+            )
+        });
+        run.charge(shortened.nodes_expanded);
+        solution.improve_passes = shortened.passes;
+        solution.improve_expanded = shortened.nodes_expanded;
+    }
+    solution.stopped = run.stopped();
+    solution
 }
 
 #[cfg(test)]

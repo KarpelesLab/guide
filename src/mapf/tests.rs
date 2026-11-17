@@ -37,17 +37,23 @@ fn agents_pass_each_other_in_a_corridor_with_a_siding() {
     let graph = Graph::from_edges(6, &[(0, 1), (1, 2), (2, 3), (3, 4), (2, 5)]).unwrap();
     let agents = vec![Agent { start: 0, goal: 4 }, Agent { start: 4, goal: 0 }];
     let instance = Instance::new(&graph, agents.clone()).unwrap();
+    // At best, one agent steps into the siding and out again, and the other waits for it:
+    // 5 + 6, as any other way round costs as much.
     let solution = solve(&instance, &SolveOptions::default());
     let plans = solution.plans.as_ref().unwrap();
     let summary = check::check(&graph, &agents, plans).unwrap();
-    // At best, one agent steps into the siding and out again, and the other waits for it:
-    // 5 + 6, as any other way round costs as much. Negotiation isn't exact, and here it has
-    // both wait a step longer.
-    assert_eq!(summary.sum_of_costs, 13);
+    assert_eq!(summary.sum_of_costs, 11);
+    assert_eq!(solution.sum_of_costs(), Some(11));
+    assert!(!solution.fell_back);
+    // Negotiation through time isn't exact either, and here it has both wait a step longer.
+    let mut options = SolveOptions {
+        method: Method::TimeExpanded,
+        ..SolveOptions::default()
+    };
+    let solution = solve(&instance, &options);
     assert_eq!(solution.sum_of_costs(), Some(13));
     assert_eq!(solution.makespan(), Some(7));
     // The engine's own default history finds the optimum.
-    let mut options = SolveOptions::default();
     options.engine.history_factor = crate::cost::Cost::ONE;
     assert_eq!(solve(&instance, &options).sum_of_costs(), Some(11));
 }
@@ -72,6 +78,12 @@ fn a_corridor_without_a_siding_has_no_solution() {
     let instance = Instance::new(&graph, agents).unwrap();
     let mut options = SolveOptions::default();
     options.engine.max_iterations = 20;
+    let solution = solve(&instance, &options);
+    assert_eq!(solution.plans, None);
+    assert_eq!(solution.first_sum_of_costs, None);
+    assert_eq!(solution.rounds[0].stop, StopReason::IterationLimit);
+    assert_eq!(first_solution(&instance, 1000, None), None);
+    options.method = Method::TimeExpanded;
     options.rounds = 2;
     let solution = solve(&instance, &options);
     assert_eq!(solution.plans, None);
@@ -107,9 +119,21 @@ fn an_expansion_budget_stops_the_solve() {
     let instance = Instance::new(&graph, agents).unwrap();
     let mut options = SolveOptions::default();
     options.engine.max_expansions = 50;
+    // With a first solution to fall back on, the solve has plans all the same.
+    let solution = solve(&instance, &options);
+    assert!(solution.fell_back);
+    assert_eq!(solution.rounds[0].stop, StopReason::BudgetExhausted);
+    let plans = solution.plans.as_ref().unwrap();
+    assert!(check::check(instance.graph(), instance.agents(), plans).is_ok());
+    assert_eq!(solution.negotiated_sum_of_costs, None);
+    options.first = false;
     let solution = solve(&instance, &options);
     assert_eq!(solution.plans, None);
     assert_eq!(solution.rounds.len(), 1);
+    assert_eq!(solution.rounds[0].stop, StopReason::BudgetExhausted);
+    options.method = Method::TimeExpanded;
+    let solution = solve(&instance, &options);
+    assert_eq!(solution.plans, None);
     assert_eq!(solution.rounds[0].stop, StopReason::BudgetExhausted);
 }
 
@@ -140,4 +164,28 @@ fn shortening_keeps_solutions_legal_and_never_longer() {
         assert_eq!(plain.improve_expanded, 0);
     }
     assert!(shortened > 0, "no solution was shortened");
+}
+
+#[test]
+fn first_solutions_are_legal_and_negotiation_beats_them() {
+    for seed in 0..6 {
+        let (graph, agents) = random_instance(seed, 12, 40);
+        let instance = Instance::new(&graph, agents.clone()).unwrap();
+        let first = first_solution(&instance, 100_000, None).expect("LaCAM is complete");
+        let summary = check::check(&graph, &agents, &first).unwrap();
+        let solution = solve(&instance, &SolveOptions::default());
+        assert_eq!(solution.first_sum_of_costs, Some(summary.sum_of_costs));
+        assert!(!solution.fell_back);
+        assert!(solution.sum_of_costs().unwrap() <= summary.sum_of_costs);
+    }
+}
+
+#[test]
+fn first_solutions_swap_in_a_corridor_with_a_siding() {
+    // Agents swap ends of a corridor, which takes one stepping into the siding.
+    let graph = Graph::from_edges(6, &[(0, 1), (1, 2), (2, 3), (3, 4), (2, 5)]).unwrap();
+    let agents = vec![Agent { start: 0, goal: 4 }, Agent { start: 4, goal: 0 }];
+    let instance = Instance::new(&graph, agents.clone()).unwrap();
+    let first = first_solution(&instance, 1000, None).unwrap();
+    assert!(check::check(&graph, &agents, &first).is_ok());
 }

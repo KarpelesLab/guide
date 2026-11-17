@@ -186,6 +186,12 @@ impl<'g> Instance<'g> {
             .collect()
     }
 
+    /// The distance from every vertex to the goal of agent `agent`, which has to exist.
+    #[inline]
+    pub(super) fn distances(&self, agent: usize) -> &[u32] {
+        &self.distances[agent]
+    }
+
     /// The distance from `vertex` to the goal of the agent of `net`, if both exist.
     #[inline]
     fn distance(&self, net: NetId, vertex: u32) -> Option<u32> {

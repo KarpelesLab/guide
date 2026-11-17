@@ -5,24 +5,29 @@
 //!     MAP SCEN AGENTS[,AGENTS...] [--time SECONDS] [--slack N] [--rounds N]
 //!     [--first-present X] [--initial-present X] [--growth X] [--history X]
 //!     [--iterations N] [--batch N] [--threads N] [--incremental] [--improve PASSES]
+//!     [--method sipp|time] [--first 0|1]
 //! ```
 //!
 //! The columns are: scenario, agents, solved, sum of costs, the sum of the agents' shortest
-//! paths, makespan, milliseconds, iterations, expansions, rounds, the last round's horizon, and
-//! the sum of costs before shortening.
+//! paths, makespan, milliseconds, iterations, expansions, rounds, the last round's horizon, the
+//! sum of costs before shortening, the sum of costs of the first solution (LaCAM's), the
+//! milliseconds to it, and 1 if the plans are that first solution's, shortened, because
+//! negotiation didn't settle. Both times include working out the distances to every goal.
 //! Every solution is checked by `guide::mapf::check` before it is printed, and a solution that
 //! fails the check stops the program.
 //!
 //! The time limit sets the engine's cancel flag from a timer, so a run that hits it isn't
 //! reproducible. Without one, a run is.
 
+use std::cell::Cell;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use guide::control::{Progress, RunControl, Stage};
 use guide::cost::Cost;
-use guide::mapf::{Instance, SolveOptions, check, movingai, solve};
+use guide::mapf::{Instance, Method, SolveOptions, check, movingai, solve_with};
 
 fn main() -> ExitCode {
     match run() {
@@ -75,6 +80,14 @@ fn run() -> Result<(), String> {
             "--initial-present" => options.engine.initial_present = cost(value)?,
             "--growth" => options.engine.present_growth = cost(value)?,
             "--history" => options.engine.history_factor = cost(value)?,
+            "--first" => options.first = number()? != 0,
+            "--method" => {
+                options.method = match value.as_str() {
+                    "time" => Method::TimeExpanded,
+                    "sipp" => Method::SafeIntervals,
+                    _ => return Err(format!("unknown method {value}")),
+                }
+            }
             _ => return Err(format!("unknown option {flag}")),
         }
     }
@@ -95,8 +108,9 @@ fn run() -> Result<(), String> {
             continue;
         }
         let agents = movingai::agents(&graph, &tasks, count).map_err(|e| e.to_string())?;
-        let instance = Instance::new(&graph, agents.clone()).map_err(|e| e.to_string())?;
 
+        // Times count from here, with the distances to every goal that the instance works out.
+        let started = Instant::now();
         let cancel = Arc::new(AtomicBool::new(false));
         let done = Arc::new((Mutex::new(false), Condvar::new()));
         let timer = time_limit.map(|limit| {
@@ -112,11 +126,26 @@ fn run() -> Result<(), String> {
                 }
             })
         });
+        let instance = Instance::new(&graph, agents.clone()).map_err(|e| e.to_string())?;
+        let setup = started.elapsed();
         let mut run_options = options;
         run_options.engine.cancel = Some(&cancel);
-        let started = Instant::now();
-        let solution = solve(&instance, &run_options);
-        let elapsed = started.elapsed();
+        // The first solution's time: solve tells of negotiation's start once it has one.
+        let solving = Instant::now();
+        let first_at = Cell::new(None);
+        let heard = |progress: &Progress| {
+            if progress.stage == Stage::Route && first_at.get().is_none() {
+                first_at.set(Some(solving.elapsed()));
+            }
+        };
+        let mut control = RunControl::default();
+        control.progress = Some(&heard);
+        let solution = solve_with(&instance, &run_options, &control);
+        let first_ms = match first_at.get() {
+            Some(first) if run_options.first => (setup + first).as_secs_f64() * 1000.0,
+            _ => 0.0,
+        };
+        let elapsed = setup + solving.elapsed();
         {
             let (lock, signal) = &*done;
             *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
@@ -141,7 +170,7 @@ fn run() -> Result<(), String> {
         };
         let last = solution.rounds.last();
         println!(
-            "{scen_name}\t{count}\t{solved}\t{soc}\t{}\t{makespan}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{scen_name}\t{count}\t{solved}\t{soc}\t{}\t{makespan}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{first_ms:.1}\t{}",
             instance.sum_of_shortest(),
             elapsed.as_millis(),
             solution.iterations(),
@@ -151,6 +180,10 @@ fn run() -> Result<(), String> {
             solution
                 .negotiated_sum_of_costs
                 .map_or("-".into(), |soc| soc.to_string()),
+            solution
+                .first_sum_of_costs
+                .map_or("-".into(), |soc| soc.to_string()),
+            u8::from(solution.fell_back),
         );
     }
     Ok(())

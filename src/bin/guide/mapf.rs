@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 
 use guide::control::Progress;
 use guide::cost::Cost;
-use guide::mapf::{Instance, SolveOptions, check, movingai};
+use guide::mapf::{Instance, Method, SolveOptions, check, movingai};
 
 use crate::Outcome;
 use crate::args::{self, Command, Failure, Opt};
@@ -33,9 +33,19 @@ fn solve_command() -> Command {
                 "Passes over the agents after a solution, to shorten their paths [default: 10]",
             ),
             Opt::value(
+                "method",
+                "M",
+                "`sipp` to plan over safe intervals, or `time` through a time-expanded space \
+                 [default: sipp]",
+            ),
+            Opt::flag(
+                "no-first",
+                "Don't look for a first solution by LaCAM to fall back on (with sipp)",
+            ),
+            Opt::value(
                 "rounds",
                 "N",
-                "Rounds of negotiation, each with a longer horizon [default: 4]",
+                "Rounds of negotiation, each with a longer horizon (with time) [default: 4]",
             ),
             Opt::value(
                 "max-iterations",
@@ -80,6 +90,16 @@ pub fn solve(argv: &[String]) -> Outcome {
     if let Some(n) = m.number("improve")? {
         options.improve_passes = n;
     }
+    match m.get("method") {
+        None | Some("sipp") => options.method = Method::SafeIntervals,
+        Some("time") => options.method = Method::TimeExpanded,
+        Some(other) => {
+            return Err(Failure::Usage(format!(
+                "--method {other}: expected sipp or time"
+            )));
+        }
+    }
+    options.first = !m.flag("no-first");
     if let Some(n) = m.number("rounds")? {
         options.rounds = n;
     }
@@ -187,6 +207,8 @@ pub fn solve(argv: &[String]) -> Outcome {
         .set("iterations", solution.iterations())
         .set("expansions", solution.nodes_expanded())
         .set("rounds", solution.rounds.len())
+        .set("first_sum_of_costs", solution.first_sum_of_costs)
+        .set("fell_back", solution.fell_back)
         .set("written", written);
     ui.finish("mapf solve", report)?;
     Ok(solved)

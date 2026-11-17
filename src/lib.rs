@@ -44,8 +44,8 @@
 //! the geometry layer, `geom`, and PCB routing over it, `pcb`. The `kicad` feature, which
 //! implies `pcb`, reads KiCad boards into them, for clearance checks and routing, and the `dsn`
 //! feature, which implies `pcb` too, reads Specctra DSN designs and writes SES sessions. The
-//! `mapf` feature adds multi-agent path finding, `mapf`, routed by the same
-//! engine through a time-expanded space, and the `asic` feature ASIC global routing, `asic`, on
+//! `mapf` feature adds multi-agent path finding, `mapf`, by the same negotiation, over
+//! safe intervals or a time-expanded space, and the `asic` feature ASIC global routing, `asic`, on
 //! the ISPD contests' designs.
 //!
 //! The `cli` feature builds the `guide` command-line tool, with every domain: `cargo install

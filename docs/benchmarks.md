@@ -4461,6 +4461,11 @@ unless said.
   every other: after 64 rounds and 36 million nodes, 394 of 432 connections, with one to
   nineteen nets still in each other's way from one round to the next; the first pass has 390
   after 3.4 million.
+- *The negotiations that were undone tried again after each pass*, on the board as the
+  pass left it: 152 over six orders for 155.
+- *A limit of 100,000 or 300,000 nodes on the first pass's searches across routes*, for
+  `sweep-v2.2`'s three long nets to come to their negotiations sooner: the same 6, 7 and
+  6. Its first pass ends after 12 s as it is, and its settling goes on for 26 s more.
 - *Chains after every pass* as the negotiations are: `glasgow-revC3` 112 open over
   three orders at 40 million nodes for 109 with the chains after the last pass alone,
   as before, and 107 with 0.0.11.
@@ -4476,7 +4481,13 @@ unless said.
   receptacle, whose pads have those of `D-` between them.
 - A second run that goes on from the first run's routes, in place of one on a board
   where they are fixed.
-- Searches that end at their limit of nodes on a wide board: `sweep-v2.2` is as it was.
+- `sweep-v2.2`, which is as it was, and not for the reason given before. Its ground,
+  `raw` and `vcc` each have terminals in both halves of the board. A negotiation's
+  search for them, with every route shared at half its length's price, expands its
+  60,000 nodes and reaches nothing, and with 800,000 it ends after 380,000 to 650,000
+  with nowhere left to go: what stands between the halves for these three nets is not
+  other nets' routes but something that does not move, at the width they are routed at.
+  What that is was not found here.
 - Vias and track, and a board of six layers, whose minute ends in its first pass.
 
 ## PCB differential pairs and lengths

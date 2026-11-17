@@ -74,6 +74,12 @@ const WHOLE_ROUNDS: f64 = 3.0;
 /// The share of the nets' length that the first round has routed when it says so.
 const SAMPLE: f64 = 0.15;
 
+/// A negotiation that its share ends in with few points still shared has as much again
+/// of what the run has left as its share was of the whole, once: with fewer than one for
+/// every this many connections, it is near its end, and the passes have little to do
+/// after one that ends.
+const NEARLY: usize = 4;
+
 /// How many times the pads that the routes cut off their fills are told, and their nets
 /// planned again with them, for the nets round them to make room.
 const POUR_ROUNDS: usize = 3;
@@ -2023,6 +2029,7 @@ pub(crate) fn route<'r>(
     pours: Option<&Pours>,
     options: &RouteOptions,
     run: &Run<'r>,
+    (share, was): (f64, Option<super::Stopped>),
     pitch: i64,
     bounds: Rect,
 ) -> Option<Whole> {
@@ -2474,9 +2481,13 @@ pub(crate) fn route<'r>(
         // By net, the box that tells which nets are routed side by side: round its pads
         // at first, and then round its wires that are routed again.
         let mut regions: Vec<Rect> = nets.iter().map(|n| n.region).collect();
+        let connections: usize = nets.iter().map(|n| n.conns.len()).sum();
+        let mut extended = false;
         for it in 0..ROUNDS {
             rounds = it + 1;
-            for batch in batches(&reroute, &regions) {
+            let mut todo = batches(&reroute, &regions);
+            todo.reverse();
+            while let Some(batch) = todo.pop() {
                 // A batch that is stopped is as it was before it.
                 let before: Vec<Vec<Wire>> = batch.iter().map(|&i| nets[i].wires.clone()).collect();
                 if run_batch(&mut nets, &mut sc, &batch, Mode::Share(pres), it > 0) {
@@ -2485,6 +2496,21 @@ pub(crate) fn route<'r>(
                         board.uncommit(&mut nets[i]);
                         nets[i].wires = w;
                         board.commit(&mut nets[i]);
+                    }
+                    // Near its end, it goes on once.
+                    let shared: usize = nets.iter().map(|n| board.conflicts(n).len()).sum();
+                    drop(board);
+                    if !extended
+                        && it > 0
+                        && run.stopped().is_none()
+                        && shared * NEARLY < connections
+                    {
+                        extended = true;
+                        run.extend(share, share, was);
+                        if !run.ending() {
+                            todo.push(batch);
+                            continue;
+                        }
                     }
                     cut = true;
                     break;

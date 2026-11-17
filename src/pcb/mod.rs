@@ -748,7 +748,10 @@ pub struct RouteOptions {
     /// [from routes](route_from) that it is given.
     pub whole: bool,
     /// The share of the time that a deadline leaves, and of the work that a budget
-    /// leaves, that [`whole`](RouteOptions::whole) may spend. The default is 0.5.
+    /// leaves, that [`whole`](RouteOptions::whole) may spend. The default is 0.5. A
+    /// negotiation that the share ends in with fewer points still shared than a quarter
+    /// of the connections has the same share of what is left then, once: it is near its
+    /// end, and the passes have little to do after one that ends.
     pub whole_share: f64,
     /// How many threads [`whole`](RouteOptions::whole) routes nets on, side by side where
     /// their pads are apart. The default is 1; the routes are the same for any number.

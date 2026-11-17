@@ -4978,6 +4978,162 @@ millimetre more track.
   that a route cut, the count of connections made at every turn. No net stands out; the
   third of the pass outside the searches is where to look first.
 
+## PCB routing of every net at once
+
+What was changed after [the release above](#pcb-routing-with-room-for-spokes), 0.0.16, for
+the same host, cadlab: `RouteOptions::whole`, off by default, routes every net against
+every other at once on one grid before the passes, as PathFinder does and as the router
+that `guide` is to replace in cadlab does (`pcb::whole`; the
+[decision](architecture.md#decisions) has how). Measured on 2026-11-18 through cadlab's
+adapter and its `route_bench`, on a machine that other work shared heavily: the counts
+of a run with a deadline moved with the load from one hour to the next, so the two
+routers were run side by side, and what decided between two versions of the code was a
+budget of nodes, which is the same on any machine.
+
+### What
+
+The passes route a net and take others out for it. What 0.0.16 left open on
+`corne-cherry`, 15 to 21 connections where cadlab's own router leaves 0 to 4, were the
+pads of two packages of 0.4 mm pitch whose nets had been taken out and found no way back
+past neighbours that had settled. In the negotiation every net is routed across every
+other at a price, the wires in another's way are routed again, round after round at
+prices that rise, and nothing is settled until none is in another's way: 432 of that
+board's 432 connections in 42 to 70 rounds and some 60 million nodes, with none left
+out when its routes are given to the world.
+
+What it took beyond the rounds themselves:
+
+- *The grid's origin to the nanometre.* Taken to the micrometre it was 5 nm beside the
+  pads of the first package: a stub of 5 nm sideways and 0.4 mm long from each, and its
+  neighbour's track 5 nm inside its clearance. 43 pieces of routes were left out by the
+  world, and 39 connections with them.
+- *Ways out for pads off the lines.* The second package is 15 µm off the lines that the
+  first is on, and a track along the nearest line is 10 µm too close to the pad beside
+  it: 30 terminals had no cell to end on. A pad with none gets ways out along its own
+  axis that turn onto a line once clear of the row, three for each direction and line,
+  and the negotiation chooses.
+- *Only the wires that are in another's way are routed again*, and those that hung on
+  them: routing every net near a shared point whole, as cadlab's router does, was 13
+  rounds in the share where this is 60.
+- *A connection with an end that is walled in is found by looking back from it*,
+  20 000 nodes at most, before a search goes over the board for it: on
+  `glasgow-revC3` 40 such connections were 16 of the 17 million nodes of the first
+  round.
+- *Pours.* With the routes of the first negotiation, cadlab's fill left 10 pads of the
+  two grounds of `corne-cherry` cut off, with no room for a stub. The pads that the
+  routes cut off their fills are now told when the rounds end, their nets planned again
+  and the rounds go on. And the cells that tell it see a pad joined only by the spokes
+  that the host gives, the spare ones too (`Zones::spare_spokes`).
+
+### Measured
+
+**A deadline of 60 s**, twelve boards of cadlab's corpus, four runs each: cadlab's own
+router with seeds 1 to 4 on three threads, `guide` with `whole` in four orders of its
+nets with three threads for the negotiation, two runs of each at a time, in the same
+half hour. Open connections by run, as cadlab counts them on the board it fills, with
+the least, the median and the most; the vias and length of the first run. This was the
+source as committed first, before a negotiation near its end was given more of its
+share.
+
+| board | layers | cadlab's router | `guide` with `whole` |
+|---|---|---|---|
+| buspirate-flash-sop | 2 | 0, 0, 0, 0; 4 vias, 460 mm | 0, 0, 0, 0; 5 vias, 497 mm |
+| buspirate-rs232 | 2 | 0, 0, 0, 0; 10, 281 mm | 0, 0, 0, 0; 4, 359 mm |
+| lumenpnp-ringlight | 2 | 0, 0, 0, 0; 1, 177 mm | 0, 0, 0, 0; 4, 210 mm |
+| nrfmicro | 2 | 0, 0, 0, 0; 46, 454 mm | 0, 0, 0, 0; 50, 554 mm |
+| sweep-v2.2 | 2 | 3, 3, 3, 3; 21, 2161 mm | 4, 4, 3, 3 (3 / 3.5 / 4); 18, 2175 mm |
+| corne-cherry | 2 | 3, 4, 0, 3 (0 / 3 / 4); 484, 8273 mm | 5, 8, 10, 5 (5 / 6.5 / 10); 617, 8738 mm |
+| tinytapeout-demo | 4 | 16, 3, 15, 2 (2 / 9 / 16); 238, 4928 mm | 5, 6, 18, 18 (5 / 12 / 18); 455, 5557 mm |
+| buspirate5-rev10 | 4 | 4, 2, 15, 7 (2 / 5.5 / 15); 314, 3045 mm | 0, 0, 0, 1 (0 / 0 / 1); 403, 3513 mm |
+| lumenpnp-mobo | 4 | 64, 58, 23, 10 (10 / 40.5 / 64); 263, 5177 mm | 3, 1, 8, 4 (1 / 3.5 / 8); 531, 6322 mm |
+| cynthion | 4 | 33, 36, 35, 38 (33 / 35.5 / 38); 474, 3152 mm | 12, 30, 11, 11 (11 / 11.5 / 30); 674, 4000 mm |
+| glasgow-revC3 | 4 | 45, 44, 47, 48 (44 / 46 / 48); 418, 3538 mm | 35, 34, 34, 33 (33 / 34 / 35); 398, 3707 mm |
+| glasgow-revD1 | 6 | 1136 in every run; 112 | 306, 315, 295, 267 (267 / 300.5 / 315); 948 |
+
+The machine was the limit in that half hour: cadlab's router ended its minute on
+`glasgow-revD1` with 112 vias placed, where it has 241 to 288 connections open on a quiet
+machine, and `guide`'s own passes, which is all that board has (below), had 116 to 135
+with 0.0.16. So the table says how the two stand under the same load, and no more.
+`nrfmicro` is closed in every run, the first in 18 s, where 0.0.16 had 0 to 2 open at
+the deadline. `corne-cherry` has 5 to 10 for 15 to 21, and is still behind 0 to 4.
+
+**A budget of 150 million nodes**, two orders, which lets the negotiation end on the
+boards it ends on: `corne-cherry` 3 and 3 open, `tinytapeout-demo` 0 and 0,
+`buspirate5-rev10` 0 and 0, `lumenpnp-mobo` 0 and 0, `cynthion` 11 and 9, `glasgow-revC3`
+28 and 27, `sweep-v2.2` 3 and 3. That is the result that a minute does not always have
+the time for.
+
+**A budget of 40 million nodes**, three orders, the nine boards that a budget cuts, as
+released, beside 0.0.16 (in brackets): `nrfmicro` 0 (5), `sweep-v2.2` 13 (9),
+`corne-cherry` 79 (75), `tinytapeout-demo` 43 (35), `buspirate5-rev10` 0 (16),
+`lumenpnp-mobo` 0 (0), `cynthion` 38 (53), `glasgow-revC3` 109 (106), `glasgow-revD1` 441
+(433): 723 for 732. The negotiation has half of the budget, which on `corne-cherry` and
+`tinytapeout-demo` ends it a third of the way through: what it has then are routes with
+shared points taken out, and the passes go on from those with the other half.
+
+**Vias**, first runs of the table above against 0.0.16's of the day before: `sweep-v2.2`
+18 for 42, `tinytapeout-demo` 455 for 598, `lumenpnp-mobo` 531 for 620, `glasgow-revC3`
+398 for 559, `buspirate5-rev10` 403 for 408; `corne-cherry` 617 for 554 and `cynthion` 674
+for 536, the boards on which it also joins the most more. At 150 million nodes
+`lumenpnp-mobo` has 414 and 524 and `tinytapeout-demo` 395 and 412. Of
+`lumenpnp-mobo`'s, 250 are stubs to its planes.
+
+**Pads short of two spokes** (cadlab's count on its fill): 84 to 96 of 2360 in the four
+runs, with 0 to 2 that have none, where 0.0.16 had 82 to 100 and 2; cadlab's router had
+108 to 116 and 3 to 18 in the same half hour.
+
+### Which boards
+
+`whole` is for a run with a budget on a board that the negotiation has the time for,
+and it says so itself: the first round takes the nets in strides through their order,
+and when it has routed 15 % of their length, a round is that much over 0.15. A board
+with no room for three rounds in the share is given up there. Of the twelve, that is
+`glasgow-revD1`: 1939 connections on six layers at a pitch of 0.1 mm, some 10 million
+nodes a round and twice that in the second, against 3 million on `corne-cherry`. Two
+rounds were all that 21 s held, and the passes had 290 open after them for 180 without.
+Given up after a second, the board is routed as 0.0.16 routes it.
+
+### Tried and not kept
+
+- *The halo of a stub made wider by what the grid's points miss between them*, as
+  cadlab's router has it for copper off its grid: two ways out of pads 0.4 mm apart are
+  then in each other's way for good, and `nrfmicro`'s negotiation stayed at 52 to 68
+  shared points where it ends at 0 to 22 without. What a halo misses is found when the
+  routes are given to the world.
+- *Every net near a shared point routed again whole* (above).
+- *A weight on the bound of the search*, 1.3 and 1.6: at 60 million nodes
+  `corne-cherry` 25 and 27, and 23 and 24, for 17 and 20; `tinytapeout-demo` 11 and 11,
+  and 8 and 5, for 4 and 4.
+- *The spokes of a pad as something that only so many nets may cross*, counted by pad
+  while the nets are routed, with a price and a history as a shared point has: at 150
+  million nodes `tinytapeout-demo` 7 and 1 open for 0 and 0, `corne-cherry` 5 and 3 for
+  3 and 3, four boards the same to the via, and 51 and 53 pads short of two spokes for
+  50.
+- *Regions round the wires' own boxes, and a first round in fixed batches*, for more
+  nets side by side: 100 rounds without an end on `corne-cherry` for 70, and 10.3 s on
+  three threads for 12.7 s.
+- *Whether the negotiation is worth beginning, told by twelve times the first 15 % of a
+  round in the nets' own order*, shortest first: `corne-cherry` 9 s said for 19 s
+  taken, `cynthion` 109 s said for 19 s taken.
+
+### Threads
+
+Nets whose regions are apart are routed side by side. On `corne-cherry` three threads
+end the negotiation in 12.7 s for 15.0 s on one, with the same routes: its nets span the
+board, 1.8 to a batch on average. The counts do not depend on it.
+
+### Open
+
+- `corne-cherry` at a minute on a loaded machine, 5 to 10 for 0 to 4. The negotiation
+  ends in 15 s on a quiet one, and what it has when it is cut short is not as good as
+  what the other router has at the same moment, which makes its rounds in a third of
+  the nodes.
+- A board of six layers at a pitch of 0.1 mm: a round is 10 million nodes and more.
+- `sweep-v2.2`, 3 to 4 open for 3: the negotiation leaves one of the nets that the
+  board keeps apart in three pieces where the passes left it in two.
+- Vias: `tinytapeout-demo` 395 to 455 and `lumenpnp-mobo` 414 to 531, where cadlab's
+  router has 238 and 263 to 340.
+
 ## PCB differential pairs and lengths
 
 Differential pairs routed side by side, and nets meandered to their lengths, by `pcb::route`

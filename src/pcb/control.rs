@@ -338,6 +338,16 @@ impl<'a> Run<'a> {
             .map(|t| t.saturating_duration_since(Instant::now()))
     }
 
+    /// Gives the part under way, which was ended at its time or its work, a share of what
+    /// the run has left on top of what it had, and takes back that it was ended.
+    pub(crate) fn extend(&self, share: f64, work_share: f64, was: Option<Stopped>) {
+        if self.why.get().is_some() {
+            return;
+        }
+        self.cut.set(was);
+        self.part(share, work_share);
+    }
+
     /// What ended a part early, if anything did.
     pub(crate) fn cut(&self) -> Option<Stopped> {
         self.cut.get()

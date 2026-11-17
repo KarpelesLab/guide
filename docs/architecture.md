@@ -963,7 +963,9 @@ does it:
   has routed 15 % of their length it says what the round costs: a board with no room
   for three such rounds in its share is given up there and routed by the passes alone,
   as before. A round that the share ends in is as it was before it, and the best round
-  is what is kept.
+  is what is kept; but a negotiation that the share ends in with fewer points shared
+  than a quarter of the connections has half of what is left then, once, as it is near
+  its end and the passes have little to do after one that ends.
 - *Threads.* Nets whose regions are apart are routed side by side against the same
   claims, on `RouteOptions::threads` threads, each with a world of its own to ask;
   the batches are told by the nets alone, so the routes are the same on any number.

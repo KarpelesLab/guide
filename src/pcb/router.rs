@@ -1765,6 +1765,7 @@ fn route_all<'a>(
             pours.as_ref(),
             options,
             run,
+            (share, was),
             pitch,
             bounds,
         );

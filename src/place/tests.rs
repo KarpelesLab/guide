@@ -609,6 +609,283 @@ fn inflated_items_spread_further() {
     assert_legal(problem, &crowded.placement);
 }
 
+/// The key under which a flip-flop draws its clock, in [`tiles_problem`].
+const CLOCK: u32 = 7;
+
+/// A row of tiles as on an FPGA: each with four flip-flop sites in two slices, whose two
+/// flip-flops share a clock pin, a tile holding two clocks at most, and a carry site that
+/// excludes the first slice's flip-flops. Items are flip-flops of three clocks, a third
+/// of them on the first, chained by nets so that they would rather crowd together.
+fn tiles_problem(tiles: i64, flops: u32, seed: u64) -> PlacementProblem {
+    let mut sites = Vec::new();
+    for x in 0..tiles {
+        for _ in 0..4 {
+            sites.push(Site::new(Point::new(x, 0), 0));
+        }
+        sites.push(Site::new(Point::new(x, 0), 1));
+    }
+    let mut problem = PlacementProblem::new(Layout::Sites(sites));
+    for t in 0..tiles as u32 {
+        let first = t * 5;
+        let site = |k: u32| SiteId(first + k);
+        problem.add_shared(1, &[(site(0), CLOCK), (site(1), CLOCK)]);
+        problem.add_shared(1, &[(site(2), CLOCK), (site(3), CLOCK)]);
+        problem.add_shared(2, &(0..4).map(|k| (site(k), CLOCK)).collect::<Vec<_>>());
+        for k in 0..2 {
+            problem.add_shared(1, &[(site(4), OCCUPANCY), (site(k), OCCUPANCY)]);
+        }
+    }
+    let mut rng = crate::rng::Rng::new(seed);
+    let items: Vec<ItemId> = (0..flops)
+        .map(|k| problem.add_item(Item::new().draw(CLOCK, k % 3)))
+        .collect();
+    // One carry, which takes a tile's first slice.
+    let carry = problem.add_item(Item::new().kind(1));
+    for k in 1..items.len() {
+        let other = items[rng.below(k as u64) as usize];
+        problem.add_net(1, &[Pin::new(items[k]), Pin::new(other)]);
+    }
+    problem.add_net(1, &[Pin::new(carry), Pin::new(items[0])]);
+    problem
+}
+
+#[test]
+fn shared_resources_are_checked() {
+    let mut problem = tiles_problem(2, 6, 1);
+    let mut placement = Placement::new(&problem);
+    // Two flip-flops of different clocks in one slice, and three clocks in the tile.
+    for (k, site) in [0, 1, 2, 5, 6, 7].into_iter().enumerate() {
+        placement.set_site(&problem, ItemId(k as u32), SiteId(site));
+    }
+    // The carry on the second tile, whose first slice is taken.
+    placement.set_site(&problem, ItemId(6), SiteId(9));
+    let found = check(&problem, &placement);
+    // In each tile, two flip-flops of clocks 0 and 1 are on one slice's pin, and the tile has
+    // clocks 0, 1 and 2; and the carry of the second tile excludes both flip-flops of its first
+    // slice.
+    let expected: Vec<Violation> = [0, 2, 5, 7, 8, 9]
+        .into_iter()
+        .map(|r| Violation::OverShared(SharedId(r)))
+        .collect();
+    assert_eq!(found, expected);
+    // A resource of capacity 0 keeps an item that draws under its key off its sites.
+    let empty = problem.add_shared(0, &[(SiteId(3), CLOCK)]);
+    placement.set_site(&problem, ItemId(2), SiteId(3));
+    assert!(check(&problem, &placement).contains(&Violation::OverShared(empty)));
+    assert_eq!(problem.drawn(ItemId(4), CLOCK), Some(1));
+    assert_eq!(problem.drawn(ItemId(4), OCCUPANCY), Some(4));
+    assert_eq!(problem.drawn(ItemId(6), CLOCK), None);
+
+    let mut bad = PlacementProblem::new(row_of_sites(2, |_| 0));
+    bad.add_shared(1, &[(SiteId(5), 0)]);
+    assert_eq!(bad.validate(), Err(ProblemError::UnknownReference));
+}
+
+#[test]
+fn every_placer_keeps_shared_resources() {
+    for seed in 1..4 {
+        // Half full: room for every flip-flop, but only where clocks allow.
+        let problem = tiles_problem(8, 15, seed);
+        let options = AnnealOptions {
+            seed,
+            ..AnnealOptions::default()
+        };
+        let annealed = anneal(&problem, Wirelength, options).expect("annealing");
+        assert_legal(&problem, &annealed.placement);
+        let (analytic, report) = place_analytic(
+            &problem,
+            Wirelength,
+            AnalyticOptions {
+                seed,
+                ..AnalyticOptions::default()
+            },
+        )
+        .expect("analytic");
+        assert_legal(&problem, &analytic.placement);
+        assert!(analytic.wirelength <= report.legalized);
+        let targets = vec![Point::new(3, 0); problem.items().len()];
+        let legal = legalize(&problem, &targets, &vec![0; targets.len()]).expect("legalized");
+        assert_legal(&problem, &legal);
+        // Legalizing everything towards one tile has to spread clocks out: a tile takes two.
+        let mut clocks_by_tile = std::collections::BTreeMap::<i64, Vec<u32>>::new();
+        for (i, _) in problem.items().iter().enumerate().take(15) {
+            let item = ItemId(i as u32);
+            let list = clocks_by_tile.entry(legal.origin(item).x).or_default();
+            list.extend(problem.drawn(item, CLOCK));
+            list.sort_unstable();
+            list.dedup();
+        }
+        assert!(clocks_by_tile.values().all(|c| c.len() <= 2));
+        // And incremental placement keeps them, from a placement it is given.
+        let priors = Prior::all(&analytic.placement);
+        let incremental =
+            place_incremental(&problem, Wirelength, &priors, IncrementalOptions::default())
+                .expect("incremental");
+        assert_legal(&problem, &incremental.outcome.placement);
+    }
+}
+
+#[test]
+fn shared_resources_leave_placements_without_them_alone() {
+    // A problem with a resource that nothing draws from places as it does without one.
+    let generated = synth::peko(PekoOptions::new(6, 6, 3));
+    let mut with = generated.problem.clone();
+    with.add_shared(1, &[(SiteId(0), 3), (SiteId(1), 3)]);
+    let plain =
+        place_analytic(&generated.problem, Wirelength, AnalyticOptions::default()).expect("plain");
+    let shared = place_analytic(&with, Wirelength, AnalyticOptions::default()).expect("shared");
+    assert_eq!(plain.0.placement, shared.0.placement);
+    assert_eq!(plain.0.moves, shared.0.moves);
+}
+
+#[test]
+fn a_source_carries_its_own_value_and_no_other() {
+    // One tile: a table (kind 1) whose output is a source of a pool with one more wire, read
+    // by two flip-flops (kind 0), the first of which may read signal 10 or 30.
+    const D: u32 = 1;
+    const O: u32 = 2;
+    let pool = |first: u32, table: Option<u32>| {
+        let sites = vec![
+            Site::new(Point::new(0, 0), 1),
+            Site::new(Point::new(0, 0), 0),
+            Site::new(Point::new(0, 0), 0),
+        ];
+        let mut problem = PlacementProblem::new(Layout::Sites(sites));
+        let mut item = Item::new().kind(1);
+        if let Some(value) = table {
+            item = item.draw(O, value);
+        }
+        let t = problem.add_item(item);
+        let a = problem.add_item(Item::new().draw(D, first));
+        let b = problem.add_item(Item::new().draw(D, 20));
+        problem.add_shared_with_sources(1, &[(SiteId(1), D), (SiteId(2), D)], &[(SiteId(0), O)]);
+        let mut placement = Placement::new(&problem);
+        placement.set_site(&problem, t, SiteId(0));
+        placement.set_site(&problem, a, SiteId(1));
+        placement.set_site(&problem, b, SiteId(2));
+        check(&problem, &placement)
+    };
+    // The table's own signal and one other: legal.
+    assert!(pool(10, Some(10)).is_empty());
+    // Two signals other than the table's on one wire: not.
+    assert_eq!(pool(30, Some(10)), [Violation::OverShared(SharedId(0))]);
+    // A table that drives nothing on the source supplies no wire.
+    assert_eq!(pool(10, None), [Violation::OverShared(SharedId(0))]);
+}
+
+#[test]
+fn a_target_density_keeps_a_sparse_kind_together() {
+    // A wide device used a little, its items chained to a pad at one edge: spread over every
+    // site of their kind, they run along the edge; at a density, they stay near the pad.
+    let mut sites = vec![Site::new(Point::new(0, 20), 1)];
+    for x in 0..40 {
+        for y in 0..40 {
+            sites.push(Site::new(Point::new(x, y), 0));
+        }
+    }
+    let mut problem = PlacementProblem::new(Layout::Sites(sites));
+    let pad = problem.add_item(Item::new().kind(1).fixed_at_site(SiteId(0)));
+    let items: Vec<ItemId> = (0..60).map(|_| problem.add_item(Item::new())).collect();
+    for (k, &item) in items.iter().enumerate() {
+        problem.add_net(1, &[Pin::new(pad), Pin::new(item)]);
+        if k > 0 {
+            problem.add_net(1, &[Pin::new(items[k - 1]), Pin::new(item)]);
+        }
+    }
+    let run = |density: Option<f64>| {
+        let options = AnalyticOptions {
+            detailed: None,
+            target_density: density,
+            ..AnalyticOptions::default()
+        };
+        let (outcome, report) = place_analytic(&problem, Wirelength, options).expect("placement");
+        assert_legal(&problem, &outcome.placement);
+        report.legalized
+    };
+    let everywhere = run(None);
+    let dense = run(Some(0.5));
+    assert!(dense < everywhere, "{dense} against {everywhere}");
+}
+
+#[test]
+fn macro_members_keep_their_slots() {
+    // A column of tiles, each with four tables (kind 0) and a carry (kind 1); macros of a
+    // carry with the third and fourth tables of its tile, then the carry of the tile above.
+    let mut sites = Vec::new();
+    for y in 0..8 {
+        for _ in 0..4 {
+            sites.push(Site::new(Point::new(0, y), 0));
+        }
+        sites.push(Site::new(Point::new(0, y), 1));
+    }
+    let mut problem = PlacementProblem::new(Layout::Sites(sites));
+    let mut all = Vec::new();
+    for _ in 0..2 {
+        let carry = problem.add_item(Item::new().kind(1));
+        let c = problem.add_item(Item::new());
+        let d = problem.add_item(Item::new());
+        let up = problem.add_item(Item::new().kind(1));
+        problem.add_macro_in_slots(&[
+            (carry, Point::new(0, 0), Some(0)),
+            (c, Point::new(0, 0), Some(2)),
+            (d, Point::new(0, 0), Some(3)),
+            (up, Point::new(0, 1), None),
+        ]);
+        all.extend([carry, c, d, up]);
+    }
+    let loose: Vec<ItemId> = (0..6).map(|_| problem.add_item(Item::new())).collect();
+    for pair in all.windows(2).chain(loose.windows(2)) {
+        problem.add_net(1, &[Pin::new(pair[0]), Pin::new(pair[1])]);
+    }
+    let slot = |placement: &Placement, item: ItemId| placement.site(item).map(|s| s.0 % 5);
+    for seed in 1..4 {
+        let annealed = anneal(
+            &problem,
+            Wirelength,
+            AnnealOptions {
+                seed,
+                ..AnnealOptions::default()
+            },
+        )
+        .expect("annealing");
+        let (analytic, _) = place_analytic(
+            &problem,
+            Wirelength,
+            AnalyticOptions {
+                seed,
+                ..AnalyticOptions::default()
+            },
+        )
+        .expect("analytic");
+        for placement in [&annealed.placement, &analytic.placement] {
+            assert_legal(&problem, placement);
+            for group in all.chunks(4) {
+                assert_eq!(slot(placement, group[1]), Some(2));
+                assert_eq!(slot(placement, group[2]), Some(3));
+            }
+        }
+    }
+    // A member off its slot breaks the macro.
+    let mut placement = anneal(&problem, Wirelength, AnnealOptions::default())
+        .expect("annealing")
+        .placement;
+    let site = placement.site(all[1]).expect("placed");
+    let free = (0..40)
+        .map(SiteId)
+        .find(|s| {
+            s.0 / 5 == site.0 / 5
+                && s.0 % 5 < 2
+                && (0..problem.items().len()).all(|i| placement.site(ItemId(i as u32)) != Some(*s))
+        })
+        .expect("a free table of the tile");
+    placement.set_site(&problem, all[1], free);
+    assert!(check(&problem, &placement).contains(&Violation::BrokenMacro(MacroId(0))));
+    assert_eq!(
+        problem.macro_slots(MacroId(0)),
+        &[Some(0), Some(2), Some(3), None]
+    );
+}
+
 /// A random problem on sites: kinds by column, some items fixed, some vertical macros.
 fn sites_problem(
     width: u32,

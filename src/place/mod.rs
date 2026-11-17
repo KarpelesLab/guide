@@ -5,7 +5,8 @@
 //! which items' outlines must not overlap, as on a PCB. Items can be fixed, can be limited to
 //! a [region](PlacementProblem::add_region), can be allowed some rotations by quarter turns,
 //! and can be tied rigidly together into [macros](PlacementProblem::add_macro), as carry chains
-//! are. [`check`] says whether a [`Placement`] is legal, without sharing any code with the
+//! are. Sites can [share](Shared) something that limits which items may be on them together,
+//! as the flip-flops of an FPGA slice share a clock. [`check`] says whether a [`Placement`] is legal, without sharing any code with the
 //! placers, as the routing validator does for routes.
 //!
 //! The cost of a placement is a sum over nets, by default the weighted half-perimeter of
@@ -59,6 +60,7 @@ mod eco_tests;
 mod legalize;
 mod netlist;
 mod problem;
+mod shared;
 mod spatial;
 pub mod synth;
 #[cfg(test)]
@@ -81,7 +83,8 @@ pub use eco::{
 };
 pub use legalize::legalize;
 pub use problem::{
-    Fixed, Item, Layout, Pin, Placement, PlacementProblem, ProblemError, Site, rotate,
+    Fixed, Item, Layout, OCCUPANCY, Pin, Placement, PlacementProblem, ProblemError, Shared, Site,
+    rotate,
 };
 
 /// A point, or an offset, in layout coordinates.
@@ -274,6 +277,11 @@ define_place_id! {
 define_place_id! {
     /// Identifies a region that items can be limited to.
     RegionId
+}
+
+define_place_id! {
+    /// Identifies a resource that sites share, a [`Shared`].
+    SharedId
 }
 
 /// Why a placer could not run.

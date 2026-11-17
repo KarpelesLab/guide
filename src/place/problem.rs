@@ -2,7 +2,7 @@
 
 use core::fmt;
 
-use super::{ItemId, MacroId, Point, Rect, RegionId, SiteId};
+use super::{ItemId, MacroId, Point, Rect, RegionId, SharedId, SiteId};
 use crate::id::NetId;
 
 /// A quarter turn, in millidegrees.
@@ -63,6 +63,55 @@ impl Site {
     }
 }
 
+/// The key under which every item draws its own identity from a [`Shared`] resource,
+/// whatever values it has under other keys.
+///
+/// A resource of capacity 1 that sites draw on under this key lets at most one of those sites
+/// be occupied, which is how sites that exclude each other are said, as an FPGA slice's carry
+/// excludes the lookup tables it is made of. Values an item is given under this key with
+/// [`Item::draw`] are ignored.
+pub const OCCUPANCY: u32 = u32::MAX;
+
+/// Something that several sites share, of which the items on them may only use so many
+/// different values.
+///
+/// Each member is a site and a key. An item on a member's site draws the value it has under
+/// that key ([`Item::draw`]), if it has one, and the items on all the members together may draw
+/// at most [`capacity`](Shared::capacity) distinct values. Several items drawing the same value
+/// count once.
+///
+/// This says what an FPGA tile's shared wires say: two flip-flops whose clock pins are one wire
+/// need the same clock (a capacity of 1, the clock's signal the value), a tile whose eight
+/// flip-flops choose their clocks from two wires holds two clocks at most (a capacity of 2),
+/// and sites that exclude each other are drawn on under [`OCCUPANCY`]. A resource of capacity
+/// 0 keeps every item with a value under its key off its sites.
+///
+/// Add one with [`PlacementProblem::add_shared`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Shared {
+    pub(crate) capacity: u32,
+    pub(crate) members: Vec<(SiteId, u32)>,
+    pub(crate) sources: Vec<(SiteId, u32)>,
+}
+
+impl Shared {
+    /// How many distinct values the items on its sites may draw.
+    pub fn capacity(&self) -> u32 {
+        self.capacity
+    }
+
+    /// Its members: each a site, and the key under which an item there draws.
+    pub fn members(&self) -> &[(SiteId, u32)] {
+        &self.members
+    }
+
+    /// Its sources: members whose item, if it draws a value, also brings room for one more
+    /// value, as a bel's output is a wire that carries what the bel drives and nothing else.
+    pub fn sources(&self) -> &[(SiteId, u32)] {
+        &self.sources
+    }
+}
+
 /// Where items may go.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Layout {
@@ -103,6 +152,8 @@ pub struct Item {
     pub(crate) rotations: Vec<i32>,
     pub(crate) region: Option<RegionId>,
     pub(crate) fixed: Option<Fixed>,
+    /// The values it draws from [`Shared`] resources, by key, sorted by key.
+    pub(crate) draws: Vec<(u32, u32)>,
 }
 
 impl Default for Item {
@@ -120,6 +171,7 @@ impl Item {
             rotations: vec![0],
             region: None,
             fixed: None,
+            draws: Vec::new(),
         }
     }
 
@@ -162,6 +214,23 @@ impl Item {
     pub fn region(mut self, region: RegionId) -> Item {
         self.region = Some(region);
         self
+    }
+
+    /// Gives the item a value under a key, which it draws from the [`Shared`] resources that
+    /// its site is a member of under that key. A second value under one key replaces the
+    /// first.
+    #[must_use]
+    pub fn draw(mut self, key: u32, value: u32) -> Item {
+        match self.draws.binary_search_by_key(&key, |&(k, _)| k) {
+            Ok(at) => self.draws[at].1 = value,
+            Err(at) => self.draws.insert(at, (key, value)),
+        }
+        self
+    }
+
+    /// The values the item draws, by key, in increasing order of key.
+    pub fn draws(&self) -> &[(u32, u32)] {
+        &self.draws
     }
 
     /// Fixes the item on a site.
@@ -240,7 +309,8 @@ impl Pin {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ProblemError {
-    /// A pin, macro or fixed location names an item, site or region that doesn't exist.
+    /// A pin, macro, fixed location or shared resource names an item, site or region that
+    /// doesn't exist.
     UnknownReference,
     /// A rotation is not a whole number of quarter turns.
     UnsupportedRotation {
@@ -337,7 +407,10 @@ pub struct PlacementProblem {
     net_starts: Vec<u32>,
     pins: Vec<Pin>,
     macros: Vec<Vec<(ItemId, Point)>>,
+    /// By macro, the slot of each member, or nothing for a macro added without slots.
+    macro_slots: Vec<Vec<Option<u32>>>,
     regions: Vec<Rect>,
+    shared: Vec<Shared>,
 }
 
 impl PlacementProblem {
@@ -350,7 +423,9 @@ impl PlacementProblem {
             net_starts: vec![0],
             pins: Vec::new(),
             macros: Vec::new(),
+            macro_slots: Vec::new(),
             regions: Vec::new(),
+            shared: Vec::new(),
         }
     }
 
@@ -374,6 +449,25 @@ impl PlacementProblem {
     /// rotation. On sites, each member still needs a site of its own kind at its offset.
     pub fn add_macro(&mut self, members: &[(ItemId, Point)]) -> MacroId {
         self.macros.push(members.to_vec());
+        self.macro_slots.push(Vec::new());
+        MacroId(self.macros.len() as u32 - 1)
+    }
+
+    /// Ties items together as [`add_macro`] does, each member on a given slot of its point,
+    /// if it has one: the sites of a kind at one point are its slots, numbered in the order
+    /// of the sites. A member without a slot takes the slot of the first member's site, as in
+    /// [`add_macro`], which is the slot the first member is on when it has none either.
+    ///
+    /// This is a group of several items of one kind at one point, as an FPGA slice's four
+    /// lookup tables that feed its carry, each to its own input: each takes its own slot
+    /// wherever the group goes.
+    ///
+    /// [`add_macro`]: PlacementProblem::add_macro
+    pub fn add_macro_in_slots(&mut self, members: &[(ItemId, Point, Option<u32>)]) -> MacroId {
+        self.macros
+            .push(members.iter().map(|&(i, p, _)| (i, p)).collect());
+        self.macro_slots
+            .push(members.iter().map(|&(_, _, slot)| slot).collect());
         MacroId(self.macros.len() as u32 - 1)
     }
 
@@ -382,6 +476,59 @@ impl PlacementProblem {
     pub fn add_region(&mut self, area: Rect) -> RegionId {
         self.regions.push(area);
         RegionId(self.regions.len() as u32 - 1)
+    }
+
+    /// Adds a resource that sites share: of the items on its members' sites, each drawing
+    /// its value under the member's key, at most `capacity` distinct values. See [`Shared`].
+    /// Only problems laid out in sites have any.
+    pub fn add_shared(&mut self, capacity: u32, members: &[(SiteId, u32)]) -> SharedId {
+        self.add_shared_with_sources(capacity, members, &[])
+    }
+
+    /// Adds a resource that sites share, with sources: as [`add_shared`], and each item on a
+    /// source's site that draws a value under the source's key brings room for one more
+    /// distinct value, its own or another's. Its value counts like any member's.
+    ///
+    /// This is a pool of wires some of which are bels' outputs: such a wire carries the
+    /// signal its bel drives and no other, so a cell there both draws its signal and supplies
+    /// the wire for it, a reader of the same signal shares it, and any other signal needs one
+    /// of the pool's other wires, which are `capacity`. An empty bel's output carries nothing.
+    ///
+    /// [`add_shared`]: PlacementProblem::add_shared
+    pub fn add_shared_with_sources(
+        &mut self,
+        capacity: u32,
+        members: &[(SiteId, u32)],
+        sources: &[(SiteId, u32)],
+    ) -> SharedId {
+        self.shared.push(Shared {
+            capacity,
+            members: members.to_vec(),
+            sources: sources.to_vec(),
+        });
+        SharedId(self.shared.len() as u32 - 1)
+    }
+
+    /// The shared resources.
+    pub fn shared(&self) -> &[Shared] {
+        &self.shared
+    }
+
+    /// The value `item` draws under `key`: its own index under [`OCCUPANCY`], or what it was
+    /// given with [`Item::draw`].
+    ///
+    /// # Panics
+    ///
+    /// If `item` is not one of the problem's.
+    pub fn drawn(&self, item: ItemId, key: u32) -> Option<u32> {
+        if key == OCCUPANCY {
+            return Some(item.0);
+        }
+        let draws = &self.items[item.index()].draws;
+        draws
+            .binary_search_by_key(&key, |&(k, _)| k)
+            .ok()
+            .map(|at| draws[at].1)
     }
 
     /// The layout.
@@ -439,6 +586,16 @@ impl PlacementProblem {
     /// The macros, each as its members and their offsets.
     pub fn macros(&self) -> &[Vec<(ItemId, Point)>] {
         &self.macros
+    }
+
+    /// A macro's members' slots, in the order of its members, or nothing for a macro added
+    /// without them.
+    ///
+    /// # Panics
+    ///
+    /// If `id` is not one of the problem's macros.
+    pub fn macro_slots(&self, id: MacroId) -> &[Option<u32>] {
+        &self.macro_slots[id.index()]
     }
 
     /// The regions.
@@ -533,6 +690,14 @@ impl PlacementProblem {
         }
         let sites = self.sites();
         let free = matches!(self.layout, Layout::FreeSpace { .. });
+        if self
+            .shared
+            .iter()
+            .flat_map(|shared| shared.members.iter().chain(&shared.sources))
+            .any(|&(site, _)| site.index() >= sites.len())
+        {
+            return Err(ProblemError::UnknownReference);
+        }
         if let Layout::FreeSpace { area, pitch } = &self.layout
             && (*pitch < 1 || area.width() == 0 || area.height() == 0)
         {

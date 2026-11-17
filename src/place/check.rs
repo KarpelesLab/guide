@@ -5,7 +5,7 @@
 //! other.
 
 use super::problem::normalize_rotation;
-use super::{Fixed, ItemId, Layout, MacroId, Placement, PlacementProblem, SiteId};
+use super::{Fixed, ItemId, Layout, MacroId, Placement, PlacementProblem, SharedId, SiteId};
 
 /// Something illegal about a placement.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33,6 +33,9 @@ pub enum Violation {
     /// A macro's members are not at their offsets from each other, or not at their first
     /// rotation.
     BrokenMacro(MacroId),
+    /// The items on a shared resource's sites draw more distinct values from it than its
+    /// capacity.
+    OverShared(SharedId),
 }
 
 /// Lists everything illegal about `placement`, or nothing if it is legal.
@@ -123,6 +126,24 @@ pub fn check(problem: &PlacementProblem, placement: &Placement) -> Vec<Violation
                     found.push(Violation::OutsideRegion(id));
                 }
             }
+            for (r, shared) in problem.shared().iter().enumerate() {
+                let drawn = |&(site, key): &(SiteId, u32)| {
+                    let item = (*holder.get(site.index())?)?;
+                    problem.drawn(item, key)
+                };
+                let supplied = shared.sources().iter().filter_map(drawn).count();
+                let mut values: Vec<u32> = shared
+                    .members()
+                    .iter()
+                    .chain(shared.sources())
+                    .filter_map(drawn)
+                    .collect();
+                values.sort_unstable();
+                values.dedup();
+                if values.len() > shared.capacity() as usize + supplied {
+                    found.push(Violation::OverShared(SharedId(r as u32)));
+                }
+            }
         }
         Layout::FreeSpace { area, .. } => {
             let mut outlines = Vec::with_capacity(n);
@@ -159,15 +180,38 @@ pub fn check(problem: &PlacementProblem, placement: &Placement) -> Vec<Violation
         }
     }
 
+    // A site's slot: how many sites of its kind at its point come before it, counted only
+    // if a macro asks for slots.
+    let any_slots =
+        (0..problem.macros().len()).any(|m| !problem.macro_slots(MacroId(m as u32)).is_empty());
+    let slot_table: Vec<u32> = if any_slots {
+        let mut seen = std::collections::BTreeMap::<(super::Point, u32), u32>::new();
+        problem
+            .sites()
+            .iter()
+            .map(|s| {
+                let count = seen.entry((s.at, s.kind)).or_default();
+                *count += 1;
+                *count - 1
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let slot_of = |site: SiteId| slot_table.get(site.index()).copied();
     for (m, members) in problem.macros().iter().enumerate() {
         let Some(&(first, first_offset)) = members.first() else {
             continue;
         };
         let base = placement.origins[first.index()].minus(first_offset);
-        let broken = members.iter().any(|&(item, offset)| {
+        let slots = problem.macro_slots(MacroId(m as u32));
+        let broken = members.iter().enumerate().any(|(k, &(item, offset))| {
             placement.origins[item.index()] != base.offset(offset)
                 || normalize_rotation(placement.rotations[item.index()])
                     != normalize_rotation(problem.item(item).rotations[0])
+                || slots.get(k).copied().flatten().is_some_and(|want| {
+                    placement.sites[item.index()].and_then(slot_of) != Some(want)
+                })
         });
         if broken {
             found.push(Violation::BrokenMacro(MacroId(m as u32)));

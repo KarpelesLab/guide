@@ -4,8 +4,8 @@
 use super::anneal::{AnnealOptions, Annealer, PlaceOutcome};
 use super::cost::{CostTerm, NetView};
 use super::legalize::{
-    legalize_units, nearest_free_spot, nearest_sites, site_unit_fits, typical_size, unit_box,
-    unit_fits,
+    claim, fixed_shared, legalize_units, nearest_free_spot, nearest_sites, shared_allow,
+    site_unit_fits, typical_size, unit_box, unit_fits,
 };
 use super::netlist::{Netlist, Unit};
 use super::problem::rotate;
@@ -499,6 +499,7 @@ fn legalize_keeping(
                 }
             }
             let mut members = Vec::new();
+            let mut shared = fixed_shared(problem);
             for (u, unit) in units.iter().enumerate() {
                 let (first, offset) = unit.members[0];
                 let start = whole(unit)
@@ -508,11 +509,13 @@ fn legalize_keeping(
                 let fits = start.is_some_and(|site| {
                     let anchor = sites[site.index()].at.minus(offset);
                     site_unit_fits(problem, netlist, unit, site, anchor, &taken, &mut members)
+                        && shared_allow(problem, unit, &members, shared.as_mut())
                 });
                 if !fits {
                     pending.push(u);
                     continue;
                 }
+                claim(problem, unit, &members, shared.as_mut());
                 kept += 1;
                 for (&(item, _), &site) in unit.members.iter().zip(&members) {
                     taken[site.index()] = true;
@@ -538,10 +541,13 @@ fn legalize_keeping(
             });
             for &u in &pending {
                 let unit = &units[u];
-                let Some(chosen) = nearest_sites(problem, netlist, unit, anchors[u], &taken) else {
+                let Some(chosen) =
+                    nearest_sites(problem, netlist, unit, anchors[u], &taken, shared.as_mut())
+                else {
                     let legal = legalize_units(problem, netlist, &anchors, &rotations)?;
                     return Ok((legal, 0));
                 };
+                claim(problem, unit, &chosen, shared.as_mut());
                 for (&(item, _), site) in unit.members.iter().zip(chosen) {
                     taken[site.index()] = true;
                     placement.set_site(problem, item, site);

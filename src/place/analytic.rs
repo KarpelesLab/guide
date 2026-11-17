@@ -48,6 +48,17 @@ pub struct AnalyticOptions<'c> {
     /// more room for routing where it is short. The default is none: items take the room they
     /// need.
     pub inflation: Option<&'c dyn Inflation>,
+    /// On sites, the share of the sites near them that items of a kind should fill when they
+    /// are spread, or `None`, the default, to spread them over every site of their kind.
+    ///
+    /// Spreading cuts the sites of a kind in two where the items part, and on a device that
+    /// they fill only a little, items that the solve has drawn together at its edge are
+    /// spread along it, in a strip as long as the device, before the next solves can pull
+    /// them back. With a density, each kind is spread only over the sites of the smallest
+    /// rectangle around its items, grown evenly on every side, that has at least as many
+    /// sites as its items divided by the density, so that they keep together as the solve
+    /// had them, as SimPL's expansion regions do.
+    pub target_density: Option<f64>,
 }
 
 /// Where items should take more room than they need, for routability.
@@ -85,6 +96,7 @@ impl Default for AnalyticOptions<'_> {
             detailed: Some(AnnealOptions::detailed()),
             cancel: None,
             inflation: None,
+            target_density: None,
         }
     }
 }
@@ -197,6 +209,8 @@ struct Model<'p> {
     /// The smallest distance a bound-to-bound weight divides by.
     epsilon: f64,
     rotations: Vec<i32>,
+    /// [`AnalyticOptions::target_density`].
+    density: Option<f64>,
 }
 
 impl<'p> Model<'p> {
@@ -260,6 +274,7 @@ impl<'p> Model<'p> {
             nets,
             epsilon,
             rotations,
+            density: None,
         }
     }
 
@@ -462,6 +477,10 @@ impl<'p> Model<'p> {
                         .filter(|&(s, site)| site.kind == kind && !fixed[s])
                         .map(|(_, site)| [site.at.x as f64, site.at.y as f64])
                         .collect();
+                    if let Some(density) = self.density {
+                        let need = units.iter().fold(0.0, |s, b| s + b.size) / density;
+                        window_sites(&units, &mut free, need);
+                    }
                     inflate_sites(&mut units, room, free.len() as f64);
                     bisect_sites(&mut units, &mut free, &mut out);
                     for body in &units {
@@ -551,6 +570,45 @@ struct Body {
     unit: u32,
     at: [f64; 2],
     size: f64,
+}
+
+/// Keeps the sites of the smallest rectangle around the bodies, grown evenly on every side,
+/// that holds at least `need` of them, or all of them if none does.
+fn window_sites(bodies: &[Body], sites: &mut Vec<[f64; 2]>, need: f64) {
+    if bodies.is_empty() || sites.len() as f64 <= need {
+        return;
+    }
+    let (mut low, mut high) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
+    for b in bodies {
+        for a in 0..2 {
+            low[a] = low[a].min(b.at[a]);
+            high[a] = high[a].max(b.at[a]);
+        }
+    }
+    let (mut slow, mut shigh) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
+    for s in sites.iter() {
+        for a in 0..2 {
+            slow[a] = slow[a].min(s[a]);
+            shigh[a] = shigh[a].max(s[a]);
+        }
+    }
+    // Grow by a fiftieth of the larger side of the sites at a time.
+    let step = ((shigh[0] - slow[0]).max(shigh[1] - slow[1]) / 50.0).max(1.0);
+    let inside = |s: &[f64; 2], low: &[f64; 2], high: &[f64; 2]| {
+        (0..2).all(|a| low[a] <= s[a] && s[a] <= high[a])
+    };
+    loop {
+        let count = sites.iter().filter(|s| inside(s, &low, &high)).count();
+        let whole = (0..2).all(|a| low[a] <= slow[a] && high[a] >= shigh[a]);
+        if count as f64 >= need || whole {
+            break;
+        }
+        for a in 0..2 {
+            low[a] -= step;
+            high[a] += step;
+        }
+    }
+    sites.retain(|s| inside(s, &low, &high));
 }
 
 /// Grows bodies on sites by their room, cut back in proportion so that they take no more
@@ -879,7 +937,8 @@ pub(crate) fn place_analytic_in<C: CostTerm>(
     run: &Run<'_>,
 ) -> Result<(PlaceOutcome, AnalyticReport), PlaceError> {
     problem.validate()?;
-    let model = Model::new(problem, Netlist::new(problem));
+    let mut model = Model::new(problem, Netlist::new(problem));
+    model.density = options.target_density.filter(|d| *d > 0.0);
     let units = model.netlist.units.len();
     let extent = problem.extent();
     let mut rng = Rng::new(options.seed ^ 0xA5A5_5A5A_C3C3_3C3C);

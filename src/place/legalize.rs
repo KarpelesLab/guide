@@ -19,6 +19,7 @@
 use super::abacus::{Rows, legalize_rows};
 use super::netlist::{KindGrid, Netlist, Unit};
 use super::problem::rotate_rect;
+use super::shared::{SharedState, Shift};
 use super::spatial::SpatialIndex;
 use super::{ItemId, Layout, PlaceError, Placement, PlacementProblem, Point, Rect, SiteId};
 
@@ -164,6 +165,22 @@ fn legalize_once(
                     taken[site.index()] = true;
                 }
             }
+            let mut shared = fixed_shared(problem);
+            // With shared resources, a kind's sites can be taken by other kinds' items, so
+            // the kinds with the fewest sites go first, while they still have room.
+            let scarcity: Vec<usize> = if shared.is_some() {
+                netlist
+                    .units
+                    .iter()
+                    .map(|unit| {
+                        netlist
+                            .grid_of(problem.item(unit.members[0].0).kind)
+                            .map_or(0, |g| netlist.grids[g].len())
+                    })
+                    .collect()
+            } else {
+                vec![0; netlist.units.len()]
+            };
             let mut order: Vec<usize> = (0..netlist.units.len()).collect();
             // Macros go from the bottom up, and single items from left to right.
             order.sort_by_key(|&u| {
@@ -186,7 +203,7 @@ fn legalize_once(
                     .map(|region| problem.regions()[region.index()].area())
                     .min()
                     .unwrap_or(u64::MAX);
-                (!unit.is_macro, size, room, a, b, u)
+                (!unit.is_macro, size, room, scarcity[u], a, b, u)
             });
             for u in order {
                 let unit = &netlist.units[u];
@@ -195,8 +212,9 @@ fn legalize_once(
                 } else {
                     anchors[u]
                 };
-                let chosen = nearest_sites(problem, netlist, unit, target, &taken)
+                let chosen = nearest_sites(problem, netlist, unit, target, &taken, shared.as_mut())
                     .ok_or(PlaceError::NoRoom(unit.members[0].0))?;
+                claim(problem, unit, &chosen, shared.as_mut());
                 for (&(item, _), site) in unit.members.iter().zip(chosen) {
                     taken[site.index()] = true;
                     placement.set_site(problem, item, site);
@@ -376,13 +394,61 @@ pub(crate) fn ring(
     }
 }
 
-/// The sites for a unit's members, with its anchor nearest to `target`, or `None`.
+/// The shared resources' state with the fixed items on their sites, if the problem has any.
+pub(crate) fn fixed_shared(problem: &PlacementProblem) -> Option<SharedState> {
+    SharedState::of(
+        problem,
+        problem
+            .items()
+            .iter()
+            .enumerate()
+            .filter_map(|(i, item)| match item.fixed {
+                Some(super::Fixed::Site(site)) => Some((ItemId(i as u32), site)),
+                _ => None,
+            }),
+    )
+}
+
+/// The moves that put a unit's members on `sites` from nowhere.
+fn arrivals(unit: &Unit, sites: &[SiteId]) -> Vec<Shift> {
+    unit.members
+        .iter()
+        .zip(sites)
+        .map(|(&(item, _), &site)| (item, None, Some(site)))
+        .collect()
+}
+
+/// Whether shared resources allow a unit's members on `sites`, with what is placed so far.
+pub(crate) fn shared_allow(
+    problem: &PlacementProblem,
+    unit: &Unit,
+    sites: &[SiteId],
+    shared: Option<&mut SharedState>,
+) -> bool {
+    shared.is_none_or(|state| state.allows(problem, &arrivals(unit, sites)))
+}
+
+/// Notes a unit's members on `sites` in the shared resources' state.
+pub(crate) fn claim(
+    problem: &PlacementProblem,
+    unit: &Unit,
+    sites: &[SiteId],
+    shared: Option<&mut SharedState>,
+) {
+    if let Some(state) = shared {
+        state.shift(problem, &arrivals(unit, sites));
+    }
+}
+
+/// The sites for a unit's members, with its anchor nearest to `target`, or `None`. With
+/// shared resources, only sites that they allow with what is placed so far.
 pub(crate) fn nearest_sites(
     problem: &PlacementProblem,
     netlist: &Netlist,
     unit: &Unit,
     target: Point,
     taken: &[bool],
+    mut shared: Option<&mut SharedState>,
 ) -> Option<Vec<SiteId>> {
     let sites = problem.sites();
     let (first, first_offset) = unit.members[0];
@@ -410,6 +476,7 @@ pub(crate) fn nearest_sites(
                 if best
                     .as_ref()
                     .is_none_or(|(d, s, _)| (distance, site) < (*d, *s))
+                    && shared_allow(problem, unit, &members, shared.as_deref_mut())
                 {
                     best = Some((distance, site, members.clone()));
                 }
@@ -436,10 +503,26 @@ pub(crate) fn site_unit_fits(
     members.clear();
     let sites = problem.sites();
     let sub = netlist.site_cell[first_site.index()].2 as usize;
+    let slot = |i: usize| unit.slots.get(i).copied().flatten().map(|s| s as usize);
+    if slot(0).is_some_and(|s| s != sub) {
+        return false;
+    }
     for (i, &(item, offset)) in unit.members.iter().enumerate() {
         let it = problem.item(item);
         let site = if i == 0 {
             first_site
+        } else if let Some(want) = slot(i) {
+            let Some(g) = netlist.grid_of(it.kind) else {
+                return false;
+            };
+            let grid = &netlist.grids[g];
+            let Some((x, y)) = grid.locate(anchor.offset(offset)) else {
+                return false;
+            };
+            match grid.cell(x, y).get(want) {
+                Some(&site) => site,
+                None => return false,
+            }
         } else {
             let Some(g) = netlist.grid_of(it.kind) else {
                 return false;

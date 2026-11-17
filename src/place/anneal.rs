@@ -6,6 +6,7 @@ use std::time::Instant;
 use super::cost::{CostTerm, NetView};
 use super::legalize::{legalize_units, snap, typical_size, unit_box, unit_fits};
 use super::netlist::{NO_UNIT, Netlist};
+use super::shared::{SharedState, Shift};
 use super::spatial::SpatialIndex;
 use super::{ItemId, Layout, PlaceError, Placement, PlacementProblem, Point, Rect, SiteId, check};
 use crate::control::{Progress, Run, RunControl, Stage, Stopped};
@@ -307,6 +308,10 @@ pub struct Annealer<'a, C> {
     limit: u64,
     /// Moves charged to the run so far.
     charged: u64,
+    /// The values drawn from shared resources, if the problem has any.
+    shared: Option<SharedState>,
+    /// The moves of the proposal last applied to `shared`.
+    shifts: Vec<Shift>,
 }
 
 /// Shows where the run is, as the routing engine's does, and leaves out the tables.
@@ -386,6 +391,14 @@ impl<'a, C: CostTerm> Annealer<'a, C> {
                 (Vec::new(), Some(index), *area, *pitch, reach as f64)
             }
         };
+        let shared = SharedState::of(
+            problem,
+            start
+                .sites
+                .iter()
+                .enumerate()
+                .filter_map(|(i, site)| Some((ItemId(i as u32), (*site)?))),
+        );
         let units = netlist.units.len() as f64;
         let moves_per_temperature =
             (options.inner_num * units * cube_root(units)).max(MIN_MOVES) as u64;
@@ -426,6 +439,8 @@ impl<'a, C: CostTerm> Annealer<'a, C> {
             best_cost: 0,
             reports: Vec::new(),
             held_rotations: Vec::new(),
+            shared,
+            shifts: Vec::new(),
             netlist,
             outer: Outer::default(),
             limit: options.max_moves,
@@ -761,6 +776,18 @@ impl<'a, C: CostTerm> Annealer<'a, C> {
         if !ok || self.proposal.is_empty() {
             return None;
         }
+        if let Some(shared) = &mut self.shared {
+            self.shifts.clear();
+            self.shifts.extend(
+                self.proposal
+                    .iter()
+                    .map(|&(item, _, _, to)| (item, self.placement.sites[item.index()], to)),
+            );
+            if !shared.shift(self.problem, &self.shifts) {
+                shared.unshift(self.problem, &self.shifts);
+                return None;
+            }
+        }
         Some(self.apply_proposal())
     }
 
@@ -848,6 +875,9 @@ impl<'a, C: CostTerm> Annealer<'a, C> {
 
     /// Takes back the move just tried.
     fn revert(&mut self) {
+        if let Some(shared) = &mut self.shared {
+            shared.unshift(self.problem, &self.shifts);
+        }
         for old in self.moved.iter().rev() {
             let i = old.item.index();
             self.placement.origins[i] = old.origin;

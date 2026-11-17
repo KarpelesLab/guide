@@ -14,6 +14,8 @@ pub(crate) struct Unit {
     pub members: Vec<(ItemId, Point)>,
     /// Whether this is a macro, whose members never rotate.
     pub is_macro: bool,
+    /// By member, the slot of its point it takes, if the macro says; empty for none.
+    pub slots: Vec<Option<u32>>,
 }
 
 /// The sites of one kind, as a grid of their distinct columns and rows.
@@ -29,6 +31,11 @@ pub(crate) struct KindGrid {
 }
 
 impl KindGrid {
+    /// How many sites of the kind there are.
+    pub fn len(&self) -> usize {
+        self.cell_sites.len()
+    }
+
     pub fn cell(&self, cx: usize, cy: usize) -> &[SiteId] {
         let c = cx * self.ys.len() + cy;
         &self.cell_sites[self.cell_start[c] as usize..self.cell_start[c + 1] as usize]
@@ -112,13 +119,14 @@ impl Netlist {
         let macro_of = problem.macro_of();
         let mut units = Vec::new();
         let mut unit_of = vec![NO_UNIT; n];
-        for members in problem.macros() {
+        for (m, members) in problem.macros().iter().enumerate() {
             for &(item, _) in members {
                 unit_of[item.index()] = units.len() as u32;
             }
             units.push(Unit {
                 members: members.clone(),
                 is_macro: true,
+                slots: problem.macro_slots(super::MacroId(m as u32)).to_vec(),
             });
         }
         for (i, item) in problem.items().iter().enumerate() {
@@ -127,6 +135,7 @@ impl Netlist {
                 units.push(Unit {
                     members: vec![(ItemId(i as u32), Point::default())],
                     is_macro: false,
+                    slots: Vec::new(),
                 });
             }
         }

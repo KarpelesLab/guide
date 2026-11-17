@@ -36,7 +36,8 @@ pub struct AsicOptions {
     ///
     /// Negotiation that stalls starts again, if it has [restarts](Self::restarts) left, and
     /// otherwise stops: a design that does not converge would spend most of its time on
-    /// iterations that change nothing.
+    /// iterations that change nothing. The first pass can also stall sooner, by
+    /// [`first_stall_iterations`](Self::first_stall_iterations).
     pub stall_iterations: u32,
     /// How many times negotiation that stalls starts again, from the best routes so far and
     /// with the history it has learned, but with the present factor back at its start, so that
@@ -83,6 +84,23 @@ pub struct AsicOptions {
     /// dearer. The default is 8, so that an edge 90% full costs 7.9 times as much as an empty
     /// one, and a full one 17 times.
     pub crowding_exponent: u32,
+    /// The crowding of a first try at negotiation, before negotiation at
+    /// [`crowding`](Self::crowding), or the same as `crowding` for no first try. The default
+    /// is 1.
+    ///
+    /// Mild crowding lets nets take the shortest ways that have room, and most designs
+    /// converge with it in a handful of iterations, each cheaper than at the steeper crowding,
+    /// for less wirelength. A design that it does not settle quickly is routed again from its
+    /// pattern routes at `crowding`, with no history and boxes as they were at the start,
+    /// exactly as without the first try, whose iterations [`max_iterations`](Self::max_iterations)
+    /// does not count; and the first try's routes are kept only if that ends with more
+    /// overflow.
+    pub first_crowding: f64,
+    /// How many iterations the first try may go on without halving the overflow on the plane,
+    /// while that is above a thousandth of its first iteration's, before it gives way to
+    /// negotiation at [`crowding`](Self::crowding), or 0 for only the rule of
+    /// [`stall_iterations`](Self::stall_iterations), which holds as well. The default is 3.
+    pub first_stall_iterations: u32,
     /// The engine's [`first_present`](EngineOptions::first_present). The default is 0.5.
     pub first_present: f64,
     /// The engine's [`initial_present`](EngineOptions::initial_present). The default is 0.5.
@@ -96,6 +114,11 @@ pub struct AsicOptions {
     /// pins are routed again, each by its shortest way that overflows nothing, against the
     /// others as they are, to take back the detours that crowding made. The default is true.
     pub refine: bool,
+    /// How many iterations at most, once negotiation has stopped with overflow left on the
+    /// plane, to route again the nets on edges that overflow, each priced at the overflow it
+    /// would add (the engine's [`marginal_overuse`](EngineOptions::marginal_overuse)), for as
+    /// long as that brings the total down. The default is 10.
+    pub overflow_passes: u32,
     /// How many times to assign layers again to the nets on edges that overflow on their
     /// layer. The default is 4.
     pub layer_passes: u32,
@@ -119,11 +142,14 @@ impl Default for AsicOptions {
             longest_first: true,
             crowding: 16.0,
             crowding_exponent: 8,
+            first_crowding: 1.0,
+            first_stall_iterations: 3,
             first_present: 0.5,
             initial_present: 0.5,
             present_growth: 1.8,
             history_factor: 1.0,
             refine: true,
+            overflow_passes: 10,
             layer_passes: 4,
         }
     }
@@ -154,6 +180,11 @@ pub struct AsicRouting {
 /// How many passes of negotiation in a row may end without a new least overflow before it
 /// gives up, however many [restarts](AsicOptions::restarts) it has left.
 const FRUITLESS_RESTARTS: u32 = 2;
+
+/// The overflow, as a fraction of its first iteration's, below which the first try at
+/// [`first_crowding`](AsicOptions::first_crowding) no longer stalls for not halving it: one in
+/// this many.
+const FIRST_TRY_FLOOR: u64 = 1000;
 
 /// What crowding is during the [refinement](AsicOptions::refine), with the same exponent:
 /// little, so that nets take the shortest ways they have, but enough that of two they take
@@ -284,9 +315,8 @@ fn route_in(design: &Design, options: &AsicOptions, run: &Run<'_>) -> AsicRoutin
         max_expansions: run.budget(u64::MAX),
         ..EngineOptions::default()
     };
-    let mut engine = Engine::new(&plane, &engine_nets, engine_options)
-        .unwrap_or_else(|e| unreachable!("nets have distinct numbers: {e}"));
-    if options.pattern {
+    // Pattern routes, which every negotiation from the start begins with.
+    let seeds: Vec<(NetId, Route<NodeId>)> = if options.pattern {
         let cells: Vec<Vec<usize>> = engine_nets
             .iter()
             .map(|net| terminal_cells(net, &plane).collect())
@@ -298,34 +328,73 @@ fn route_in(design: &Design, options: &AsicOptions, run: &Run<'_>) -> AsicRoutin
             options.steiner,
             options.z_shapes,
         );
-        let seeds =
-            engine_nets
-                .iter()
-                .zip(patterns)
-                .zip(&pins_by_net)
-                .map(|((net, links), pins)| {
-                    let tree = tree_of_links(cells_root(net, &plane), links, pins);
-                    (net.id, node_route(&plane, &tree))
-                });
-        engine
-            .seed_routes(seeds)
-            .unwrap_or_else(|e| unreachable!("seeds come before the first iteration: {e}"));
-    }
+        engine_nets
+            .iter()
+            .zip(patterns)
+            .zip(&pins_by_net)
+            .map(|((net, links), pins)| {
+                let tree = tree_of_links(cells_root(net, &plane), links, pins);
+                (net.id, node_route(&plane, &tree))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    // A first try at the milder crowding, unless it is the same.
+    let mut trying = options.first_crowding.to_bits() != options.crowding.to_bits();
+    let first_options = EngineOptions {
+        crowding: Cost::new(options.first_crowding).unwrap_or(Cost::ZERO),
+        ..engine_options
+    };
+    let mut engine = Engine::new(
+        &plane,
+        &engine_nets,
+        if trying {
+            first_options
+        } else {
+            engine_options
+        },
+    )
+    .unwrap_or_else(|e| unreachable!("nets have distinct numbers: {e}"));
+    engine
+        .seed_routes(seeds.iter().cloned())
+        .unwrap_or_else(|e| unreachable!("seeds come before the first iteration: {e}"));
     let mut grown = vec![0u32; design.nets.len()];
     let mut reports: Vec<IterationReport> = Vec::new();
+    // The iterations of the first try, which the iteration limit does not count.
+    let mut tried = 0;
+    let mut first_try: Option<(u64, Outcome<NodeId, NodeId>)> = None;
     let mut best: Option<(u64, Outcome<NodeId, NodeId>)> = None;
     let mut restarts = 0;
     // Passes in a row that ended without a new least overflow.
     let mut fruitless = 0;
     loop {
         let (mut least, mut least_at) = (u64::MAX, 0);
+        let (mut halved, mut halved_at, mut floor) = (u64::MAX, 0, 0);
         let mut stalled = false;
         let mut expanded = 0;
         while let Some(report) = engine.step_parallel(options.threads) {
             expanded += report.nodes_expanded;
             run.tell_iteration(&report, expanded);
+            if report.iteration == 1 {
+                floor = report.total_overuse / FIRST_TRY_FLOOR;
+            }
             if report.total_overuse.saturating_mul(100) < least.saturating_mul(99) {
                 (least, least_at) = (report.total_overuse, report.iteration);
+            }
+            if report.total_overuse.saturating_mul(2) < halved {
+                (halved, halved_at) = (report.total_overuse, report.iteration);
+            }
+            // The first try goes on only while it halves the overflow often enough, or has
+            // little left: a design that it does not settle quickly is the steeper crowding's
+            // from the start.
+            if trying
+                && options.first_stall_iterations > 0
+                && report.total_overuse > floor
+                && report.iteration >= halved_at + options.first_stall_iterations
+            {
+                stalled = true;
+                break;
             }
             if options.stall_iterations > 0
                 && report.iteration >= least_at + options.stall_iterations
@@ -361,13 +430,46 @@ fn route_in(design: &Design, options: &AsicOptions, run: &Run<'_>) -> AsicRoutin
             .iter()
             .map(|r| u64::from(r.occupancy.saturating_sub(r.capacity)))
             .sum();
+        if trying {
+            trying = false;
+            if !stalled || overuse == 0 || run.stopped().is_some() {
+                best = Some((overuse, outcome));
+                break;
+            }
+            // Negotiation from the start, at the steeper crowding, as if the first try had not
+            // been: from the pattern routes, with no history, and boxes as they were.
+            first_try = Some((overuse, outcome));
+            tried = reports.len() as u32;
+            if let Some(margin) = options.box_margin {
+                for net in &engine_nets {
+                    plane.reset_box(net.id, boxes[net.id.index()]);
+                    plane.grow_box(net.id, margin);
+                }
+            }
+            grown.fill(0);
+            engine = Engine::new(
+                &plane,
+                &engine_nets,
+                EngineOptions {
+                    max_expansions: run.budget(u64::MAX),
+                    ..engine_options
+                },
+            )
+            .unwrap_or_else(|e| unreachable!("nets have distinct numbers: {e}"));
+            engine
+                .seed_routes(seeds.iter().cloned())
+                .unwrap_or_else(|e| unreachable!("seeds come before the first iteration: {e}"));
+            continue;
+        }
         if best.as_ref().is_none_or(|(least, _)| overuse < *least) {
             best = Some((overuse, outcome));
             fruitless = 0;
         } else {
             fruitless += 1;
         }
-        let budget = options.max_iterations.saturating_sub(reports.len() as u32);
+        let budget = options
+            .max_iterations
+            .saturating_sub(reports.len() as u32 - tried);
         let Some((overuse, from)) = best.as_ref() else {
             unreachable!("set above")
         };
@@ -403,9 +505,56 @@ fn route_in(design: &Design, options: &AsicOptions, run: &Run<'_>) -> AsicRoutin
             .unwrap_or_else(|e| unreachable!("history comes before the first iteration: {e}"));
     }
     drop(engine);
-    let Some((_, mut outcome)) = best else {
+    let Some((mut least, mut outcome)) = best else {
         unreachable!("set in the first pass")
     };
+    if let Some((overuse, tried_outcome)) = first_try
+        && overuse < least
+    {
+        (least, outcome) = (overuse, tried_outcome);
+    }
+    // Overflow that negotiation could not take away: the nets on it routed again, each priced
+    // at the overflow it would add, for as long as that brings the total down.
+    if least > 0 && options.overflow_passes > 0 && run.stopped().is_none() {
+        let least_options = EngineOptions {
+            cancel: run.engine_flag(None),
+            max_expansions: run.budget(u64::MAX),
+            max_iterations: options.overflow_passes,
+            batch_size: options.batch_size,
+            first_present: Cost::from(1000),
+            initial_present: Cost::from(1000),
+            history_factor: Cost::ZERO,
+            crowding: Cost::from(REFINE_CROWDING),
+            crowding_exponent: options.crowding_exponent,
+            marginal_overuse: true,
+            ..EngineOptions::default()
+        };
+        let mut again = Engine::new(&plane, &engine_nets, least_options)
+            .unwrap_or_else(|e| unreachable!("nets have distinct numbers: {e}"));
+        again
+            .seed_routes(
+                outcome
+                    .routes
+                    .routes()
+                    .map(|(id, route)| (id, route.clone())),
+            )
+            .unwrap_or_else(|e| unreachable!("seeds come before the first iteration: {e}"));
+        while let Some(report) = again.step_parallel(options.threads) {
+            reports.push(report);
+            let interrupted = matches!(
+                again.stop_reason(),
+                Some(StopReason::Cancelled | StopReason::BudgetExhausted)
+            );
+            if report.total_overuse >= least || interrupted {
+                break;
+            }
+            least = report.total_overuse;
+            outcome = again.outcome();
+        }
+        let last = again.outcome();
+        run.charge(last.routes.stats.nodes_expanded);
+        run.engine_stopped(last.stop);
+    }
     let mut refined_nets = 0;
     if options.refine && outcome.overused.is_empty() && run.stopped().is_none() {
         let refine_options = EngineOptions {

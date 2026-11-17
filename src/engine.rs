@@ -815,6 +815,20 @@ pub struct EngineOptions<'c> {
     /// connections one at a time already, and this changes only the others.
     /// `docs/benchmarks.md` has what it did on reticle's designs.
     pub target_terminals: u32,
+    /// Whether a step is priced at the overuse a net would add, 1 for each resource it would
+    /// take beyond capacity, rather than at how far beyond capacity each would then be. The
+    /// default is false.
+    ///
+    /// The default makes a resource that is far over dearer than one just over, which spreads
+    /// the overuse out until none is left. On a problem that cannot be solved, that also sends
+    /// nets round the resources that are most over through others that then overflow too,
+    /// which adds to the total. Priced at what it adds, with a high present factor and no
+    /// history, each net routed again looks for the way that adds the least overuse, so that
+    /// the overuse gathers where it cannot be helped rather than spreading. A net of many
+    /// terminals is still routed one terminal at a time, and nets of a batch see the same
+    /// state, so the total can rise as well as fall. `asic` uses this once negotiation has
+    /// stopped with overflow left, for as long as it falls.
+    pub marginal_overuse: bool,
 }
 
 impl Default for EngineOptions<'_> {
@@ -840,6 +854,7 @@ impl Default for EngineOptions<'_> {
             crowding: Cost::ZERO,
             crowding_exponent: 2,
             target_terminals: 0,
+            marginal_overuse: false,
         }
     }
 }
@@ -1584,11 +1599,14 @@ impl<S: RoutingSpace> ResourceTable<S> {
     }
 }
 
-/// [`EngineOptions::crowding`] and [`EngineOptions::crowding_exponent`].
+/// [`EngineOptions::crowding`] and [`EngineOptions::crowding_exponent`], and
+/// [`EngineOptions::marginal_overuse`]: what prices a step besides history and the present
+/// factor.
 #[derive(Clone, Copy, Debug)]
 struct Crowding {
     factor: Cost,
     exponent: u32,
+    marginal: bool,
 }
 
 impl Crowding {
@@ -1596,12 +1614,25 @@ impl Crowding {
     const OFF: Crowding = Crowding {
         factor: Cost::ZERO,
         exponent: 2,
+        marginal: false,
     };
 
     fn of(options: &EngineOptions<'_>) -> Crowding {
         Crowding {
             factor: options.crowding,
             exponent: options.crowding_exponent.max(1),
+            marginal: options.marginal_overuse,
+        }
+    }
+
+    /// The overuse that a net taking a resource with `others` on it is priced at.
+    #[inline]
+    fn overuse(self, others: u32, capacity: u32) -> u32 {
+        let overuse = overuse_with_one_more(others, capacity);
+        if self.marginal {
+            overuse.min(1)
+        } else {
+            overuse
         }
     }
 
@@ -1610,6 +1641,13 @@ impl Crowding {
     fn power(self, full: f64) -> f64 {
         if self.exponent == 2 {
             return full * full;
+        }
+        if self.exponent == 8 {
+            // The squarings the loop below would do, without its branches: the 8th power is
+            // what `asic` prices with, at every step of every search.
+            let square = full * full;
+            let fourth = square * square;
+            return fourth * fourth;
         }
         let (mut result, mut base, mut n) = (1.0, full, self.exponent);
         while n > 0 {
@@ -1754,7 +1792,7 @@ impl<S: RoutingSpace> Priced<'_, S> {
                 // out of iterations.
                 None => (0, self.inner.capacity(resource)),
             };
-            overuse = overuse.saturating_add(overuse_with_one_more(others, capacity));
+            overuse = overuse.saturating_add(self.crowding.overuse(others, capacity));
             if crowded && capacity > 0 {
                 let full = f64::from(others.saturating_add(1).min(capacity)) / f64::from(capacity);
                 fill += self.crowding.power(full);
@@ -1817,6 +1855,16 @@ impl<S: RoutingSpace> RoutingSpace for Priced<'_, S> {
     #[inline]
     fn lower_bound(&self, net: NetId, from: S::Node, to: S::Node) -> Cost {
         self.inner.lower_bound(net, from, to)
+    }
+
+    #[inline]
+    fn lower_bound_to_targets(
+        &self,
+        net: NetId,
+        from: S::Node,
+        targets: &[Target<S::Node>],
+    ) -> Cost {
+        self.inner.lower_bound_to_targets(net, from, targets)
     }
 
     fn resources(&self, net: NetId, from: S::Node, to: S::Node, out: &mut Vec<S::Resource>) {
@@ -6044,21 +6092,26 @@ mod tests {
         let bus = table.intern(&space, BUS);
         let held = FastSet::default();
         let buffer = RefCell::new(Vec::new());
-        let price_with = |table: &ResourceTable<BusSpace>, crowding: u32, exponent: u32| {
-            let priced = Priced {
-                inner: &space,
-                table,
-                present: Cost::from(10),
-                crowding: Crowding {
-                    factor: Cost::from(crowding),
-                    exponent,
-                },
-                held: &held,
-                buffer: &buffer,
-                replacing: &FastSet::default(),
-                tied: None,
+        let priced_with =
+            |table: &ResourceTable<BusSpace>, crowding: u32, exponent: u32, marginal: bool| {
+                let priced = Priced {
+                    inner: &space,
+                    table,
+                    present: Cost::from(10),
+                    crowding: Crowding {
+                        factor: Cost::from(crowding),
+                        exponent,
+                        marginal,
+                    },
+                    held: &held,
+                    buffer: &buffer,
+                    replacing: &FastSet::default(),
+                    tied: None,
+                };
+                priced.price(Cost::ONE, &mut vec![BUS]).get()
             };
-            priced.price(Cost::ONE, &mut vec![BUS]).get()
+        let price_with = |table: &ResourceTable<BusSpace>, crowding: u32, exponent: u32| {
+            priced_with(table, crowding, exponent, false)
         };
         let price = |table: &ResourceTable<BusSpace>, crowding: u32| price_with(table, crowding, 2);
         // Off, a resource with room is priced at its base cost.
@@ -6076,6 +6129,13 @@ mod tests {
         table.states[bus].occupancy = 3;
         assert_eq!(price(&table, 4), 25.0);
         assert_eq!(price(&table, 0), 21.0);
+        // Priced at what it adds, the net is one more over whatever the overuse before: 1 + 10.
+        assert_eq!(priced_with(&table, 0, 2, true), 11.0);
+        table.states[bus].occupancy = 2;
+        assert_eq!(priced_with(&table, 0, 2, true), 11.0);
+        // And with room left, nothing.
+        table.states[bus].occupancy = 1;
+        assert_eq!(priced_with(&table, 0, 2, true), 1.0);
     }
 
     #[test]

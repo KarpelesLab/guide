@@ -22,15 +22,18 @@
 //!    overflow, longest first: each net's tree grows from its first pin to the nearest pin not
 //!    yet connected, by A\*, which is the Steiner heuristic of Takahashi and Matsuyama, within
 //!    a box around its pins that grows while it overflows, with history, until none do. Edges
-//!    get dearer steeply as they fill up, through the engine's
-//!    [`crowding`](crate::engine::EngineOptions::crowding), so that nets keep out of what is
-//!    nearly full.
-//! 4. **Refinement.** Nets that took a detour on the way are routed again once, each by its
+//!    get dearer as they fill up, through the engine's
+//!    [`crowding`](crate::engine::EngineOptions::crowding): mildly at first, which settles most
+//!    designs in a few iterations, and steeply once that stops halving the overflow, so that
+//!    nets keep out of what is nearly full.
+//! 4. **Overflow that is left**, on a design that can't be routed without, is taken down by
+//!    routing again the nets on it, each priced at the overflow it would add.
+//! 5. **Refinement.** Nets that took a detour on the way are routed again once, each by its
 //!    shortest way that overflows nothing, against the rest as they are.
-//! 5. **Layers.** Each net's tree is then given layers, net by net, those with the least wire
+//! 6. **Layers.** Each net's tree is then given layers, net by net, those with the least wire
 //!    per pin first, exactly for the fewest vias that don't overflow a layer, by dynamic
-//!    programming over the tree, as in COLA. Nets on edges that still overflow are given layers
-//!    again, with those edges dearer.
+//!    programming over the tree, as in COLA. Nets on edges that still overflow on a layer while
+//!    another has room are given layers again, with those edges dearer.
 //!
 //! Nets with more than 1000 pins, and nets whose pins are all in one cell, are not routed, as
 //! the contests allow. Pins are where the file has them, on their layers, and routes reach them

@@ -36,6 +36,9 @@
 //! | `--design-order` | `AsicOptions::longest_first` off | Longest first |
 //! | `--crowding F` | `AsicOptions::crowding` | 16 |
 //! | `--crowding-exponent N` | `AsicOptions::crowding_exponent` | 8 |
+//! | `--first-crowding F` | `AsicOptions::first_crowding` | 1 |
+//! | `--first-stall N` | `AsicOptions::first_stall_iterations` | 3 |
+//! | `--overflow-passes N` | `AsicOptions::overflow_passes` | 10 |
 //! | `--no-refine` | `AsicOptions::refine` off | On |
 //!
 //! It prints one line of `key=value` pairs, which the scripts parse.
@@ -74,6 +77,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             "--batch" => options.batch_size = value()?.parse()?,
             "--max-iterations" => options.max_iterations = value()?.parse()?,
             "--layer-passes" => options.layer_passes = value()?.parse()?,
+            "--overflow-passes" => options.overflow_passes = value()?.parse()?,
             "--box-margin" => {
                 let v: i64 = value()?.parse()?;
                 options.box_margin = u32::try_from(v).ok();
@@ -93,6 +97,8 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             "--restarts" => options.restarts = value()?.parse()?,
             "--max-box-growth" => options.max_box_growth = value()?.parse()?,
             "--crowding" => options.crowding = value()?.parse()?,
+            "--first-crowding" => options.first_crowding = value()?.parse()?,
+            "--first-stall" => options.first_stall_iterations = value()?.parse()?,
             "--crowding-exponent" => options.crowding_exponent = value()?.parse()?,
             _ if !arg.starts_with("--") && design_path.is_none() => design_path = Some(arg),
             _ => return Err(format!("unknown argument {arg}").into()),

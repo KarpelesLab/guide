@@ -5064,10 +5064,10 @@ boards it ends on: `corne-cherry` 3 and 3 open, `tinytapeout-demo` 0 and 0,
 the time for.
 
 **A budget of 40 million nodes**, three orders, the nine boards that a budget cuts, as
-released, beside 0.0.16 (in brackets): `nrfmicro` 0 (5), `sweep-v2.2` 13 (9),
+released, beside 0.0.16 (in brackets): `nrfmicro` 0 (5), `sweep-v2.2` 9 (9),
 `corne-cherry` 79 (75), `tinytapeout-demo` 43 (35), `buspirate5-rev10` 0 (16),
-`lumenpnp-mobo` 0 (0), `cynthion` 38 (53), `glasgow-revC3` 109 (106), `glasgow-revD1` 441
-(433): 723 for 732. The negotiation has half of the budget, which on `corne-cherry` and
+`lumenpnp-mobo` 0 (0), `cynthion` 38 (53), `glasgow-revC3` 105 (106), `glasgow-revD1` 441
+(433): 715 for 732. The negotiation has half of the budget, which on `corne-cherry` and
 `tinytapeout-demo` ends it a third of the way through: what it has then are routes with
 shared points taken out, and the passes go on from those with the other half.
 
@@ -5081,6 +5081,16 @@ for 536, the boards on which it also joins the most more. At 150 million nodes
 **Pads short of two spokes** (cadlab's count on its fill): 84 to 96 of 2360 in the four
 runs, with 0 to 2 that have none, where 0.0.16 had 82 to 100 and 2; cadlab's router had
 108 to 116 and 3 to 18 in the same half hour.
+
+**A net that the negotiation ends with in pieces keeps them.** `sweep-v2.2` had 5, 4 and
+4 open at 40 million nodes for 3, 3 and 3, and 4 in two runs of four at a minute. Three
+of its nets have a connection that the grid has no way for. The passes on the finer
+lattice looked for it, found none, and took the net out whole to route it again from
+nothing, as they do with a net that could not be mended: on a board with every other net
+routed round it by then, where a budget ended before it was whole again. A net whose
+copper began as what a negotiation that ended left it with is no longer taken out so
+(`corne-cherry`, whose negotiation 40 million nodes cut short, had 88 open over three
+orders for 79 with the same for every net of a negotiation).
 
 ### Which boards
 
@@ -5129,8 +5139,6 @@ board, 1.8 to a batch on average. The counts do not depend on it.
   what the other router has at the same moment, which makes its rounds in a third of
   the nodes.
 - A board of six layers at a pitch of 0.1 mm: a round is 10 million nodes and more.
-- `sweep-v2.2`, 3 to 4 open for 3: the negotiation leaves one of the nets that the
-  board keeps apart in three pieces where the passes left it in two.
 - Vias: `tinytapeout-demo` 395 to 455 and `lumenpnp-mobo` 414 to 531, where cadlab's
   router has 238 and 263 to 340.
 

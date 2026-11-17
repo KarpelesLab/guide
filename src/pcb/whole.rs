@@ -1849,6 +1849,8 @@ pub(crate) struct Whole {
     /// routes to end at, and how many pieces of fill were told to be cut off in all.
     pub(crate) sites: Vec<(usize, Vec<TermPad>)>,
     pub(crate) pour_cuts: usize,
+    /// Whether the rounds ended on their own, and not with their share.
+    pub(crate) ended: bool,
 }
 
 /// The pads of fine pitch: those of routed nets with no hole and another net's pad so near
@@ -2857,6 +2859,7 @@ pub(crate) fn route<'r>(
         vias_saved,
         sites,
         pour_cuts,
+        ended: !cut,
     })
 }
 

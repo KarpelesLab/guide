@@ -1730,6 +1730,8 @@ fn route_all<'a>(
     // Every net against every other at once, on one grid: what that ends with is each
     // net's copper as the passes begin, less what the world does not allow of it.
     let mut negotiated_whole = false;
+    // By job, whether its copper began as what a negotiation that ended left it with.
+    let mut from_whole = vec![false; jobs.len()];
     if options.whole && given.is_empty() && !run.poll() {
         run.phase(Phase::Whole);
         let was = run.cut();
@@ -1800,6 +1802,7 @@ fn route_all<'a>(
                     completing[j] = Some(completion(design, ctx, &c, pitch));
                     fresh[j] = true;
                 }
+                from_whole[j] = w.ended;
                 tried[j] = true;
                 copper[j] = Some(c);
             }
@@ -2177,9 +2180,14 @@ fn route_all<'a>(
             }
             // A net that could not be mended is taken out whole, and routed again from
             // nothing when its turn comes: its pieces join nothing, and are in the way.
+            // But one that a negotiation for every net ended with in pieces: those join
+            // its pads, among nets that were all routed round them, and routed again from
+            // nothing it has less room than it had (`sweep-v2.2`, 13 open over three
+            // orders for 9). One that its share cut short is as any other.
             if tree.is_none()
                 && rest.is_some()
                 && !was_held
+                && !from_whole[j]
                 && job.ctx.terminals < BRANCH_TERMINALS
                 && !plane
                 && mends(job.ctx.terminals, plane, hurried, 0)

@@ -747,6 +747,23 @@ pub struct EngineOptions<'c> {
     /// penalty is the fifth power, and NCTU-GR 2.0, which uses a logistic curve, do. 0 counts
     /// as 1.
     pub crowding_exponent: u32,
+    /// How many of a net's terminals still to connect each search of its tree aims at, the
+    /// nearest first, or 0 for all of them. The default is 0.
+    ///
+    /// At 0, each search looks for whichever terminal not yet connected is nearest, and its
+    /// lower bound at every node is the least over all of their access points. On a net of
+    /// many terminals, or of terminals with many access points, working that out is most of
+    /// the work of a search. Above 0, a search aims at only this many of them: those whose
+    /// lower bound from the driver is least, the first in the net's order on a tie. So a net
+    /// grows outwards from its driver one terminal at a time, as VPR and reticle grow theirs,
+    /// and each node's bound is worked out over the access points of one terminal. A
+    /// terminal reached on the way to another is connected all the same.
+    ///
+    /// Trees can come out differently, since a terminal is no longer joined at whichever point
+    /// is cheapest to reach, so this changes results. A timing-driven run routes its critical
+    /// connections one at a time already, and this changes only the others.
+    /// `docs/benchmarks.md` has what it did on reticle's designs.
+    pub target_terminals: u32,
 }
 
 impl Default for EngineOptions<'_> {
@@ -771,6 +788,7 @@ impl Default for EngineOptions<'_> {
             give_up_overused: 100,
             crowding: Cost::ZERO,
             crowding_exponent: 2,
+            target_terminals: 0,
         }
     }
 }
@@ -1888,6 +1906,10 @@ struct Worker<S: RoutingSpace> {
     targets: Vec<Target<S::Node>>,
     /// Indices of the terminals still to connect.
     pending: Vec<usize>,
+    /// Each terminal's lower bound from the driver, for
+    /// [`EngineOptions::target_terminals`], and the terminals a search aims at.
+    terminal_keys: Vec<Cost>,
+    aimed: Vec<usize>,
     path: Vec<S::Node>,
     /// The nodes new to the tree after a path, for finding the terminals it connected.
     new_nodes: FastSet<S::Node>,
@@ -1918,6 +1940,8 @@ impl<S: RoutingSpace> Worker<S> {
             sources: Vec::new(),
             targets: Vec::new(),
             pending: Vec::new(),
+            terminal_keys: Vec::new(),
+            aimed: Vec::new(),
             path: Vec::new(),
             new_nodes: FastSet::default(),
             steps: Vec::new(),
@@ -2120,6 +2144,8 @@ struct RouteContext<'a, S: RoutingSpace> {
     /// Whether nets routed again keep what of their route is not overused, as
     /// [`EngineOptions::incremental_reroute`] says.
     incremental: bool,
+    /// [`EngineOptions::target_terminals`].
+    target_terminals: u32,
 }
 
 /// Returns the most critical of the terminals still to connect, if any has a criticality
@@ -2156,6 +2182,26 @@ fn route_net<S: RoutingSpace>(
     let Some(driver) = net.driver() else {
         return Attempt::NoPath;
     };
+    let aiming =
+        context.target_terminals > 0 && net.terminals.len() > context.target_terminals as usize + 1;
+    if aiming {
+        worker.terminal_keys.clear();
+        worker
+            .terminal_keys
+            .extend(net.terminals.iter().map(|terminal| {
+                let mut least = Cost::MAX;
+                for from in driver.access_points() {
+                    if !space.contains(from.node) {
+                        continue;
+                    }
+                    for to in terminal.access_points() {
+                        let bound = space.lower_bound(net.id, from.node, to.node) + to.cost;
+                        least = least.min(bound);
+                    }
+                }
+                least
+            }));
+    }
 
     // Each time around, one more root is known to be useless, so this ends.
     'roots: loop {
@@ -2250,7 +2296,19 @@ fn route_net<S: RoutingSpace>(
                     worker.targets.extend(targets);
                 }
                 None => {
-                    for &terminal in &worker.pending {
+                    let limit = context.target_terminals as usize;
+                    worker.aimed.clear();
+                    if aiming && worker.pending.len() > limit {
+                        worker.aimed.extend_from_slice(&worker.pending);
+                        let keys = &worker.terminal_keys;
+                        worker
+                            .aimed
+                            .sort_by(|a, b| keys[*a].cmp(&keys[*b]).then(a.cmp(b)));
+                        worker.aimed.truncate(limit);
+                    } else {
+                        worker.aimed.extend_from_slice(&worker.pending);
+                    }
+                    for &terminal in &worker.aimed {
                         let points = net.terminals[terminal].access_points();
                         let targets = points
                             .iter()
@@ -3488,6 +3546,7 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
                 timing: self.timing.as_ref().map(TimingState::route_timing),
                 bound_weight: self.options.bound_weight,
                 incremental: self.incremental(),
+                target_terminals: self.options.target_terminals,
             },
             nets: self.nets,
             states: &self.states,
@@ -3851,6 +3910,7 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
             timing: self.timing.as_ref().map(TimingState::route_timing),
             bound_weight: self.options.bound_weight,
             incremental: false,
+            target_terminals: self.options.target_terminals,
         };
         let criticality = context.timing.map_or(&[][..], |t| t.of_net(index));
         let budget = self.options.max_expansions;
@@ -4152,6 +4212,7 @@ where
             cancel: self.options.cancel,
             bound_weight: self.options.bound_weight,
             incremental: self.incremental(),
+            target_terminals: self.options.target_terminals,
         };
         let lent = RwLock::new(Lent {
             table: ResourceTable::new(self.space),
@@ -4269,6 +4330,7 @@ struct IterationContext<'a, S: RoutingSpace> {
     cancel: Option<&'a AtomicBool>,
     bound_weight: f64,
     incremental: bool,
+    target_terminals: u32,
 }
 
 impl<S: RoutingSpace> IterationContext<'_, S> {
@@ -4284,6 +4346,7 @@ impl<S: RoutingSpace> IterationContext<'_, S> {
                 timing: lent.timing.as_ref().map(TimingState::route_timing),
                 bound_weight: self.bound_weight,
                 incremental: self.incremental,
+                target_terminals: self.target_terminals,
             },
             nets: self.nets,
             states: &lent.states,

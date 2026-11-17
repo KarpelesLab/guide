@@ -489,6 +489,48 @@ fn incremental_rerouting_is_the_same_on_any_number_of_threads() {
 }
 
 #[test]
+fn aiming_at_one_terminal_routes_legally_and_the_same_on_any_number_of_threads() {
+    // Nets of several terminals, where each search aiming at the nearest one only makes trees
+    // of their own. Would catch a terminal left out of the tree, since the validator checks
+    // every one, and a choice of terminals that depended on the thread or the order of a hash.
+    let fabric = small_fabric(12, 1);
+    let (graph, nets) = (fabric_graph(fabric), fabric.nets(50, 6, 3));
+    let all = run_stepped(&graph, &nets, EngineOptions::default()).0;
+    for aim in [1, 2] {
+        let aiming = EngineOptions {
+            target_terminals: aim,
+            ..EngineOptions::default()
+        };
+        let (outcome, _) = run_stepped(&graph, &nets, aiming);
+        assert!(outcome.is_success(), "aiming at {aim}");
+        let routes = outcome.legal_routes().unwrap();
+        let report = crate::validate::check(&graph, &nets, routes);
+        assert!(report.is_legal() && report.is_complete(), "aiming at {aim}");
+        assert_eq!(
+            run_through_batches(&graph, &nets, aiming),
+            run_stepped(&graph, &nets, aiming)
+        );
+        for batch in [2, 16] {
+            let options = EngineOptions {
+                batch_size: batch,
+                ..aiming
+            };
+            let (outcome, _) = assert_same_for_all_threads(&graph, &nets, options);
+            assert!(
+                outcome.is_success(),
+                "aiming at {aim}, at a batch size of {batch}"
+            );
+        }
+    }
+    // At 0, every terminal is aimed at, as before.
+    let zero = EngineOptions {
+        target_terminals: 0,
+        ..EngineOptions::default()
+    };
+    assert_eq!(run_stepped(&graph, &nets, zero).0, all);
+}
+
+#[test]
 fn graphs_with_dead_roots_and_equivalent_access_points_are_the_same() {
     // Directed, so that some roots reach the nearest terminal and not the next, and nets have
     // several ways in that compete. The access costs are odd so that their sums are telling.

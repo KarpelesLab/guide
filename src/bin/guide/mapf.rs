@@ -2,12 +2,13 @@
 
 use std::fmt::Write as _;
 
+use guide::control::Progress;
 use guide::cost::Cost;
 use guide::mapf::{Instance, SolveOptions, check, movingai};
 
 use crate::Outcome;
 use crate::args::{self, Command, Failure, Opt};
-use crate::report::{Deadline, Map, Ui, read_text, write_output};
+use crate::report::{Map, Ui, progress_line, read_text, run_control, set_stopped, write_output};
 
 fn solve_command() -> Command {
     Command {
@@ -59,6 +60,7 @@ fn solve_command() -> Command {
             ),
             args::THREADS,
             args::TIME_LIMIT,
+            args::WORK_BUDGET,
             args::JSON,
             args::QUIET,
             args::VERBOSE,
@@ -93,7 +95,8 @@ pub fn solve(argv: &[String]) -> Outcome {
     }
     options.engine.shuffle_seed = m.number("seed")?;
     options.threads = m.threads()?;
-    let limit = m.seconds("time-limit")?;
+    let heard = |p: &Progress| ui.detail(progress_line(p));
+    let control = run_control(&m, &ui, &heard)?;
 
     ui.progress(format!("reading {map_path} and {scen_path}"));
     let map = movingai::parse_map(&read_text(map_path)?).map_err(|e| Failure::file(map_path, e))?;
@@ -116,9 +119,7 @@ pub fn solve(argv: &[String]) -> Outcome {
         Instance::new(&graph, agents.clone()).map_err(|e| Failure::file(scen_path, e))?;
 
     ui.progress(format!("solving for {count} agents"));
-    let deadline = Deadline::start(limit);
-    options.engine.cancel = deadline.flag();
-    let solution = guide::mapf::solve(&instance, &options);
+    let solution = guide::mapf::solve_with(&instance, &options, &control);
     for (i, round) in solution.rounds.iter().enumerate() {
         ui.detail(format!(
             "round {i}: horizon {} iterations {} conflicts {} stop {:?}",
@@ -130,8 +131,8 @@ pub fn solve(argv: &[String]) -> Outcome {
     report
         .set("solved", solution.plans.is_some())
         .set("agents", count)
-        .set("sum_of_shortest_paths", instance.sum_of_shortest())
-        .set("time_limit_hit", deadline.expired());
+        .set("sum_of_shortest_paths", instance.sum_of_shortest());
+    set_stopped(&mut report, solution.stopped);
     let mut written = None;
     let solved = match &solution.plans {
         Some(plans) => {

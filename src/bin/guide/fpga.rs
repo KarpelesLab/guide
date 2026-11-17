@@ -1,21 +1,26 @@
 //! `guide fpga`: VPR's files in, VPR's files out.
 
 use std::io::BufWriter;
+use std::sync::atomic::AtomicBool;
 
-use guide::engine::{EngineOptions, Outcome, StopReason, route_parallel, route_timed_parallel};
+use guide::control::{Progress, Stopped};
+use guide::engine::{Engine, EngineOptions, Outcome, StopReason};
 use guide::fpga::{
     Architecture, Design, LookaheadOptions, LoopOptions, NetOptions, NodeKind, PackedNetlist,
     PlaceDelayModel, PlaceMethod, PlaceProblem, PlacerOptions, ProblemOptions, RouteHeader,
     RrGraph, TimingOptions, build_place_problem, build_timing, constant_nets, estimate_slack,
-    place_design, place_route_loop, read_architecture, read_netlist, read_placement, read_rr_graph,
-    resolve_nets, write_placement, write_route,
+    place_design_with, place_route_loop_with, read_architecture, read_netlist, read_placement,
+    read_rr_graph, resolve_nets, write_placement, write_route,
 };
 use guide::id::NodeId;
+use guide::space::RoutingSpace;
 use guide::validate::check;
 
 use crate::Outcome as CommandOutcome;
 use crate::args::{self, Command, Failure, Matches, Opt};
-use crate::report::{Deadline, Map, Ui, open, sha256_hex, write_output};
+use crate::report::{
+    Deadline, Map, Ui, open, progress_line, run_control, set_stopped, sha256_hex, write_output,
+};
 
 const ARCH: Opt = Opt::value(
     "arch",
@@ -74,7 +79,8 @@ fn route_command() -> Command {
                 "max-expansions",
                 "N",
                 "Search nodes expanded at most: a budget that stops at the same point every run",
-            ),
+            )
+            .aliases(&["--work-budget"]),
             WRITE_ILLEGAL,
             Opt::value(
                 "seed",
@@ -128,13 +134,16 @@ fn place_command() -> Command {
             ),
             NO_TIMING,
             Opt::value("seed", "N", "The placer's seed [default: 1]"),
+            args::TIME_LIMIT,
+            args::WORK_BUDGET,
             args::JSON,
             args::QUIET,
             args::VERBOSE,
         ],
         details: "Example:\n  guide fpga place --arch k6_N10_40nm.xml --rr-graph rr.xml --net c.net \
-                  -o c.place\n\n--arch, --rr-graph and --net are required. Placement has no time \
-                  limit.",
+                  -o c.place\n\n--arch, --rr-graph and --net are required. Stopped by \
+                  --time-limit or --work-budget, in annealing moves, placement keeps the best \
+                  legal placement it has.",
     }
 }
 
@@ -175,14 +184,16 @@ fn flow_command() -> Command {
             Opt::value("seed", "N", "The placer's seed [default: 1]"),
             args::THREADS,
             args::TIME_LIMIT,
+            args::WORK_BUDGET,
             args::JSON,
             args::QUIET,
             args::VERBOSE,
         ],
         details: "Example:\n  guide fpga flow --arch k6_N10_40nm.xml --rr-graph rr.xml --net c.net \
                   -o c.place --route-output c.route\n\n\
-                  --arch, --rr-graph and --net are required. The time limit covers routing: \
-                  placing is not stopped by it.",
+                  --arch, --rr-graph and --net are required. --time-limit and --work-budget, \
+                  in annealing moves and search nodes, cover the whole flow: stopped, it keeps \
+                  the best placement it routed and that routing.",
     }
 }
 
@@ -231,7 +242,7 @@ fn routing_report(
     device: &RrGraph,
     design: &Design,
     outcome: &Outcome<NodeId, NodeId>,
-    deadline: &Deadline,
+    stopped: Option<Stopped>,
 ) -> bool {
     let faults = check(device.graph(), design.nets(), &outcome.routes);
     let legal = outcome.is_success() && faults.is_complete() && faults.faults().is_empty();
@@ -243,7 +254,6 @@ fn routing_report(
         .set("validator_faults", faults.faults().len())
         .set("iterations", outcome.routes.stats.iterations)
         .set("stop", stop_name(outcome.stop))
-        .set("time_limit_hit", deadline.expired())
         .set("wirelength", wirelength(device, outcome))
         .set(
             "critical_path_ps",
@@ -251,6 +261,7 @@ fn routing_report(
         )
         .set("worst_slack_ps", timing.and_then(|t| t.worst_slack))
         .set("expansions", outcome.routes.stats.nodes_expanded);
+    set_stopped(report, stopped);
     legal
 }
 
@@ -259,7 +270,7 @@ fn routing_report(
 fn engine_options<'c>(
     m: &Matches,
     device: &RrGraph,
-    deadline: &'c Deadline,
+    cancel: Option<&'c AtomicBool>,
     shuffle: bool,
 ) -> Result<EngineOptions<'c>, Failure> {
     let mut options = device.engine_options();
@@ -275,8 +286,26 @@ fn engine_options<'c>(
     if shuffle {
         options.shuffle_seed = m.number("seed")?;
     }
-    options.cancel = deadline.flag();
+    options.cancel = cancel;
     Ok(options)
+}
+
+/// Runs an engine to the end, telling of each iteration with `-v`.
+fn negotiate<S>(mut engine: Engine<'_, S>, threads: usize, ui: &Ui) -> Outcome<S::Node, S::Resource>
+where
+    S: RoutingSpace + Sync,
+    S::Node: Send + Sync,
+    S::Resource: Send + Sync,
+    S::Slots: Send,
+    S::ResourceSlots: Send + Sync,
+{
+    while let Some(r) = engine.step_parallel(threads) {
+        ui.detail(format!(
+            "iteration {}: rerouted {} overused {} expansions {}",
+            r.iteration, r.nets_rerouted, r.overused_resources, r.nodes_expanded
+        ));
+    }
+    engine.outcome()
 }
 
 /// `guide fpga route`.
@@ -317,7 +346,7 @@ pub fn route(argv: &[String]) -> CommandOutcome {
     }
 
     let deadline = Deadline::start(limit);
-    let options = engine_options(&m, &device, &deadline, true)?;
+    let options = engine_options(&m, &device, deadline.flag(), true)?;
     ui.progress(if timing_driven {
         "routing, timing-driven"
     } else {
@@ -333,14 +362,21 @@ pub fn route(argv: &[String]) -> CommandOutcome {
                 .vpr_constraints(0)
                 .map_err(|e| Failure::Input(format!("timing constraints: {e}")))?;
             let driven = timing.timing_driven(&design, constraints);
-            route_timed_parallel(&timed, design.nets(), options, driven, threads)
+            Engine::with_timing(&timed, design.nets(), options, driven)
+                .map(|engine| negotiate(engine, threads, &ui))
         }
-        _ => route_parallel(device.graph(), design.nets(), options, threads),
+        _ => Engine::new(device.graph(), design.nets(), options)
+            .map(|engine| negotiate(engine, threads, &ui)),
     }
     .map_err(|e| Failure::Input(format!("the engine refused the nets: {e}")))?;
 
     let mut report = Map::default();
-    let legal = routing_report(&mut report, &device, &design, &outcome, &deadline);
+    let stopped = match outcome.stop {
+        StopReason::Cancelled if deadline.expired() => Some(Stopped::Deadline),
+        StopReason::BudgetExhausted => Some(Stopped::WorkBudget),
+        _ => None,
+    };
+    let legal = routing_report(&mut report, &device, &design, &outcome, stopped);
     let mut written = None;
     if let Some(path) = m.get("output")
         && (legal || m.flag("write-illegal"))
@@ -446,8 +482,10 @@ pub fn place(argv: &[String]) -> CommandOutcome {
         .map_err(|e| Failure::Input(format!("timing constraints: {e}")))?;
 
     ui.progress("placing");
+    let heard = |p: &Progress| ui.detail(progress_line(p));
+    let control = run_control(&m, &ui, &heard)?;
     let timing_arg = (!m.flag("no-timing")).then_some((&mut timing, &constraints));
-    let result = place_design(&problem, &delays, timing_arg, &options)
+    let result = place_design_with(&problem, &delays, timing_arg, &options, &control)
         .map_err(|e| Failure::Input(format!("placing: {e}")))?;
     let violations = guide::place::check(problem.problem(), &result.placement);
     let legal = violations.is_empty();
@@ -468,6 +506,7 @@ pub fn place(argv: &[String]) -> CommandOutcome {
         .set("start_bb_estimate", result.start_bb_estimate)
         .set("worst_slack_ps", slack)
         .set("moves", result.moves);
+    set_stopped(&mut report, result.stopped);
     let mut written = None;
     if legal && let Some(path) = m.get("output") {
         let id = match m.get("netlist-id") {
@@ -495,7 +534,8 @@ pub fn flow(argv: &[String]) -> CommandOutcome {
     let timing_driven = !m.flag("no-timing");
     let placer = placer_options(&m)?;
     let threads = m.threads()?;
-    let limit = m.seconds("time-limit")?;
+    let heard = |p: &Progress| ui.detail(progress_line(p));
+    let mut control = run_control(&m, &ui, &heard)?;
     let mut loop_options = LoopOptions::default();
     if let Some(rounds) = m.number("rounds")? {
         loop_options.rounds = rounds;
@@ -526,24 +566,28 @@ pub fn flow(argv: &[String]) -> CommandOutcome {
         .map_err(|e| Failure::Input(format!("timing constraints: {e}")))?;
 
     ui.progress("placing");
-    let start = place_design(
+    let start = place_design_with(
         &problem,
         &delays,
         timing_driven.then_some((&mut timing, &constraints)),
         &placer,
+        &control,
     )
     .map_err(|e| Failure::Input(format!("placing: {e}")))?;
+    // What the first placement left of the budget is the loop's.
+    control.work_budget = control
+        .work_budget
+        .map(|budget| budget.saturating_sub(start.moves));
     ui.progress("building the map lookahead");
     route_device.use_map_lookahead(&LookaheadOptions::default());
-    let deadline = Deadline::start(limit);
-    let mut engine = engine_options(&m, &route_device, &deadline, false)?;
+    let mut engine = engine_options(&m, &route_device, None, false)?;
     if m.get("max-iterations").is_none() {
         engine.max_iterations = 50;
     }
     let mut net_options = NetOptions::default();
     net_options.constant_nets = constant_nets(&netlist);
     ui.progress("routing, and placing again where it fails");
-    let result = place_route_loop(
+    let result = place_route_loop_with(
         &route_device,
         &netlist,
         &problem,
@@ -553,8 +597,10 @@ pub fn flow(argv: &[String]) -> CommandOutcome {
         engine,
         start.placement,
         &loop_options,
+        &control,
     )
     .map_err(|e| Failure::Input(e.to_string()))?;
+    let stopped = start.stopped.or(result.stopped);
     for (i, round) in result.rounds.iter().enumerate() {
         ui.detail(format!(
             "round {i}: legal={} overused={} iterations={} moved={}",
@@ -568,7 +614,7 @@ pub fn flow(argv: &[String]) -> CommandOutcome {
         &route_device,
         &result.design,
         &result.outcome,
-        &deadline,
+        stopped,
     );
     let placed_legal = guide::place::check(problem.problem(), &result.placement).is_empty();
     let legal = legal_routes && placed_legal;

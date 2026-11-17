@@ -88,7 +88,7 @@ pub const QUIET: Opt = Opt::flag("quiet", "Print nothing but errors").short('q')
 /// `-v`.
 pub const VERBOSE: Opt = Opt::flag(
     "verbose",
-    "Print more: warnings about the inputs, and each iteration or round",
+    "Print more: warnings about the inputs, and progress as a run goes, on standard error",
 )
 .short('v');
 /// `--threads N`.
@@ -102,7 +102,15 @@ pub const THREADS: Opt = Opt::value(
 pub const TIME_LIMIT: Opt = Opt::value(
     "time-limit",
     "SECONDS",
-    "Stop routing after this long and keep the best result so far; a run that hits it may not be reproducible",
+    "Stop after this long and keep the best result so far; a run that hits it may not be reproducible",
+);
+/// `--work-budget N`, for the commands that take a [`RunControl`](guide::control::RunControl).
+pub const WORK_BUDGET: Opt = Opt::value(
+    "work-budget",
+    "N",
+    "Work a run may do, in annealing moves and search nodes, after which it stops and keeps \
+     its best result so far: the same result for the same budget, on any machine [default: no \
+     limit]",
 );
 
 /// A command: what it is called, what it takes, and what it does.

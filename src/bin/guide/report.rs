@@ -8,6 +8,8 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use guide::control::{Progress, RunControl, Stopped};
+
 use crate::args::{Failure, Matches};
 
 /// A value in a report.
@@ -316,6 +318,62 @@ pub fn write_output(path: &str, bytes: &[u8]) -> Result<(), Failure> {
     } else {
         std::fs::write(path, bytes).map_err(|e| Failure::file(path, e))
     }
+}
+
+/// How often `-v` prints a line of progress within a stage.
+pub const PROGRESS_INTERVAL: Duration = Duration::from_secs(2);
+
+/// A line of progress, for `-v`.
+pub fn progress_line(p: &Progress) -> String {
+    let mut line = format!("{:?}", p.stage);
+    if p.round > 0 {
+        let _ = write!(line, ", round {}", p.round);
+    }
+    if p.step > 0 {
+        let _ = write!(line, ", step {}", p.step);
+    }
+    let _ = write!(line, ": work {}", p.work);
+    if let Some(cost) = p.cost {
+        let _ = write!(line, ", cost {cost:.0}");
+    }
+    if let Some(conflicts) = p.conflicts {
+        let _ = write!(line, ", {conflicts} in conflict");
+    }
+    line
+}
+
+/// The run control of `--time-limit` and `--work-budget`, with `heard` as its listener if
+/// `-v` asks for progress. The deadline counts from now.
+pub fn run_control<'a>(
+    m: &Matches,
+    ui: &Ui,
+    heard: &'a dyn Fn(&Progress),
+) -> Result<RunControl<'a>, Failure> {
+    let mut control = RunControl::default();
+    control.deadline = m.seconds("time-limit")?.map(|limit| Instant::now() + limit);
+    control.work_budget = m.number("work-budget")?;
+    control.progress_interval = PROGRESS_INTERVAL;
+    if ui.verbose {
+        control.progress = Some(heard);
+    }
+    Ok(control)
+}
+
+/// The report's name for why a run was stopped.
+pub fn stopped_name(stopped: Option<Stopped>) -> Option<&'static str> {
+    stopped.map(|s| match s {
+        Stopped::WorkBudget => "work_budget",
+        Stopped::Deadline => "time_limit",
+        Stopped::Cancelled => "cancelled",
+        _ => "stopped",
+    })
+}
+
+/// Sets the report's `stopped` and `time_limit_hit`.
+pub fn set_stopped(report: &mut Map, stopped: Option<Stopped>) {
+    report
+        .set("stopped", stopped_name(stopped))
+        .set("time_limit_hit", stopped == Some(Stopped::Deadline));
 }
 
 /// A time limit: a flag that a timer sets once it runs out, for the engine's cancel flag.

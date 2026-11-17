@@ -1,10 +1,11 @@
 //! `guide asic`: global routing in the ISPD 2007 and 2008 contests' formats.
 
 use guide::asic::{AsicOptions, Design, Evaluation, NetRoute, evaluate, read_design, read_routes};
+use guide::control::Progress;
 
 use crate::Outcome;
 use crate::args::{self, Command, Failure, Matches, Opt};
-use crate::report::{Map, Ui, open, write_output};
+use crate::report::{Map, Ui, open, progress_line, run_control, set_stopped, write_output};
 
 const VIA_COST: Opt = Opt::value(
     "via-cost",
@@ -38,13 +39,17 @@ fn route_command() -> Command {
                 "Start every net from nothing, not from L-shaped pattern routes",
             ),
             args::THREADS,
+            args::TIME_LIMIT,
+            args::WORK_BUDGET,
             args::JSON,
             args::QUIET,
             args::VERBOSE,
         ],
         details: "Example:\n  guide asic route adaptec1.capo70.3d.35.50.90.gr -o adaptec1.route -j 8\n\n\
-                  The exit status is 1 if a net is left unrouted or an edge overflows. Routing \
-                  has no time limit: --max-iterations bounds it.",
+                  The exit status is 1 if a net is left unrouted or an edge overflows. Stopped \
+                  by --time-limit or --work-budget, in search nodes, negotiation keeps its best \
+                  routes, which are then given layers and written, with the overflow they \
+                  leave.",
     }
 }
 
@@ -104,7 +109,9 @@ pub fn route(argv: &[String]) -> Outcome {
     ui.progress(format!("reading {path}"));
     let design = read(path)?;
     ui.progress(format!("routing {} nets", design.nets.len()));
-    let routing = guide::asic::route_design(&design, &options);
+    let heard = |p: &Progress| ui.detail(progress_line(p));
+    let control = run_control(&m, &ui, &heard)?;
+    let routing = guide::asic::route_design_with(&design, &options, &control);
     for r in &routing.iterations {
         ui.detail(format!(
             "iteration {}: rerouted {} overused {} overuse {}",
@@ -128,6 +135,7 @@ pub fn route(argv: &[String]) -> Outcome {
         .set("routed_nets", routing.routed_nets)
         .set("iterations", routing.iterations.len())
         .set("planar_overflow", routing.planar_overflow);
+    set_stopped(&mut report, routing.stopped);
     let mut written = None;
     if let Some(out) = m.get("output") {
         write_output(out, &text)?;

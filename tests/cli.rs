@@ -658,3 +658,112 @@ fn asic_route_and_score() {
     let out = run(&["asic", "score", &design, &empty, "--json", "-", "-q"], 1);
     assert!(has(&stdout(&out), "unrouted_nets", "2"));
 }
+
+/// Every long command takes `--work-budget` and `--time-limit`, says in its report why it
+/// stopped, keeps a legal result, and with `-v` tells of its progress on standard error.
+#[test]
+fn long_commands_stop_at_a_budget_and_tell_of_progress() {
+    let dir = scratch("budget");
+    let rr = path(&dir, "rr.xml");
+    std::fs::write(&rr, island_device(4, 12)).unwrap();
+    let (arch, net) = (
+        testdata("vtr/k6_N10_40nm.xml"),
+        testdata("vtr/mult_4x4.net"),
+    );
+    let placed = path(&dir, "placed.place");
+    let place = |budget: &str| {
+        let out = run(
+            &[
+                "fpga",
+                "place",
+                "--arch",
+                &arch,
+                "--rr-graph",
+                &rr,
+                "--net",
+                &net,
+                "-o",
+                &placed,
+                "--work-budget",
+                budget,
+                "--time-limit",
+                "600",
+                "--json",
+                "-",
+                "-v",
+            ],
+            0,
+        );
+        (stdout(&out), stderr(&out))
+    };
+    let (json, progress) = place("300");
+    assert!(has(&json, "stopped", "\"work_budget\""), "{json}");
+    assert!(has(&json, "moves", "300"), "{json}");
+    assert!(has(&json, "legal", "true"), "{json}");
+    assert!(progress.contains("Anneal"), "{progress}");
+    let first = std::fs::read(&placed).unwrap();
+    place("300");
+    assert_eq!(
+        std::fs::read(&placed).unwrap(),
+        first,
+        "a budget is reproducible"
+    );
+
+    let design = path(&dir, "tiny.gr");
+    std::fs::write(
+        &design,
+        "grid 3 3 2\nvertical capacity 0 2\nhorizontal capacity 2 0\nminimum width 1 1\n\
+         minimum spacing 1 1\nvia spacing 1 1\n0 0 10 10\nnum net 2\n\
+         A 0 2 1\n 5  5 1\n25 25 1\nB 1 2 1\n 5 25 1\n25  5 1\n",
+    )
+    .unwrap();
+    let out = run(
+        &[
+            "asic",
+            "route",
+            &design,
+            "--work-budget",
+            "0",
+            "--json",
+            "-",
+            "-q",
+        ],
+        1,
+    );
+    // The pattern routes, given layers, and the overflow they leave.
+    let json = stdout(&out);
+    assert!(has(&json, "stopped", "\"work_budget\""), "{json}");
+    assert!(has(&json, "unrouted_nets", "0"), "{json}");
+    let out = run(
+        &[
+            "asic",
+            "route",
+            &design,
+            "--time-limit",
+            "600",
+            "--json",
+            "-",
+            "-q",
+        ],
+        0,
+    );
+    assert!(has(&stdout(&out), "stopped", "null"));
+
+    let board = testdata("kicad/dotbots/TS4231-BOB.kicad_pcb");
+    let out = run(
+        &[
+            "pcb",
+            "place",
+            &board,
+            "--work-budget",
+            "100",
+            "--json",
+            "-",
+            "-q",
+        ],
+        0,
+    );
+    let json = stdout(&out);
+    assert!(has(&json, "stopped", "\"work_budget\""), "{json}");
+    assert!(has(&json, "legal", "true"), "{json}");
+}

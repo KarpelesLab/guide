@@ -2,17 +2,20 @@
 
 use std::path::Path;
 
+use guide::control::Progress;
 use guide::dsn::{self, DsnBoard, Session, WireType, write_session};
 use guide::geom::drc::{self, Board, Item, Track, Via, Violation};
 use guide::geom::{LayerId, Rules};
 use guide::id::NetId;
 use guide::kicad::{self, FlowOptions, KicadBoard};
-use guide::pcb::place::{PlaceOptions, Side, outline_overlaps, place_components};
-use guide::pcb::{self, Design, RouteOptions, Routed, RunControl, Stopped};
+use guide::pcb::place::{PlaceOptions, Side, outline_overlaps, place_components_with};
+use guide::pcb::{self, Design, RouteOptions, Routed, RunControl};
 
 use crate::Outcome;
 use crate::args::{self, Command, Failure, Matches, Opt};
-use crate::report::{Map, Ui, Value, read_text, write_output};
+use crate::report::{
+    Map, Ui, Value, progress_line, read_text, run_control, set_stopped, write_output,
+};
 
 const PROJECT: Opt = Opt::value(
     "project",
@@ -305,17 +308,8 @@ fn routing_report(report: &mut Map, routed: &Routed, names: &[String]) {
         .set("length_rules_met", s.lengths.1)
         .set("planes_broken", s.planes_broken)
         .set("open_connections", routed.open.len())
-        .set("work", s.work)
-        .set(
-            "stopped",
-            routed.stopped.map(|why| match why {
-                Stopped::WorkBudget => "work_budget",
-                Stopped::Deadline => "time_limit",
-                Stopped::Cancelled => "cancelled",
-                _ => "other",
-            }),
-        )
-        .set("time_limit_hit", routed.stopped == Some(Stopped::Deadline));
+        .set("work", s.work);
+    set_stopped(report, routed.stopped);
 }
 
 /// Checks the routed board, and reports what breaks a rule with the new copper: of tracks
@@ -497,6 +491,8 @@ fn pcb_place_command() -> Command {
                         "Keep the tracks and vias, which no longer fit the placement; by \
                          default they are taken out",
                     ),
+                    args::TIME_LIMIT,
+                    args::WORK_BUDGET,
                 ],
                 place_opts(),
             ),
@@ -504,7 +500,8 @@ fn pcb_place_command() -> Command {
         ),
         details: "Example:\n  guide pcb place board.kicad_pcb -o placed.kicad_pcb\n\n\
                   Then `guide pcb route placed.kicad_pcb`, or `guide pcb flow` for both in a \
-                  loop.",
+                  loop. A placement stopped by --time-limit or --work-budget is still legal: \
+                  each pass is legalized, and annealing keeps its best.",
     }
 }
 
@@ -521,7 +518,9 @@ pub fn place(argv: &[String]) -> Outcome {
         design.components.iter().filter(|c| !c.fixed).count(),
         design.components.len()
     ));
-    let placed = place_components(&design, &options)
+    let heard = |p: &Progress| ui.detail(progress_line(p));
+    let control = run_control(&m, &ui, &heard)?;
+    let placed = place_components_with(&design, &options, &control)
         .map_err(|e| Failure::Input(format!("{}: placing: {e}", loaded.path)))?;
     let overlaps: Vec<String> = outline_overlaps(&design, &placed.placed)
         .into_iter()
@@ -551,6 +550,7 @@ pub fn place(argv: &[String]) -> Outcome {
         .set("wirelength_mm_after", placed.wirelength.1 as f64 / 1e6)
         .set("spacing_mm", placed.spacing as f64 / 1e6)
         .set("overlaps", overlaps);
+    set_stopped(&mut report, placed.stopped);
     let mut written = None;
     if let Some(path) = m.get("output") {
         let mut text = kicad::replace_placement(&loaded.pcb, read, &placed.placed);
@@ -587,6 +587,7 @@ fn pcb_flow_command() -> Command {
                             "Rounds of placing again at most; 0 is placement then routing \
                              [default: 6]",
                         ),
+                        args::TIME_LIMIT,
                     ],
                     place_opts(),
                 ),
@@ -595,7 +596,9 @@ fn pcb_flow_command() -> Command {
             common(),
         ),
         details: "Example:\n  guide pcb flow board.kicad_pcb -o done.kicad_pcb\n\n\
-                  Every track and via is routed again: the board's own are taken out.",
+                  Every track and via is routed again: the board's own are taken out. \
+                  --work-budget and --time-limit cover the whole flow, placing and routing: \
+                  stopped, it keeps the best board it has.",
     }
 }
 
@@ -616,13 +619,20 @@ pub fn flow(argv: &[String]) -> Outcome {
     let mut options = FlowOptions::default();
     options.place = place_options(&m)?;
     options.route = route_options(&m)?;
+    // The budget is the whole flow's, not each routing's.
+    options.route.work_budget = None;
     if let Some(rounds) = m.number("rounds")? {
         options.rounds = rounds;
     }
     let loaded = load_kicad(&m, &ui)?;
     ui.progress("placing and routing");
-    let flow = kicad::place_and_route(&loaded.pcb, loaded.project.as_deref(), &options)
-        .map_err(|e| Failure::Input(format!("{}: {e}", loaded.path)))?;
+    let heard = |p: &Progress| ui.detail(progress_line(p));
+    let control = run_control(&m, &ui, &heard)?;
+    let mut flow =
+        kicad::place_and_route_with(&loaded.pcb, loaded.project.as_deref(), &options, &control)
+            .map_err(|e| Failure::Input(format!("{}: {e}", loaded.path)))?;
+    // The report's `stopped` is the flow's.
+    flow.routed.stopped = flow.stopped.or(flow.routed.stopped);
     for (i, round) in flow.rounds.iter().enumerate() {
         ui.detail(format!(
             "round {i}: {} parts placed again, {} nets rerouted, kept: {}",

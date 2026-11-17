@@ -92,6 +92,24 @@ pub struct GuideConfig {
     pub delay_weight: f64,
     /// `EngineOptions::timing_iterations`.
     pub timing_iterations: u32,
+    /// The criticality exponent and maximum (`CriticalityOptions`), `TimingDriven::search_budget`
+    /// and `present_cap`, and how many iterations from the second route the critical nets
+    /// again whatever their congestion, from what criticality: reticle's own for the flow
+    /// (`route::Timing`'s `exponent`, `max_criticality`, `search_budget`, `present_cap`,
+    /// `passes` and `reroute_above`) unless given.
+    pub exponent: Option<u32>,
+    pub max_criticality: Option<f64>,
+    pub search_budget: Option<u64>,
+    pub present_cap: Option<f64>,
+    pub early_passes: Option<u32>,
+    pub reroute_above: Option<f64>,
+    /// None of reticle's ways of keeping critical connections critical: no budget or cap on
+    /// a critical search, no criticality kept, the nets in their own order and no early
+    /// rerouting of critical nets. Criticality is still against the latest path when reticle's
+    /// is.
+    pub plain: bool,
+    /// `EngineOptions::timing_reroute_criticality`, or the engine's default.
+    pub timing_reroute_criticality: Option<f64>,
     /// How the router was asked for, for the report.
     pub label: String,
 }
@@ -114,6 +132,14 @@ impl Default for GuideConfig {
             timed: false,
             delay_weight: 1.0,
             timing_iterations: 0,
+            exponent: None,
+            max_criticality: None,
+            search_budget: None,
+            present_cap: None,
+            early_passes: None,
+            reroute_above: None,
+            plain: false,
+            timing_reroute_criticality: None,
         }
     }
 }
@@ -130,6 +156,16 @@ pub fn route_reticle(
     let (routing, report) =
         route(netlist, graph, placement, options).map_err(|e| format!("reticle: {e}"))?;
     let seconds = started.elapsed().as_secs_f64();
+    for it in &report.iterations {
+        eprintln!(
+            "note: reticle: iteration {}: {} signal(s) rerouted, {} visited, {} overused, critical path {:?}",
+            it.index, it.rerouted, it.visited, it.overused_nodes, it.critical
+        );
+    }
+    eprintln!(
+        "note: reticle: {} critical search(es) gave up, kept legal {:?}, {} group(s) refined",
+        report.gave_up, report.kept_legal, report.refined
+    );
     Ok((
         routing,
         RunReport {
@@ -304,6 +340,9 @@ pub fn route_guide(
     engine.batch_size = config.batch_size;
     engine.target_terminals = config.target_terminals;
     engine.timing_iterations = config.timing_iterations;
+    if let Some(c) = config.timing_reroute_criticality {
+        engine.timing_reroute_criticality = c;
+    }
     // Timing-driven, by reticle's model, when asked and when the flow has one.
     let timed = options
         .timing
@@ -312,12 +351,20 @@ pub fn route_guide(
         .and_then(|t| t.paths.as_ref().map(|paths| (t, paths)));
     let outcome: Outcome<NodeId, NodeId> = match timed {
         Some((timing, paths)) => {
-            fabric.set_delays(graph, &timing.node_delay, f64::from(timing.tile_delay));
+            fabric.set_delays(
+                graph,
+                &timing.node_delay,
+                f64::from(timing.tile_delay),
+            );
             // A picosecond against a node of congestion as reticle weighs them: the mean
             // base cost of the timed nodes over their mean delay (`delay_scale`).
             let (mut bases, mut delays, mut count) = (0.0f64, 0.0f64, 0usize);
             for (node, delay) in timing.node_delay.iter().enumerate() {
                 let base = f64::from(options.node_base.get(node).copied().unwrap_or(1.0));
+                // Under a weight, reticle leaves out the wires closed by their price.
+                if timing.delay_weight > 0.0 && base >= f64::from(reticle::fpga::route::TIE_BASE) {
+                    continue;
+                }
                 if *delay > 0 && base > 0.0 && !options.closed.get(node).copied().unwrap_or(false) {
                     bases += base;
                     delays += f64::from(*delay);
@@ -325,7 +372,12 @@ pub fn route_guide(
                 }
             }
             let delay_cost = if count > 0 && delays > 0.0 {
-                bases / delays * config.delay_weight
+                let weight = if timing.delay_weight > 0.0 {
+                    timing.delay_weight
+                } else {
+                    1.0
+                };
+                bases / delays * weight * config.delay_weight
             } else {
                 1e-3
             };
@@ -333,18 +385,107 @@ pub fn route_guide(
                 .iter()
                 .map(|t| netlist.signals[t.signal].driver.unwrap_or(0))
                 .collect();
+            // A sink pin that shares its wire with another sink of its signal, such as the
+            // flip-flops of a slice on one reset, is no terminal of its own: it arrives when the
+            // pin whose terminal that wire is does.
+            let mut aliases: Vec<(usize, usize)> = Vec::new();
+            for t in &terms {
+                for &sink in &netlist.signals[t.signal].sinks {
+                    if t.sinks.iter().any(|(_, pin)| *pin == sink) {
+                        continue;
+                    }
+                    let pin = &netlist.pins[sink];
+                    let Some(site) = placement.site_of(pin.instance) else {
+                        continue;
+                    };
+                    if netlist.pins[sink].role == "clk" {
+                        continue;
+                    }
+                    let nodes: Vec<u32> = graph.sites[site].pin_nodes(&pin.role).collect();
+                    if let Some((_, with)) = t.sinks.iter().find(|(n, _)| nodes.contains(n)) {
+                        aliases.push((*with, sink));
+                    } else {
+                        // No wire of its own to route, such as a carry chain's carry from the
+                        // slice before: it arrives with its driver, as reticle times it.
+                        aliases.push((netlist.signals[t.signal].driver.unwrap_or(0), sink));
+                    }
+                }
+            }
             let sinks: Vec<Vec<usize>> = terms
                 .iter()
                 .map(|t| t.sinks.iter().map(|(_, pin)| *pin).collect())
                 .collect();
-            let driven = crate::timed::driven(
-                netlist, graph, placement, paths, &drivers, &sinks, delay_cost,
+            let mut driven = crate::timed::driven(
+                netlist, graph, placement, paths, &drivers, &sinks, &aliases, delay_cost,
             )?;
-            if config.threads > 1 {
-                guide::engine::route_timed_parallel(&fabric, &nets, engine, driven, config.threads)
+            // Reticle's settings for the flow, but where the router was asked otherwise.
+            let exponent = config.exponent.unwrap_or(timing.exponent.max(0) as u32);
+            let max = config.max_criticality.unwrap_or(timing.max_criticality);
+            driven.criticality = guide::timing::CriticalityOptions::new(exponent, max)
+                .map_err(|e| format!("criticality: {e}"))?;
+            driven.against_latest = timing.against_longest;
+            let early_passes = if config.plain {
+                0
             } else {
-                guide::engine::route_timed(&fabric, &nets, engine, driven)
+                config.early_passes.unwrap_or(timing.passes)
+            };
+            let reroute_above = config.reroute_above.unwrap_or(timing.reroute_above);
+            if !config.plain {
+                driven.search_budget = config.search_budget.unwrap_or(timing.search_budget);
+                let cap = config.present_cap.unwrap_or(timing.present_cap);
+                if cap.is_finite() {
+                    driven.present_cap = cost(cap);
+                }
+                driven.keep_criticality = timing.keep_criticality;
+                driven.critical_first = timing.seed_from_placement;
             }
+            let offsets: Vec<usize> = sinks
+                .iter()
+                .scan(0usize, |at, s| {
+                    let here = *at;
+                    *at += s.len();
+                    Some(here)
+                })
+                .collect();
+            // Stepped here rather than run, so that each iteration's work and timing are logged.
+            guide::engine::Engine::with_timing(&fabric, &nets, engine, driven).map(|mut e| {
+                let mut last = Instant::now();
+                loop {
+                    let report = if config.threads > 1 {
+                        e.step_parallel(config.threads)
+                    } else {
+                        e.step()
+                    };
+                    let Some(report) = report else { break };
+                    // Reticle's first passes: the critical nets routed again whatever their
+                    // congestion.
+                    if report.iteration <= early_passes {
+                        let critical = sinks.iter().enumerate().filter_map(|(net, s)| {
+                            (0..s.len())
+                                .any(|k| {
+                                    e.connection_criticality(offsets[net] + k)
+                                        .is_some_and(|c| c >= reroute_above)
+                                })
+                                .then_some(guide::id::NetId(net as u32))
+                        });
+                        let critical: Vec<guide::id::NetId> = critical.collect();
+                        e.rip_up(critical);
+                    }
+                    eprintln!(
+                        "note: guide: iteration {}: {} net(s) rerouted, {} search(es), {} expansion(s), {} overused, critical path {:?} ps, worst slack {:?} ps, {:.2} s",
+                        report.iteration,
+                        report.nets_rerouted,
+                        report.searches,
+                        report.nodes_expanded,
+                        report.overused_resources,
+                        report.timing.and_then(|t| t.critical_path_delay),
+                        report.timing.and_then(|t| t.worst_slack),
+                        last.elapsed().as_secs_f64()
+                    );
+                    last = Instant::now();
+                }
+                e.outcome()
+            })
         }
         None if config.threads > 1 => {
             guide::engine::route_parallel(&fabric, &nets, engine, config.threads)
@@ -487,6 +628,41 @@ pub fn route_guide(
     match routed {
         Ok((routing, _)) => {
             report.exact = Some(compare(&routing, &chosen, &terms));
+            // Each connection's delay as guide's run had it, against reticle's own figure for
+            // the same routes, with no branch load.
+            if let (Some((timing, _)), Some(t)) = (timed, outcome.timing.as_ref()) {
+                let wire = reticle::fpga::route::connection_delays(
+                    netlist,
+                    graph,
+                    placement,
+                    &routing,
+                    &timing.node_delay,
+                    reticle::fpga::route::BranchLoad::NONE,
+                );
+                let (mut same, mut lower, mut higher, mut worst) = (0, 0, 0, (0i64, 0usize));
+                let mut at = 0;
+                for t_ in &terms {
+                    for (_, pin) in &t_.sinks {
+                        let ours = t.connection_delays.get(at).copied().flatten().unwrap_or(0);
+                        let theirs = (wire[*pin] * 1000.0).round() as i64;
+                        let gap = theirs - i64::from(ours);
+                        match gap.cmp(&0) {
+                            std::cmp::Ordering::Equal => same += 1,
+                            std::cmp::Ordering::Greater => higher += 1,
+                            std::cmp::Ordering::Less => lower += 1,
+                        }
+                        if gap.abs() > worst.0.abs() {
+                            worst = (gap, *pin);
+                        }
+                        at += 1;
+                    }
+                }
+                let pin = &netlist.pins[worst.1];
+                eprintln!(
+                    "note: guide's delays against reticle's: {same} the same, {higher} reticle's later, {lower} reticle's earlier; most apart by {} ps at {}.{}[{}] ({})",
+                    worst.0, netlist.instances[pin.instance].name, pin.port, pin.bit, pin.role
+                );
+            }
             Ok((routing, report))
         }
         Err(e) => {

@@ -561,6 +561,27 @@ pub fn run(s: &Synthesised, routers: &[Router]) -> Result<Vec<Checked>, String> 
             reticle::fpga::xray::delay::branch_load(grade),
         );
         let (_, longest) = reticle::fpga::place::path_criticality(&netlist, &timing, &wire);
+        // The model guide routes by, against reticle's own analysis, on these routes: with
+        // no branch load, which guide's model leaves out, and with it.
+        if crate::timing_driven() {
+            let bare = reticle::fpga::route::connection_delays(
+                &netlist,
+                &graph,
+                &placement,
+                &routing,
+                &node_delay,
+                reticle::fpga::route::BranchLoad::NONE,
+            );
+            let (_, bare_longest) =
+                reticle::fpga::place::path_criticality(&netlist, &timing, &bare);
+            match crate::timed::latest(&netlist, &timing, &bare) {
+                Ok((arrival, slack)) => eprintln!(
+                    "note: {}: reticle's analysis {longest:?} ps, without branch loads {bare_longest:?}; guide's model without them: arrival {arrival} ps, worst slack {slack:?} ps",
+                    router.name()
+                ),
+                Err(e) => eprintln!("note: guide's model: {e}"),
+            }
+        }
         checked.critical = domains
             .iter()
             .zip(&longest)

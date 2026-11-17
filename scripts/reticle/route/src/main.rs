@@ -12,8 +12,16 @@
 //!                           `history` (reticle's own for the family here), `batch`
 //!                           (32 with threads), `full` (no incremental rerouting),
 //!                           `timed` (route by reticle's timing model, with
-//!                           --timing-driven), `delay` (what delay weighs, over reticle's
-//!                           scale) and `after` (EngineOptions::timing_iterations)
+//!                           --timing-driven, with reticle's settings for it), `delay`
+//!                           (what delay weighs, over reticle's scale), `after`
+//!                           (EngineOptions::timing_iterations), `rcrit`
+//!                           (EngineOptions::timing_reroute_criticality), `exp` and
+//!                           `max` (the criticality exponent and maximum), `budget`
+//!                           and `cap` (TimingDriven::search_budget and present_cap),
+//!                           `early` and `above` (how many iterations reroute the nets
+//!                           of connections at least that critical), `plain` (none of
+//!                           budget, cap, kept criticality, critical nets first or
+//!                           early rerouting) and `iters` (EngineOptions::max_iterations)
 //!   --name <name>           the design's name in the results
 //!   --place-seed <n>        the placer's seed
 //!   --timing-driven         on a 7-series part, place and route reticle's way with its
@@ -43,7 +51,7 @@ use crate::router::{GuideConfig, RunReport};
 #[derive(Clone, Debug)]
 pub enum Router {
     Reticle,
-    Guide(GuideConfig),
+    Guide(Box<GuideConfig>),
 }
 
 impl Router {
@@ -222,11 +230,20 @@ fn parse_router(text: &str, base: &GuideConfig) -> Router {
             "delay" => config.delay_weight = number(),
             "after" => config.timing_iterations = number() as u32,
             "aim" => config.target_terminals = number() as u32,
+            "exp" => config.exponent = Some(number() as u32),
+            "max" => config.max_criticality = Some(number()),
+            "budget" => config.search_budget = Some(number() as u64),
+            "cap" => config.present_cap = Some(number()),
+            "early" => config.early_passes = Some(number() as u32),
+            "above" => config.reroute_above = Some(number()),
+            "plain" => config.plain = true,
+            "iters" => config.max_iterations = number() as u32,
+            "rcrit" => config.timing_reroute_criticality = Some(number()),
             _ => bad(),
         }
     }
     config.label = text.to_owned();
-    Router::Guide(config)
+    Router::Guide(Box::new(config))
 }
 
 static PLACE_SEED: OnceLock<Option<u64>> = OnceLock::new();

@@ -24,11 +24,15 @@
 //!   (`reserve_sink_entries`, a penalty of 10 000 times the step).
 //!
 //! For timing-driven routing it is a [`DelaySpace`] too: a step's delay is reticle's
-//! `node_delay` of the graph node its pip enters (under reticle's fitted model, a node a join
-//! enters has none), and the lower bound on delay is reticle's `tile_delay` a tile.
+//! `node_delay` of the graph node its pip enters, and the lower bound on delay is reticle's
+//! `tile_delay` a tile. Under reticle's fitted model a name a join enters has no delay, but
+//! for the long lines, which can be driven from either end and have a delay on both: a step
+//! into such a physical node is charged all of its names' delays, which is what reticle's
+//! analysis charges a route that crosses the line, and more than it charges one that turns
+//! back where it came in ([`Fabric::set_delays`]).
 //!
 //! What it does not do: reticle's bounding box, `first` (routing some pins of a net before
-//! others), a branch's load on the connections past it, and a critical search's budget.
+//! others), and a branch's load on the connections past it.
 
 use std::collections::HashMap;
 
@@ -309,14 +313,30 @@ impl Fabric {
     /// Gives each step the delay of the graph node its pip enters, from reticle's
     /// `Timing::node_delay`, and the lower bound on delay a tile of distance.
     pub fn set_delays(&mut self, graph: &RoutingGraph, node_delay: &[u32], tile_delay: f64) {
+        let delay_of = |node: u32| node_delay.get(node as usize).copied().unwrap_or(0);
+        // A physical node with a delay on more than one of its names, such as a long line
+        // that can be driven from either end and has its delay on both: reticle's analysis
+        // walks the joins from the name a route enters by to the name it leaves by, and
+        // charges each name it enters, so a route that crosses the line pays for both ends,
+        // and one that leaves by the name it came in by for one. A step's delay cannot depend
+        // on where the route leaves, so a step into such a node is charged all of them: the
+        // crossing as reticle times it, and a turn back more than that.
+        let mut delayed = vec![(0u8, 0u32); self.len()];
+        for (node, g) in self.group.iter().enumerate() {
+            let delay = delay_of(node as u32);
+            if delay > 0 {
+                let (count, total) = &mut delayed[*g as usize];
+                *count = count.saturating_add(1);
+                *total = total.saturating_add(delay);
+            }
+        }
         self.delays = self
             .steps
             .iter()
             .map(|step| {
-                node_delay
-                    .get(graph.pip(step.pip).to as usize)
-                    .copied()
-                    .unwrap_or(0)
+                let pip = graph.pip(step.pip);
+                let (count, total) = delayed[step.to as usize];
+                if count > 1 { total } else { delay_of(pip.to) }
             })
             .collect();
         self.tile_delay = tile_delay;

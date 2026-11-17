@@ -2086,15 +2086,13 @@ fn route_all<'a>(
             tried: 0,
             kept: 0,
             made: 0,
-            cut: 0,
         };
         let mut routes = Routes {
             copper: &mut copper,
             missing: &mut missing,
             apart: &mut apart,
         };
-        settle.all(&mut world, &mut jobs, &mut routes);
-        stats.pour_cuts += settle.cut;
+        settle.all(&mut world, &jobs, &mut routes);
         stats.expanded += settle.expanded;
         stats.settled = (settle.tried, settle.kept, settle.made);
         for j in 0..jobs.len() {

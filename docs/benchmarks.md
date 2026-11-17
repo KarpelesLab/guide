@@ -3996,6 +3996,24 @@ All at 40 million nodes, connections open as cadlab counts them.
   and 45 in that order, and the six orders 276 for 274: the same, with a count that says
   what the host will find.
 
+- *Chains for the pads cut off their fills* were in 0.0.10 and are gone with 0.0.11. A
+  net with pieces of fill cut off had chains of its own before the others, each piece a
+  terminal to join to its fill again across what is in the way. They made no more: 235
+  open over three orders on `nrfmicro`, `corne-cherry`, `buspirate5-rev10`,
+  `lumenpnp-mobo`, `cynthion` and `sweep-v2.2` with them and 232 without, through the
+  host's adapter with the rows planned on two layers. And they cost time that a budget of
+  work does not count: `lumenpnp-mobo`'s first run, with a deadline at 42 s on a machine
+  under load, was settling from 25.2 s to 39.0 s with 193 of its 193 nets routed, a
+  ground of two hundred pads searched for at four times a search's limit, its cleanup
+  had 3 s for 7, and it was back too late for its host's second run, which is what joins
+  the pads off its pours: 4, 8 and 5 open for 2, 1 and 5. Without those chains the call
+  takes 40.8, 36.7 and 33.4 s for 41.1, 45.8 and 37.8 s, as with 0.0.9. The pieces are
+  counted, and joined by the stubs after routing.
+- *Longer chains for what is left.* Once chains of twelve nets, three deep, across four,
+  in four tries, have made what they can: twice those, and then four times, in the work
+  that is left. `nrfmicro` 11 open over three orders with and without, `corne-cherry`
+  130, `buspirate5-rev10` 11, and `lumenpnp-mobo` 2 for 1.
+
 ### What this does not show
 
 - A way out of the pads of a QFN of 0.4 mm on a board of two layers, still.

@@ -732,10 +732,14 @@ routes it again when its turn comes, on a board that has changed by then: a pass
   that nets are planned on, as any route does, and a connection made by cutting two pads
   off their pour is a loss. So what a chain is judged by is the connections that the
   routes leave open and the pieces of fill with pads on them that are cut off their
-  net's fill, as the grid of `RouteOptions::pour_cuts` tells them, and a net with such
-  pieces has chains of its own first, with each piece as a terminal to join to its fill
-  again across what is in the way. On `corne-cherry` the run then says 34 open where its
-  host finds 45, for 23 and 40 without.
+  net's fill, as the grid of `RouteOptions::pour_cuts` tells them. On `corne-cherry` the
+  run then says 34 open where its host finds 45, for 23 and 40 without. The pieces
+  themselves are joined by the stubs after routing, as before: until 0.0.11 a net with
+  such pieces had chains of its own first, with each piece as a terminal to join to its
+  fill again across what is in the way, which made no more of them (232 open for 235 on
+  six boards at 40 million nodes without those chains) and went on for 14 s of the 42 s
+  that `lumenpnp-mobo` had, with every one of its nets routed, so that its host's second
+  run was not started.
 
 `RouteOptions::settle`, on by default; `Stats::settled` says how many chains were tried
 and kept and what they made, and `Phase::Settle` is told. A run with neither a budget nor
@@ -749,7 +753,9 @@ Tried and not kept: chains kept with a net left cut where the routes made more i
 which went on to a dozen nets and were undone; chains half as long and half as deep at
 three times the price of a crossing; a window after the chains, the nets of few pads
 beside the open pad taken out whole and routed again after it; a fixed share of the
-budget for the chains with no end to the passes; and the count without the pours.
+budget for the chains with no end to the passes; the count without the pours; and, once
+the chains have made what they can, chains twice and four times as long, deep and wide
+for what is left, which made nothing on four boards.
 
 **The layers that a net joins at a point are those of all its places there.** A track's
 end and a via at the same point are two places of a net, as a stub to a plane has them once

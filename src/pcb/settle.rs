@@ -17,16 +17,17 @@
 //! What is counted is what a host that fills the zones again would count: the connections
 //! that the routes leave open, and the pieces of fill with pads on them that the routes
 //! cut off the fill their net is planned on, where the run keeps [count](super::pours) of
-//! those. A net with such pads has a chain of its own, with each piece as a terminal to
-//! join to its fill again across what is in the way, and a chain that makes a connection
-//! by cutting a pad off its fill is undone.
+//! those: a chain that makes a connection by cutting a pad off its fill is undone. The
+//! pieces themselves are left to the stubs that join them once routing is over, which move
+//! nothing: a chain for each net with such pieces, across what is in the way, made no more
+//! of them and cost a board with every net routed a third of its time.
 
 use std::collections::{BTreeMap, VecDeque};
 
 use super::Design;
 use super::detail::{self, History, NetCtx, NetRun, Params, RipUp, StepCache};
 use super::geometry::NetCopper;
-use super::pours::{self, Pours};
+use super::pours::Pours;
 use super::router::{Job, completion};
 use super::world::World;
 use crate::id::NetId;
@@ -102,21 +103,6 @@ impl Routes<'_> {
     fn open_all(&self, nets: &[&NetCtx]) -> usize {
         (0..nets.len()).map(|k| self.open(nets, k)).sum()
     }
-
-    /// Counts the pieces that the copper of net `k` leaves it in again, as `ctx` has it.
-    fn count(&mut self, ctx: &NetCtx, k: usize) {
-        match &self.copper[k] {
-            Some(c) => {
-                let pieces = c.pieces(ctx);
-                self.missing[k] = pieces.missing();
-                self.apart[k] = pieces.apart();
-            }
-            None => {
-                self.missing[k].clear();
-                self.apart[k] = 0;
-            }
-        }
-    }
 }
 
 /// The settling of a run's routes.
@@ -141,15 +127,12 @@ pub(crate) struct Settle<'a> {
     pub(crate) tried: usize,
     pub(crate) kept: usize,
     pub(crate) made: usize,
-    /// The pieces of fill found cut off, each time a net was given a chain to join them.
-    pub(crate) cut: usize,
 }
 
 impl Settle<'_> {
-    /// Goes through the nets with connections open, and those with pads that routes cut
-    /// off their fills, until a round makes no connection or the run has to stop. Every
-    /// net of a job may be crossed, whatever rip-up locked.
-    pub(crate) fn all(&mut self, world: &mut World<'_>, jobs: &mut [Job], routes: &mut Routes<'_>) {
+    /// Goes through the nets with connections open, until a round makes no connection or
+    /// the run has to stop. Every net of a job may be crossed, whatever rip-up locked.
+    pub(crate) fn all(&mut self, world: &mut World<'_>, jobs: &[Job], routes: &mut Routes<'_>) {
         let locked: Vec<bool> = jobs.iter().map(|j| world.locked(j.ctx.net)).collect();
         let fixed: Vec<bool> = self.fixed.iter().map(|&n| world.locked(n)).collect();
         for job in jobs.iter() {
@@ -162,14 +145,9 @@ impl Settle<'_> {
         let mut score = self.score(world, jobs, routes);
         // By job, the nets that a try for it could not join up again.
         let mut walls: Vec<Vec<NetId>> = vec![Vec::new(); jobs.len()];
-        let poured: Vec<usize> = self.pours.map_or(Vec::new(), |p| p.jobs().collect());
         'rounds: for _ in 0..ROUNDS {
             let mut gained = false;
-            // The pads cut off their fills first, a net's at a time.
-            let fills = poured.iter().map(|&j| (j, true));
-            let order: Vec<(usize, bool)> =
-                fills.chain((0..jobs.len()).map(|j| (j, false))).collect();
-            for (j, fill) in order {
+            for j in 0..jobs.len() {
                 if self.fixed.contains(&jobs[j].ctx.net) {
                     continue;
                 }
@@ -178,41 +156,15 @@ impl Settle<'_> {
                     if world.run().is_some_and(|r| r.poll()) {
                         break 'rounds;
                     }
-                    let again = match (fill, self.pours) {
-                        (true, Some(p)) => {
-                            match p.rejoin(world, self.design, jobs, routes.copper, j, self.pitch) {
-                                Some(again) => Some(again),
-                                None => break,
-                            }
-                        }
-                        _ => None,
-                    };
-                    if again.is_none() {
+                    let chain = {
                         let nets: Vec<&NetCtx> = jobs.iter().map(|j| &j.ctx).collect();
                         if routes.open(&nets, j) == 0 {
                             break;
                         }
-                    }
-                    tries += 1;
-                    self.tried += 1;
-                    // A net with pads cut off has them as terminals of their own.
-                    if let Some(again) = &again {
-                        self.cut += again.cut;
-                        routes.count(&again.ctx, j);
-                    }
-                    let chain = {
-                        let mut nets: Vec<&NetCtx> = jobs.iter().map(|j| &j.ctx).collect();
-                        if let Some(again) = &again {
-                            nets[j] = &again.ctx;
-                        }
+                        tries += 1;
+                        self.tried += 1;
                         self.chain(world, &nets, routes, j, &walls[j])
                     };
-                    // And the places in its fill that they were joined to as its own.
-                    let old = again.as_ref().map(|again| {
-                        let with = pours::with_sites(&jobs[j].ctx, &again.sites, self.pitch);
-                        core::mem::replace(&mut jobs[j].ctx, with)
-                    });
-                    routes.count(&jobs[j].ctx, j);
                     let now = if chain.whole {
                         self.score(world, jobs, routes)
                     } else {
@@ -227,9 +179,6 @@ impl Settle<'_> {
                         walls[j].clear();
                         continue;
                     }
-                    if let Some(old) = old {
-                        jobs[j].ctx = old;
-                    }
                     let nets: Vec<&NetCtx> = jobs.iter().map(|j| &j.ctx).collect();
                     for b in chain.journal.into_iter().rev() {
                         if let Some(mut c) = routes.copper[b.job].take() {
@@ -242,7 +191,6 @@ impl Settle<'_> {
                         routes.missing[b.job] = b.missing;
                         routes.apart[b.job] = b.apart;
                     }
-                    routes.count(nets[j], j);
                     match chain.culprit {
                         Some(net) if !walls[j].contains(&net) => walls[j].push(net),
                         // Nothing to try another way.
@@ -573,7 +521,7 @@ mod tests {
         .unwrap();
         world.configure(d, &options);
         let pitch = router::pitch(d, &options);
-        let mut jobs = router::jobs(d, &world, pitch, &[], &[]);
+        let jobs = router::jobs(d, &world, pitch, &[], &[]);
         let by_net: BTreeMap<NetId, usize> = jobs
             .iter()
             .enumerate()
@@ -625,14 +573,13 @@ mod tests {
             tried: 0,
             kept: 0,
             made: 0,
-            cut: 0,
         };
         let mut routes = Routes {
             copper: &mut copper,
             missing: &mut missing,
             apart: &mut apart,
         };
-        settle.all(&mut world, &mut jobs, &mut routes);
+        settle.all(&mut world, &jobs, &mut routes);
         let (tried, kept) = (settle.tried, settle.kept);
         let count = |k: usize| {
             copper[k]

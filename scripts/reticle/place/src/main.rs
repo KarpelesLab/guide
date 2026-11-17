@@ -225,11 +225,23 @@ fn main() {
             }
         }
         "guide" => {
-            let built =
-                match model::build(netlist, family.arch(), graph, constraints, &place_options) {
-                    Ok(m) => m,
-                    Err(e) => fail(&mut line, "model", &e),
-                };
+            // `--forbid SITE,...`: sites guide's placement leaves empty.
+            let forbidden: Vec<String> = args
+                .options
+                .get("forbid")
+                .map(|v| v.split(',').map(str::to_owned).collect())
+                .unwrap_or_default();
+            let built = match model::build(
+                netlist,
+                family.arch(),
+                graph,
+                constraints,
+                &place_options,
+                &forbidden,
+            ) {
+                Ok(m) => m,
+                Err(e) => fail(&mut line, "model", &e),
+            };
             line.put("model_s", format!("{:.2}", started.elapsed().as_secs_f64()));
             for (k, v) in &built.stats {
                 line.put(&k.replace(' ', "_"), v);

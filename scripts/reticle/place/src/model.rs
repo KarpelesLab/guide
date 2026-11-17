@@ -28,7 +28,7 @@ type RelationKey = (String, String, String, String);
 type Members = Vec<(SiteId, u32)>;
 
 /// How many steps a tile is wide and tall, so that the slices of a tile have their own
-/// columns.
+/// columns: a chain from the last slice of a tile to the first of the next is one step.
 pub const SCALE: i64 = 4;
 
 /// How far a walk back from a sink pin goes looking for its driver's sites, as reticle's
@@ -37,6 +37,9 @@ const DEDICATED_WALK: usize = 8;
 
 /// The most wires in a pool of a tile's own control wires, as reticle's `MAX_POOL`.
 const MAX_POOL: usize = 8;
+
+/// The most global clocks one cell reads.
+const CLOCKS: usize = 4;
 
 /// The most ways through one site.
 const THROUGHS: usize = 4;
@@ -80,7 +83,18 @@ pub struct Grid {
     pub xs: Vec<u32>,
     /// By guide row, the tile row.
     pub ys: Vec<u32>,
+    /// By kept column, from before the first, the first tile column with sites between it and
+    /// the next: what a site there is measured at.
+    pub between_x: Vec<u32>,
+    /// The same for rows.
+    pub between_y: Vec<u32>,
+    /// Where, past a kept column, the columns between it and the next are: past its last
+    /// slice. A family whose tiles use every step for slices keeps every column.
+    between_step_x: i64,
 }
+
+/// Where, past a kept row, the rows between it and the next are.
+const BETWEEN_Y: i64 = SCALE / 2;
 
 impl Grid {
     fn new(graph: &RoutingGraph) -> Grid {
@@ -93,30 +107,54 @@ impl Grid {
             .max_by_key(|&(kind, n)| (*n, std::cmp::Reverse(*kind)))
             .map(|(kind, _)| *kind)
             .unwrap_or_default();
-        let of = |axis: fn(&(u32, u32)) -> u32| {
+        let of = |axis: fn(&(u32, u32)) -> u32, all: bool| {
             let mut v: Vec<u32> = graph
                 .sites
                 .iter()
-                .filter(|s| s.kind == common)
+                .filter(|s| all || s.kind == common)
                 .map(|s| axis(&s.tile))
                 .collect();
             v.sort_unstable();
             v.dedup();
             v
         };
+        let slices = graph
+            .sites
+            .iter()
+            .filter_map(|s| slice_of(&s.bel))
+            .max()
+            .unwrap_or(0);
+        let between_step_x = slices + 1;
+        let xs = of(|t| t.0, between_step_x >= SCALE);
+        let ys = of(|t| t.1, false);
+        let between = |kept: &[u32], axis: fn(&(u32, u32)) -> u32| {
+            let mut out: Vec<Option<u32>> = vec![None; kept.len() + 1];
+            for site in &graph.sites {
+                let t = axis(&site.tile);
+                if let Err(i) = kept.binary_search(&t) {
+                    out[i] = Some(out[i].map_or(t, |o: u32| o.min(t)));
+                }
+            }
+            out.iter()
+                .enumerate()
+                .map(|(i, o)| o.unwrap_or_else(|| kept[i.min(kept.len() - 1)]))
+                .collect()
+        };
         Grid {
-            xs: of(|t| t.0),
-            ys: of(|t| t.1),
+            between_x: between(&xs, |t| t.0),
+            between_y: between(&ys, |t| t.1),
+            xs,
+            ys,
+            between_step_x,
         }
     }
 
-    /// A tile column or row in guide's steps: its rank among the kept ones, or half a step
-    /// past the kept one before it.
-    fn step(kept: &[u32], t: u32) -> i64 {
+    /// A tile column or row in guide's steps: its rank among the kept ones, or
+    /// [`BETWEEN`] past the kept one before it.
+    fn step(kept: &[u32], t: u32, between: i64) -> i64 {
         match kept.binary_search(&t) {
             Ok(i) => i as i64 * SCALE,
-            Err(0) => -SCALE / 2,
-            Err(i) => (i as i64 - 1) * SCALE + SCALE / 2,
+            Err(i) => i as i64 * SCALE - SCALE + between,
         }
     }
 
@@ -124,37 +162,42 @@ impl Grid {
     pub fn point(&self, graph: &RoutingGraph, site: usize) -> Point {
         let s = &graph.sites[site];
         let (x, y) = s.tile;
-        let cx = Grid::step(&self.xs, x);
+        let cx = Grid::step(&self.xs, x, self.between_step_x);
         let sub = if self.xs.binary_search(&x).is_ok() {
             slice_of(&s.bel).unwrap_or(0)
         } else {
             0
         };
-        Point::new(cx + sub, Grid::step(&self.ys, y))
+        Point::new(cx + sub, Grid::step(&self.ys, y, BETWEEN_Y))
     }
 
-    /// The tile a guide point is in, in tile units: a kept column or row is its tile, and
-    /// one between two is half way.
+    /// The tile a site's guide point is in. Monotone, so that a bounding box's corners give
+    /// its tiles' bounding box.
     pub fn tile(&self, at: Point) -> (i64, i64) {
-        let axis = |v: i64, kept: &[u32]| -> i64 {
-            let i = v.div_euclid(SCALE).clamp(0, kept.len() as i64 - 1) as usize;
-            let base = i64::from(kept[i]);
-            if v.rem_euclid(SCALE) == SCALE / 2 && i + 1 < kept.len() && kept.len() > 1 {
-                (base + i64::from(kept[i + 1])) / 2
+        let axis = |v: i64, kept: &[u32], between: &[u32], step: i64| -> i64 {
+            let i = v.div_euclid(SCALE);
+            if v.rem_euclid(SCALE) < step {
+                i64::from(kept[i.clamp(0, kept.len() as i64 - 1) as usize])
             } else {
-                base
+                i64::from(between[(i + 1).clamp(0, between.len() as i64 - 1) as usize])
             }
         };
-        (axis(at.x, &self.xs), axis(at.y, &self.ys))
+        (
+            axis(at.x, &self.xs, &self.between_x, self.between_step_x),
+            axis(at.y, &self.ys, &self.between_y, BETWEEN_Y),
+        )
     }
 
     /// The guide rectangle of the sites in a rectangle of tiles.
     fn rect(&self, x0: u32, y0: u32, x1: u32, y1: u32) -> Rect {
         Rect::new(
-            Point::new(Grid::step(&self.xs, x0), Grid::step(&self.ys, y0)),
             Point::new(
-                Grid::step(&self.xs, x1) + SCALE - 1,
-                Grid::step(&self.ys, y1) + SCALE - 1,
+                Grid::step(&self.xs, x0, self.between_step_x),
+                Grid::step(&self.ys, y0, BETWEEN_Y),
+            ),
+            Point::new(
+                Grid::step(&self.xs, x1, self.between_step_x) + SCALE - 1,
+                Grid::step(&self.ys, y1, BETWEEN_Y) + SCALE - 1,
             ),
         )
     }
@@ -188,6 +231,7 @@ pub fn build(
     graph: &RoutingGraph,
     constraints: &Constraints,
     options: &reticle::fpga::place::PlaceOptions,
+    forbidden: &[String],
 ) -> Result<Model, String> {
     let mut stats: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut kinds = Names::default();
@@ -269,6 +313,31 @@ pub fn build(
             if let Some(value) = pin_value(netlist, pin) {
                 item = item.draw(roles.id(&netlist.pins[pin].role), value);
             }
+        }
+        // The global clocks a cell reads, each under a key of its own, for the clock regions.
+        let mut clocks: Vec<u32> = instance
+            .pins
+            .iter()
+            .filter(|&&p| !netlist.pins[p].output)
+            .filter_map(|&p| netlist.pins[p].signal)
+            .filter(|&s| {
+                netlist.signals[s].driver.is_some_and(|d| {
+                    let kind = netlist.instances[netlist.pins[d].instance].kind.as_str();
+                    matches!(kind, "gb" | "bufh" | "bufr" | "bufio")
+                })
+            })
+            .map(|s| s as u32)
+            .collect();
+        clocks.sort_unstable();
+        clocks.dedup();
+        if clocks.len() > CLOCKS {
+            return Err(format!(
+                "`{}` reads more than {CLOCKS} clocks",
+                instance.name
+            ));
+        }
+        for (k, clock) in clocks.iter().enumerate() {
+            item = item.draw(roles.id(&format!("clock{k}")), *clock);
         }
         // A cell on a site that a way through a lookup table goes through shuts the way:
         // it draws a value of its own under each way's key.
@@ -370,6 +439,38 @@ pub fn build(
             &mut problem,
             &mut stats,
         );
+    }
+    // Each clock region carries so many clocks, as reticle's anneal charges for more.
+    if !options.clock_regions.is_empty() && options.clock_region_lines > 0 {
+        let width = arch.width;
+        let mut regions: BTreeMap<u16, Members> = BTreeMap::new();
+        for (s, site) in graph.sites.iter().enumerate() {
+            let (x, y) = site.tile;
+            let Some(&region) = options.clock_regions.get((y * width + x) as usize) else {
+                continue;
+            };
+            if region == reticle::fpga::place::NO_CLOCK_REGION {
+                continue;
+            }
+            for k in 0..CLOCKS {
+                regions
+                    .entry(region)
+                    .or_default()
+                    .push((SiteId(s as u32), roles.id(&format!("clock{k}"))));
+            }
+        }
+        for members in regions.values() {
+            problem.add_shared(options.clock_region_lines, members);
+            *stats.entry("clock regions").or_default() += 1;
+        }
+    }
+    // Sites the caller keeps empty.
+    for name in forbidden {
+        let site = graph
+            .site_index(name)
+            .ok_or_else(|| format!("no site named `{name}`"))?;
+        problem.add_shared(0, &[(SiteId(site as u32), OCCUPANCY)]);
+        *stats.entry("forbidden sites").or_default() += 1;
     }
     for (_, _, unreachable) in reach {
         *stats.entry("unreachable buffer sites").or_default() += unreachable.len();

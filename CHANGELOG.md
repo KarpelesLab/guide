@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.13](https://github.com/KarpelesLab/guide/compare/v0.0.12...v0.0.13) - 2026-11-17
+
+### Added
+
+- *(pcb)* a route that keeps what it reaches begins another tree from a terminal it leaves out
+
+### Other
+
+- *(benchmarks)* what else was tried for PCB routing negotiated, and what sweep-v2.2's nets are shut in by
+
 ## [0.0.12](https://github.com/KarpelesLab/guide/compare/v0.0.11...v0.0.12) - 2026-11-17
 
 ### Added

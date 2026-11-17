@@ -1131,6 +1131,15 @@ fn stub_order(ctx: &NetCtx) -> Vec<usize> {
 /// everywhere else first.
 const LOOKS: [(u64, u64); 3] = [(0, 256), (8_000, 2_000), (64_000, 50_000)];
 
+/// How many trees a partial route begins at most after its first, each from a terminal
+/// that the others leave out.
+const TREES: usize = 2;
+
+/// How many terminals at most a partial route leaves out for another tree to be begun
+/// from one: more are the pads of a net with a plane, each waiting for its own stub to
+/// it, and tracks from one to the next are in the way of what is still to route.
+const LEFT_OUT: usize = 8;
+
 /// How many terminals at most a search of a negotiation is for, for each to have a look
 /// from it first.
 const SHARE_LOOKS: usize = 4;
@@ -1191,6 +1200,14 @@ pub(crate) struct NetRun<'a> {
     /// The tree's nodes, in the order they joined it.
     sources: Vec<DNode>,
     retries: u32,
+    /// Whether a partial route that leaves two terminals or more out goes on from one of
+    /// them: in a run with a budget.
+    forest: bool,
+    /// By terminal, whether the first tree reached it, once a second has begun, and
+    /// whether a tree was begun from it; and how many trees were begun after the first.
+    first: Option<Vec<bool>>,
+    rooted: Vec<bool>,
+    roots: usize,
 }
 
 impl<'a> NetRun<'a> {
@@ -1219,6 +1236,10 @@ impl<'a> NetRun<'a> {
             room: None,
             sources: Vec::new(),
             retries: 0,
+            forest: world.run().is_some_and(Run::bounded),
+            first: None,
+            rooted: vec![false; ctx.terminals],
+            roots: 0,
         };
         run.join(0);
         run
@@ -1266,10 +1287,48 @@ impl<'a> NetRun<'a> {
 
     /// The tree, with the terminals it doesn't reach as [`Tree::missing`].
     pub(crate) fn finish(mut self) -> Tree {
-        self.tree.missing = (0..self.ctx.terminals)
+        let reached = self.first.as_ref().unwrap_or(&self.connected);
+        self.tree.missing = (0..self.ctx.terminals).filter(|&t| !reached[t]).collect();
+        self.tree
+    }
+
+    /// Begins another tree from the first terminal that the trees so far leave out and
+    /// that none was begun from, with the others left out to reach again, and returns
+    /// whether it did: if there are two or more, and fewer than [`TREES`] were begun.
+    ///
+    /// A net with terminals that nothing joins to its first, on a board in two parts that
+    /// only its schematic joins, has those among themselves all the same: a tree that only
+    /// grows from the first terminal leaves every one of them alone.
+    fn regrow(&mut self) -> bool {
+        let out: Vec<usize> = (0..self.ctx.terminals)
             .filter(|&t| !self.connected[t])
             .collect();
-        self.tree
+        let Some(&root) = out.iter().find(|&&t| !self.rooted[t]) else {
+            return false;
+        };
+        if out.len() < 2 || out.len() > LEFT_OUT || self.roots >= TREES {
+            return false;
+        }
+        self.roots += 1;
+        self.rooted[root] = true;
+        if self.first.is_none() {
+            self.first = Some(self.connected.clone());
+        }
+        self.space.tree.clear();
+        self.space.tree_cells.clear();
+        self.space.tree_boxes.clear();
+        self.space.tree_grid.clear();
+        self.space.tree_groups.clear();
+        self.sources.clear();
+        self.room = None;
+        for &t in &out {
+            self.missing[t] = false;
+            self.open[t] = 0;
+            self.alive[t] = false;
+            self.dead[t] = false;
+        }
+        self.join(root);
+        true
     }
 
     /// A search from the tree to the terminals `to`, within `limit` nodes. Returns the path
@@ -1551,7 +1610,14 @@ impl<'a> NetRun<'a> {
         } else {
             Vec::new()
         };
-        while self.left().next().is_some() {
+        loop {
+            if self.left().next().is_none() {
+                // What a partial route leaves out may still be joined among itself.
+                if self.forest && params.partial && self.regrow() {
+                    continue;
+                }
+                break;
+            }
             let stub = order
                 .iter()
                 .copied()
@@ -1560,7 +1626,7 @@ impl<'a> NetRun<'a> {
                 Some(t) => vec![t],
                 None => self.left().collect(),
             };
-            let full = if stub.is_some() {
+            let full = if stub.is_some() || self.roots > 0 {
                 budget.min(params.max_expansions / PARTIAL_SHARE)
             } else {
                 budget
@@ -1573,6 +1639,10 @@ impl<'a> NetRun<'a> {
                 for t in to {
                     let why = match searched.iter().find(|s| s.0 == t) {
                         Some(&(_, why)) => why,
+                        // A tree begun from a terminal left out is for what is joined
+                        // to it with nothing in the way: the terminals that the first
+                        // tree searched from on their own are not searched from again.
+                        None if self.roots > 0 => Failure::NoPath,
                         None => {
                             let limit = params.max_expansions / PARTIAL_SHARE;
                             match self.backward(t, limit, true).0 {
@@ -1590,10 +1660,7 @@ impl<'a> NetRun<'a> {
                     self.missing[t] = true;
                 }
                 if path.is_err() {
-                    if stub.is_some() {
-                        continue;
-                    }
-                    break;
+                    continue;
                 }
             }
             let path = path?;

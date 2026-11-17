@@ -904,3 +904,58 @@ fn a_run_with_a_budget_settles_what_its_passes_leave_open_and_one_with_none_does
     let whole = route(&d, &RouteOptions::default()).unwrap();
     assert_eq!(whole.stats.settled, (0, 0, 0));
 }
+
+/// A board in two parts that only the schematic joins: a wall with no gap from side to
+/// side, and net 1 with two pads above it and two below.
+fn two_parts() -> Design {
+    let pads = vec![
+        smd(10 * MM, 10 * MM, 1),
+        smd(30 * MM, 10 * MM, 1),
+        smd(10 * MM, 30 * MM, 1),
+        smd(30 * MM, 30 * MM, 1),
+    ];
+    let mut d = design(1, pads, 2);
+    d.outline = outline(Rect::new(Point::new(0, 0), Point::new(40 * MM, 40 * MM)));
+    d.board.keepouts.push(Keepout {
+        shape: Shape::rect(Rect::new(
+            Point::new(-MM, 19_900_000),
+            Point::new(41 * MM, 20_100_000),
+        ))
+        .unwrap(),
+        layers: LayerSet::first(1),
+        tracks: true,
+        vias: true,
+        pads: false,
+        except: Vec::new(),
+    });
+    d
+}
+
+#[test]
+fn a_net_with_pads_that_nothing_joins_to_its_first_has_those_joined_among_themselves() {
+    // The two pads below the wall can't be reached from the first pad, above it: the
+    // route keeps what it reaches, and in a run with a budget the pads left out are
+    // joined to each other, so that one connection is open, the one that no board has.
+    let d = two_parts();
+    let options = RouteOptions {
+        work_budget: Some(50_000_000),
+        keep_partial: true,
+        ..RouteOptions::default()
+    };
+    let routed = route(&d, &options).unwrap();
+    check(&d, &routed);
+    assert_eq!(routed.unrouted, [NetId(1)]);
+    assert_eq!(routed.stats.connections, 3);
+    assert_eq!(routed.stats.connected, 2, "{:?}", routed.stats);
+    let below = routed
+        .tracks
+        .iter()
+        .filter(|t| t.start.y.min(t.end.y) > 20 * MM)
+        .count();
+    let above = routed
+        .tracks
+        .iter()
+        .filter(|t| t.start.y.max(t.end.y) < 20 * MM)
+        .count();
+    assert!(below >= 1 && above >= 1, "{:?}", routed.tracks);
+}

@@ -1901,7 +1901,6 @@ fn route_all<'a>(
                         old.merge(&job.ctx);
                         c = old;
                         let mut pieces = c.pieces(&job.ctx);
-                        debug_assert_eq!(pieces.apart(), t.missing.len());
                         // A net mended whole loses the ends that its cuts left.
                         if pieces.apart() == 0 && job.ctx.terminals < BRANCH_TERMINALS && !plane {
                             // With the stubs it did without.
@@ -1916,8 +1915,10 @@ fn route_all<'a>(
                         if let Some(mut old) = old {
                             old.unplace(&mut world);
                         }
-                        missing[j] = t.missing.clone();
-                        apart[j] = t.missing.len();
+                        // What the route leaves out may be joined among itself.
+                        let pieces = c.pieces(&job.ctx);
+                        missing[j] = pieces.missing();
+                        apart[j] = pieces.apart();
                     }
                 }
                 c.place(&mut world, &job.ctx);

@@ -416,7 +416,7 @@ silkscreen included, and no connection missing. That includes `nk3-nrf-mini`, wh
 by hand leaves a net unrouted. The hand placements route with fewer vias on seven boards of the
 nine that have anything to move, and shorter track on six.
 
-### M9: Co-optimization
+### M9: Co-optimization (done)
 
 Placement and routing as a single loop rather than two sequential passes.
 

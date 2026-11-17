@@ -4945,6 +4945,12 @@ millimetre more track.
 - *Nets with a plane looked for on the bare board too*: `sweep-v2.2` 4 and 5 open for
   3. Their terminals there are places on a fill that no route has cut, and the count of
   what is apart comes out higher than what the net is left with.
+- *A net that goes on at the width its tracks have*, those of the board and of an earlier
+  run: in a run on a board with routes beside its pads no straight track leaves a pad at
+  any width, so a net that the first run necked is back at its own width, which between
+  the pads of a 0.4 mm QFN leaves none. `tinytapeout-demo` at 60 s over four orders: 6,
+  10, 0 and 14 open for 7, 7, 2 and 14; `buspirate5-rev10` 4 for 4. The pads of its supply
+  that this was for are joined on cadlab's new fill without it. Not released.
 - *The finest lattice alone as what says that two pads are apart*: `sweep-v2.2`'s halves
   are more than 4 million nodes on it, and nothing was told. It has the say where it
   ends within that; where it does not, the lattice of the pass has.
@@ -4963,8 +4969,14 @@ millimetre more track.
   boards whose pads in pours are close together.
 - The time of `sweep-v2.2`, which still ends at its deadline for the one connection of
   its ground that has no way.
-- Rule areas with a track width of their own, and a board of six layers in a minute:
-  not touched.
+- Rule areas with a track width of their own: not touched.
+- A board of six layers in a minute. `glasgow-revD1`'s first pass was timed by net, with
+  counters in the loop of the passes (this machine lets no process be sampled): of 42 s
+  of routing at 40 million nodes, 27 s are in the searches of its 561 nets, the longest
+  2.4 s and 25 of them over 0.2 s, and 15 s are outside any search, in what a turn does
+  before and after it: the routes kept for a run that is stopped, the pieces of the nets
+  that a route cut, the count of connections made at every turn. No net stands out; the
+  third of the pass outside the searches is where to look first.
 
 ## PCB differential pairs and lengths
 

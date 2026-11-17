@@ -94,8 +94,10 @@ Proposed wording, making each term precise:
   that count things (iterations, expansions, rip-ups), and files written. Not wall-clock
   times (`kicad::FlowReport::first_seconds`, `kicad::Round::seconds`, the CLI's timings),
   nor anything stopped by a time limit or a cancel flag, whose result depends on when it
-  stopped. Iteration and expansion budgets are deterministic, and are the way to bound a run
-  reproducibly.
+  stopped. Iteration and expansion budgets, and the work budgets of `control::RunControl` and
+  `pcb::RouteOptions`, are deterministic, and are the way to bound a run reproducibly. A
+  control with no limit set, or a progress callback, changes no result: the `…_with` entry
+  points with `RunControl::default()` give what the entry points without it give.
 - **Any platform**: every 64-bit target that Rust supports with IEEE 754 `f64`, which is
   how results-affecting floating point is written (basic operations and `sqrt` in a fixed
   order, and the crate's own `exp`, sines and cosines). CI tests Linux, Windows and macOS.

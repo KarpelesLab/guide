@@ -57,16 +57,25 @@ cargo install guide --features cli
 | `guide asic route design.gr -o design.route` | ISPD 2007/2008 global routing, scored as `eval2008.pl` scores it; `guide asic score` scores any router's routes |
 
 Every command takes `--help`, `--json FILE` for a machine-readable report (`-` for standard
-output), `-q` and `-v`; those that use them take `--seed`, `--threads` (`-j`) and
-`--time-limit SECONDS`, after which routing stops with the best result so far. Results are the
-same for any thread count. PCB routing uses one thread, so `pcb route` and `dsn route` take no
-`--threads`; they take `--seed` (another order of the nets, for a second attempt),
-`--time-limit`, and `--work-budget N`, a number of search nodes for the whole run, which stops
-it as a time limit does but gives the same result on any machine. The exit status is 0 for a
-complete and legal result, 1 for an incomplete or illegal one (nets unrouted, overuse,
-violations), and 2 for a wrong command line or an input that can't be read. There is no signal
-handler, so Ctrl-C ends a run at once, without writing anything: use `--time-limit` to stop
-early and keep the result.
+output), `-q` and `-v`; those that use them take `--seed` and `--threads` (`-j`). Results are
+the same for any thread count. PCB routing uses one thread, so `pcb route` and `dsn route` take
+no `--threads`; they take `--seed`, another order of the nets, for a second attempt.
+
+Every command that can run long, all but `pcb drc` and `asic score`, takes `--time-limit
+SECONDS` and `--work-budget N`, and stops at either with the best legal result so far: a
+placement that is legal, the best routes negotiation had, or the board as routed until then,
+with the report's `stopped` saying why (`time_limit` or `work_budget`). The work budget is
+counted in annealing moves and search nodes (`fpga route` counts search nodes alone, as its
+`--max-expansions`, and `pcb flow` both for the whole flow), and gives the same result on any
+machine; a time limit doesn't. With `-v`, a long command prints a line on standard error at
+each stage and every two seconds or so within one: the stage, its step (temperature,
+iteration), the work so far, the cost, and what is still in conflict. The exit status is 0 for
+a complete and legal result, 1 for an incomplete or illegal one (nets unrouted, overuse,
+violations, or a run stopped before it got there), and 2 for a wrong command line or an input
+that can't be read. There is no Ctrl-C handler: std has no signal API, and the alternatives
+need either a dependency or `unsafe` code, which the crate forbids, so Ctrl-C ends a run at
+once, without writing anything. Use `--time-limit` to stop early and keep the result, and `-v`
+to see how far a run has got.
 
 ## Why one engine?
 

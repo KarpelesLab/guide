@@ -522,9 +522,15 @@ the first routing on the small boards.
   deadline, a cancel flag and a progress callback, `RouteOptions::work_budget` bounds a run
   reproducibly, and a run stopped by any of them returns what it has routed, with each
   connection left open and its cause (`pcb route` and `dsn route` take `--time-limit`,
-  `--work-budget` and `--seed`). Left: a time limit or cancellation for the placers, the PCB
-  flow and ASIC routing, which have no cancel flag yet; Ctrl-C handling, which needs a signal
-  handler std doesn't have; and progress within a run for the other domains.
+  `--work-budget` and `--seed`). **Done since:** run control everywhere, through one type,
+  `control::RunControl`: a deadline, a cancel flag, a work budget in annealing moves and search
+  nodes, and a progress callback, taken by the `…_with` entry points of the placers (`place`,
+  `fpga`, `pcb::place`), the FPGA and KiCad flows, ASIC routing and MAPF. A stopped run returns
+  its best legal result and why it stopped (`control::Stopped`, which `pcb` shares); a budget
+  is reproducible; the default control changes no result. Every long command takes
+  `--time-limit` and `--work-budget` and prints its progress with `-v`. Not possible: Ctrl-C
+  handling, which needs a signal handler that std doesn't have and that the crate can't install
+  without `unsafe` or a dependency ([architecture](docs/architecture.md)).
 - API review and stabilization. **Started:** the [review](docs/api-review.md) of all 405 public
   items, with the consistent fixes made (option and result types `#[non_exhaustive]`, `# Errors`
   and `# Panics` everywhere, `missing_docs` denied, examples per domain, the feature each item

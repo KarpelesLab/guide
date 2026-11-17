@@ -44,17 +44,36 @@ so it is also a check that the API is enough to run each domain from its files t
 It has no dependency either: a small table-driven argument parser gives each command its
 options and its `--help`. Commands follow one pattern, `guide <domain> <action> [options]
 <files>`, with the same options for the same things everywhere (`-o`, `--json`, `--seed`,
-`--threads`, `--time-limit`, `-q`, `-v`) and the same exit status: 0 for a complete and legal
-result, 1 for an incomplete or illegal one, 2 for an error. The time limit is the engine's
-cancel flag set from a timer thread, so it stops negotiated-congestion routing (FPGA routing,
-multi-agent path finding) with the best result so far. PCB routing takes a deadline, a cancel
-flag and a progress callback through `pcb::RunControl`, and a work budget in search nodes
-through `RouteOptions::work_budget`, which is the reproducible one: its searches run on one
-thread, so the run itself looks at the clock every thousand nodes and there is no timer
-thread. Stopped by any of them, it returns what it has routed, with the connections left open
-listed. The placers and ASIC routing have no cancel flag, and are bounded by iteration or
-expansion limits instead. There is no
-signal handler, since std has none, so Ctrl-C ends a run without writing anything.
+`--threads`, `--time-limit`, `--work-budget`, `-q`, `-v`) and the same exit status: 0 for a
+complete and legal result, 1 for an incomplete or illegal one, 2 for an error.
+
+**Run control.** Every long run can be stopped and heard from the same way, through
+`control::RunControl`: a deadline, a cancel flag, a work budget and a progress callback, taken
+by the entry points named `…_with` (`place::anneal_with`, `place_analytic_with`,
+`place_incremental_with`, `fpga::place_design_with`, `refine_placement_with`,
+`place_route_loop_with`, `pcb::place::place_components_with`, `refine_components_with`,
+`kicad::place_and_route_with`, `asic::route_design_with`, `mapf::solve_with`), each the plain
+entry point when the control is the default, bit for bit. A run stopped by any of them returns
+its best legal result so far and says why, as a `control::Stopped`. The work budget is counted
+in the run's own work, annealing moves and nodes expanded, together where a flow does both,
+and is the reproducible one; a deadline and the flag depend on the moment. One-threaded parts
+look at the clock and the flag themselves, the annealer every thousand moves; the engine reads
+a single flag, so a run with a deadline that negotiates has a scoped thread watch the clock and
+the caller's flag and set the engine's, as the tool's timer did. PCB routing keeps its own
+`pcb::RunControl`, whose progress knows its phases and nets, and whose `Stopped` is the
+crate's; the flows that route PCBs hand it their deadline, flag and what is left of their
+budget. The placers' options keep their own cancel flag and move budget, now with a deadline,
+and the engine its cancel flag and expansion budget, for callers that step them. `fpga route`
+still stops the engine through its cancel flag set from a timer thread, and prints each
+iteration with `-v`.
+
+There is no Ctrl-C handler. std has no signal API; on Unix one would call `signal` or
+`sigaction` through `extern "C"`, which is `unsafe` and the crate forbids it, and on Windows
+`SetConsoleCtrlHandler`, likewise; reading standard input to its end is no substitute, since
+Ctrl-C doesn't close it. Doing it without either needs a dependency such as `ctrlc`, which the
+tool doesn't take. So Ctrl-C ends a run at once, without writing anything, and the tool offers
+`--time-limit` to stop early and keep the result, and `-v`'s progress lines to see how far a
+run has got.
 
 The examples in `examples/` stay what they were: research harnesses with every tuning knob,
 printing `key=value` lines that the scripts in `scripts/` parse. The tool exposes the settings
@@ -147,8 +166,9 @@ time and keep the best result so far.
 Placement engines mirror this through a `PlacementProblem` of items, legal locations
 and a cost. They query routing engines for congestion estimates through a narrow
 interface, so that the two can be iterated together (roadmap M9). In `src/place`: the annealer
-steps a temperature at a time with a budget and a cancel flag, as the routing engine steps
-iterations, and the interface is `CongestionEstimate`, an overflow for a rectangle, which a
+steps a temperature at a time with a budget, a deadline and a cancel flag, as the routing
+engine steps iterations, and every placer takes a `control::RunControl` through its `_with`
+entry point, and the interface is `CongestionEstimate`, an overflow for a rectangle, which a
 RUDY map or a router's own demand can answer. Placement costs are `u64` sums over nets of a
 `CostTerm`, cached per net so that a move prices only the nets it touches.
 

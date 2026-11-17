@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.14](https://github.com/KarpelesLab/guide/compare/v0.0.13...v0.0.14) - 2026-11-17
+
+### Added
+
+- *(pcb)* a run goes on from an earlier run's routes and may move them, and a place with several pads open can have a negotiation of its own
+
 ## [0.0.13](https://github.com/KarpelesLab/guide/compare/v0.0.12...v0.0.13) - 2026-11-17
 
 ### Added

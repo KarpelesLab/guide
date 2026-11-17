@@ -88,6 +88,19 @@ def main():
             if cr and cg:
                 ratios["crit"].append(cg / cr)
     print()
+    exact = [rows[n][g]["exact"] for n in designs if g in rows[n] and "exact" in rows[n][g]]
+    same = sum(e[0] for e in exact)
+    total = sum(e[1] for e in exact)
+    print(f"Replays: {same} of {total} signals came back from reticle's router with exactly "
+          f"guide's pips, over {len(exact)} design(s).")
+    print()
+    for name in designs:
+        for router in ("reticle", g):
+            d = rows[name].get(router)
+            if d and not d["legal"]:
+                why = (d.get("failed") or d.get("problems") or "").split(":")[0:2]
+                print(f"- {name}, {router}: {':'.join(why)[:160]}")
+    print()
     print("Geometric means of guide against reticle, over the designs of 100 signals or more "
           "that both route legally:")
     print()

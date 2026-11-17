@@ -91,6 +91,11 @@ Two existing crates are expected to adopt `guide`, and they constrain its design
 
 Both currently declare Rust 1.89 and will move to `guide`'s 1.95 before adopting it.
 
+On reticle's own designs and devices, `guide` already routes everything reticle's router
+does, legally by reticle's own checks down to the decoded bitstream, in less time overall and
+with fewer pips: see [routing reticle's designs](benchmarks.md#routing-reticles-designs), which
+also lists what reticle would need to expose for `guide` to be dropped into its flow.
+
 ## Core abstractions
 
 ### `RoutingSpace`

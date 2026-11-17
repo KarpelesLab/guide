@@ -550,6 +550,7 @@ done so far are below. There are no results for the others yet.
 | FPGA placement | VPR 9.0.0 | VTR's MCNC circuits and Verilog suite | [Done](#fpga-placement-against-vpr) |
 | FPGA placement and routing in a loop, LUT rotation | The one-pass flow, checked by VPR 9.0.0 | VTR's MCNC circuits and Verilog suite | [Done](#fpga-placement-and-routing-in-a-loop) |
 | FPGA placement | nextpnr | VTR benchmarks, ISPD 2016/2017 contest sets | Not yet done |
+| FPGA routing | reticle's own router, both checked by reticle down to the decoded bitstream | reticle's designs on the XC7A35T, LFE5U-12F and GW2A-18 | [Done](#routing-reticles-designs) |
 | PCB clearance checks | KiCad 10.0.3 | [Curated open-source KiCad boards](../testdata/kicad/README.md) | [Done](#pcb-clearance-checks-against-kicad) |
 | PCB DSN import, SES export | KiCad 10.0.3's reading of the same boards, and its session import | The same boards | [Done](#pcb-dsn-designs-against-kicad-boards) |
 | PCB routing | Freerouting 2.5.0, both checked by KiCad 10.0.3 | The same boards | [First results](#pcb-routing-against-freerouting) |
@@ -2126,6 +2127,261 @@ placement too, to show that it is independent of the placer:
 - LUT rotation is measured on MCNC alone, as the Verilog architecture's LUT inputs are all as
   fast. Architectures whose clusters have sparse crossbars would make rotation a matter of
   routing inside the cluster too, which neither flow here does.
+
+## Routing reticle's designs
+
+[reticle](https://github.com/KarpelesLab/reticle) is expected to adopt `guide`
+([target consumers](architecture.md#target-consumers)), so `guide` has to route reticle's own
+designs on reticle's own devices at least as well as reticle's router does. This compares the
+two on every design reticle builds a bitstream for with its own place and route, on the
+same placements and routing graphs, with every result of both checked by reticle itself.
+
+Measured on 2026-11-17 with rustc 1.97.1, on an AMD Ryzen Threadripper PRO 9995WX shared with
+other work, every run under `nice -n 19` and four designs at a time; `guide` at `ad406db` and
+reticle at `1b20721c`. The times are noisy for that: the same route measured at different
+loads differed by up to a factor of two. Both routers of a design run one after the other in
+one process, on one placement, so their times were taken at about the same load.
+
+### How
+
+- **The flow** is reticle's own, up to and after routing, as `reticle fpga --bitstream` runs
+  it with no other option, transcribed from `src/bin/reticle/main.rs` into
+  [`scripts/reticle/route`](../scripts/reticle/route), a crate of its own with path
+  dependencies on `guide` and on reticle's checkout beside it: synthesis, mapping and packing,
+  the device database's fabric (on the 7-series, the region reticle loads around the
+  constrained pins), placement by reticle with its default seed, and the routing options
+  reticle's flow builds for the family. One difference: reticle places a design again with
+  the next seed when its route does not converge (`--route-attempts`); the harness keeps the
+  one placement, since both routers are compared on it.
+- **The devices** are those reticle has a database for that it fetches itself (`reticle
+  fetch`, into `~/.cache/reticle`): the Basys 3's Xilinx XC7A35T by Project X-Ray, the
+  Cynthion's Lattice LFE5U-12F by Project Trellis and the Tang Primer 20K's Gowin GW2A-18 by
+  Project Apicula. Not the ZCU104's UltraScale+: reticle routes it inside its library's
+  `uray::zcu104::implement`, which also needs the PYNQ base overlay's bitstream to borrow its
+  clock network (`--borrow-clock`), and neither is to hand. Not the iCE40: reticle's one
+  built-in iCE40 architecture is the HX1K's, and the examples that target an iCE40 are for
+  the HX8K. No database is copied here.
+- **The designs** are the 43 of [`designs.txt`](../scripts/reticle/route/designs.txt): every
+  Basys 3 example with its own constraints, the SoC, NES and Apple II on the Basys 3, every
+  Cynthion design in reticle's `testdata/fpga/cynthion` with constraints, the 6502 monitor on
+  the Cynthion, and the Primer 20K examples. The ChipWhisperer-Husky, reticle's largest, needs
+  NewAE's sources, which are not in reticle's repository. The largest here are a USB crypto
+  console of 13 342 signals on the ECP5 and an NES of 5342 on the XC7A35T, over graphs of 1.1
+  and 2.9 to 5.7 million nodes.
+- **`guide`'s graph** is reticle's `RoutingGraph` seen as a `RoutingSpace` whose nodes are
+  reticle's *physical* nodes (`route::physical_nodes`): a 7-series wire has a name in every
+  tile it crosses, joined to the next by a bit-less pip each way, and reticle keeps capacity per
+  piece of metal and refuses a route that drives one twice. A tree over physical nodes cannot
+  do either. Each net is held to what reticle holds its signal to: closed nodes, the clock
+  network open only to clocks, a clock entering its pin's wire only from the network, a clock
+  reaching its pins over the network alone, and a sink's only way in reserved for it at
+  reticle's price. A lookup table's inputs that reticle lets the router permute
+  (`RouteOptions::equivalent`) are one terminal with each input an access point. The lower
+  bound is reticle's own estimate, its `astar_weight` per tile of distance scaled by the node's
+  base cost, and the negotiation's factors are reticle's for the family; besides those,
+  `guide` routes with incremental rerouting and `EngineOptions::target_terminals` at 1 (below).
+- **Back to reticle.** Reticle's `Routing` cannot be built from routes through its public API,
+  and everything after routing takes one. So `guide`'s routes are replayed: reticle's own
+  router is run again on a copy of the graph in which every pip `guide` did not choose reads
+  and drives the same node, but for the joins inside a physical node, with every node `guide`
+  did not use closed. What comes back is reticle's own `Routing`, held to all of its rules,
+  with the real graph's pip numbers. **All 100 626 signals of the 42 designs that have any came
+  back with exactly `guide`'s pips.**
+- **Legal** means that a result passed everything reticle does before it writes a bitstream:
+  `Routing::verify` (each sink walked back to its driver), `Routing::shorts`, the clocks on the
+  global network, the cells configured, and the bitstream decoded back through the database,
+  with no set bit unexplained and the arcs the bits select exactly the arcs routed (the
+  7-series also checks each lookup table decodes as placed and routed). The Gowin database
+  decodes nothing back, so there it is `verify`, `shorts` and the bitstream's tiles generating,
+  which is more than reticle's own flow checks there.
+- **Programmable pips** are the pips with configuration bits in the final `Routing`, the same
+  count for both: a 7-series route also takes a join for every tile a wire crosses, which costs
+  nothing. **Latest path** is reticle's own timing of the final routing: on the 7-series the
+  slowest clock domain's latest path by the model `--timing-driven` routes by
+  (`place::path_criticality` on `route::connection_delays`, Vivado-fitted delays and branch
+  loads); reticle has no delay model for the ECP5 or Gowin, so there it is the longest
+  register-to-register path counted in graph nodes (`route::latest_paths`, one unit a node).
+- **Time** is the routing call alone, for `guide` including building its physical graph from
+  reticle's (up to 0.9 s on the 7-series graphs, 0.3 s on the ECP5's) but not the replay.
+  **Memory** is the peak resident set during routing over what was resident before it, with
+  the peak reset through `/proc/self/clear_refs`.
+
+```text
+# reticle's checkout beside guide's, and its databases fetched:
+reticle fetch prjxray-db && reticle fetch prjtrellis-db && reticle fetch apicula
+JOBS=4 scripts/reticle/route/run.sh OUT              # all 43 designs, about an hour
+python3 scripts/reticle/route/tables.py OUT          # the table below
+ROUTERS=guide,guide@8 JOBS=1 scripts/reticle/route/run.sh OUT2 nes_basys3 ...  # threads
+ARGS=--timing-driven ROUTERS=reticle,guide,guide:timed scripts/reticle/route/run.sh OUT3 ...
+```
+
+### Results
+
+**Every design that reticle's router routes legally, `guide` routes legally too**, and the
+three that fail fail the same way for both, on the same placement:
+
+- `spi_console`: reticle's placement leaves a carry chain's sum with no wire at all to the
+  flip-flop it feeds (`no path exists`), which no router can mend.
+- `nanos_seph_usb`: one set bit of the bitstream belongs to no feature of Project Trellis'
+  database, with either router's routes.
+- `wide_state`: three flip-flops' clocks reach them off the global network, with either.
+
+Over the 31 designs of 100 signals or more that both route, by geometric mean, `guide` takes
+**0.77 times reticle's time**, uses **0.90 times the programmable pips**, and gives **latest
+paths 0.96 times as long**, with 1.4 times the memory. By family:
+
+| Designs of 100 signals or more | Designs | Time | Programmable pips | Latest path | Memory |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| XC7A35T, all | 15 | 1.26 | 0.83 | 0.90 | 0.98 |
+| XC7A35T, 1000 signals or more | 9 | 0.99 | 0.87 | 0.85 | 1.00 |
+| LFE5U-12F, all | 16 | 0.48 | 0.98 | 1.01 | 1.96 |
+| LFE5U-12F, 1000 signals or more | 12 | 0.42 | 0.98 | 1.00 | 1.97 |
+
+| Design | Device | Signals | Graph nodes | Legal (reticle / guide) | Time, s (reticle / guide / guide@8) | Iterations | Programmable pips | Latest path | Peak memory, MiB |
+| --- | --- | ---: | ---: | --- | --- | --- | --- | --- | --- |
+| iso_display | xc7a35t-cpg236 | 7083 | 5721505 | yes / yes | 3.16 / 3.12 / - | 10 / 9 | 43353 / 38430 | 16.28 / 13.47 ns | 628 / 614 |
+| nes_basys3 | xc7a35t-cpg236 | 5342 | 2941591 | yes / yes | 16.42 / 9.98 / - | 16 / 17 | 70436 / 59485 | 49.30 / 48.10 ns | 324 / 305 |
+| iso7816_terminal | xc7a35t-cpg236 | 5183 | 5721505 | yes / yes | 2.46 / 2.29 / - | 10 / 9 | 32075 / 28822 | 15.11 / 12.95 ns | 591 / 668 |
+| apple2_basys3 | xc7a35t-cpg236 | 2605 | 5353485 | yes / yes | 5.00 / 3.91 / - | 10 / 9 | 29767 / 27490 | 36.12 / 31.82 ns | 565 / 580 |
+| soc_basys3 | xc7a35t-cpg236 | 2508 | 5353485 | yes / yes | 2.79 / 2.89 / - | 11 / 11 | 24337 / 21546 | 21.02 / 23.46 ns | 591 / 612 |
+| ssd1306_console | xc7a35t-cpg236 | 2095 | 5721505 | yes / yes | 1.20 / 1.32 / - | 8 / 7 | 12703 / 10915 | 15.22 / 8.74 ns | 620 / 614 |
+| iso7816_probe | xc7a35t-cpg236 | 1834 | 5475395 | yes / yes | 0.99 / 1.31 / - | 9 / 9 | 10594 / 9377 | 9.85 / 9.13 ns | 603 / 553 |
+| selftest | xc7a35t-cpg236 | 1448 | 5706490 | yes / yes | 1.07 / 1.27 / - | 8 / 7 | 10851 / 8886 | 16.36 / 11.72 ns | 657 / 617 |
+| spi_console | xc7a35t-cpg236 | 1285 | 5475395 | **no** / **no** | - / - / - | - / - | - | - | - |
+| partsel | xc7a35t-cpg236 | 1220 | 5475395 | yes / yes | 1.38 / 1.59 / - | 11 / 10 | 9949 / 8670 | 15.12 / 13.82 ns | 562 / 569 |
+| carry_probe | xc7a35t-cpg236 | 195 | 3294596 | yes / yes | 0.32 / 0.61 / - | 8 / 8 | 1075 / 922 | 5.83 / 5.79 ns | 363 / 353 |
+| carry_where | xc7a35t-cpg236 | 195 | 3396477 | yes / yes | 0.33 / 0.53 / - | 5 / 5 | 1524 / 1299 | 5.82 / 4.56 ns | 374 / 341 |
+| io_exercise | xc7a35t-cpg236 | 167 | 5375600 | yes / yes | 0.49 / 0.87 / - | 6 / 7 | 1848 / 1366 | 3.20 / 3.14 ns | 602 / 619 |
+| pll_blink | xc7a35t-cpg236 | 165 | 3294596 | yes / yes | 0.29 / 0.56 / - | 6 / 8 | 1045 / 963 | 3.19 / 3.98 ns | 366 / 355 |
+| lutram | xc7a35t-cpg236 | 106 | 3294596 | yes / yes | 0.32 / 0.55 / - | 6 / 7 | 990 / 722 | 3.35 / 3.24 ns | 366 / 336 |
+| blink_carry | xc7a35t-cpg236 | 105 | 5375600 | yes / yes | 0.43 / 0.85 / - | 2 / 7 | 593 / 319 | 2.66 / 2.66 ns | 599 / 602 |
+| blink | xc7a35t-cpg236 | 86 | 3294596 | yes / yes | 0.29 / 0.60 / - | 8 / 7 | 654 / 580 | 3.67 / 3.59 ns | 361 / 344 |
+| bram_rom | xc7a35t-cpg236 | 17 | 4125371 | yes / yes | 0.34 / 0.74 / - | 2 / 3 | 387 / 217 | - | 445 / 451 |
+| pmod_bidir | xc7a35t-cpg236 | 4 | 234835 | yes / yes | 0.01 / 0.03 / - | 1 / 1 | 70 / 38 | - | 14 / 9 |
+| sw_led | xc7a35t-cpg236 | 3 | 103117 | yes / yes | 0.00 / 0.01 / - | 1 / 2 | 23 / 14 | - | 0 / 6 |
+| usb_crypto_console | ecp5-12f-CABGA256 | 13342 | 1096425 | yes / yes | 189.78 / 100.04 / - | 5 / 6 | 101742 / 99226 | 209 / 209 units | 135 / 253 |
+| mos6502_monitor | ecp5-12f-CABGA256 | 9629 | 1096425 | yes / yes | 192.15 / 69.40 / - | 6 / 6 | 83549 / 81866 | 271 / 305 units | 134 / 259 |
+| usb_mjpeg | ecp5-12f-CABGA256 | 8203 | 1096425 | yes / yes | 118.67 / 44.83 / - | 5 / 6 | 56052 / 55102 | 197 / 198 units | 118 / 255 |
+| usb_inflate | ecp5-12f-CABGA256 | 4972 | 1096425 | yes / yes | 76.92 / 34.80 / - | 5 / 6 | 37378 / 36735 | 137 / 137 units | 133 / 261 |
+| usb_host_target | ecp5-12f-CABGA256 | 4899 | 1096425 | yes / yes | 90.62 / 31.67 / - | 6 / 7 | 34140 / 33625 | 89 / 92 units | 131 / 255 |
+| nanos_seph_usb | ecp5-12f-CABGA256 | 4882 | 1096425 | **no** / **no** | 81.76 / 36.51 / - | 5 / 6 | 36066 / 35656 | 65 / 70 units | 128 / 258 |
+| smartcard_serial | ecp5-12f-CABGA256 | 4810 | 1096425 | yes / yes | 90.46 / 34.13 / - | 5 / 5 | 38018 / 37127 | 113 / 119 units | 132 / 262 |
+| usb_proxy_target | ecp5-12f-CABGA256 | 4807 | 1096425 | yes / yes | 82.74 / 35.81 / - | 5 / 6 | 35230 / 34634 | 61 / 61 units | 133 / 263 |
+| usb_hub_target | ecp5-12f-CABGA256 | 3730 | 1096425 | yes / yes | 59.54 / 25.62 / - | 5 / 5 | 25794 / 25364 | 67 / 61 units | 114 / 253 |
+| usb_ulpi_trace | ecp5-12f-CABGA256 | 3485 | 1096425 | yes / yes | 123.39 / 40.38 / - | 5 / 5 | 20952 / 20450 | 65 / 64 units | 133 / 259 |
+| usb_cdc_uart | ecp5-12f-CABGA256 | 3031 | 1096425 | yes / yes | 51.20 / 21.83 / - | 5 / 6 | 21368 / 21157 | 122 / 117 units | 137 / 251 |
+| usb_bram | ecp5-12f-CABGA256 | 2404 | 1096425 | yes / yes | 31.16 / 16.15 / - | 5 / 5 | 18025 / 17699 | 66 / 63 units | 136 / 261 |
+| usb_ulpi_device | ecp5-12f-CABGA256 | 1594 | 1096425 | yes / yes | 21.16 / 11.44 / - | 4 / 5 | 11185 / 11091 | 55 / 54 units | 134 / 257 |
+| bidir_bus | ecp5-12f-CABGA256 | 146 | 1096425 | yes / yes | 2.01 / 0.94 / - | 4 / 4 | 929 / 930 | 33 / 29 units | 136 / 259 |
+| target_ulpi_loopback | ecp5-12f-CABGA256 | 112 | 1096425 | yes / yes | 0.87 / 0.81 / - | 3 / 3 | 693 / 680 | 26 / 28 units | 135 / 263 |
+| bidir_loopback | ecp5-12f-CABGA256 | 102 | 1096425 | yes / yes | 1.48 / 1.01 / - | 4 / 5 | 646 / 628 | 26 / 29 units | 135 / 255 |
+| clock_blink | ecp5-12f-CABGA256 | 100 | 1096425 | yes / yes | 1.07 / 0.88 / - | 3 / 5 | 613 / 601 | 25 / 27 units | 137 / 259 |
+| wide_state | ecp5-12f-CABGA256 | 9 | 1096425 | **no** / **no** | 0.12 / 0.25 / - | 2 / 2 | 41 / 40 | 16 / 15 units | 134 / 273 |
+| button_led | ecp5-12f-CABGA256 | 2 | 1096425 | yes / yes | 0.13 / 0.25 / - | 1 / 1 | 15 / 16 | 20 / 18 units | 133 / 271 |
+| leds | ecp5-12f-CABGA256 | 0 | 1096425 | yes / yes | 0.11 / 0.23 / - | 1 / 1 | 0 / 0 | 0 / 0 units | 137 / 275 |
+| quiesce | ecp5-12f-CABGA256 | 0 | 1096425 | yes / yes | 0.12 / 0.23 / - | 1 / 1 | 0 / 0 | 0 / 0 units | 134 / 273 |
+| buttons | gw2a-18-pg256 | 4 | 626001 | yes / yes | 0.13 / 0.25 / - | 1 / 1 | 51 / 51 | 16 / 16 units | 98 / 243 |
+| key_led | gw2a-18-pg256 | 2 | 93370 | yes / yes | 0.01 / 0.02 / - | 1 / 1 | 11 / 11 | 11 / 11 units | 0 / 0 |
+
+On the 7-series, `guide`'s routes use 13% to 17% fewer programmable pips and their latest
+paths are 10% to 15% shorter, by reticle's own timing model, with neither router timing-driven;
+`soc_basys3` and `pll_blink` are the two whose latest path is longer. Its time is about
+reticle's on the larger designs and up to twice reticle's on the small ones, where building its
+physical graph from reticle's, 0.5 to 0.9 s, is most of it: a caller routing one graph several times
+would build it once. On the ECP5, `guide` takes 0.42 times reticle's time on the larger designs, with 2% fewer
+pips and the same latest paths in nodes by geometric mean, though from 0.88 to 1.13 times as
+long design by design (`mos6502_monitor` the longest). Its memory there is twice reticle's, its physical
+graph of the die's 8.3 million pips, which on the 7-series is in place of about as much of
+reticle's own.
+
+### Threads
+
+`guide@8` is `guide` on 8 threads, with batches of 32 nets, which route differently from one
+net at a time but the same for any number of threads; each was run on its own, one design at a
+time, against `guide` on one thread in the same process.
+
+| Design | Device | Time, s (1 thread / 8) | Speed-up | Programmable pips (1 / 8) | Latest path (1 / 8) | Memory, MiB (1 / 8) |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| iso_display | XC7A35T | 2.94 / 1.84 | 1.60 | 38430 / 38570 | 13.47 / 13.27 ns | 610 / 1108 |
+| nes_basys3 | XC7A35T | 10.21 / 4.67 | 2.19 | 59485 / 59385 | 48.10 / 46.52 ns | 326 / 651 |
+| apple2_basys3 | XC7A35T | 3.32 / 2.45 | 1.35 | 27490 / 27481 | 31.82 / 32.57 ns | 599 / 940 |
+| usb_crypto_console | LFE5U-12F | 89.26 / 69.05 | 1.29 | 99226 / 99429 | 209 / 215 units | 260 / 647 |
+| mos6502_monitor | LFE5U-12F | 72.07 / 59.79 | 1.21 | 81866 / 81598 | 305 / 296 units | 264 / 688 |
+| usb_mjpeg | LFE5U-12F | 42.29 / 33.80 | 1.25 | 55102 / 55130 | 198 / 200 units | 247 / 686 |
+
+Threads help the 7-series more than the ECP5, where batches took 8% to 14% more expansions
+than one net at a time and gained only a fifth to a quarter. What holds the ECP5 back was not
+measured further.
+
+### Timing-driven routing
+
+With `--timing-driven`, reticle places and routes the 7-series by its timing model: each pass
+analysed per clock domain, a critical connection weighing delay over congestion, the lookup
+tables' fast inputs claimed, clean-up passes and a refinement after the route is legal. The
+harness places that way and gives reticle's router the same `route::Timing` the command line
+builds (it does not give a placement whose cells moved after the route another route, as the
+command line's `refine_bels` does). `guide` is shown routing for wire, as above, and routing
+by reticle's model (`guide:timed`): reticle's `PlaceTiming` as a `guide` timing graph, a
+point a pin, cells' delays as cell arcs, each domain a clock of its own period, connections
+starting at reticle's estimates from the placement; reticle's node delays as step delays; and
+a picosecond weighed against congestion as reticle weighs it (`delay_scale`). Three designs
+were run, three at a time:
+
+| Design | Time, s (reticle / guide / guide:timed) | Iterations | Programmable pips | Latest path, ns (reticle / guide / guide:timed) |
+| --- | ---: | ---: | ---: | ---: |
+| soc_basys3 | 19.9 / 2.5 / 129.6 | 23 / 9 / 27 | 21672 / 21133 / 20748 | 12.27 / 18.22 / 14.64 |
+| apple2_basys3 | 28.8 / 3.6 / 231.5 | 35 / 9 / 36 | 29248 / 28088 / 27561 | 19.74 / 27.67 / 20.31 |
+| iso7816_terminal | 8.7 / 2.5 / 108.9 | 27 / 8 / 20 | 31632 / 29381 / 29717 | 8.14 / 11.53 / 10.70 |
+
+All nine are legal by reticle's checks. **Here reticle is ahead.** Routing by reticle's model
+brings `guide`'s latest paths from 1.43 to 1.17 times reticle's, by geometric mean, with
+fewer pips than either, but in 6 to 12 times reticle's time. Its critical searches flood:
+reticle gives up on a critical search after four million nodes and makes it again as an
+uncritical one (`CRITICAL_SEARCH_BUDGET`), estimates the rest of a critical connection's
+way from a tile delay fitted to its fabric, lets a critical connection take a table's fast
+input from a slack one, and refines the late tables' inputs once the route is legal; the
+timing graph here also leaves out what the module docs of `timed.rs` list, a branch's load
+among them, which reticle's analysis charges. Closing this gap is the next step for reticle's
+timing-driven builds; without timing, reticle's default, `guide` is ahead as above.
+
+### What it took
+
+- **Aiming at one terminal at a time** (`EngineOptions::target_terminals`, new, off by default).
+  Each search of a net's tree used to look for whichever terminal still to connect was
+  nearest, with a lower bound that is the least over all their access points. On the 7-series
+  a lookup table's sink has six, and that bound was most of a search's work. Aiming each search
+  at the terminal nearest the driver, by the lower bound, as reticle and VPR grow their trees,
+  took `iso_display` from 17.0 s to 5.0 s and `usb_ulpi_device` from 80.6 s to 32.1 s on the
+  same load, with 1% to 2% fewer pips, the same latest paths and both still legal.
+- **Physical nodes as the space's nodes**, rather than reticle's graph nodes, which made the
+  rule against driving a wire twice hold by construction instead of being found by
+  `Routing::verify`.
+- **Replaying onto a narrowed graph.** The first replay only closed the nodes `guide` had not
+  used, and left every pip between them: reticle's router then took shortcuts through other
+  signals' wires, and on `usb_ulpi_device` its negotiation did not settle in 40 passes, though
+  `guide`'s routes were legal by the harness's own check. With every unchosen pip leading
+  nowhere, each signal has its own tree and nothing else.
+- **reticle's estimate, scaled as reticle scales it.** With one figure a tile for every node,
+  a clock search on the ECP5, whose network costs a twentieth of a wire, was drawn off it onto
+  general routing near its sinks, five flip-flops' clocks among them on `usb_ulpi_device` at a
+  bound weight of 1.5. Scaling a tile by the node's own base cost, as reticle's
+  `heuristic_base` does, kept them on it.
+
+### What this does not show
+
+- The times are from a shared machine, at loads that moved by a factor of two during the run.
+  The ratios are of the two routers measured back to back on each design.
+- One placement per design, reticle's with its default seed. Reticle's own flow would have
+  placed `spi_console` again only if its route had been congested, which it was not.
+- Reticle's router is compared as its flow configures it for each family. On the ECP5 that is
+  reticle's defaults, every signal rerouted every pass and no bounding box, where the 7-series
+  has reticle's tuned options; `guide` gets the same factors either way, and its incremental
+  rerouting on both.
+- The UltraScale+, the iCE40 and the Husky are not here, for the reasons under "How".
+- What reticle would need to expose so that the replay is not needed: a way to build its
+  `Routing` from routes, such as a `Routing::set(Route)`, and for its own `route` to be
+  callable from the flow with another router in its place, so that a flow's post-routing steps
+  (`apply_lut_moves`, the bitstream, its checks) are not copied out of its command line.
 
 ## PCB clearance checks against KiCad
 

@@ -42,6 +42,13 @@ reticle and cadlab already have their own routers and are expected to adopt `gui
 bar: `guide` has to match or beat each one on its own designs and boards, or
 adopting it would be a regression.
 
+For reticle's router that bar is met on routing, without timing: on the 43 designs reticle
+builds bitstreams for on its 7-series, ECP5 and Gowin devices, `guide` routes legally every one
+reticle routes legally, by reticle's own checks down to the decoded bitstream, in 0.77 times its
+time with 0.90 times the pips and latest paths 0.96 times as long, by geometric mean
+([results](docs/benchmarks.md#routing-reticles-designs)). Left: reticle's `--timing-driven`
+routing, which `guide` does not match yet, and cadlab.
+
 ## Milestones
 
 ### M0: Scaffold (done)
@@ -519,6 +526,14 @@ the first routing on the small boards.
   tracker's best known solutions.
 - ASIC global routing against the ISPD benchmarks (below).
 - `nextpnr`/FPGA Interchange and IPC-2581 interop as demand dictates.
+- The target consumers' own designs. **Started:** reticle's, routed on its own placements
+  and graphs by [`scripts/reticle/route`](scripts/reticle/route) and checked by reticle down to
+  the decoded bitstream: every design legal that reticle's router routes legally, in 0.77 times
+  its time, with 0.90 times the pips and latest paths 0.96 times as long
+  ([results](docs/benchmarks.md#routing-reticles-designs)), after aiming each search at one
+  terminal (`EngineOptions::target_terminals`). Left: reticle's timing-driven routing, where
+  `guide` routing by reticle's model is still behind; the UltraScale+, which needs a vendor
+  overlay; reticle's placer, measured separately; and cadlab.
 - Command-line tool. **Done:** `guide`, behind the `cli` feature (`cargo install guide
   --features cli`), with no dependency: `guide <domain> <action>` for `fpga route|place|flow`,
   `pcb route|place|flow|drc`, `dsn route` (a drop-in for Freerouting in KiCad's DSN workflow),

@@ -349,6 +349,7 @@ impl Settle<'_> {
             stubs: many,
             pitch: self.pitch,
             under_pads: false,
+            forest: true,
             bounds: near.unwrap_or(self.params.bounds),
             ..self.params
         };

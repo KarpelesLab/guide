@@ -411,6 +411,7 @@ impl Settle<'_> {
             max_expansions: if depth == 0 { QUIET_NODES } else { MEND_NODES },
             partial: false,
             stubs: many,
+            forest: true,
             ..self.params
         };
         let far = Params {
@@ -647,6 +648,7 @@ mod tests {
                 under_pads: false,
                 partial: false,
                 stubs: false,
+                forest: false,
             },
             pitch,
             history: &history,

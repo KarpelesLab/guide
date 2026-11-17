@@ -4490,6 +4490,99 @@ unless said.
   What that is was not found here.
 - Vias and track, and a board of six layers, whose minute ends in its first pass.
 
+## PCB routing of a board in two parts
+
+What was changed after [the release above](#pcb-routing-negotiated), 0.0.12, for the same
+host, cadlab, and the last of what that section does not show: `sweep-v2.2`, a keyboard
+in two halves on one board that only its schematic joins. Measured on 2026-11-17, each
+run with one thread, four to six runs at a time, on a machine that other work shared with
+a load of 6 to 15 on its 64 threads.
+
+### What
+
+Its ground, `raw` and `vcc` each have pads in both halves, and between the halves a row
+of holes that no track passes. A net's tree grew from its first terminal alone, so such a
+net joined the pads of the half with its first terminal and left every pad of the other
+on its own: 6, 7 and 6 connections open, where three are open on any routing of the
+board, one for each of the three nets. In a run with a budget or a deadline, a route
+that keeps what it reaches (`RouteOptions::keep_partial`, a net with a plane, or one of
+many pads) and leaves two to eight terminals out now begins another tree from one of
+them, twice at most, so that the pads that nothing joins to the first are joined among
+themselves; the net's pieces are counted from its copper, as those of a net that was cut
+are, and a later turn joins them if it can.
+
+It does so in every search but one: the search that a net has with nothing moved, in the
+first pass, before its turn to cross other nets' routes. What that search leaves is
+copper that waits for the net's next turn, and pads joined among themselves that the
+first terminal reaches none of are then in the way of the nets still to come.
+
+### Results
+
+Through cadlab's adapter as in the section above. Connections left open as cadlab counts
+them, before → after, vias and track of the first order.
+
+With a budget of 40 million nodes, one run, three orders of the nets:
+
+| Board | Layers | Open | Vias | Track, mm |
+| --- | --- | --- | --- | --- |
+| `nrfmicro` | 2 | 2, 4, 3 → 5, 2, 3 | 35 → 44 | 521 → 494 |
+| `sweep-v2.2` | 2 | 6, 7, 6 → 5, 6, 5 | 42 → 42 | 2231 → 2242 |
+| `corne-cherry` | 2 | 40, 42, 36 → 38, 38, 32 | 483 → 487 | 6018 → 6050 |
+| `tinytapeout-demo` | 4 | 16, 19, 5 → 16, 19, 5 | 604 → 604 | 5655 → 5655 |
+| `buspirate5-rev10` | 4 | 1, 1, 7 → 0, 5, 7 | 476 → 488 | 3756 → 3776 |
+| `lumenpnp-mobo` | 4 | 0, 1, 0 → 0, 1, 0 | 713 → 712 | 6544 → 6538 |
+| `cynthion` | 4 | 13, 17, 25 → 14, 17, 25 | 586 → 583 | 3576 → 3540 |
+| `glasgow-revC3` | 4 | 36, 37, 36 → 32, 35, 37 | 563 → 563 | 3937 → 3961 |
+| `glasgow-revD1` | 6 | 170, 145, 139 → 170, 145, 139 | 1067 → 1067 | 7616 → 7616 |
+| All, three orders | | 814 → 801 | | |
+
+`sweep-v2.2` is cut by that budget in its first pass, whose searches for the three
+connections that no route makes cost it most of its nodes.
+
+With a deadline of 60 s, a first run with seven tenths of it and a second on the board
+filled again, four orders of the nets (no seed, 2, 3 and 4):
+
+| Board | Open before | Open after |
+| --- | --- | --- |
+| `nrfmicro` | 2, 4, 3, 3 | 5, 2, 3, 3 |
+| `sweep-v2.2` | 6, 7, 6, 7 | 3, 3, 3, 3 |
+| `corne-cherry` | 34, 28, 26, 27 | 33, 27, 21, 26 |
+| `tinytapeout-demo` | 9, 6, 5, 18 | 9, 7, 5, 16 |
+| `buspirate5-rev10` | 1, 7, 7, 4 | 0, 5, 4, 0 |
+| `lumenpnp-mobo` | 0, 1, 0, 1 | 0, 1, 0, 1 |
+| `cynthion` | 17, 15, 25, 22 | 14, 15, 23, 15 |
+| `glasgow-revC3` | 36, 36, 41, 34 | 33, 31, 35, 34 |
+| `glasgow-revD1` | 162, 137, 124, 121 | 162, 136, 124, 121 |
+| All, four orders | 982 | 923 |
+
+`sweep-v2.2` has the three that every routing of it has. The curated boards, routed with
+no budget, are as they were, 1150 of 1151 connections with 712 vias: a run with neither
+a budget nor a deadline begins no second tree.
+
+### What was tried and not kept
+
+At 60 s through the adapter, `tinytapeout-demo` over six orders of the nets, which has
+59 connections open with 0.0.12 (9, 6, 5, 18, 9 and 12).
+
+- *Another tree in every search that keeps what it reaches*: 91 (14, 20, 18, 18, 8 and
+  13), with `sweep-v2.2` at 3, 3 and 3. The first run then ends with up to sixteen
+  connections open for six, of nets that had room before.
+- *Not for the nets with a plane*, whose pads each wait for a stub of their own: 81.
+  *Not for the pads that routes cut off a fill*, joined again after routing: 85. *For
+  neither*: 81.
+- *Only in the searches that may cross other nets' routes*, none in a negotiation or a
+  chain's search with nothing moved: 60, with `sweep-v2.2` at 4, 6 and 4.
+- *In every search but the first pass's with nothing moved*, as released: 60, with
+  `sweep-v2.2` at 3, 3 and 4 in those runs and 3 in each of the four of the table.
+
+### What this does not show
+
+- `glasgow-revD1` with the first variant had 373 to 408 open over three orders for 421:
+  on a board of six layers whose first pass does not end in a minute, pads joined among
+  themselves early are connections made. As released it is as it was.
+- Whether a net left in two trees should be joined across other nets' routes first: a
+  net's later turns go on from its pieces as they do for a net that was cut.
+
 ## PCB differential pairs and lengths
 
 Differential pairs routed side by side, and nets meandered to their lengths, by `pcb::route`

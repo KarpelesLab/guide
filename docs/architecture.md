@@ -831,6 +831,20 @@ after 3.4 million. With the negotiations the rows planned for a host
 gain on: `corne-cherry` 160 open over six orders without them for 155 with, `nrfmicro`
 19 for 18.
 
+**A route that keeps what it reaches grows more than one tree**
+([results](benchmarks.md#pcb-routing-of-a-board-in-two-parts)). A net's tree grows from
+its first terminal, and a terminal that no search joins to it is left out. On a board in
+two parts that only its schematic joins, every pad of the part without the first terminal
+was left on its own, so that a net with five pads there had five connections open where
+one is. In a run with a budget, a route that keeps what it reaches and leaves two to
+eight terminals out begins another tree from the first of them, with the others to reach
+again, twice at most; what the trees leave apart is counted from the net's copper, as for
+a net that was cut, and its later turns go on from the pieces. More than eight left out
+are the pads of a net with a plane that each wait for a stub of their own. The one search
+that does not do it is the first pass's with nothing moved, before a net's turn to cross
+other nets' routes: what that leaves is copper that waits, and it was in the way of nets
+that had room without it.
+
 **The layers that a net joins at a point are those of all its places there.** A track's
 end and a via at the same point are two places of a net, as a stub to a plane has them once
 it is fixed copper of a later run. Asked from the track's layer, the first of the two said

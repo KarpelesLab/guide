@@ -1150,6 +1150,7 @@ fn route_all<'a>(
             under_pads: false,
             partial: false,
             stubs: false,
+            forest: false,
         });
         // The pads of nets with zones near the pairs' ends, which a via takes to their
         // planes, keep a place for it.
@@ -1223,6 +1224,7 @@ fn route_all<'a>(
         under_pads: false,
         partial: false,
         stubs: false,
+        forest: false,
     };
 
     // Pairs routed first are routes of their nets in the world, locked until the passes on
@@ -1538,6 +1540,7 @@ fn route_all<'a>(
             let many = job.ctx.terminals > detail::BUDGET_TERMINALS;
             let params = Params {
                 stubs: many,
+                forest: hurried,
                 ..params
             };
             // A net that is mended does not cross the net that cut it: the two would take
@@ -1616,6 +1619,12 @@ fn route_all<'a>(
                     let part = Params {
                         partial: true,
                         stubs: true,
+                        // What the net is left with here waits, as copper, for its
+                        // turn to cross: pads joined among themselves that the first
+                        // reaches none of are then in the way of the nets still to come,
+                        // on a board with room for them (tinytapeout-demo, 91 open over
+                        // six orders for 59).
+                        forest: false,
                         ..params
                     };
                     if grow.stage(part, None, Some(quiet)).is_ok()
@@ -1901,7 +1910,6 @@ fn route_all<'a>(
                         old.merge(&job.ctx);
                         c = old;
                         let mut pieces = c.pieces(&job.ctx);
-                        debug_assert_eq!(pieces.apart(), t.missing.len());
                         // A net mended whole loses the ends that its cuts left.
                         if pieces.apart() == 0 && job.ctx.terminals < BRANCH_TERMINALS && !plane {
                             // With the stubs it did without.
@@ -1916,8 +1924,10 @@ fn route_all<'a>(
                         if let Some(mut old) = old {
                             old.unplace(&mut world);
                         }
-                        missing[j] = t.missing.clone();
-                        apart[j] = t.missing.len();
+                        // What the route leaves out may be joined among itself.
+                        let pieces = c.pieces(&job.ctx);
+                        missing[j] = pieces.missing();
+                        apart[j] = pieces.apart();
                     }
                 }
                 c.place(&mut world, &job.ctx);
@@ -2214,6 +2224,7 @@ fn route_all<'a>(
                 let stubs = Params {
                     partial: true,
                     stubs: true,
+                    forest: true,
                     ..params
                 };
                 let found = detail::route_net(&world, &ctx, &steps, stubs, None, None);
@@ -2994,6 +3005,7 @@ mod tests {
             under_pads: false,
             partial: false,
             stubs: false,
+            forest: false,
         };
         cleanup::run(&mut world, &jobs, &mut copper, params, &options);
         // The search for the first net's route with no vias spent the budget, and the

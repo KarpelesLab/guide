@@ -302,7 +302,11 @@ Each item is independently useful, and they can land in any order.
   rounds at a rising price with a history of where routes were in each other's way,
   kept if a round ends with none in another's way and the board has less open
   (`RouteOptions::negotiate`)
-  ([benchmarks](docs/benchmarks.md#pcb-routing-negotiated)). Not yet:
+  ([benchmarks](docs/benchmarks.md#pcb-routing-negotiated)); and a route that keeps
+  what it reaches begins another tree from a terminal that it leaves out, so that the
+  pads that nothing joins to a net's first, on a board in two parts that only its
+  schematic joins, are joined among themselves
+  ([benchmarks](docs/benchmarks.md#pcb-routing-of-a-board-in-two-parts)). Not yet:
   tracks routed at an area's width, or narrower only near pads, and several via sizes for
   a net beyond its escapes, which the search, with one width and one via for each net, has
   no place for; the balls of an array further in than the ring that its dog-bones' vias

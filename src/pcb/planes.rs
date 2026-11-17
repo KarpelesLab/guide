@@ -431,6 +431,7 @@ fn search(
         under_pads: false,
         partial: false,
         stubs: false,
+        forest: false,
     };
     let tree = detail::route_net(world, &ctx, &StepCache::default(), params, None, None).ok()?;
     let mut copper = NetCopper::from_tree(&ctx, &tree);

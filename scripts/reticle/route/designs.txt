@@ -1,0 +1,58 @@
+# Every design reticle builds a bitstream for with its own place and route, and a device
+# database it can fetch: one per line, as
+#
+#   <name> <device> <constraints> <top file> [--top <module>]
+#
+# paths relative to reticle's checkout. sources.py finds the rest of each design's files.
+
+# Digilent Basys 3, Xilinx XC7A35T, by Project X-Ray's database.
+blink               xc7a35t-cpg236     examples/basys3/blink.rcf               examples/basys3/blink.v
+blink_carry         xc7a35t-cpg236     examples/basys3/blink_carry.rcf         examples/basys3/blink_carry.v
+bram_rom            xc7a35t-cpg236     examples/basys3/bram_rom.rcf            examples/basys3/bram_rom.v
+carry_probe         xc7a35t-cpg236     examples/basys3/carry_probe.rcf         examples/basys3/carry_probe.v
+carry_where         xc7a35t-cpg236     examples/basys3/carry_where.rcf         examples/basys3/carry_where.v
+io_exercise         xc7a35t-cpg236     examples/basys3/io_exercise.rcf         examples/basys3/io_exercise.v
+iso7816_probe       xc7a35t-cpg236     examples/basys3/iso7816_probe.rcf       examples/basys3/iso7816_probe.v
+iso7816_terminal    xc7a35t-cpg236     examples/basys3/iso7816_terminal.rcf    examples/basys3/iso7816_terminal_pad.v
+iso_display         xc7a35t-cpg236     examples/basys3/iso_display.rcf         examples/basys3/iso_display_pad.v
+lutram              xc7a35t-cpg236     examples/basys3/lutram.rcf              examples/basys3/lutram.v
+partsel             xc7a35t-cpg236     examples/basys3/partsel.rcf             examples/basys3/partsel.v
+pll_blink           xc7a35t-cpg236     examples/basys3/pll_blink.rcf           examples/basys3/pll_blink.v
+pmod_bidir          xc7a35t-cpg236     examples/basys3/pmod_bidir.rcf          examples/basys3/pmod_bidir.v
+selftest            xc7a35t-cpg236     examples/basys3/selftest.rcf            examples/basys3/selftest.v
+spi_console         xc7a35t-cpg236     examples/basys3/spi_console.rcf         examples/basys3/spi_console.v
+ssd1306_console     xc7a35t-cpg236     examples/basys3/ssd1306_console.rcf     examples/basys3/ssd1306_console_pad.v
+sw_led              xc7a35t-cpg236     examples/basys3/sw_led.rcf              examples/basys3/sw_led.v
+soc_basys3          xc7a35t-cpg236     examples/soc/board/basys3.rcf           examples/soc/rtl/soc_top.v --top soc_top
+nes_basys3          xc7a35t-cpg236     examples/nes/board/basys3.rcf           examples/nes/rtl/nes_basys3.v --top nes_basys3
+apple2_basys3       xc7a35t-cpg236     examples/apple2/board/basys3.rcf        examples/apple2/rtl/apple2_basys3.v --top apple2_basys3
+
+# Cynthion, Lattice ECP5 LFE5U-12F, by Project Trellis' database.
+bidir_bus           ecp5-12f-CABGA256  testdata/fpga/cynthion/bidir_bus.rcf          testdata/fpga/cynthion/bidir_bus.v
+bidir_loopback      ecp5-12f-CABGA256  testdata/fpga/cynthion/bidir_loopback.rcf     testdata/fpga/cynthion/bidir_loopback.v
+button_led          ecp5-12f-CABGA256  testdata/fpga/cynthion/button_led.rcf         testdata/fpga/cynthion/button_led.v
+clock_blink         ecp5-12f-CABGA256  testdata/fpga/cynthion/clock_blink.rcf        testdata/fpga/cynthion/clock_blink.v
+leds                ecp5-12f-CABGA256  testdata/fpga/cynthion/leds.rcf               testdata/fpga/cynthion/leds.v
+nanos_seph_usb      ecp5-12f-CABGA256  testdata/fpga/cynthion/nanos_seph_usb.rcf     testdata/fpga/cynthion/nanos_seph_usb.v
+quiesce             ecp5-12f-CABGA256  testdata/fpga/cynthion/quiesce.rcf            testdata/fpga/cynthion/quiesce.v
+smartcard_serial    ecp5-12f-CABGA256  testdata/fpga/cynthion/smartcard_serial.rcf   testdata/fpga/cynthion/smartcard_serial.v
+target_ulpi_loopback ecp5-12f-CABGA256 testdata/fpga/cynthion/target_ulpi_loopback.rcf testdata/fpga/cynthion/target_ulpi_loopback.v
+usb_bram            ecp5-12f-CABGA256  testdata/fpga/cynthion/usb_bram.rcf           testdata/fpga/cynthion/usb_bram.v
+usb_cdc_uart        ecp5-12f-CABGA256  testdata/fpga/cynthion/usb_cdc_uart.rcf       testdata/fpga/cynthion/usb_cdc_uart.v
+usb_crypto_console  ecp5-12f-CABGA256  testdata/fpga/cynthion/usb_crypto_console.rcf testdata/fpga/cynthion/usb_crypto_console.v
+usb_host_target     ecp5-12f-CABGA256  testdata/fpga/cynthion/usb_host_target.rcf    testdata/fpga/cynthion/usb_host_target.v
+usb_hub_target      ecp5-12f-CABGA256  testdata/fpga/cynthion/usb_hub_target.rcf     testdata/fpga/cynthion/usb_hub_target.v
+usb_inflate         ecp5-12f-CABGA256  testdata/fpga/cynthion/usb_inflate.rcf        testdata/fpga/cynthion/usb_inflate.v
+usb_mjpeg           ecp5-12f-CABGA256  testdata/fpga/cynthion/usb_mjpeg.rcf          testdata/fpga/cynthion/usb_mjpeg.v
+usb_proxy_target    ecp5-12f-CABGA256  testdata/fpga/cynthion/usb_proxy_target.rcf   testdata/fpga/cynthion/usb_proxy_target.v
+usb_ulpi_device     ecp5-12f-CABGA256  testdata/fpga/cynthion/usb_ulpi_device.rcf    testdata/fpga/cynthion/usb_ulpi_device.v
+usb_ulpi_trace      ecp5-12f-CABGA256  testdata/fpga/cynthion/usb_ulpi_trace.rcf     testdata/fpga/cynthion/usb_ulpi_trace.v
+wide_state          ecp5-12f-CABGA256  testdata/fpga/cynthion/wide_state.rcf         testdata/fpga/cynthion/wide_state.v
+mos6502_monitor     ecp5-12f-CABGA256  examples/mos6502_monitor/board/cynthion.rcf   examples/mos6502_monitor/rtl/monitor_cynthion.v --top monitor_cynthion
+
+# No iCE40: reticle's one built-in iCE40 architecture is the HX1K's, which no example targets
+# (soc and mos6502_computer are for the HX8K), and reticle has no iCE40 database to load.
+
+# Tang Primer 20K, Gowin GW2A-18, by Project Apicula's database.
+buttons             gw2a-18-pg256      examples/primer20k/buttons.rcf          examples/primer20k/buttons.v
+key_led             gw2a-18-pg256      examples/primer20k/key_led.rcf          examples/primer20k/key_led.v

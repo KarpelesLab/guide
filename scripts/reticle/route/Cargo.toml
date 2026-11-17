@@ -1,0 +1,33 @@
+# Routes reticle's own designs with guide and with reticle's router, on the same
+# placements and routing graphs, and checks both with reticle's own checks. See
+# docs/benchmarks.md, "Routing reticle's designs".
+#
+# Not part of guide's package (scripts/ is excluded from it) and not a member of any
+# workspace. It expects reticle's repository beside guide's:
+#
+#   <dir>/guide/scripts/reticle/route   this crate
+#   <dir>/reticle                       https://github.com/KarpelesLab/reticle
+[package]
+name = "reticle-route"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "MIT"
+description = "Compares guide's router with reticle's on reticle's designs."
+
+# Its own workspace, so that cargo never takes it for part of guide's.
+[workspace]
+
+[dependencies]
+guide = { path = "../../.." }
+reticle = { path = "../../../../reticle", default-features = false, features = [
+    "verilog",
+    "synth",
+    "sim",
+    "fpga",
+    "timing",
+    "apicula",
+] }
+
+[profile.release]
+debug = 1

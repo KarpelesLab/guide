@@ -4873,6 +4873,13 @@ By board in the first order, short of two before and after: `buspirate5-rev10` 6
 0 and 0 for both, `sweep-v2.2` 3 and 3 for both. None of these runs had copper taken out
 by cadlab's check.
 
+Those spokes were worked out here, from the zones and what the pads say. cadlab's fill
+has since changed: it fits a spoke's width to its pad, places spokes in other directions
+where the first do not fit, and has a connection by layer. A host gives the spokes as its
+fill makes them (`Zones::spokes`), and with cadlab's given so, on its new fill, the same
+two orders have 97 and 81 pads short of two for 138 and 128 with 0.0.15, and 209 and 205
+connections open for 238 and 218.
+
 `sweep-v2.2` over four orders at 60 s: 3 open in each, where 0.0.15 has 3, 4, 4 and 4.
 Two of the three are told as apart; the third is of its ground, which has a pour and is
 not looked at (below). Its first run ends after 25 s of 42 with those two nets out of

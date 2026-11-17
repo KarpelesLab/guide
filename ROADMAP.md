@@ -519,15 +519,25 @@ the first routing on the small boards.
 ### M10: More domains and 1.0
 
 - At least one domain outside electronics, as proof that the core is general. **Done:**
-  multi-agent path finding, `mapf`, as a time-expanded `RoutingSpace` that the engine
-  negotiates unchanged, with an independent checker and a reader for the MovingAI benchmarks.
-  On six of their maps, 1500 instances, it solved 1498 within a minute on one thread, LaCAM3
-  1500, EECBS 1237 and CBSH2-RTC 308, with the lowest sums of costs of the suboptimal solvers
-  nearly everywhere and within 1.7% of the optimum where one is known
-  ([results](docs/benchmarks.md#multi-agent-path-finding-on-the-movingai-benchmarks)).
-  LaCAM3 is several times faster to a first solution on crowded maps. Left: larger maps,
-  where safe-interval path planning would likely be needed, the even scenarios, and the
-  tracker's best known solutions.
+  multi-agent path finding, `mapf`, with an independent checker, a reader for the MovingAI
+  benchmarks, and two ways to plan: a time-expanded `RoutingSpace` that the engine negotiates
+  unchanged, and, by default, safe-interval path planning with conflicts priced, under the
+  engine's negotiation run over a table kept per vertex in time order, with a first solution
+  by LaCAM to fall back on. On six of the MovingAI maps, 1500 instances, it solved all within a
+  minute on one thread, LaCAM3 1500, EECBS 1237 and CBSH2-RTC 308, with the lowest sums of
+  costs of the suboptimal solvers nearly everywhere, as low as the time-expanded space's or
+  lower at every map and count, and within 1.4% of the optimum where one is known; its first
+  solution comes in milliseconds, before LaCAM3's. On all 33 maps, random and even scenarios, 240
+  instances under 30 seconds on a shared machine, it solved 231 and LaCAM3 231, with lower
+  sums of costs than LaCAM3's on every map but those where negotiation didn't settle in time
+  and it fell back on its first solution
+  ([results](docs/benchmarks.md#multi-agent-path-finding-on-the-movingai-benchmarks)). The
+  MAPF tracker's best known solutions and lower bounds are now downloaded and compared with:
+  `guide` is below the best known on 132 of those 240 instances, as the best known on
+  crowded instances are old. Left: more scenarios a map than the one each that a shared
+  machine allowed; corridors where agents have to pass in the order of their goals
+  (maze-32-32-4, maze-128-128-1), where negotiation goes round and the first solution,
+  unrefined, is what is left; and refining that first solution with time, as LaCAM3 does.
 - ASIC global routing against the ISPD benchmarks (below).
 - `nextpnr`/FPGA Interchange and IPC-2581 interop as demand dictates.
 - The target consumers' own designs. **Started:** reticle's, routed on its own placements

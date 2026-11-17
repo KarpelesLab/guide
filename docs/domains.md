@@ -201,29 +201,43 @@ et al. (SoCS 2019): agents on a graph or a 4-connected grid, one move or wait pe
 no vertex or swap conflicts, agents staying on their goals, and the sum of costs as the
 objective, with the makespan reported.
 
-- **The space.** `TimeSpace` is a `RoutingSpace` over (vertex, time) states, keyed through
-  `InternedSlots`. Its resources are a vertex at a time and an undirected edge during a move,
-  each of capacity 1, so the engine's overuse is exactly the set of conflicts. Each agent is
-  a net of two terminals, its start at time 0 and its goal. After the goal, a route goes on
-  through a stay at each time to the horizon, which is what keeps others off a goal once an
-  agent is there for good. Searches are guided by the exact distance to the goal and never
-  offered a state from which the goal can't be reached in time.
-- **The engine does the rest**, unchanged: negotiated congestion, with soft conflicts as
-  MAPF-LNS2 has them, history, and only the agents in conflict routed again. The horizon
-  starts at the longest shortest path plus 16, and grows, seeded with the routes and history
-  so far, if negotiation doesn't settle. After a legal solution, each agent is planned again
-  against the others as hard reservations, and keeps what arrives sooner.
-- **Domain code** is about 1200 lines without tests or comments, error types included: the
-  graph, the space, the solve loop, the shortening pass, the checker, and a reader for the
-  MovingAI `.map` and `.scen` files. Nothing in the engine or the search changed for it.
+- **Two ways to plan, one negotiation.** `TimeSpace` is a `RoutingSpace` over (vertex, time)
+  states, keyed through `InternedSlots`, whose resources are a vertex at a time and an
+  undirected edge during a move, each of capacity 1, so the engine's overuse is exactly the set
+  of conflicts; each agent is a net of two terminals, its start at time 0 and its goal, and
+  after the goal a route goes on through a stay at each time to a horizon. The engine
+  negotiates over it unchanged (`Method::TimeExpanded`). The default, `Method::SafeIntervals`,
+  plans each agent over safe intervals instead (SIPP: a state is a vertex and an interval of
+  time over which nobody arrives or leaves), with occupied intervals priced at the engine's
+  price rather than forbidden, as SIPPS does, and runs the engine's negotiation loop, its
+  schedule, history, limits and cancel flag, over a table kept per vertex in time order.
+- **Why not through the engine.** A safe-interval search has to ask when a vertex is next free,
+  or next changes price; the engine's resource table is a hash map from a resource to who holds
+  it, which can only answer one time step at a time. Giving the engine an ordered index per
+  vertex for one domain would cost every other domain, so the loop, about 100 lines, is
+  repeated in `mapf` instead, with the same formula and schedule; the engine is unchanged.
+  On the large MovingAI maps, where paths are a thousand steps long, the time-expanded space
+  took seconds to minutes an iteration and solved none of maze-128-128-2; safe intervals made
+  every map faster and every sum of costs lower.
+- **A first solution.** LaCAM over PIBT, one step at a time for every agent, finds a solution in
+  milliseconds before negotiation starts, to fall back on when negotiation hits its iteration
+  limit or is stopped. Negotiation's solution is the one returned when it settles.
+- **Shortening.** After a legal solution, each agent is planned again against the others as hard
+  reservations, over safe intervals, and keeps what arrives sooner.
+- **Domain code** is about 2600 lines without tests or comments, error types included: the
+  graph, both spaces, the safe-interval planner and its negotiation, LaCAM, the solve loop,
+  shortening, the checker, and a reader for the MovingAI `.map` and `.scen` files.
 - **Checking** is `mapf::check`, which takes plans as vertices per time step and knows nothing
   of the space or the engine.
 
-On six MovingAI maps, 25 scenarios each at ten agent counts, `guide` solved 1498 of 1500
-instances within a minute on one thread, against 1500 for LaCAM3, 1237 for EECBS and 308 for
-the optimal CBSH2-RTC, with the lowest sums of costs of the suboptimal solvers nearly
-everywhere, within 1.7% of the optimum wherever CBSH2-RTC found one. LaCAM3 finds its first
-solution several times faster on crowded maps. [The results](benchmarks.md#multi-agent-path-finding-on-the-movingai-benchmarks)
+On six MovingAI maps, 25 scenarios each at ten agent counts, `guide` solved all 1500
+instances within a minute on one thread, as did LaCAM3, against 1237 for EECBS and 308 for the
+optimal CBSH2-RTC, with the lowest sums of costs of the suboptimal solvers nearly everywhere,
+within 1.4% of the optimum wherever CBSH2-RTC found one, and a first solution in milliseconds.
+On all 33 maps, one random and one even scenario each at four agent counts, it solved 231 of
+240 under 30 seconds, as did LaCAM3, with lower sums of costs on every map but those where
+negotiation ran out of time and it returned its first solution unrefined, and below the MAPF
+tracker's best known solution on 132. [The results](benchmarks.md#multi-agent-path-finding-on-the-movingai-benchmarks)
 have the tables and what this does not show.
 
 ## Other candidates

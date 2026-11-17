@@ -34,9 +34,9 @@ interchange formats behind Cargo features. We can split into a workspace later i
 compile times or release cadence call for it. So far: `fpga` for VTR's formats, `pcb` for
 the geometry layer, `kicad`, which implies `pcb`, for reading KiCad boards into it, `dsn`,
 which implies `pcb` too, for reading Specctra designs into it and writing sessions from it,
-`mapf` for multi-agent path finding, a time-expanded space that the engine routes agents
-through unchanged, with a reader for the MovingAI benchmarks, and `asic` for ASIC global
-routing on the ISPD contests' designs.
+`mapf` for multi-agent path finding, negotiated over safe intervals or through a time-expanded
+space that the engine routes agents through unchanged, with a reader for the MovingAI
+benchmarks, and `asic` for ASIC global routing on the ISPD contests' designs.
 
 The `guide` command-line tool, `src/bin/guide`, sits on top of all of it, behind the `cli`
 feature, which enables every domain. It uses only the public API, as any other consumer would,

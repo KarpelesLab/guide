@@ -130,6 +130,13 @@
 //! or negative. A worst path with positive slack stays below 1, as it does in VPR: nothing
 //! is failing, so nothing needs the full delay weight.
 //!
+//! [Against the latest path](TimingAnalysis::set_against_latest), the shift is
+//! `-worst_slack` whether or not timing is met, so that the worst path is exactly 1 even when
+//! it has slack to spare, and every other slack is weighed against the latest path rather
+//! than the period. That is reticle's `Timing::against_longest`, and it keeps a router
+//! working on the latest path of a design that meets its constraints with room, where VPR's
+//! formula would have its criticalities, and so its weight on delay, shrink as the slack grows.
+//!
 //! A clock period of 0 gives VPR's behaviour without a timing constraint, and pushes for the
 //! fastest circuit. With no capture margins, the shift then turns the raw criticality of an
 //! arc into `longest path through it / longest path of all`.
@@ -1657,6 +1664,9 @@ pub struct TimingAnalysis {
     path_arcs: Vec<ArcId>,
     /// When the critical path reaches its end, on the clock it was launched by.
     path_arrival: u64,
+    /// Whether criticality is against the latest path, met or not: see
+    /// [`set_against_latest`](TimingAnalysis::set_against_latest).
+    against_latest: bool,
     /// The rest is only used by a run on constraints per clock, as `per_clock` says.
     per_clock: bool,
     /// The worst slack of each point over the pairs of clocks, or `NO_SLACK`.
@@ -1700,6 +1710,7 @@ impl TimingAnalysis {
             path_points: Vec::with_capacity(levels),
             path_arcs: Vec::with_capacity(levels),
             path_arrival: 0,
+            against_latest: false,
             per_clock: false,
             point_slack: Vec::new(),
             point_raw: Vec::new(),
@@ -1708,6 +1719,52 @@ impl TimingAnalysis {
             capture_clocks: Vec::new(),
             clock_arrival: Vec::new(),
             clock_required: Vec::new(),
+        }
+    }
+
+    /// Sets whether the next [`run`](TimingAnalysis::run)s weigh every slack against the
+    /// latest path, whether or not timing is met, rather than against the period. Off by
+    /// default, which is VPR's formula. See [criticality](self#criticality).
+    ///
+    /// Only criticalities change: slacks, the worst slack and the critical path are the same
+    /// either way.
+    ///
+    /// ```
+    /// use guide::timing::{Constraints, CriticalityOptions, TimingAnalysis, TimingGraphBuilder};
+    ///
+    /// let mut builder = TimingGraphBuilder::new();
+    /// let (input, output) = (builder.add_input(0)?, builder.add_output(0)?);
+    /// let arc = builder.add_net_arc(input, output, 400)?;
+    /// let graph = builder.build();
+    /// // A period of 1000 ps, met with 600 to spare.
+    /// let constraints = Constraints::single_clock(1000)?;
+    /// let options = CriticalityOptions::new(1, 1.0)?;
+    /// let mut analysis = TimingAnalysis::new(&graph);
+    /// analysis.run(&graph, &constraints);
+    /// assert_eq!(analysis.arc_criticality(arc, &options), 0.4);
+    /// analysis.set_against_latest(true);
+    /// analysis.run(&graph, &constraints);
+    /// assert_eq!(analysis.arc_criticality(arc, &options), 1.0);
+    /// # Ok::<(), guide::timing::TimingError>(())
+    /// ```
+    pub fn set_against_latest(&mut self, on: bool) {
+        self.against_latest = on;
+    }
+
+    /// Whether criticality is against the latest path: see
+    /// [`set_against_latest`](TimingAnalysis::set_against_latest).
+    pub fn is_against_latest(&self) -> bool {
+        self.against_latest
+    }
+
+    /// The worst slack that shifts every criticality's slack: itself against the latest
+    /// path, and otherwise only when it is negative.
+    #[inline]
+    fn shift_slack(against_latest: bool, worst_slack: i64) -> i64 {
+        if against_latest {
+            worst_slack
+        } else {
+            worst_slack.min(0)
         }
     }
 
@@ -1814,7 +1871,8 @@ impl TimingAnalysis {
         };
         self.max_required = max_required;
         // `max_required + shift`, which the proof at `raw_criticality` shows is not negative.
-        self.criticality_span = max_required.abs_diff(worst_slack.min(0));
+        self.criticality_span =
+            max_required.abs_diff(Self::shift_slack(self.against_latest, worst_slack));
 
         // Real arrival times are never negative.
         self.path_arrival = arrival[worst_end.index()] as u64;
@@ -1970,7 +2028,7 @@ impl TimingAnalysis {
                 continue;
             };
             // As for one clock, and for the same reasons, within the pair.
-            let span = max_required.abs_diff(pair_worst.min(0));
+            let span = max_required.abs_diff(Self::shift_slack(self.against_latest, pair_worst));
 
             for step in live_steps {
                 let from = arrival[step.from.index()];

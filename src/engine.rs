@@ -337,6 +337,57 @@
 //! At 10 iterations, criticalities of 0.5, 0.8 and 0.9 found the same critical paths, 0.95
 //! missed the gain on the small group, and the lower the criticality, the more work it took.
 //!
+//! ## Bounded critical searches
+//!
+//! A critical search weighs delay, and its lower bound is mostly the space's delay bound. When
+//! congestion has grown dearer than any delay, that bound is far below what the way costs, and
+//! the search floods. reticle met that on its largest design, and gives up on a critical
+//! search after a number of nodes, to make it again as an uncritical one, whose bound is in
+//! the costs it pays. [`TimingDriven::search_budget`] does the same: a critical connection's
+//! search that expands that many nodes without reaching its sink stops, and the connection is
+//! searched for again at a criticality of 0, aimed at that sink alone. The expansions of both
+//! count, against [`max_expansions`](EngineOptions::max_expansions) as everywhere else.
+//!
+//! [`TimingDriven::present_cap`] is reticle's other guard on critical connections, and VPR's
+//! `max_pres_fac` for only them: the present factor a critical search weighs what other nets
+//! hold at is the iteration's, or the cap, whichever is less. By the late iterations a
+//! resource another net holds costs a critical connection more than a long way round, for all
+//! that it weighs congestion at a hundredth, and a capped one takes it instead and leaves the
+//! other net to move. Two critical connections that want one resource would each take it
+//! from the other for ever at that price, so the cap is lifted for the rest of the run once
+//! ten iterations in a row have left resources overused and not fewer than the fewest since
+//! the run began or since its latest legal iteration, as reticle lifts it.
+//!
+//! Neither changed a result on reticle's designs in `docs/benchmarks.md`, whose critical
+//! searches stayed well under reticle's budget and whose runs ended before the present factor
+//! reached reticle's cap: they are there for the designs reticle needed them for.
+//!
+//! ## Keeping criticalities
+//!
+//! The critical path moves as connections are routed again, and a connection that is off it
+//! for one iteration is routed for congestion as if it had slack, takes a detour, and may be
+//! on the critical path when the run ends. With [`TimingDriven::keep_criticality`], each
+//! connection's criticality is the highest that any analysis so far has given it, the one
+//! before the first iteration included, as reticle's `keep_criticality` has it.
+//!
+//! ## The most critical first
+//!
+//! With [`TimingDriven::critical_first`], nets take their turns in the order of their most
+//! critical connection by the analysis before the first iteration, which is of the delays the
+//! timing graph was built with, the most critical first, as reticle orders its signals by the
+//! placement's estimate. The first nets routed are the ones that a fast way matters to, and
+//! they find it before the others take it. A tie keeps the order the nets were given in, and
+//! the order then stays the same in every iteration, unless
+//! [`shuffle_seed`](EngineOptions::shuffle_seed) shuffles it.
+//!
+//! ## Against the latest path
+//!
+//! VPR's criticality is against the constraint, so a design that meets its constraint with
+//! room to spare has no connection near 1, and with an exponent above 1 hardly any weight on
+//! delay at all. [`TimingDriven::against_latest`] weighs each slack against the latest path
+//! of its pair of clocks instead, met or not, as reticle's `against_longest` does: see
+//! [`TimingAnalysis::set_against_latest`].
+//!
 //! ## What a delay is
 //!
 //! **Each step has a fixed delay**, which is an approximation. The delay along a tree is then
@@ -836,6 +887,27 @@ pub struct TimingDriven {
     /// `1e-12`, which weighs the two as VPR does. A space whose steps cost about 1 per tile
     /// wants about 1 over the delay of a tile.
     pub delay_cost: Cost,
+    /// The most nodes the search for one critical connection may expand before it gives up
+    /// and the connection is searched for again as if it had no criticality. The default is
+    /// [`u64::MAX`], no limit. See [bounded critical searches](self#bounded-critical-searches).
+    pub search_budget: u64,
+    /// The most a critical connection's search pays for what other nets hold, as a present
+    /// factor: the iteration's, or this, whichever is less. The default is [`Cost::MAX`], no
+    /// cap. See [bounded critical searches](self#bounded-critical-searches).
+    pub present_cap: Cost,
+    /// Whether a connection's criticality, once an analysis has given it one, is never
+    /// lowered by a later analysis. The default is false. See [keeping
+    /// criticalities](self#keeping-criticalities).
+    pub keep_criticality: bool,
+    /// Whether nets take their turns in the order of their most critical connection by the
+    /// first analysis, the most critical first, rather than in the order given. The default
+    /// is false. See [the most critical first](self#the-most-critical-first).
+    pub critical_first: bool,
+    /// Whether each connection's slack is weighed against the latest path of its pair of
+    /// clocks, met or not, rather than against the constraint, so that the latest path is
+    /// fully critical even with slack to spare: see
+    /// [`TimingAnalysis::set_against_latest`]. The default is false, VPR's formula.
+    pub against_latest: bool,
 }
 
 impl TimingDriven {
@@ -852,6 +924,11 @@ impl TimingDriven {
             connections,
             criticality: CriticalityOptions::default(),
             delay_cost,
+            search_budget: u64::MAX,
+            present_cap: Cost::MAX,
+            keep_criticality: false,
+            critical_first: false,
+            against_latest: false,
         }
     }
 }
@@ -2112,6 +2189,10 @@ struct RouteTiming<'a, S: RoutingSpace> {
     /// The criticality of every terminal of every net, at `offsets[net] + terminal`.
     criticality: &'a [f64],
     offsets: &'a [u32],
+    /// [`TimingDriven::search_budget`].
+    search_budget: u64,
+    /// [`TimingDriven::present_cap`].
+    present_cap: Cost,
 }
 
 // By hand, because a derive would ask for `S: Copy` when only pointers to its methods are here.
@@ -2233,6 +2314,9 @@ fn route_net<S: RoutingSpace>(
         // Whether the latest search grew this tree without timing, so that the next one may
         // keep its heuristics: see `Search::reuse_bounds`.
         let mut grew_priced = false;
+        // A critical connection whose search ran out of its budget, to be searched for again
+        // as if it had no criticality: see `TimingDriven::search_budget`.
+        let mut demoted: Option<usize> = None;
         while !worker.pending.is_empty() {
             let priced = Priced {
                 inner: space,
@@ -2244,14 +2328,25 @@ fn route_net<S: RoutingSpace>(
                 replacing: &worker.replacing,
                 tied: space.has_non_configurable().then_some(&worker.tied),
             };
+            // What a critical connection's search sees: the same, at a present factor of no
+            // more than `TimingDriven::present_cap`.
+            let capped = Priced {
+                present: timing.map_or(context.present, |timing| {
+                    context.present.min(timing.present_cap)
+                }),
+                ..priced
+            };
             // A critical connection is routed on its own, most critical first, as in VPR, so
             // that it gets its own weight on delay and the first choice of the tree. Those of
             // no criticality are left to the end, and routed as without timing: each search
             // connects whichever is nearest, which makes the same trees as a timing-free run.
             let critical = timing.and_then(|timing| {
                 let (terminal, c) = most_critical(&worker.pending, criticality)?;
+                if demoted == Some(terminal) {
+                    return None;
+                }
                 let blend = Blended {
-                    priced: &priced,
+                    priced: &capped,
                     step_delays: timing.step_delays,
                     delay_bound: timing.delay_bound,
                     congestion: Cost::new(1.0 - c).unwrap_or(Cost::ZERO),
@@ -2267,10 +2362,12 @@ fn route_net<S: RoutingSpace>(
                     // A node outside the space has no resources to be priced by. The search
                     // would ignore it anyway.
                     if !dead_roots.contains(&point.node) && space.contains(point.node) {
-                        let start = priced.source_cost(net.id, point.node, point.cost);
                         let start = match &critical {
-                            Some((_, blend)) => blend.congestion * start,
-                            None => start,
+                            Some((_, blend)) => {
+                                blend.congestion
+                                    * capped.source_cost(net.id, point.node, point.cost)
+                            }
+                            None => priced.source_cost(net.id, point.node, point.cost),
                         };
                         worker.sources.push(Source::with_cost(point.node, start));
                     }
@@ -2298,7 +2395,9 @@ fn route_net<S: RoutingSpace>(
                 None => {
                     let limit = context.target_terminals as usize;
                     worker.aimed.clear();
-                    if aiming && worker.pending.len() > limit {
+                    if let Some(terminal) = demoted {
+                        worker.aimed.push(terminal);
+                    } else if aiming && worker.pending.len() > limit {
                         worker.aimed.extend_from_slice(&worker.pending);
                         let keys = &worker.terminal_keys;
                         worker
@@ -2318,8 +2417,15 @@ fn route_net<S: RoutingSpace>(
                 }
             }
 
+            let left = budget.saturating_sub(spent);
+            let capped_search = match (&critical, timing) {
+                (Some(_), Some(timing)) if timing.search_budget < left => {
+                    Some(timing.search_budget)
+                }
+                _ => None,
+            };
             let limits = SearchLimits {
-                max_expansions: budget.saturating_sub(spent),
+                max_expansions: capped_search.unwrap_or(left),
                 cancel: context.cancel,
             };
             let sources = worker.sources.iter().copied();
@@ -2354,7 +2460,11 @@ fn route_net<S: RoutingSpace>(
             worker.expanded += expanded;
 
             match end {
-                Ok(true) => {}
+                Ok(true) => demoted = None,
+                Err(Interrupt::Budget) if capped_search.is_some() => {
+                    demoted = critical.as_ref().map(|(terminal, _)| *terminal);
+                    continue;
+                }
                 Ok(false) => match route.root() {
                     // With no tree yet, every root that remains has been searched from, and a
                     // fixed part has the only root there can be.
@@ -2710,7 +2820,24 @@ struct TimingState<S: RoutingSpace> {
     /// For each net, whether a connection of it is at least `critical_from`.
     critical_nets: Vec<bool>,
     metrics: TimingMetrics,
+    /// [`TimingDriven::search_budget`].
+    search_budget: u64,
+    /// [`TimingDriven::present_cap`].
+    present_cap: Cost,
+    /// [`TimingDriven::keep_criticality`].
+    keep_criticality: bool,
+    /// The fewest resources overused since the run or its latest legal iteration, and how
+    /// many iterations in a row have not gone below it: see [`CAP_STALL`].
+    least_overused: u32,
+    stalled: u32,
 }
+
+/// How many iterations in a row may end with resources overused, and no fewer than the
+/// fewest since the run began or since its latest legal iteration, before
+/// [`TimingDriven::present_cap`] is lifted for the rest of the run. Two critical connections
+/// that want one resource would otherwise each take it from the other at the capped price for
+/// ever. It is reticle's `STALL`.
+const CAP_STALL: u32 = 10;
 
 impl<S: RoutingSpace> TimingState<S> {
     /// Checks the connections and runs a first analysis on the estimated delays.
@@ -2727,6 +2854,11 @@ impl<S: RoutingSpace> TimingState<S> {
             connections,
             criticality: options,
             delay_cost,
+            search_budget,
+            present_cap,
+            keep_criticality,
+            critical_first: _,
+            against_latest,
         } = timing;
 
         let mut offsets = Vec::with_capacity(nets.len() + 1);
@@ -2767,7 +2899,8 @@ impl<S: RoutingSpace> TimingState<S> {
         let arc_delays = (0..graph.num_arcs())
             .map(|arc| graph.arc(ArcId(arc)).map_or(0, |info| info.delay))
             .collect();
-        let analysis = TimingAnalysis::new(&graph);
+        let mut analysis = TimingAnalysis::new(&graph);
+        analysis.set_against_latest(against_latest);
         let mut state = TimingState {
             step_delays,
             delay_bound,
@@ -2789,6 +2922,11 @@ impl<S: RoutingSpace> TimingState<S> {
                 worst_slack: None,
                 total_negative_slack: 0,
             },
+            search_budget,
+            present_cap,
+            keep_criticality,
+            least_overused: u32::MAX,
+            stalled: 0,
         };
         state.run();
         state.refresh_criticality();
@@ -2825,10 +2963,28 @@ impl<S: RoutingSpace> TimingState<S> {
             .fill_arc_criticalities(&self.options, &mut self.arc_criticality);
         self.critical_nets.fill(false);
         for (connection, &(net, _, slot)) in self.connections.iter().zip(&self.places) {
-            let criticality = self.arc_criticality[connection.arc.index()];
+            let mut criticality = self.arc_criticality[connection.arc.index()];
+            if self.keep_criticality && self.criticality[slot] > criticality {
+                criticality = self.criticality[slot];
+            }
             self.criticality[slot] = criticality;
             if criticality >= self.critical_from {
                 self.critical_nets[net] = true;
+            }
+        }
+    }
+
+    /// Takes in how an iteration ended, and lifts the present cap once the overuse has stalled
+    /// for [`CAP_STALL`] iterations.
+    fn watch_stall(&mut self, overused: u32, legal: bool) {
+        if legal {
+            (self.least_overused, self.stalled) = (u32::MAX, 0);
+        } else if overused < self.least_overused {
+            (self.least_overused, self.stalled) = (overused, 0);
+        } else {
+            self.stalled += 1;
+            if self.stalled >= CAP_STALL {
+                self.present_cap = Cost::MAX;
             }
         }
     }
@@ -2858,6 +3014,8 @@ impl<S: RoutingSpace> TimingState<S> {
             delay_cost: self.delay_cost,
             criticality: &self.criticality,
             offsets: &self.offsets,
+            search_budget: self.search_budget,
+            present_cap: self.present_cap,
         }
     }
 }
@@ -3597,6 +3755,7 @@ impl<'a, S: RoutingSpace> Engine<'a, S> {
             .sum();
         let timing = self.timing.as_mut().map(|timing| {
             timing.analyse(&self.states);
+            timing.watch_stall(overused_resources, total_overuse == fixed_overuse);
             timing.metrics
         });
         self.consider_best(interrupted, unrouted, total_overuse, total_cost);
@@ -4144,13 +4303,40 @@ impl<'a, S: DelaySpace> Engine<'a, S> {
         timing: TimingDriven,
     ) -> Result<Self, EngineError> {
         let mut engine = Engine::new(space, nets, options)?;
-        engine.timing = Some(TimingState::new(
+        let critical_first = timing.critical_first;
+        let state = TimingState::new(
             nets,
             timing,
             S::step_delays,
             S::delay_lower_bound,
             options.timing_reroute_criticality,
-        )?);
+        )?;
+        if critical_first {
+            // The most critical connection of each net, by the first analysis. A tie keeps the
+            // order given, so that the order is fixed.
+            let most: Vec<f64> = (0..nets.len())
+                .map(|index| {
+                    let start = state.offsets[index] as usize;
+                    let end = state.offsets[index + 1] as usize;
+                    state.criticality[start..end]
+                        .iter()
+                        .fold(0.0f64, |most, &c| if c > most { c } else { most })
+                })
+                .collect();
+            let position: Vec<usize> = {
+                let mut position = vec![0; nets.len()];
+                for (at, &index) in engine.order.iter().enumerate() {
+                    position[index as usize] = at;
+                }
+                position
+            };
+            engine.order.sort_by(|&a, &b| {
+                most[b as usize]
+                    .total_cmp(&most[a as usize])
+                    .then(position[a as usize].cmp(&position[b as usize]))
+            });
+        }
+        engine.timing = Some(state);
         Ok(engine)
     }
 }

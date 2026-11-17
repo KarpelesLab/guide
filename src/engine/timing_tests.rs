@@ -1221,3 +1221,199 @@ fn going_on_needs_timing_and_changes_nothing_without_it() {
     let plain = route(&graph, &nets, EngineOptions::default()).unwrap();
     assert_eq!(route(&graph, &nets, improving(10)).unwrap(), plain);
 }
+
+// Bounded critical searches, kept criticalities, the most critical first, and criticality
+// against the latest path.
+
+#[test]
+fn a_critical_search_out_of_budget_is_made_again_as_an_uncritical_one() {
+    let (graph, nets, timing) = two_diamonds(0.99);
+    let space = graph.with_step_delays(diamond_delay);
+    // Plenty: net 0 takes the fast way, as without a budget.
+    let roomy = TimingDriven {
+        search_budget: 100,
+        ..timing.clone()
+    };
+    let outcome = route_checked(&space, &nets, EngineOptions::default(), &roomy);
+    assert!(outcome.routes.route(NetId(0)).unwrap().contains(NodeId(2)));
+    assert_eq!(
+        outcome,
+        route_checked(&space, &nets, EngineOptions::default(), &timing)
+    );
+    // One expansion is not enough to reach the sink, so net 0 is routed for cost alone, the
+    // slow way, and the expansion of the search that gave up counts.
+    let tight = TimingDriven {
+        search_budget: 1,
+        ..timing.clone()
+    };
+    let outcome = route_checked(&space, &nets, EngineOptions::default(), &tight);
+    assert!(outcome.is_success());
+    assert!(outcome.routes.route(NetId(0)).unwrap().contains(NodeId(1)));
+    let plain = route(&space, &nets, EngineOptions::default()).unwrap();
+    assert_eq!(
+        outcome.routes.stats.nodes_expanded,
+        plain.routes.stats.nodes_expanded + 1
+    );
+    assert_eq!(
+        outcome.routes.stats.searches,
+        plain.routes.stats.searches + 1
+    );
+}
+
+#[test]
+fn a_present_cap_only_changes_what_critical_searches_pay() {
+    let (graph, nets, timing) = contested_fast_node();
+    let space = graph.with_step_delays(diamond_delay);
+    let uncapped = route_checked(&space, &nets, EngineOptions::default(), &timing);
+    // A cap no iteration's present factor reaches changes nothing.
+    let high = TimingDriven {
+        present_cap: Cost::from(1_000_000),
+        ..timing.clone()
+    };
+    assert_eq!(
+        route_checked(&space, &nets, EngineOptions::default(), &high),
+        uncapped
+    );
+    // At no charge for what others hold, both nets keep wanting the fast node, which history
+    // alone settles slowly: the overuse stalls, and the cap is lifted.
+    let free = TimingDriven {
+        present_cap: Cost::ZERO,
+        ..timing.clone()
+    };
+    let capped = route_checked(&space, &nets, EngineOptions::default(), &free);
+    assert!(capped.is_success());
+    assert!(capped.routes.stats.iterations > uncapped.routes.stats.iterations);
+    let mut engine = Engine::with_timing(&space, &nets, EngineOptions::default(), free).unwrap();
+    let cap = |engine: &Engine<'_, _>| engine.timing.as_ref().unwrap().present_cap;
+    let mut overused = Vec::new();
+    while let Some(report) = engine.step() {
+        overused.push(report.overused_resources);
+        // One resource overused from the first iteration on is a stall from the second.
+        let stalled = overused.len() > CAP_STALL as usize;
+        assert_eq!(cap(&engine) == Cost::MAX, stalled, "{overused:?}");
+    }
+    assert!(overused.len() > CAP_STALL as usize, "{overused:?}");
+}
+
+/// The criticality of each connection before the first iteration and after each one of a
+/// run on `timing`.
+fn criticalities_by_iteration<S: DelaySpace<Node = NodeId>>(
+    space: &S,
+    nets: &[Net<NodeId>],
+    timing: &TimingDriven,
+) -> Vec<Vec<f64>> {
+    let count = timing.connections.len();
+    let mut engine =
+        Engine::with_timing(space, nets, EngineOptions::default(), timing.clone()).unwrap();
+    let read = |engine: &Engine<'_, S>| -> Vec<f64> {
+        (0..count)
+            .map(|c| engine.connection_criticality(c).unwrap())
+            .collect()
+    };
+    let mut found = vec![read(&engine)];
+    while engine.step().is_some() {
+        found.push(read(&engine));
+    }
+    found
+}
+
+#[test]
+fn kept_criticalities_never_fall() {
+    let (graph, nets, timing) = contested_fast_node();
+    let space = graph.with_step_delays(diamond_delay);
+    // Net 0's connection is the most critical at first, and is not once net 1's path through
+    // the slow node is the latest.
+    let plain = criticalities_by_iteration(&space, &nets, &timing);
+    assert!(plain.windows(2).any(|w| w[1][0] < w[0][0]), "{plain:?}");
+    let kept = TimingDriven {
+        keep_criticality: true,
+        ..timing.clone()
+    };
+    let kept = criticalities_by_iteration(&space, &nets, &kept);
+    for w in kept.windows(2) {
+        assert!(
+            w[1].iter().zip(&w[0]).all(|(now, before)| now >= before),
+            "{kept:?}"
+        );
+    }
+    // The routes are the same until a criticality is kept that would have fallen, so each
+    // is the highest the plain run had given it by then.
+    assert_eq!(kept[0], plain[0]);
+    assert_eq!(kept[1][0], plain[0][0].max(plain[1][0]));
+}
+
+#[test]
+fn nets_can_take_their_turns_most_critical_first() {
+    // The diamonds with the uncritical net first.
+    let (graph, mut nets, timing) = two_diamonds(0.99);
+    nets.reverse();
+    let space = graph.with_step_delays(diamond_delay);
+    let given = Engine::with_timing(&space, &nets, EngineOptions::default(), timing.clone());
+    assert_eq!(given.unwrap().order, [0, 1]);
+    let first = TimingDriven {
+        critical_first: true,
+        ..timing.clone()
+    };
+    let engine = Engine::with_timing(&space, &nets, EngineOptions::default(), first.clone());
+    // Net 0, the critical one, is at index 1.
+    assert_eq!(engine.unwrap().order, [1, 0]);
+    let outcome = route_checked(&space, &nets, EngineOptions::default(), &first);
+    assert!(outcome.is_success());
+    // Nothing is contested here, so the routes are the same either way.
+    assert_eq!(
+        outcome.routes,
+        route_checked(&space, &nets, EngineOptions::default(), &timing).routes
+    );
+}
+
+#[test]
+fn against_the_latest_path_a_met_path_is_fully_critical() {
+    // The diamonds against a period of 10 ns, which either way meets with room to spare.
+    let (graph, nets, mut timing) = two_diamonds(0.99);
+    timing.constraints = Constraints::single_clock(10_000).unwrap();
+    let space = graph.with_step_delays(diamond_delay);
+    // Before routing every delay is 0, and against the period nothing is critical.
+    let engine = Engine::with_timing(&space, &nets, EngineOptions::default(), timing.clone());
+    assert_eq!(engine.unwrap().connection_criticality(0), Some(0.0));
+    let outcome = route_checked(&space, &nets, EngineOptions::default(), &timing);
+    assert!(outcome.routes.route(NetId(0)).unwrap().contains(NodeId(1)));
+    // Against the latest path, net 0's connection is on it, and takes the fast way.
+    let latest = TimingDriven {
+        against_latest: true,
+        ..timing.clone()
+    };
+    let engine = Engine::with_timing(&space, &nets, EngineOptions::default(), latest.clone());
+    assert_eq!(engine.unwrap().connection_criticality(0), Some(0.99));
+    let outcome = route_checked(&space, &nets, EngineOptions::default(), &latest);
+    assert!(outcome.routes.route(NetId(0)).unwrap().contains(NodeId(2)));
+}
+
+#[test]
+fn bounded_kept_and_ordered_runs_are_the_same_on_any_number_of_threads() {
+    for (tiles, tracks, count, batch_size) in [(12, 1, 60, 8), (16, 1, 120, 8)] {
+        let (graph, nets, fabric) = fabric_problem(tiles, tracks, count);
+        let space = graph
+            .with_step_delays(fabric_delay(fabric))
+            .with_delay_bound(fabric_delay_bound(fabric));
+        let timing = TimingDriven {
+            search_budget: 200,
+            present_cap: Cost::from(4),
+            keep_criticality: true,
+            critical_first: true,
+            against_latest: true,
+            ..fabric_timing(fabric, &nets)
+        };
+        let options = EngineOptions {
+            batch_size,
+            timing_iterations: 3,
+            ..EngineOptions::default()
+        };
+        let reference = route_checked(&space, &nets, options, &timing);
+        assert!(reference.is_success());
+        for threads in THREAD_COUNTS {
+            let threaded =
+                route_timed_parallel(&space, &nets, options, timing.clone(), threads).unwrap();
+            assert_eq!(threaded, reference, "{threads} threads");
+        }
+    }
+}

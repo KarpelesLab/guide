@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.19](https://github.com/KarpelesLab/guide/compare/v0.0.18...v0.0.19) - 2026-11-18
+
+### Added
+
+- *(pcb)* on more than two layers every net is negotiated at twice the pitch, every via that a fill makes needless goes and a host can ask which (needless), and a pad that the host names and no track leaves may have vias of its net in it (Zones::via_pads) ([#23](https://github.com/KarpelesLab/guide/pull/23))
+
+### Other
+
+- *(benchmarks)* the host's own fills as released, beside cadlab's router on a quiet machine, and what the vias and the spokes did not reach ([#21](https://github.com/KarpelesLab/guide/pull/21))
+
 ## [0.0.18](https://github.com/KarpelesLab/guide/compare/v0.0.17...v0.0.18) - 2026-11-18
 
 ### Added

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.21](https://github.com/KarpelesLab/guide/compare/v0.0.20...v0.0.21) - 2026-11-18
+
+### Fixed
+
+- *(pcb)* a run that moves no route plans its escapes round the routes it is given ([#29](https://github.com/KarpelesLab/guide/pull/29))
+
+### Other
+
+- *(benchmarks)* out of an array and shorter after it as released, beside cadlab's router on a quiet machine, with what the track and the vias reach and what a minute leaves undone ([#27](https://github.com/KarpelesLab/guide/pull/27))
+
 ## [0.0.20](https://github.com/KarpelesLab/guide/compare/v0.0.19...v0.0.20) - 2026-11-18
 
 ### Added

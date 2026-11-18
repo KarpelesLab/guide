@@ -1032,6 +1032,65 @@ Dearer vias in the negotiation, 24 and 40 steps for 10, were measured for the vi
 that hosts count and not kept: fewer vias, and connections lost wherever the budget
 ends the rounds.
 
+**On more than two layers the negotiation for every net is on a grid of twice the pitch**
+([results](benchmarks.md#pcb-routing-at-twice-the-pitch)). Its grid was half a track and
+its clearance, two points to a track's pitch, which is what a channel of a board of two
+layers needs to hold every track that fits it. Counted round by round, the vias of a
+negotiation only rise: `tinytapeout-demo` has 310 after the first round, each net where
+it would go alone, and 485 when the share ends it; a wire that went under another stays
+there when the other has moved, as only the wires in another's way are routed again. And
+a board of six layers had no room for three rounds at that pitch in half a minute. A
+track and its clearance apart, two tracks side by side are still a step from each other;
+there are a quarter of the points, a round costs a fifth, a via costs twice the track it
+did, and a board of four layers has the room that the coarser lines leave unused.
+
+- *Which boards.* More than two layers: at twice the pitch from the start. Two: at the
+  first pitch, and at twice only where the first round says that the share has no room
+  for three rounds of it. `nrfmicro`, two layers and a receptacle of fine pitch, had 0,
+  2, 2 and 1 connections open at twice the pitch where it has none.
+- *Whether to begin.* At twice the pitch a negotiation is begun if one first round fits
+  the time, and thirty first rounds fit a budget of nodes: the first round's time is
+  mostly the board being asked about each place for the first time, and its nodes are a
+  fraction of the later rounds', which go round what is shared. The six layers of
+  `glasgow-revD1` are what these were set by.
+- *There, a negotiation that its share ends still has its end.* The nets taken out for
+  what was shared are routed again where nothing is claimed, and each net once more for
+  fewer vias, the nets with the most first, within 2.5 times what the first round
+  took and 15 % of what the run has left. Left to the passes, the first was done by
+  searches that cost three times as much a node, and the second not at all. At the
+  first pitch a round costs five times as much, and a negotiation that is cut is left
+  as it was.
+
+**What a fill makes needless is told of every via, and a host can ask.** A net with a
+plane had its stubs judged by the host's fill once the routes were where they stay: a
+connected piece of the net's copper with one via and no more than four tracks. The wires
+of a negotiation are no such pieces. A net whose pads the other nets' routes cut off
+their pour is joined up again each of the three times that is told, while those routes
+still move, and what one telling joined by a wire through a via the next finds joined by
+the pour, or by another wire: `corne-cherry`'s two grounds had 171 vias where cadlab's
+router has 75, for as many pieces of pour to join. So every via is tried, one at a time:
+it goes if the pads of its net are in the same pieces without it, by the fills on every
+layer, the board's own copper and the rest of the net's routes, told by the copper
+itself, a track being one with every pad and piece of fill that it touches along its
+length. A piece of fill with no pad on it, and less than a sixteenth of the net's
+largest, is joined to nothing for its own sake: a zone that takes its islands away takes
+that one once nothing touches it. Then the tracks that this leaves leading nowhere go. A track
+from pad to pad stays, whatever fill joins the two: with it gone another net's pour may
+take its room, and the fill that joined them is another. `pcb::needless` is the same for
+a host that has its fill only after the run: nothing is filled or searched for, and a
+host that fills its board to count what a run left open has the answer for that fill.
+
+**A via may be in a pad that the host names and that no track leaves**
+(`Zones::via_pads`). A host that keeps vias out of pads means the pads that leads are
+soldered to. The exposed pad under a package is none of those, the pads round it shut it
+in, and its own board joins it to its plane by vias in it: `cynthion` has three, which no
+router joined. A named pad takes a via of its own net, all inside its box, if on the
+board as given no straight track of the net leaves it, sixteen ways round, and none
+joins it to a pad of its net beside it. One that a track leaves is joined by tracks:
+with vias let into the exposed pads of `corne-cherry`'s two packages, whose grounds have
+a pin beside them, the room under the packages went to those vias, and the board had 1,
+4 and 3 connections open for 2, 1 and 0.
+
 **Differential pairs are routed side by side last, in place of their nets' routes.** Routing
 pairs first, before anything else, as fixed copper, coupled `udb-s`'s USB pair a little better,
 60% of its length side by side in place of 50%, but cost other nets their room: `GB-LIVE32`

@@ -87,9 +87,6 @@ pub(crate) struct Refilled {
     pub(crate) fills: Vec<Fill>,
 }
 
-/// The most tracks that a stub to a fill has, with its one via.
-const STUB_TRACKS: usize = 4;
-
 fn find(parent: &mut [u32], mut i: u32) -> u32 {
     while parent[i as usize] != i {
         parent[i as usize] = parent[parent[i as usize] as usize];
@@ -279,16 +276,8 @@ impl Pours {
         })
     }
 
-    /// The copper `c` of the net of job `job` without the stubs to its fill that the
-    /// host's fills `real` make needless, and those stubs: a stub is a via with
-    /// no more than [`STUB_TRACKS`] tracks that joins pads to a fill, and it is needless if the
-    /// host's fills on every layer, the board's own copper and the net's other routes
-    /// join what it joins without it. `None` if none is.
-    ///
-    /// A net that plans on a plane has a stub for every pad that the plane does not
-    /// reach, whatever a pour of an outer layer joins: guide plans on no pour that
-    /// routes may cut. Once the routes are where they stay, the host's fill says which
-    /// pads its pours do join.
+    /// The copper `c` of the net of job `job` without what the host's fills `real` make
+    /// needless of it ([`needless`]), and what that is. `None` if nothing is.
     pub(crate) fn without_needless(
         &self,
         design: &Design,
@@ -299,122 +288,37 @@ impl Pours {
     ) -> Option<(NetCopper, NetCopper)> {
         let net = self.nets.iter().find(|n| n.job == job)?;
         let ctx = &jobs[job].ctx;
-        let own: Vec<Fill> = real
-            .fills
+        let widths: Vec<i64> = c
+            .segs
             .iter()
-            .filter(|f| design.zones.zones.get(f.zone).and_then(|z| z.net) == Some(net.net))
-            .cloned()
+            .map(|s| ctx.widths.get(usize::from(s.l)).copied().unwrap_or(0))
             .collect();
-        let by_net = planes::pieces_by_net(design, &own);
-        let fills: &[Piece] = by_net.first().map_or(&[][..], |(_, list)| list.as_slice());
-        // What the fills and the board's own copper join, without the net's routes.
-        let groups = planes::pieces(&design.board, design, net.net, fills);
-        let main = groups.main(fills)?;
-        let count = groups.pads.len();
-        let mut of_fill = vec![usize::MAX; fills.len()];
-        for (g, theirs) in groups.fills.iter().enumerate() {
-            for &f in theirs {
-                of_fill[f] = g;
-            }
-        }
-        let boxes: Vec<(Rect, usize)> = groups
-            .pads
-            .iter()
-            .enumerate()
-            .flat_map(|(g, pads)| pads.iter().map(move |&p| (p, g)))
-            .map(|(p, g)| (design.board.pads[p].shape.bbox(), g))
-            .collect();
-        // The groups that copper at `at` on `layers` is part of: a pad of the net with
-        // its centre there, a fill that holds the point, a track's end or a via of the
-        // board's own there.
-        let at_groups = |at: Point, layers: LayerSet, out: &mut Vec<usize>| {
-            for p in ctx.pads.iter().filter(|p| own_pad(p) && p.center == at) {
-                if p.layers.0 & layers.0 != 0
-                    && let Some(&(_, g)) = boxes.iter().find(|(b, _)| *b == p.bbox)
-                {
-                    out.push(g);
-                }
-            }
-            for (f, piece) in fills.iter().enumerate() {
-                if layers.contains(piece.layer)
-                    && of_fill[f] != usize::MAX
-                    && piece.bbox.intersects(&Rect::new(at, at))
-                    && piece.holds(at)
-                {
-                    out.push(of_fill[f]);
-                }
-            }
-            for (g, points) in groups.points.iter().enumerate() {
-                if points
-                    .iter()
-                    .any(|&(q, on)| q == at && on.0 & layers.0 != 0)
-                {
-                    out.push(g);
-                }
-            }
-        };
-        let bare = NetCtx::new(ctx.net, ctx.widths.clone(), ctx.via, Vec::new(), 0, 0);
-        let parts = c.pieces(&bare);
-        let all = design.rules.layers();
-        let mut joins: Vec<Vec<usize>> = vec![Vec::new(); parts.count];
-        let mut size: Vec<(usize, usize)> = vec![(0, 0); parts.count];
-        for (s, &part) in c.segs.iter().zip(&parts.segs) {
-            let on = LayerSet::EMPTY.with(LayerId(s.l));
-            at_groups(s.a, on, &mut joins[part]);
-            at_groups(s.b, on, &mut joins[part]);
-            size[part].0 += 1;
-        }
-        for (&v, &part) in c.vias.iter().zip(&parts.vias) {
-            at_groups(v, all, &mut joins[part]);
-            size[part].1 += 1;
-        }
-        for j in &mut joins {
-            j.sort_unstable();
-            j.dedup();
-        }
-        // The groups that are one with the largest fill, by the parts that are not `gone`.
-        let joined = |gone: &[bool]| {
-            let mut parent: Vec<u32> = (0..count as u32).collect();
-            for (part, j) in joins.iter().enumerate() {
-                if !gone[part] {
-                    for w in j.windows(2) {
-                        union(&mut parent, w[0] as u32, w[1] as u32);
-                    }
-                }
-            }
-            let root = find(&mut parent, main as u32);
-            (0..count as u32)
-                .map(|g| find(&mut parent, g) == root)
-                .collect::<Vec<bool>>()
-        };
-        let mut gone = vec![false; parts.count];
-        let before = joined(&gone);
-        for part in 0..parts.count {
-            let stub = size[part].1 == 1 && size[part].0 <= STUB_TRACKS;
-            // Only where everything it joins is known to be one with the largest fill.
-            if !stub || joins[part].is_empty() || !joins[part].iter().all(|&g| before[g]) {
-                continue;
-            }
-            gone[part] = true;
-            if joined(&gone) != before {
-                gone[part] = false;
-            }
-        }
-        if !gone.iter().any(|&g| g) {
-            return None;
-        }
+        let diameters = vec![ctx.via.map_or(0, |(d, _)| d); c.vias.len()];
+        let gone = needless(design, net.net, c, (&widths, &diameters), &real.fills)?;
+        let ns = c.segs.len();
         let (mut out, mut taken) = (c.detached(), c.detached());
         out.keep.clear();
         taken.keep.clear();
-        // The tracks and vias of the parts that stay, or of those that go.
-        fn sift<T>(items: &mut Vec<T>, parts: &[usize], gone: &[bool], keep: bool) {
-            let mut k = parts.iter();
-            items.retain(|_| k.next().is_some_and(|&part| gone[part] != keep));
-        }
-        sift(&mut out.segs, &parts.segs, &gone, true);
-        sift(&mut out.vias, &parts.vias, &gone, true);
-        sift(&mut taken.segs, &parts.segs, &gone, false);
-        sift(&mut taken.vias, &parts.vias, &gone, false);
+        let mut k = 0;
+        out.segs.retain(|_| {
+            k += 1;
+            !gone[k - 1]
+        });
+        let mut k = 0;
+        out.vias.retain(|_| {
+            k += 1;
+            !gone[ns + k - 1]
+        });
+        let mut k = 0;
+        taken.segs.retain(|_| {
+            k += 1;
+            gone[k - 1]
+        });
+        let mut k = 0;
+        taken.vias.retain(|_| {
+            k += 1;
+            gone[ns + k - 1]
+        });
         Some((out, taken))
     }
 
@@ -967,6 +871,254 @@ impl Pours {
     }
 }
 
+/// A piece of fill with no pad on it counts as one to keep joined if its area is no less
+/// than the largest's over this ([`needless`]).
+const ISLAND: i128 = 16;
+
+/// Whether a pad has copper on one of `layers` that `copper` touches.
+fn pad_touches(pad: &crate::geom::drc::Pad, copper: &Shape, layers: LayerSet) -> bool {
+    let near = copper.bbox();
+    let touches = |on: LayerSet, shape: &Shape| {
+        on.0 & layers.0 != 0 && shape.bbox().intersects(&near) && shape.touches(copper)
+    };
+    touches(pad.layers, &pad.shape) || pad.stack.iter().any(|(on, shape)| touches(*on, shape))
+}
+
+/// What of the copper `c` of `net` the fills `fills` make needless: by track and then by
+/// via, whether it is. A via is needless if the pads of the net are joined to each other
+/// without it as they are with it, by the fills on every layer, the board's own copper
+/// and the rest of `c`: whatever is one piece with it stays one, joined to the largest
+/// fill or not. A small piece of fill with no pad on it is joined to nothing for its own
+/// sake, unless a zone of the net keeps its islands. And a track that a via taken out
+/// leaves leading nowhere is needless too. `widths` are the tracks' widths, by
+/// position in `c`'s, and `diameters` its vias'. `None` if nothing is needless, or the
+/// net has no fill.
+///
+/// A net that plans on a plane has a stub for every pad that the plane does not reach,
+/// whatever a pour of an outer layer joins: guide plans on no pour that routes may cut.
+/// And a net whose pads the routes of others cut off their pour is joined up again each
+/// time that is told, while those routes still move: by a wire through a via for a piece
+/// that another wire, or the pour as it is at the end, joins as well. Once the routes are
+/// where they stay, the fill around them says what the pours join, and the vias are taken
+/// one at a time, so that a pour with five pads keeps the one that takes it to the plane.
+///
+/// A track or a via is one with every pad and every piece of fill that its copper
+/// touches, anywhere along it: a track across a piece of a pour joins that piece, and may
+/// be all that does.
+pub(crate) fn needless(
+    design: &Design,
+    net: NetId,
+    c: &NetCopper,
+    (widths, diameters): (&[i64], &[i64]),
+    fills: &[Fill],
+) -> Option<Vec<bool>> {
+    let own: Vec<Fill> = fills
+        .iter()
+        .filter(|f| design.zones.zones.get(f.zone).and_then(|z| z.net) == Some(net))
+        .cloned()
+        .collect();
+    let by_net = planes::pieces_by_net(design, &own);
+    let fills: &[Piece] = by_net.first().map_or(&[][..], |(_, list)| list.as_slice());
+    // What the fills and the board's own copper join, without the net's routes.
+    let groups = planes::pieces(&design.board, design, net, fills);
+    groups.main(fills)?;
+    let count = groups.pads.len();
+    let mut of_fill = vec![usize::MAX; fills.len()];
+    for (g, theirs) in groups.fills.iter().enumerate() {
+        for &f in theirs {
+            of_fill[f] = g;
+        }
+    }
+    let pads: Vec<(usize, usize)> = groups
+        .pads
+        .iter()
+        .enumerate()
+        .flat_map(|(g, pads)| pads.iter().map(move |&p| (p, g)))
+        .collect();
+    // The groups that `copper` on `layers`, with ends at `ends`, is part of: a pad of the
+    // net or a fill that it touches, a track's end or a via of the board's own at one of
+    // its ends.
+    let touched = |copper: &Shape, ends: &[Point], layers: LayerSet, out: &mut Vec<usize>| {
+        let near = copper.bbox();
+        for &(p, g) in &pads {
+            if pad_touches(&design.board.pads[p], copper, layers) {
+                out.push(g);
+            }
+        }
+        for (f, piece) in fills.iter().enumerate() {
+            if layers.contains(piece.layer)
+                && of_fill[f] != usize::MAX
+                && piece.bbox.intersects(&near)
+                && (ends.iter().any(|&at| piece.holds(at)) || piece.shape.touches(copper))
+            {
+                out.push(of_fill[f]);
+            }
+        }
+        for (g, points) in groups.points.iter().enumerate() {
+            if points
+                .iter()
+                .any(|&(q, on)| ends.contains(&q) && on.0 & layers.0 != 0)
+            {
+                out.push(g);
+            }
+        }
+    };
+    let all = design.rules.layers();
+    let (ns, nv) = (c.segs.len(), c.vias.len());
+    // By track and then by via, the groups that it is part of.
+    let mut of: Vec<Vec<usize>> = vec![Vec::new(); ns + nv];
+    // The copper of each, with its layers. One that is no shape is taken for a net that
+    // nothing is told of.
+    let mut shapes: Vec<(Shape, LayerSet)> = Vec::with_capacity(ns + nv);
+    for (i, s) in c.segs.iter().enumerate() {
+        let on = LayerSet::EMPTY.with(LayerId(s.l));
+        let copper = widths
+            .get(i)
+            .and_then(|&w| Shape::track(s.a, s.b, w).ok())?;
+        touched(&copper, &[s.a, s.b], on, &mut of[i]);
+        shapes.push((copper, on));
+    }
+    for (v, &at) in c.vias.iter().enumerate() {
+        let copper = diameters.get(v).and_then(|&d| Shape::circle(at, d).ok())?;
+        touched(&copper, &[at], all, &mut of[ns + v]);
+        shapes.push((copper, all));
+    }
+    for g in &mut of {
+        g.sort_unstable();
+        g.dedup();
+    }
+    // What touches what: two of them with a layer in common whose copper does.
+    let mut touching: Vec<(usize, usize)> = Vec::new();
+    {
+        let boxes: Vec<Rect> = shapes.iter().map(|(s, _)| s.bbox()).collect();
+        let mut order: Vec<usize> = (0..shapes.len()).collect();
+        order.sort_by_key(|&i| (boxes[i].min().x, i));
+        for (k, &i) in order.iter().enumerate() {
+            for &j in &order[k + 1..] {
+                if boxes[j].min().x > boxes[i].max().x {
+                    break;
+                }
+                if shapes[i].1.0 & shapes[j].1.0 != 0
+                    && boxes[i].intersects(&boxes[j])
+                    && shapes[i].0.touches(&shapes[j].0)
+                {
+                    touching.push((i.min(j), i.max(j)));
+                }
+            }
+        }
+    }
+    // The groups that count: those with a pad, or with copper of the board's own, or
+    // with fill of a sixteenth of the largest group's, as a plane with no pad on its
+    // layer has. A small piece of fill that touches no pad is an island once nothing of
+    // the net's routes touches it, which a zone that takes its islands away does not
+    // keep, and a via that only ties such a piece to the rest is needless. Where a zone
+    // of the net keeps its islands, every group counts.
+    let keeps = design
+        .zones
+        .zones
+        .iter()
+        .any(|z| z.net == Some(net) && z.islands != super::Islands::Remove);
+    let size = |g: usize| -> i128 { groups.fills[g].iter().map(|&f| fills[f].size).sum() };
+    let largest = (0..count).map(size).max().unwrap_or(0);
+    let counted: Vec<usize> = (0..count)
+        .filter(|&g| {
+            keeps
+                || !groups.pads[g].is_empty()
+                || !groups.points[g].is_empty()
+                || size(g) * ISLAND >= largest
+        })
+        .collect();
+    // By group that counts, the first of those that it is one with, by the tracks and
+    // vias that are not `gone`.
+    let joined = |gone: &[bool]| {
+        let mut parent: Vec<u32> = (0..(count + ns + nv) as u32).collect();
+        for (e, groups) in of.iter().enumerate() {
+            if !gone[e] {
+                for &g in groups {
+                    union(&mut parent, g as u32, (count + e) as u32);
+                }
+            }
+        }
+        for &(a, b) in &touching {
+            if !gone[a] && !gone[b] {
+                union(&mut parent, (count + a) as u32, (count + b) as u32);
+            }
+        }
+        let mut first = vec![u32::MAX; count + ns + nv];
+        for &g in &counted {
+            let root = find(&mut parent, g as u32) as usize;
+            first[root] = first[root].min(g as u32);
+        }
+        counted
+            .iter()
+            .map(|&g| first[find(&mut parent, g as u32) as usize])
+            .collect::<Vec<u32>>()
+    };
+    let mut gone = vec![false; ns + nv];
+    let before = joined(&gone);
+    // The vias first, each with nothing else: one that the groups are as joined without
+    // goes. Then the tracks that this leaves leading nowhere, over and over until none
+    // goes: one with an end that nothing of the copper that stays is at, and no pad. A
+    // track from pad to pad stays, whatever fill joins the two: taking it out leaves
+    // room that another net's pour may fill, and the fill that joined them is then
+    // another.
+    for v in 0..nv {
+        gone[ns + v] = true;
+        if joined(&gone) != before {
+            gone[ns + v] = false;
+        }
+    }
+    if !gone.iter().any(|&g| g) {
+        return None;
+    }
+    // By track, for each of its ends, what touches it there and whether a pad does.
+    let dot = |at: Point| Shape::circle(at, 2).ok();
+    let mut ends: Vec<[(Vec<usize>, bool); 2]> = Vec::with_capacity(ns);
+    for (i, s) in c.segs.iter().enumerate() {
+        let on = LayerSet::EMPTY.with(LayerId(s.l));
+        let end = |at: Point| {
+            let Some(dot) = dot(at) else {
+                return (Vec::new(), true);
+            };
+            let near: Vec<usize> = touching
+                .iter()
+                .filter(|&&(a, b)| a == i || b == i)
+                .map(|&(a, b)| if a == i { b } else { a })
+                .filter(|&o| shapes[o].0.touches(&dot))
+                .collect();
+            let pad = pads
+                .iter()
+                .any(|&(p, _)| pad_touches(&design.board.pads[p], &dot, on));
+            (near, pad)
+        };
+        ends.push([end(s.a), end(s.b)]);
+    }
+    loop {
+        let mut any = false;
+        for i in 0..ns {
+            if gone[i] {
+                continue;
+            }
+            let loose = ends[i]
+                .iter()
+                .any(|(near, pad)| !pad && near.iter().all(|&o| gone[o]));
+            if !loose {
+                continue;
+            }
+            gone[i] = true;
+            if joined(&gone) == before {
+                any = true;
+            } else {
+                gone[i] = false;
+            }
+        }
+        if !any {
+            break;
+        }
+    }
+    Some(gone)
+}
+
 /// A net to join up again: as [`Pours::rejoin`] has it, the places in its fill that are
 /// new, which its routes may end at from now on, and how many pieces of its fill with pads
 /// or stubs of its on them are cut off the largest.
@@ -1353,6 +1505,150 @@ mod tests {
         control.refill = Some(&none);
         let routed = route_with(&d, &options, &control).unwrap();
         assert_eq!((routed.tracks, routed.vias), (alone.tracks, alone.vias));
+    }
+
+    #[test]
+    fn the_fills_say_which_vias_and_tracks_of_a_net_are_needless() {
+        use super::super::tests::design;
+        use super::super::{Zones, needless};
+        use crate::geom::drc::{Track, Via};
+        use crate::geom::{LayerId, LayerSet};
+        // Four layers. Net 1 has a plane on the second and a pour on the first, which
+        // joins its two pads there, and two more pads off both, 20 mm away.
+        let pads = vec![
+            smd(3 * MM, 2 * MM, 1),
+            smd(8 * MM, 2 * MM, 1),
+            smd(20 * MM, 2 * MM, 1),
+            smd(24 * MM, 2 * MM, 1),
+        ];
+        let mut d = design(4, pads, 2);
+        let mut plane = zone(1, 1, 4 * MM);
+        plane.outline[1].x = 12 * MM;
+        plane.outline[2].x = 12 * MM;
+        plane.plane = Some(true);
+        let mut pour = plane.clone();
+        pour.layers = LayerSet::EMPTY.with(LayerId(0));
+        d.zones = Zones {
+            zones: vec![plane, pour],
+            ..Zones::default()
+        };
+        let fills = vec![
+            piece(0, 1, (0, 12 * MM), (0, 4 * MM)),
+            piece(1, 0, (0, 12 * MM), (0, 4 * MM)),
+        ];
+        let track = |a: (i64, i64), b: (i64, i64)| Track {
+            start: Point::new(a.0, a.1),
+            end: Point::new(b.0, b.1),
+            mid: None,
+            width: 200_000,
+            layer: LayerId(0),
+            net: Some(NetId(1)),
+        };
+        let via = |x: i64, y: i64| Via {
+            at: Point::new(x, y),
+            drill: 300_000,
+            diameter: 600_000,
+            from: LayerId(0),
+            to: LayerId(3),
+            net: Some(NetId(1)),
+        };
+        // A stub to the plane from each pad on the pour, a track round a corner to a
+        // via; and a track between the two pads off it.
+        let tracks = vec![
+            track((3 * MM, 2 * MM), (3 * MM, 3 * MM)),
+            track((3 * MM, 3 * MM), (4 * MM, 3 * MM)),
+            track((8 * MM, 2 * MM), (8 * MM, 3 * MM)),
+            track((20 * MM, 2 * MM), (24 * MM, 2 * MM)),
+        ];
+        let vias = vec![via(4 * MM, 3 * MM), via(8 * MM, 3 * MM)];
+        // The pour joins the two pads, so one via to the plane is enough: the first goes,
+        // with the two tracks that led to it, and the second stays, as the one thing
+        // that joins the pour to the plane. The track between the pads that no fill
+        // reaches stays too: they are one piece by it, if not with the plane.
+        assert_eq!(needless(&d, &tracks, &vias, &fills), (vec![0, 1], vec![0]));
+        // With no pour, each pad needs its stub.
+        let none: (Vec<usize>, Vec<usize>) = Default::default();
+        assert_eq!(needless(&d, &tracks, &vias, &fills[..1]), none);
+        // And with no fill at all there is nothing to tell by.
+        assert_eq!(needless(&d, &tracks, &vias, &[]), none);
+        // A net with a via that does not go through the board is left as it is.
+        let mut blind = vias.clone();
+        blind[1].to = LayerId(1);
+        assert_eq!(needless(&d, &tracks, &blind, &fills), none);
+        // A small piece of fill on the far side with no pad on it, and a via that ties
+        // it to the plane where the pour does not reach: the via joins no pad to
+        // another, and goes. Unless the zone keeps its islands.
+        let island = vec![
+            piece(0, 1, (0, 12 * MM), (0, 4 * MM)),
+            piece(1, 0, (0, 10 * MM), (0, 4 * MM)),
+            piece(1, 3, (10_500_000, 11_500_000), (1_500_000, 2_500_000)),
+        ];
+        let mut tied = vias.clone();
+        tied.push(via(11 * MM, 2 * MM));
+        assert_eq!(
+            needless(&d, &tracks, &tied, &island),
+            (vec![0, 1], vec![0, 2])
+        );
+        d.zones.zones[1].islands = super::super::Islands::Keep;
+        assert_eq!(needless(&d, &tracks, &tied, &island), (vec![0, 1], vec![0]));
+    }
+
+    #[test]
+    fn a_via_of_its_net_may_be_in_a_pad_that_the_host_names_and_no_track_leaves() {
+        use super::super::tests::design;
+        use super::super::world::Verdict;
+        use crate::geom::drc::Pad;
+        use crate::geom::{LayerId, LayerSet, Shape};
+        // The exposed pad of a package, 3 mm square, of net 1, and the pads of the
+        // package round it, of net 2, with no room between two of them.
+        let big = Pad::new(
+            Shape::rect(Rect::new(Point::new(0, 0), Point::new(3 * MM, 3 * MM))).unwrap(),
+            LayerSet::EMPTY.with(LayerId(0)),
+            Some(NetId(1)),
+        );
+        let mut pads = vec![big];
+        for k in 0..8 {
+            let at = -800_000 + 650_000 * k;
+            for (x, y) in [
+                (at, -800_000),
+                (at, 3_800_000),
+                (-800_000, at),
+                (3_800_000, at),
+            ] {
+                pads.push(smd(x, y, 2));
+            }
+        }
+        let shut = design(2, pads, 3);
+        let options = RouteOptions {
+            vias_in_pads: false,
+            ..RouteOptions::default()
+        };
+        let via = |d: &Design, net: u32, x: i64| {
+            let mut world = World::new(
+                &d.board,
+                &d.rules,
+                &d.outline,
+                d.edge_clearance,
+                &d.obstacles,
+            )
+            .unwrap();
+            world.configure(d, &options);
+            world.via(NetId(net), Point::new(x, 1_500_000), 600_000, 300_000, None)
+        };
+        // Vias are kept out of pads.
+        assert_eq!(via(&shut, 1, 1_500_000), Verdict::Blocked);
+        // Named, the pad has room for a via of its net that is all inside it, and for no
+        // other net's.
+        let mut named = shut.clone();
+        named.zones.via_pads = vec![0];
+        assert_eq!(via(&named, 1, 1_500_000), Verdict::Free);
+        assert_eq!(via(&named, 1, 2_900_000), Verdict::Blocked);
+        assert_eq!(via(&named, 2, 1_500_000), Verdict::Blocked);
+        // With a side of the package open, a track leaves the pad, and it is joined by
+        // tracks as any other.
+        let mut open = named.clone();
+        open.board.pads.retain(|p| p.shape.bbox().min().x < 3 * MM);
+        assert_eq!(via(&open, 1, 1_500_000), Verdict::Blocked);
     }
 
     #[test]

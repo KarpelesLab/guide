@@ -415,6 +415,35 @@ impl<'a> Run<'a> {
         self.part(share, work_share);
     }
 
+    /// How long the deadline leaves, if there is one.
+    pub(crate) fn left(&self) -> Option<Duration> {
+        self.control
+            .deadline
+            .map(|d| d.saturating_duration_since(Instant::now()))
+    }
+
+    /// Gives the part under way, which was ended at its time or its work, `time` more
+    /// and `work` more, no later than the deadline and no more than the budget has, and
+    /// takes back that it was ended.
+    pub(crate) fn allow(&self, time: Duration, work: u64, was: Option<Stopped>) {
+        if self.why.get().is_some() {
+            return;
+        }
+        self.cut.set(was);
+        self.paused.set(false);
+        self.stop.store(false, Ordering::Relaxed);
+        self.part_until.set(self.control.deadline.map(|d| {
+            let now = Instant::now();
+            (now + time).min(d)
+        }));
+        self.part_work.set(if self.budgeted {
+            self.work.get().saturating_add(work.min(self.left.get()))
+        } else {
+            u64::MAX
+        });
+        self.pause_if_due(false);
+    }
+
     /// What ended a part early, if anything did.
     pub(crate) fn cut(&self) -> Option<Stopped> {
         self.cut.get()

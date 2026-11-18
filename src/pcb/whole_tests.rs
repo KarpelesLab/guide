@@ -101,3 +101,33 @@ fn on_one_layer_what_cannot_cross_is_left_to_the_passes() {
     let routed = route_checked(&d, &whole());
     assert_eq!(routed.unrouted.len(), 1);
 }
+
+#[test]
+fn on_more_than_two_layers_the_routes_are_legal_and_the_same_on_any_number_of_threads() {
+    // The same nets across each other on four layers, where the grid is of twice the
+    // pitch.
+    let mut d = crossed(8);
+    d.rules = super::tests::rules(4);
+    let one = route_checked(&d, &whole());
+    assert!(one.unrouted.is_empty());
+    let (_, shared, taken_out, nets) = one.stats.whole;
+    assert_eq!((shared, taken_out, nets), (0, 0, 8));
+    let options = RouteOptions {
+        threads: 3,
+        ..whole()
+    };
+    let more = route_checked(&d, &options);
+    assert_eq!(one.tracks, more.tracks);
+    assert_eq!(one.vias, more.vias);
+    // And whatever a budget stops it in.
+    for part in [8, 64, 512, 4096] {
+        let options = RouteOptions {
+            work_budget: Some(one.stats.work * part / 8192 + 1),
+            ..whole()
+        };
+        let routed = route_checked(&d, &options);
+        let again = route(&d, &options).unwrap();
+        assert_eq!(routed.tracks, again.tracks);
+        assert_eq!(routed.vias, again.vias);
+    }
+}

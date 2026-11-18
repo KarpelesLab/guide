@@ -5337,6 +5337,179 @@ a fill was timed and took no more than 3 % of the budget.
 - The vias of the other nets. Of `lumenpnp-mobo`'s some 280 are not stubs, where
   cadlab's router has some 207, and nothing here touches them.
 
+## PCB routing at twice the pitch
+
+What was changed after [the release above](#pcb-routing-on-the-hosts-own-fills), 0.0.18,
+for the same host, cadlab: where its own router still had the better copper, vias and
+track, and the boards on which both leave the most open
+([decisions](architecture.md#decisions)). Measured on 2026-11-18 through cadlab's adapter
+and its `route_bench`. What decided between two versions of the code was a budget of
+nodes, which is the same on any machine; the runs with a deadline are those of the
+source as it was when each was made, several at a time.
+
+### What
+
+At 60 s 0.0.18 was behind cadlab's router on no board by the connections it left open,
+and behind it by its vias: `lumenpnp-mobo` 402 to 411 against 309 to 343,
+`tinytapeout-demo` 385 to 427 against 238 to 290, `corne-cherry` 534 to 625 against 445
+to 505, `glasgow-revD1` 1202 to 1253 against 877 to 932.
+
+**Where the vias come from**, counted in one run of each board:
+
+- *The negotiation's vias only rise.* After its first round, each net where it would go
+  alone, `tinytapeout-demo` has 310 vias, and 485 when its share ends it at the
+  forty-second; `lumenpnp-mobo` 442 and 534 at the twelfth, where it ends with nothing
+  shared; `corne-cherry` 319 and 666 at the hundred and eighteenth. Only the wires in
+  another net's way are routed again, and a wire that went under another stays there
+  when the other has moved. The pass for fewer vias at the end, each net once more
+  with nothing shared and vias at four times their price, takes 32, 43 and 51 of them
+  on three boards, and none where the share ended the rounds first.
+- *The passes add more.* What the negotiation leaves open the passes route, a net at a
+  time with others taken out for it, at a quarter of the negotiation's price for a
+  via: `tinytapeout-demo`, with all of what follows, begins them with 219 to 278 vias
+  in the nets that have no plane and ends them with 313 to 379, for 15 to 22
+  connections more.
+- *A net with a pour has more than one via for each piece of it.* By the nets with
+  zones and the others, one run: `lumenpnp-mobo` 163 and 245 against 140 and 200 for
+  cadlab's router, `tinytapeout-demo` 111 and 345 against 43 and 195, `corne-cherry` 171
+  and 454 against 75 and 409. The routes of both routers leave the pours in as many
+  pieces: on `corne-cherry` the pads and fills of one ground are in 89 pieces without
+  the net's own routes after `guide` and in 79 after cadlab's router, which joins them
+  with 37 vias where `guide` has 83. A net whose pads are cut off its pour is joined up
+  again at each of the three times that is told, and what one telling joined through a
+  via the next finds joined by the pour.
+
+**What was done:**
+
+- **On more than two layers the grid is at twice the pitch.** A track and its
+  clearance apart, where it was half that: two tracks side by side are still a step
+  from each other, there are a quarter of the points, a round costs a fifth of the
+  nodes, and a via costs twice the track it did. A board of two layers stays at the
+  first pitch, and has the second only where the first round says that its share has
+  no room for three rounds of the first.
+- **A negotiation at twice the pitch is begun if one first round fits the time**, or
+  thirty first rounds a budget of nodes: `glasgow-revD1`, six layers and 1939
+  connections, was given up after a second at the first pitch. At twice it has five
+  rounds in its share, which leave 3700 points shared and 130 nets with wires taken
+  out, and the passes begin from the rest.
+- **There, a negotiation that its share ends has its end all the same**: the nets
+  taken out routed again where nothing is claimed, and the pass for fewer vias, the
+  nets with the most first, within 2.5 times what the first round took and 15 % of
+  what the run has left.
+- **Every via is tried against the fills**, where it was the stubs: a via goes if the
+  pads of its net are in the same pieces without it, told by the copper itself, and
+  then the tracks that this leaves leading nowhere. A small piece of fill with no pad
+  on it is joined to nothing for its own sake. `needless` gives the same to a host
+  that fills its board after a run, with nothing filled for it.
+- **A via may be in a pad that the host names and that no track leaves**
+  (`Zones::via_pads`): the exposed pad under a package, which the pads round it shut
+  in. `cynthion` has three, joined by vias in them on its own board and by no router.
+
+### Results
+
+At a budget of 40 million nodes, the nine boards that a budget cuts, three orders of the
+nets: connections open over the three, and the range of the vias, 0.0.18 first.
+
+| board | layers | open, 0.0.18 | with this | vias, 0.0.18 | with this |
+|---|---|---|---|---|---|
+| nrfmicro | 2 | 0 | 0 | 48 to 60 | 48 to 60 |
+| sweep-v2.2 | 2 | 9 | 9 | 18 to 24 | 18 to 24 |
+| corne-cherry | 2 | 79 | 79 | 494 to 519 | 473 to 501 |
+| tinytapeout-demo | 4 | 41 | 30 | 397 to 454 | 362 to 412 |
+| buspirate5-rev10 | 4 | 0 | 0 | 377 to 393 | 314 to 323 |
+| lumenpnp-mobo | 4 | 0 | 0 | 401 to 408 | 331 to 335 |
+| cynthion | 4 | 35 | 24 | 603 to 669 | 405 to 421 |
+| glasgow-revC3 | 4 | 105 | 100 | 395 to 400 | 341 to 384 |
+| glasgow-revD1 | 6 | 441 | 433 | 1078 to 1134 | 1066 to 1107 |
+| all | | 710 | 675 | | |
+
+The boards of two layers are as they were but for the vias that the fills make needless.
+`glasgow-revD1` has no negotiation at this budget, at either pitch: thirty first rounds
+are 61 million nodes. `cynthion`'s eleven fewer are nine for the three exposed pads and
+two for the grid.
+
+At 60 s, through the adapter, four orders of the nets with three threads for the
+negotiation, four runs at a time on the machine, the source as it was before the small
+pieces of fill with no pad stopped counting; 0.0.18 in brackets, from the table of the
+[release above](#pcb-routing-on-the-hosts-own-fills), two runs at a time:
+
+| board | open by order | vias |
+|---|---|---|
+| nrfmicro | 0, 0, 0, 0 (0, 0, 0, 0) | 41 to 60 |
+| sweep-v2.2 | 3, 3, 3, 3 (3, 3, 3, 3) | 18 to 24 |
+| corne-cherry | 2, 1, 0, 0 (2, 1, 0, 0) | 529 to 619 (534 to 625) |
+| tinytapeout-demo | 1, 4, 1, 0 (0, 4, 0, 4) | 333 to 465 (385 to 427) |
+| buspirate5-rev10 | 0, 0, 0, 0 (0, 0, 0, 0) | 311 to 351 (349 to 372) |
+| lumenpnp-mobo | 0, 0, 0, 0 (0, 0, 0, 0) | 337 to 354 (402 to 411) |
+| cynthion | 8, 8, 8, 8 (12, 11, 12, 11) | 427 to 470 (604 to 699) |
+| glasgow-revC3 | 29, 30, 33, 34 (35, 33, 31, 34) | 325 to 359 (379 to 403) |
+| glasgow-revD1 | 103, 87, 101, 99 (122, 135, 118, 134) | 1092 to 1125 (1202 to 1253) |
+
+Pads in pours short of two spokes, cadlab's count over the twelve boards: 70 to 80 in
+the four orders for 90 to 100, with 0 to 3 that have none for 1 to 3;
+`buspirate5-rev10` 29 to 34 for 33 to 43, `glasgow-revD1` 24 to 28 for 38 to 42,
+`tinytapeout-demo` 11 to 13 for 6 to 10.
+
+`glasgow-revD1` alone, two orders, two runs at a time: 125 and 135 open with no
+negotiation, 82 and 84 with one at twice the pitch in half of the first run, 79 and 74
+with three quarters of it.
+
+### Tried and not kept
+
+- **The history of the rounds forgotten before the pass for fewer vias, and the pass
+  made up to four times.** A search with nothing shared still pays for a point what the
+  rounds added to it each time it was shared. Without that and with more rounds, at 150
+  million nodes: `lumenpnp-mobo` 31 vias saved in the first and none in the second,
+  `buspirate5-rev10` 52 and 3, `glasgow-revC3` 28 and 1, and no fewer on the routed
+  board, 411 for 408 and 357 for 346. With the others where they are, a net has no
+  better way.
+- **The nets with something shared routed again whole**, every round, or every fourth:
+  at 150 million nodes the nets with no plane have 247 and 243 vias on `lumenpnp-mobo`
+  for 245, 245 and 249 on `buspirate5-rev10` for 247, and on `corne-cherry` and
+  `tinytapeout-demo` the budget ended the rounds with more open.
+- **Every net near a shared point routed again whole**, as cadlab's router does it, in
+  every round or in the first eight, at 300 million nodes, which lets every negotiation
+  end: `corne-cherry` 518 vias for 625 at 2.6 times the nodes, `buspirate5-rev10` 392
+  for 346, `tinytapeout-demo` 407 for 389; in the first eight rounds only, 607, 357 and
+  383. Nothing that a minute pays for.
+- **Twice the pitch on two layers.** `nrfmicro` at 60 s in four orders: 0, 2, 2 and 1
+  open for none, and 4 for none over three orders at 40 million nodes; `sweep-v2.2`
+  the same either way.
+- **The first pitch with three quarters of the run on six layers**: `glasgow-revD1` 161
+  and 198 open for 125 and 135 with no negotiation; at twice the pitch 82 and 84 with
+  half, 79 and 74 with three quarters.
+- **A negotiation at twice the pitch begun whenever one first round fits its budget of
+  nodes**: `glasgow-revD1` at 40 million has two rounds in its 20, and 599 open over
+  three orders for 441.
+- **The end of a negotiation that was cut, at the first pitch too**: `corne-cherry` at
+  40 million nodes 95 open over three orders for 79. At twice the pitch
+  `tinytapeout-demo` has 30 with it for 26 without at that budget, and at 60 s 0, 3, 1
+  and 4 with it for 3, 7, 0 and 7.
+- **Tracks from pad to pad taken out where a fill joins the two.** The room goes to
+  another net's pour, where the board has one with a higher priority on the layer, and
+  the fill that joined the pads is then another: on `cynthion` a strip of the ground's
+  pour beside such a track was gone with it, and the pad at its end open. Four runs of
+  27 ended with a connection more for it, which the host's check found.
+- **Vias let into every pad that the host names**, shut in or not: `corne-cherry`'s two
+  packages have a ground pin beside their exposed pads, and with the room under them
+  taken by vias the board had 1, 4 and 3 open at 150 million nodes for 2, 1 and 0.
+- **The rooms of spokes told half a step round each point of the coarser grid**, for
+  the ones that lie between two points: `buspirate5-rev10` 33 to 36 pads short of two
+  spokes at 40 million nodes for 31, with a connection open in one order of three.
+- **Dearer vias in the passes after a negotiation**, 2 mm of track for 1: at 40 million
+  nodes over three orders `corne-cherry` 88 open for 79 and `glasgow-revC3` 103 for
+  100, with as many vias on `tinytapeout-demo`, 362 to 422 for 370 to 418.
+
+### What this does not show
+
+- The vias that the passes add after a negotiation that was cut. `tinytapeout-demo`
+  is where they are most: its negotiation does not end in a minute at either pitch,
+  with 38 to 98 points shared when its share is over.
+- A board of two layers with no room at the first pitch. The corpus has none, and the
+  second pitch there is as it is on six layers, untried.
+- A host whose pours have no priorities among them, or a board with one net's pour to
+  a layer: a track from pad to pad that a fill makes needless could go there.
+
 ## PCB differential pairs and lengths
 
 Differential pairs routed side by side, and nets meandered to their lengths, by `pcb::route`

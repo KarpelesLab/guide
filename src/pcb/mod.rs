@@ -786,7 +786,9 @@ pub struct RouteOptions {
     /// and the new one is kept if it costs less. Then the searches for fewer vias, as
     /// without. The routes that a run [was given](route_from) and has not moved are
     /// looked at as well, where the rest of cleanup leaves them as the run before left
-    /// them: a host that routes in several runs sets it in the last.
+    /// them: a host that routes in several runs sets it in the last. Not the routes of a
+    /// net of a [pair](Design::pairs) or of one with a [length](Design::lengths) to
+    /// keep, which stay as they are.
     pub shorten: bool,
 }
 

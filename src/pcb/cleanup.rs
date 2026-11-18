@@ -74,8 +74,22 @@ pub(crate) fn run(
     }
     if options.shorten {
         // The nets that an earlier run left as they are too: it looked at each with the
-        // others where they were then.
-        expanded += shorten(world, design, jobs, copper, params, options);
+        // others where they were then. But a net of a pair or with a length to keep: the
+        // routes that a run was given for those are side by side, or as long as they
+        // are to be, and a shorter way is neither.
+        let kept: Vec<bool> = jobs
+            .iter()
+            .map(|job| {
+                let net = job.ctx.net;
+                (bounded && job.plane)
+                    || design
+                        .pairs
+                        .iter()
+                        .any(|p| p.positive == net || p.negative == net)
+                    || design.lengths.iter().any(|l| l.nets.contains(&net))
+            })
+            .collect();
+        expanded += shorten(world, design, jobs, copper, params, options, &kept);
         // And every net pulled tight again, a few times over: tracks side by side round
         // a corner are each in the next one's way, and the one on the inside goes first.
         let length = |copper: &[Option<NetCopper>]| -> f64 {
@@ -83,12 +97,12 @@ pub(crate) fn run(
         };
         for _ in 0..TIDY_SWEEPS {
             let before = length(copper);
-            for (job, slot) in jobs.iter().zip(copper.iter_mut()) {
+            for (j, (job, slot)) in jobs.iter().zip(copper.iter_mut()).enumerate() {
                 let Some(c) = slot else { continue };
                 if stopped(world) {
                     return expanded;
                 }
-                if !(bounded && job.plane) {
+                if !kept[j] {
                     tidy(world, &job.ctx, c);
                 }
             }
@@ -275,6 +289,7 @@ fn shorten(
     copper: &mut [Option<NetCopper>],
     params: Params,
     options: &RouteOptions,
+    kept: &[bool],
 ) -> u64 {
     // Of the time and of the work that cleanup has, a share: what is cut off a fill by a
     // run that went another way is joined to it again afterwards.
@@ -292,7 +307,6 @@ fn shorten(
             || time.is_some_and(|t| began.elapsed() >= t)
             || work.is_some_and(|w| expanded >= w)
     };
-    let bounded = world.run().is_some_and(super::control::Run::bounded);
     let mut expanded = 0;
     // Where runs moved, the last time through the nets.
     let mut last: Option<Vec<Rect>> = None;
@@ -305,7 +319,7 @@ fn shorten(
         let mut order: Vec<(f64, usize)> = Vec::new();
         for (j, (job, slot)) in jobs.iter().zip(copper.iter_mut()).enumerate() {
             let Some(c) = slot else { continue };
-            if bounded && job.plane {
+            if kept[j] {
                 continue;
             }
             let mut split = c.detached();
@@ -1079,5 +1093,92 @@ mod tests {
             &mut places,
         );
         assert!(!better && nodes == 0);
+    }
+
+    #[test]
+    fn a_net_with_a_length_to_keep_is_left_as_long_as_it_is() {
+        // Two nets of two pads, each routed the long way round with nothing in its way.
+        // The second has a length to keep.
+        let pads = vec![
+            smd(0, 0, 1),
+            smd(10 * MM, 0, 1),
+            smd(0, 40 * MM, 2),
+            smd(10 * MM, 40 * MM, 2),
+        ];
+        let mut d = design(2, pads, 3);
+        d.lengths = vec![crate::pcb::LengthConstraint {
+            nets: vec![crate::id::NetId(2)],
+            min: Some(20 * MM),
+            max: None,
+            target: None,
+            max_skew: None,
+        }];
+        let options = RouteOptions {
+            shorten: true,
+            ..RouteOptions::default()
+        };
+        let mut world = World::new(
+            &d.board,
+            &d.rules,
+            &d.outline,
+            d.edge_clearance,
+            &d.obstacles,
+        )
+        .unwrap();
+        world.configure(&d, &options);
+        let pitch = router::pitch(&d, &options);
+        let jobs = router::jobs(&d, &world, pitch, &[], &[]);
+        assert_eq!(jobs.len(), 2);
+        let seg = |a: (i64, i64), b: (i64, i64)| Seg {
+            a: Point::new(a.0, a.1),
+            b: Point::new(b.0, b.1),
+            l: 0,
+        };
+        let round = |y: i64| {
+            let mut c = NetCopper::default();
+            c.segs = vec![
+                seg((0, y), (0, y + 5 * MM)),
+                seg((0, y + 5 * MM), (10 * MM, y + 5 * MM)),
+                seg((10 * MM, y + 5 * MM), (10 * MM, y)),
+            ];
+            c
+        };
+        let mut copper = vec![Some(round(0)), Some(round(40 * MM))];
+        for (job, c) in jobs.iter().zip(copper.iter_mut()) {
+            c.as_mut().unwrap().place(&mut world, &job.ctx);
+        }
+        let params = Params {
+            pitch,
+            via_cost: options.via_cost,
+            layer_bias: options.layer_bias,
+            bounds: crate::geom::Rect::new(
+                Point::new(-10 * MM, -20 * MM),
+                Point::new(20 * MM, 60 * MM),
+            ),
+            max_expansions: options.max_expansions,
+            under_pads: false,
+            partial: false,
+            stubs: false,
+            forest: false,
+        };
+        // As routes that an earlier run left: looked at for a shorter way all the same.
+        super::run(
+            &mut world,
+            &d,
+            &jobs,
+            &mut copper,
+            params,
+            &options,
+            &[true, true],
+        );
+        let by_net = |n: u32| {
+            let j = jobs
+                .iter()
+                .position(|j| j.ctx.net == crate::id::NetId(n))
+                .unwrap();
+            copper[j].as_ref().unwrap().length()
+        };
+        assert_eq!(by_net(1), (10 * MM) as f64);
+        assert_eq!(by_net(2), (20 * MM) as f64);
     }
 }

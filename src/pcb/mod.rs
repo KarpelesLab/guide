@@ -489,6 +489,7 @@ impl Design {
                 spokes: Vec::new(),
                 spare_spokes: Vec::new(),
                 min_spokes: 0,
+                via_pads: Vec::new(),
             },
         }
     }
@@ -747,6 +748,12 @@ pub struct RouteOptions {
     /// rest. In a run with a [budget](RouteOptions::work_budget) or a deadline it has
     /// [`whole_share`](RouteOptions::whole_share) of it at most. Not in a run
     /// [from routes](route_from) that it is given.
+    ///
+    /// The grid's pitch is half a track's width and its clearance on a board of two
+    /// layers, and a track's width and its clearance on one of more, or where a board of
+    /// two has no room for three rounds at the first in its share: a quarter of the
+    /// points and a fifth of the cost of a round, with vias at twice the track they cost
+    /// at the first. On two layers a channel has to hold every track that fits it.
     pub whole: bool,
     /// The share of the time that a deadline leaves, and of the work that a budget
     /// leaves, that [`whole`](RouteOptions::whole) may spend. The default is 0.5. A
@@ -863,8 +870,9 @@ pub struct Stats {
     /// How many times the host gave its own fill of the zones around the routes, to tell
     /// those pieces by ([`RunControl::refill`]).
     pub refills: usize,
-    /// The stubs to fills that the host's own fill around the routes made needless, and
-    /// that were taken out again ([`RunControl::refill`]).
+    /// The vias that the host's own fill around the routes made needless, and that were
+    /// taken out again with the tracks that led to them ([`RunControl::refill`],
+    /// [`needless`]).
     pub stubs_pruned: usize,
     /// The chains of moves tried for the connections that rip-up left open
     /// ([`RouteOptions::settle`]), those of them kept, and the connections that these
@@ -944,9 +952,10 @@ pub struct Routed {
     /// now, in place of what was given for them. What was given for any other net is
     /// not in the result, and stays on the board as the host has it.
     pub taken_back: Vec<NetId>,
-    /// The stubs that the host's own fill around the routes made needless and that were
-    /// taken out of [`tracks`](Routed::tracks) and [`vias`](Routed::vias) for it
-    /// ([`RunControl::refill`], [`Stats::stubs_pruned`]): the tracks and the vias of each.
+    /// The vias that the host's own fill around the routes made needless, with the tracks
+    /// that led to them, taken out of [`tracks`](Routed::tracks) and
+    /// [`vias`](Routed::vias) for it ([`RunControl::refill`], [`Stats::stubs_pruned`],
+    /// [`needless`]): the tracks and the vias.
     /// A host that goes on from this result in another run gives them back with the
     /// routes, as copper of the board or in [`Earlier`]: that run plans a net with a plane
     /// on the plane alone, and would make each of them again on a board that has less
@@ -1179,6 +1188,90 @@ pub fn route_from(
     control: &RunControl<'_>,
 ) -> Result<Routed, RouteError> {
     router::run_from(design, Some(earlier), options, control)
+}
+
+/// What of a run's routes the fills of the board with those routes on it make needless:
+/// the positions in `tracks` and in `vias` of those that the pads of their nets are joined
+/// without, as they are with them, by `fills`, the board's own copper and the rest of the
+/// routes. For a host that [fills its zones itself](Zones::fills) and has filled them
+/// around the routes of a run, as it does to count what the run left open: `design` is the
+/// design that was routed, `tracks` and `vias` what the run returned, [`Routed::tracks`]
+/// and [`Routed::vias`], or what the host kept of them, and `fills` the host's fills
+/// around them, each one connected piece on one layer.
+///
+/// A run that is given such fills when it asks for them ([`RunControl::refill`]) takes the
+/// same out itself and returns it apart ([`Routed::spare`]). This is for the host whose
+/// fill came after the run, when the run had no time left to wait for one: nothing is
+/// filled here, and nothing searched for.
+///
+/// A net with a plane has a stub through a via for every pad that the plane does not
+/// reach, and a net whose pads the routes of others cut off their pour is joined up again
+/// each time that is told; a pour of an outer layer may join those pads all the same once
+/// the routes are where they stay. The vias are taken one at a time, and then the tracks
+/// that this leaves leading nowhere, so that a pour with five pads keeps the one via that
+/// takes it to the plane. A piece of fill with no pad on it, and less than a sixteenth of
+/// the net's largest, is joined to nothing for its own sake, and a via that only ties it
+/// to the rest goes, unless a zone of the net [keeps its islands](Islands::Keep). A net
+/// with an arc among its tracks here, or a via that does not go through every layer, is
+/// left as it is.
+pub fn needless(
+    design: &Design,
+    tracks: &[crate::geom::drc::Track],
+    vias: &[crate::geom::drc::Via],
+    fills: &[Fill],
+) -> (Vec<usize>, Vec<usize>) {
+    let layers = design.rules.layer_count();
+    let bottom = crate::geom::LayerId(layers.saturating_sub(1) as u8);
+    let mut nets: Vec<crate::id::NetId> = fills
+        .iter()
+        .filter_map(|f| design.zones.zones.get(f.zone).and_then(|z| z.net))
+        .collect();
+    nets.sort_unstable();
+    nets.dedup();
+    let mut out: (Vec<usize>, Vec<usize>) = Default::default();
+    for net in nets {
+        let of_tracks: Vec<usize> = (0..tracks.len())
+            .filter(|&i| tracks[i].net == Some(net))
+            .collect();
+        let of_vias: Vec<usize> = (0..vias.len())
+            .filter(|&i| vias[i].net == Some(net))
+            .collect();
+        let whole = of_tracks
+            .iter()
+            .all(|&i| tracks[i].mid.is_none() && usize::from(tracks[i].layer.0) < layers)
+            && of_vias
+                .iter()
+                .all(|&i| vias[i].from == crate::geom::LayerId(0) && vias[i].to == bottom);
+        if !whole || (of_tracks.is_empty() && of_vias.is_empty()) {
+            continue;
+        }
+        let mut c = geometry::NetCopper::default();
+        c.segs = of_tracks
+            .iter()
+            .map(|&i| geometry::Seg {
+                a: tracks[i].start,
+                b: tracks[i].end,
+                l: tracks[i].layer.0,
+            })
+            .collect();
+        c.vias = of_vias.iter().map(|&i| vias[i].at).collect();
+        let widths: Vec<i64> = of_tracks.iter().map(|&i| tracks[i].width).collect();
+        let diameters: Vec<i64> = of_vias.iter().map(|&i| vias[i].diameter).collect();
+        let Some(gone) = pours::needless(design, net, &c, (&widths, &diameters), fills) else {
+            continue;
+        };
+        let ns = of_tracks.len();
+        out.0
+            .extend((0..ns).filter(|&k| gone[k]).map(|k| of_tracks[k]));
+        out.1.extend(
+            (0..of_vias.len())
+                .filter(|&k| gone[ns + k])
+                .map(|k| of_vias[k]),
+        );
+    }
+    out.0.sort_unstable();
+    out.1.sort_unstable();
+    out
 }
 
 #[cfg(test)]

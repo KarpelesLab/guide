@@ -301,7 +301,12 @@ Each item is independently useful, and they can land in any order.
   and a host that fills its zones itself is asked for its fill around the routes,
   which is then what tells the pads cut off and the stubs that a pour makes needless
   (`RunControl::refill`,
-  [benchmarks](docs/benchmarks.md#pcb-routing-on-the-hosts-own-fills))
+  [benchmarks](docs/benchmarks.md#pcb-routing-on-the-hosts-own-fills)),
+  on more than two layers the negotiation for every net is on a grid of twice the
+  pitch, every via that a fill makes needless goes and a host can ask which
+  (`pcb::needless`), and a pad that the host names and no track leaves may have vias of
+  its net in it (`Zones::via_pads`,
+  [benchmarks](docs/benchmarks.md#pcb-routing-at-twice-the-pitch))
   ([benchmarks](docs/benchmarks.md#pcb-routing-with-a-second-wait)). A pass of such a
   run ends where it has stopped gaining, and what the passes leave open is settled: a
   route for each open connection across other nets' routes, with the nets it crosses cut

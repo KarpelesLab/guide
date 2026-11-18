@@ -72,6 +72,16 @@ const STALE: usize = 12;
 /// other, which cost the passes more than they give them. Such a board is given up as
 /// soon as the first round says so, and the passes have the time.
 const WHOLE_ROUNDS: f64 = 3.0;
+/// And on the grid of twice the pitch: by the time, once, and by the work, thirty times.
+/// The first round's time is mostly that of asking the board about each place for the
+/// first time, which the later ones do not pay, and its nodes are a fraction of theirs,
+/// which go round what is shared. `glasgow-revD1`, six layers and 1939 connections, is
+/// the board these are set by: its first round is 2 million nodes and some 10 s on three
+/// threads, five rounds are 60 million and 20 s, and its minute ends with 74 to 84
+/// connections open for 125 to 135 with no negotiation; with 20 million nodes for it, two
+/// rounds, the board has 599 open over three orders for 441 (`docs/benchmarks.md`).
+const COARSE_ROUNDS: f64 = 1.0;
+const COARSE_WORK: f64 = 30.0;
 /// The share of the nets' length that the first round has routed when it says so.
 const SAMPLE: f64 = 0.15;
 
@@ -92,6 +102,13 @@ const POUR_MORE: usize = 40;
 const FEWER_VIA: f32 = 40.0;
 const FEWER_STRETCH: f64 = 0.10;
 const FEWER_SLACK: f64 = 8.0;
+
+/// How many times what its first round took a negotiation that its share ended has for
+/// routing again the nets it takes out and for fewer vias: the second is each net once
+/// with nothing shared, which costs up to twice what the first round did.
+const TAIL: f64 = 2.5;
+/// And the most of what the run has left then that it has for them.
+const TAIL_SHARE: f64 = 0.15;
 
 /// The side of the blocks of cells that the world is asked about together.
 const BLOCK: i32 = 8;
@@ -1835,6 +1852,15 @@ fn kept_wires(terminals: usize, old: Vec<Wire>, keep: &[bool]) -> Vec<(Vec<usize
     out
 }
 
+/// Why there is no negotiation for every net.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NoWhole {
+    /// Its first round said that the share has no room for it on this grid.
+    NoRoom,
+    /// The board is none for it, or the run ended.
+    Not,
+}
+
 /// What a whole-board negotiation ends with.
 pub(crate) struct Whole {
     /// By job, the route found for its net, if any.
@@ -2038,13 +2064,13 @@ pub(crate) fn route<'r>(
     options: &RouteOptions,
     run: &Run<'r>,
     (share, was): (f64, Option<super::Stopped>),
-    pitch: i64,
+    (pitch, coarse): (i64, bool),
     bounds: Rect,
-) -> Option<Whole> {
+) -> Result<Whole, NoWhole> {
     let rules = &design.rules;
     let layers = rules.layer_count();
     if jobs.is_empty() || layers == 0 {
-        return None;
+        return Err(NoWhole::Not);
     }
     // The pitch is half the tightest pitch of the tracks as they are routed: those of a
     // net routed narrower are its narrow ones.
@@ -2060,10 +2086,14 @@ pub(crate) fn route<'r>(
             .min()
             .map_or(pitch, |p| p.max(1000))
     };
+    // Twice that on more than two layers, and where a board of two has no room for the
+    // negotiation at it: a track's width and its clearance, at which two tracks side by
+    // side are still a step apart.
+    let pitch = if coarse { pitch * 2 } else { pitch };
     let grid = make_grid(design, jobs, pitch, bounds);
     let cells = grid.cells();
     if cells == 0 || (layers as u64) * (cells as u64) >= u64::from(u32::MAX) / 8 {
-        return None;
+        return Err(NoWhole::Not);
     }
     // Classes of halo and groups of rules.
     let mut halos: Vec<Halo> = Vec::new();
@@ -2134,7 +2164,7 @@ pub(crate) fn route<'r>(
         });
     }
     if group_keys.len() > GROUPS {
-        return None;
+        return Err(NoWhole::Not);
     }
     // More classes of halo than there are maps for are taken together, two at a time:
     // the two whose nets lose the least room by being kept apart as the wider of them
@@ -2253,7 +2283,7 @@ pub(crate) fn route<'r>(
                 }
             }
             if run.poll() {
-                return None;
+                return Err(NoWhole::Not);
             }
         }
         if any_plane {
@@ -2286,7 +2316,7 @@ pub(crate) fn route<'r>(
             }
         }
         if run.poll() {
-            return None;
+            return Err(NoWhole::Not);
         }
     }
     // The nets in order, the shortest first.
@@ -2320,6 +2350,8 @@ pub(crate) fn route<'r>(
     let mut pour_cuts = 0;
     let mut refills = 0;
     let mut sites: Vec<(usize, Vec<TermPad>)> = Vec::new();
+    // What the first round took, in time and in nodes, once it has ended.
+    let mut first_round: Option<(std::time::Duration, u64)> = None;
     let threads = options.threads.max(1);
     let lock = RwLock::new(board);
     #[allow(clippy::type_complexity)]
@@ -2493,6 +2525,7 @@ pub(crate) fn route<'r>(
         let connections: usize = nets.iter().map(|n| n.conns.len()).sum();
         let mut extended = false;
         let mut it = 0;
+        let mut round_began = began;
         // Each time the pads cut off are told, the rounds have as many more for them.
         while it < ROUNDS + POUR_MORE * pour_rounds {
             it += 1;
@@ -2537,8 +2570,12 @@ pub(crate) fn route<'r>(
                         sampled = true;
                         let share = length_done as f64 / total_length as f64;
                         let nodes = (run.work() - began.1) as f64;
-                        let factor = WHOLE_ROUNDS;
-                        let needed = factor * nodes / share;
+                        let (factor, work_factor) = if coarse {
+                            (COARSE_ROUNDS, COARSE_WORK)
+                        } else {
+                            (WHOLE_ROUNDS, WHOLE_ROUNDS)
+                        };
+                        let needed = work_factor * nodes / share;
                         let short_of_work = run.limits(u64::MAX).max_expansions != u64::MAX
                             && needed > run.limits(u64::MAX).max_expansions as f64 + nodes;
                         let took = began.0.elapsed().as_secs_f64();
@@ -2556,6 +2593,10 @@ pub(crate) fn route<'r>(
             if given_up {
                 break;
             }
+            if it == 0 && !cut {
+                first_round = Some((round_began.0.elapsed(), run.work() - round_began.1));
+            }
+            round_began = (std::time::Instant::now(), run.work());
             // What is shared.
             let board = read!();
             let mut points: Vec<(Conflict, usize)> = Vec::new();
@@ -2757,7 +2798,7 @@ pub(crate) fn route<'r>(
     });
     drop(done_tx);
     if given_up {
-        return None;
+        return Err(NoWhole::NoRoom);
     }
     let mut board = lock
         .into_inner()
@@ -2776,6 +2817,28 @@ pub(crate) fn route<'r>(
                 board.commit(net);
             }
         }
+    }
+    // At twice the pitch, a negotiation that its share ended has what follows all the
+    // same, within a few times what its first round took: the nets taken out routed
+    // again where nothing is claimed, and each net once more for fewer vias. Left to the
+    // passes, the first is done by searches that cost three times as much a node, and
+    // the second not at all: the routes of a negotiation that was cut were the ones with
+    // the most vias. Not at the first pitch, where a round costs five times as much:
+    // `corne-cherry`, cut a third of the way through by 40 million nodes, had 95
+    // connections open over three orders with it for 79.
+    if cut
+        && coarse
+        && let Some((time, nodes)) = first_round
+    {
+        let time = run.left().map_or(time.mul_f64(TAIL), |left| {
+            time.mul_f64(TAIL).min(left.mul_f64(TAIL_SHARE))
+        });
+        let nodes = run
+            .work_left()
+            .map_or((nodes as f64 * TAIL) as u64, |left| {
+                ((nodes as f64 * TAIL) as u64).min((left as f64 * TAIL_SHARE) as u64)
+            });
+        run.allow(time, nodes, was);
     }
     // What is still shared is taken out, the net with the most first, and routed again
     // where nothing is claimed.
@@ -2844,16 +2907,25 @@ pub(crate) fn route<'r>(
         }
     }
     // Fewer vias: each net with any again, with vias dear, kept if it has fewer and is
-    // little longer.
+    // little longer. After a negotiation that its share ended, the nets with the most
+    // first: the time may end before all of them have had their turn, and those are
+    // the ones with the most to lose.
     let mut vias_saved = 0;
-    for net in &mut nets {
+    let mut by_vias: Vec<(usize, usize)> = nets
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (board.measure(n).0, i))
+        .filter(|&(v, _)| v > 0)
+        .collect();
+    if cut {
+        by_vias.sort_by_key(|&(v, i)| (core::cmp::Reverse(v), i));
+    }
+    for (_, i) in by_vias {
         if run.ending() {
             break;
         }
+        let net = &mut nets[i];
         let (vias, len) = board.measure(net);
-        if vias == 0 {
-            continue;
-        }
         let old = net.wires.clone();
         board.uncommit(net);
         let (res, pops) =
@@ -2881,7 +2953,7 @@ pub(crate) fn route<'r>(
             trees[net.job] = Some(tree_of(&board, net));
         }
     }
-    Some(Whole {
+    Ok(Whole {
         trees,
         pitch: grid.g,
         rounds,

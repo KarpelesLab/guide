@@ -169,6 +169,16 @@ pub struct Zones {
     /// ([`RouteOptions::spoke_cost`](super::RouteOptions::spoke_cost)). Zero, the
     /// default, holds none harder than another.
     pub min_spokes: u8,
+    /// The pads, by position in [`Board::pads`], that a via of their own net may be in
+    /// where [`RouteOptions::vias_in_pads`](super::RouteOptions::vias_in_pads) is off: a
+    /// host that keeps vias out of the pads that leads are soldered to names here the
+    /// ones that are not such pads, as the exposed pad under a package is. Where the pads
+    /// round that one shut it in, so that on the board as it is given no straight track
+    /// of its net leaves it and none joins it to a pad of its net beside it, its own
+    /// board joins it to the plane of its net by vias in it, and so does a run: only a
+    /// via whose copper is all inside the pad's box, and only in a pad that is shut in
+    /// so. One that a track leaves is joined by tracks, as before.
+    pub via_pads: Vec<usize>,
 }
 
 /// One spoke of a thermal relief that the host's fill will make: a strip of copper from a

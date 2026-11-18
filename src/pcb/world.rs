@@ -44,6 +44,27 @@ pub(crate) enum Owner {
     Routed(NetId),
 }
 
+/// The ways out of a pad that are tried to tell whether a track leaves it, in quarters of
+/// how far out: sixteen, round it.
+const WAYS_OUT: [(i64, i64); 16] = [
+    (4, 0),
+    (4, 2),
+    (4, 4),
+    (2, 4),
+    (0, 4),
+    (-2, 4),
+    (-4, 4),
+    (-4, 2),
+    (-4, 0),
+    (-4, -2),
+    (-4, -4),
+    (-2, -4),
+    (0, -4),
+    (2, -4),
+    (4, -4),
+    (4, -2),
+];
+
 /// How many vertices the parts of a fixed zone have at most, as the world keeps it.
 const ZONE_PART: usize = 48;
 
@@ -107,6 +128,9 @@ pub(crate) struct World<'r> {
     /// By net and then layer, [`Rules::clearance`], for the nets of the board's items,
     /// which costs more to resolve than many a query.
     clearances: Vec<i64>,
+    /// The boxes of the pads that a via of their net may be in although vias are kept out
+    /// of pads ([`Zones::via_pads`](super::Zones::via_pads)), with their nets.
+    via_pads: Vec<(NetId, crate::geom::Rect)>,
     /// Where zones of nets are planes, which other nets' tracks pay more to cross.
     planes: Option<Planes>,
     /// Where the spokes of pads in pours will be, which other nets pay to be in.
@@ -176,6 +200,7 @@ impl<'r> World<'r> {
             clearances: Vec::new(),
             planes: None,
             spokes: None,
+            via_pads: Vec::new(),
             vias_in_pads: true,
             excepts: Vec::new(),
             ties: Vec::new(),
@@ -357,10 +382,86 @@ impl<'r> World<'r> {
             .unwrap_or_else(|| self.rules.clearance(net, layer))
     }
 
+    /// Whether `pad` is a pad of `net` that a via of the net may be in with vias kept out
+    /// of pads, and the via's copper `via` is all inside its box.
+    fn via_pad(&self, net: NetId, pad: &Shape, via: &Shape) -> bool {
+        if self.via_pads.is_empty() {
+            return false;
+        }
+        let (b, v) = (pad.bbox(), via.bbox());
+        self.via_pads.iter().any(|&(n, r)| n == net && r == b)
+            && v.min().x >= b.min().x
+            && v.min().y >= b.min().y
+            && v.max().x <= b.max().x
+            && v.max().y <= b.max().y
+    }
+
     /// What a run asks of every query: whether vias may be in pads, and the layers that
     /// each net's tracks may be on.
     pub(crate) fn configure(&mut self, design: &super::Design, options: &super::RouteOptions) {
         self.vias_in_pads = options.vias_in_pads;
+        // Of the pads that the host names, those that no track of their net leaves: one
+        // that a track gets out of, or joins to a pad of its net beside it, is joined by
+        // tracks, and vias in it take the room under its package that the pads round it
+        // need for theirs.
+        self.via_pads = Vec::new();
+        let named: Vec<(usize, NetId, crate::geom::Rect, LayerSet)> = design
+            .zones
+            .via_pads
+            .iter()
+            .filter_map(|&i| design.board.pads.get(i).map(|p| (i, p)))
+            .filter_map(|(i, p)| p.net.map(|n| (i, n, p.shape.bbox(), p.layers)))
+            .collect();
+        for (at, net, b, layers) in named {
+            let centre = Point::new(
+                b.min().x + (b.max().x - b.min().x) / 2,
+                b.min().y + (b.max().y - b.min().y) / 2,
+            );
+            let leaves = layers.iter().any(|layer| {
+                let width = design
+                    .nets
+                    .get(net.index())
+                    .map_or(0, |s| s.track_width)
+                    .max(self.rules.track_width(Some(net), layer));
+                let out = (b.max().x - b.min().x).max(b.max().y - b.min().y)
+                    + 2 * (width + self.clearance(Some(net), layer));
+                let free = |from: Point, to: Point| {
+                    Shape::track(from, to, width)
+                        .is_ok_and(|t| self.track(net, layer, &t, None) == Verdict::Free)
+                };
+                // Straight out, sixteen ways round.
+                WAYS_OUT.iter().any(|&(dx, dy)| {
+                    free(
+                        centre,
+                        Point::new(centre.x + dx * out / 4, centre.y + dy * out / 4),
+                    )
+                })
+                // Or straight to a pad of its net beside it, from the nearest of its
+                // own box.
+                || design.board.pads.iter().enumerate().any(|(i, q)| {
+                    let other = q.shape.bbox();
+                    if i == at
+                        || q.net != Some(net)
+                        || !q.copper_layers().contains(layer)
+                        || !other.intersects(&b.expand(out))
+                    {
+                        return false;
+                    }
+                    let to = Point::new(
+                        other.min().x + (other.max().x - other.min().x) / 2,
+                        other.min().y + (other.max().y - other.min().y) / 2,
+                    );
+                    let from = Point::new(
+                        to.x.clamp(b.min().x, b.max().x),
+                        to.y.clamp(b.min().y, b.max().y),
+                    );
+                    free(from, to)
+                })
+            });
+            if !leaves {
+                self.via_pads.push((net, b));
+            }
+        }
         let all = self.rules.layers().0;
         self.run_layers = options.layers.map_or(all, |l| l.0);
         self.track_layers = design
@@ -748,7 +849,10 @@ impl<'r> World<'r> {
                         (other_net
                             && (self.copper_hit(&copper, other, (net, ours), meta, layer)
                                 || self.hole_hit(other, &hole, None, meta.own)))
-                            || (!self.vias_in_pads && meta.smd && copper.touches(other))
+                            || (!self.vias_in_pads
+                                && meta.smd
+                                && copper.touches(other)
+                                && !self.via_pad(net, other, &copper))
                     }
                     // Holes go through every layer, so the first one is enough.
                     Kind::Hole if l == 0 => {
@@ -893,7 +997,11 @@ impl<'r> World<'r> {
                 }
                 let (hit, all) = match meta.kind {
                     Kind::Copper => {
-                        if !self.vias_in_pads && meta.smd && copper.touches(other) {
+                        if !self.vias_in_pads
+                            && meta.smd
+                            && copper.touches(other)
+                            && !self.via_pad(net, other, &copper)
+                        {
                             (true, true)
                         } else {
                             (

@@ -1776,7 +1776,7 @@ fn route_all<'a>(
             }
             Some(w)
         };
-        let attempt = |options: &RouteOptions| {
+        let attempt = |options: &RouteOptions, coarse: bool| {
             whole::route(
                 design,
                 &world,
@@ -1787,12 +1787,24 @@ fn route_all<'a>(
                 options,
                 run,
                 (share, was),
-                pitch,
+                (pitch, coarse),
                 bounds,
             )
         };
         let began = (std::time::Instant::now(), run.work());
-        let mut whole = attempt(options);
+        // On a grid of twice the pitch on a board of more than two layers, and on one of
+        // two where the first round says that the share has no room for it at the first:
+        // with two layers a channel has to hold every track that fits it, and with more
+        // the rounds that the coarser grid has the time for count for more.
+        let mut coarse = rules.layer_count() > 2;
+        let mut whole = match attempt(options, coarse) {
+            Err(whole::NoWhole::NoRoom) if !coarse && !run.poll() => {
+                coarse = true;
+                run.part(share, share);
+                attempt(options, true).ok()
+            }
+            other => other.ok(),
+        };
         // A negotiation that ended on its own with points still shared, in a small part
         // of its share, is begun again with the nets moved in their order another way,
         // and the one that ends with the fewest shared is kept: its rounds stop where
@@ -1820,7 +1832,7 @@ fn route_all<'a>(
                 ),
                 ..*options
             };
-            if let Some(next) = attempt(&other)
+            if let Ok(next) = attempt(&other, coarse)
                 && (next.shared, next.taken_out) < (w.shared, w.taken_out)
             {
                 whole = Some(next);

@@ -306,7 +306,12 @@ Each item is independently useful, and they can land in any order.
   pitch, every via that a fill makes needless goes and a host can ask which
   (`pcb::needless`), and a pad that the host names and no track leaves may have vias of
   its net in it (`Zones::via_pads`,
-  [benchmarks](docs/benchmarks.md#pcb-routing-at-twice-the-pitch))
+  [benchmarks](docs/benchmarks.md#pcb-routing-at-twice-the-pitch)),
+  the second ring of an array of balls has its ways out planned, a run of tracks that
+  costs more than the straight way is looked for again once routing is over
+  (`RouteOptions::shorten`), and a host can ask which tracks from pad to pad a fill
+  makes needless (`pcb::needless_between`,
+  [benchmarks](docs/benchmarks.md#pcb-routing-out-of-an-array-and-shorter-after-it))
   ([benchmarks](docs/benchmarks.md#pcb-routing-with-a-second-wait)). A pass of such a
   run ends where it has stopped gaining, and what the passes leave open is settled: a
   route for each open connection across other nets' routes, with the nets it crosses cut

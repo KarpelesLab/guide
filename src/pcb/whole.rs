@@ -56,11 +56,16 @@ const WRONG_WAY: f32 = 1.8;
 const DIAG: f32 = 1.05;
 
 /// The price of a claimed point at first, what it is multiplied by after each round, and
-/// the most it is: past that, sharing is out of the question anyway, and a search only
-/// goes further for it.
+/// the most it is: thirty times a step, at which a net goes thirty steps round a point
+/// rather than share it. Past that a search only goes further for it, and what is still
+/// shared is the history's to price, which rises for as long as a point is shared: at
+/// 1000, as VPR has it and cadlab's router, `corne-cherry` ended a minute with 559 vias
+/// and 8276 mm of track over four orders where it has 498 and 7621, for as many
+/// connections, and the nine boards that 40 million nodes cut had 620 connections open
+/// for 621 (`docs/benchmarks.md`).
 const PRES: f32 = 0.6;
 const PRES_STEP: f32 = 1.6;
-const PRES_MAX: f32 = 1000.0;
+const PRES_MAX: f32 = 30.0;
 /// What a round adds to the price of a point that was shared in it.
 const HISTORY: f32 = 0.5;
 /// How many rounds there are at most, and how many may pass since the best.

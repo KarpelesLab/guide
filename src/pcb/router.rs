@@ -2719,83 +2719,91 @@ fn route_all<'a>(
     run.part(shares.cleanup, cleanup_work);
     // What the routes cut off the planned fills is joined to them again, by stubs that
     // move nothing: now that nothing moves any more, a piece that is cut off stays so.
-    if let Some(pours) = &pours {
-        for _ in 0..POUR_ROUNDS {
-            if run.poll() {
-                break;
-            }
-            let mut joined = false;
-            // By the host's own fill around the routes as they are, if it gives one, on
-            // a board with pours that routes cut.
-            let real = pours
-                .outer(design)
-                .then(|| {
-                    pours.refill(
-                        run,
-                        design,
-                        &jobs,
-                        &copper,
-                        (&own_fixed.0, &own_fixed.1),
-                        false,
-                    )
-                })
-                .flatten();
-            stats.refills += usize::from(real.is_some());
-            for k in pours.jobs().collect::<Vec<usize>>() {
+    // And once more after a cleanup that looked for shorter ways: a run of tracks that
+    // goes another way may cut a fill where the old one did not.
+    for cleaned in [false, true] {
+        if cleaned && !(options.cleanup && options.shorten) {
+            break;
+        }
+        if let Some(pours) = &pours {
+            for _ in 0..POUR_ROUNDS {
                 if run.poll() {
                     break;
                 }
-                let Some(c) = copper[k].as_ref() else {
-                    continue;
-                };
-                let Some(again) =
-                    pours.rejoin(&world, design, &jobs, &copper, k, pitch, real.as_ref(), &[])
-                else {
-                    continue;
-                };
-                let ctx = completion(design, &again.ctx, c, pitch);
-                jobs[k].ctx = pours::with_sites(&jobs[k].ctx, &again.sites, pitch);
-                stats.pour_cuts += again.cut;
-                let steps = StepCache::default();
-                let stubs = Params {
-                    partial: true,
-                    stubs: true,
-                    forest: true,
-                    ..params
-                };
-                let found = detail::route_net(&world, &ctx, &steps, stubs, None, None);
-                let tree = match found {
-                    Ok(tree) => tree,
-                    Err((_, expanded)) => {
-                        stats.expanded += expanded;
+                let mut joined = false;
+                // By the host's own fill around the routes as they are, if it gives one, on
+                // a board with pours that routes cut.
+                let real = pours
+                    .outer(design)
+                    .then(|| {
+                        pours.refill(
+                            run,
+                            design,
+                            &jobs,
+                            &copper,
+                            (&own_fixed.0, &own_fixed.1),
+                            false,
+                        )
+                    })
+                    .flatten();
+                stats.refills += usize::from(real.is_some());
+                for k in pours.jobs().collect::<Vec<usize>>() {
+                    if run.poll() {
+                        break;
+                    }
+                    let Some(c) = copper[k].as_ref() else {
+                        continue;
+                    };
+                    let Some(again) =
+                        pours.rejoin(&world, design, &jobs, &copper, k, pitch, real.as_ref(), &[])
+                    else {
+                        continue;
+                    };
+                    let ctx = completion(design, &again.ctx, c, pitch);
+                    jobs[k].ctx = pours::with_sites(&jobs[k].ctx, &again.sites, pitch);
+                    stats.pour_cuts += again.cut;
+                    let steps = StepCache::default();
+                    let stubs = Params {
+                        partial: true,
+                        stubs: true,
+                        forest: true,
+                        ..params
+                    };
+                    let found = detail::route_net(&world, &ctx, &steps, stubs, None, None);
+                    let tree = match found {
+                        Ok(tree) => tree,
+                        Err((_, expanded)) => {
+                            stats.expanded += expanded;
+                            continue;
+                        }
+                    };
+                    stats.expanded += tree.expanded;
+                    let more = NetCopper::from_tree(&ctx, &tree);
+                    if more.is_empty() {
                         continue;
                     }
-                };
-                stats.expanded += tree.expanded;
-                let more = NetCopper::from_tree(&ctx, &tree);
-                if more.is_empty() {
-                    continue;
-                }
-                if let Some(mut old) = copper[k].take() {
-                    old.unplace(&mut world);
-                    old.segs.extend(more.segs);
-                    for v in more.vias {
-                        if !old.vias.contains(&v) {
-                            old.vias.push(v);
+                    if let Some(mut old) = copper[k].take() {
+                        old.unplace(&mut world);
+                        old.segs.extend(more.segs);
+                        for v in more.vias {
+                            if !old.vias.contains(&v) {
+                                old.vias.push(v);
+                            }
                         }
+                        old.merge(&jobs[k].ctx);
+                        old.place(&mut world, &jobs[k].ctx);
+                        copper[k] = Some(old);
+                        joined = true;
                     }
-                    old.merge(&jobs[k].ctx);
-                    old.place(&mut world, &jobs[k].ctx);
-                    copper[k] = Some(old);
-                    joined = true;
                 }
-            }
-            if !joined {
-                break;
+                if !joined {
+                    break;
+                }
             }
         }
-    }
-    if options.cleanup && !run.poll() {
+        if cleaned || !options.cleanup || run.poll() {
+            continue;
+        }
         run.phase(Phase::Cleanup);
         // A net that this run has not moved is as the earlier run's cleanup left it.
         let still: Vec<bool> = (0..jobs.len())
@@ -2810,7 +2818,15 @@ fn route_all<'a>(
                 _ => false,
             })
             .collect();
-        stats.expanded += cleanup::run(&mut world, &jobs, &mut copper, params, options, &still);
+        stats.expanded += cleanup::run(
+            &mut world,
+            design,
+            &jobs,
+            &mut copper,
+            params,
+            options,
+            &still,
+        );
     }
     // Pairs side by side, in place of the routes they were given as two nets.
     let mut paired = (0, 0.0);
@@ -3729,7 +3745,7 @@ mod tests {
             stubs: false,
             forest: false,
         };
-        cleanup::run(&mut world, &jobs, &mut copper, params, &options, &[]);
+        cleanup::run(&mut world, &d, &jobs, &mut copper, params, &options, &[]);
         // The search for the first net's route with no vias spent the budget, and the
         // second net is straight all the same: it was pulled tight before.
         assert_eq!(run.stopped(), Some(Stopped::WorkBudget));

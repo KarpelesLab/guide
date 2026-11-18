@@ -208,10 +208,26 @@ pub(crate) fn plan(
         list.push(pad);
     }
 
+    let mut out = Vec::new();
+    // In a run with a budget, the ways out of the second ring of an area array first.
+    if arrays {
+        // Not for a net with a zone, whose pads go to it by a via where they are, nor
+        // for one of many pads, a supply routed as tracks.
+        let zoned = |net: NetId| design.zones.zones.iter().any(|z| z.net == Some(net));
+        let usable = |i: usize| {
+            let pad = &pads[i];
+            routed(pad.net)
+                .filter(|(net, _)| {
+                    !joined(design, i) && !zoned(*net) && count[net.index()] <= EXIT_PADS
+                })
+                .map(|(net, _)| net)
+        };
+        out = ring_exits(design, world, &usable, &width_of);
+    }
     let mut regions: Vec<Region> = Vec::new();
     // The balls too deep in an area array to get out on their layer, whose nets' own via
     // fits nowhere beside them, so that routing has no way to take them to another layer:
-    // each is a region with the places of the smaller via, towards the array's middle.
+    // each is a region with the places of the smaller via, away from the array's middle.
     let mut deep_pads: Vec<usize> = Vec::new();
     if let (true, Some(small)) = (arrays, fanout) {
         for (i, middle) in deep(design) {
@@ -336,7 +352,6 @@ pub(crate) fn plan(
         }
     }
 
-    let mut out = Vec::new();
     // Regions with no room for a via get out by the shortest way there is, first, as it is
     // the only one.
     for r in regions.iter_mut().filter(|r| r.candidates.is_empty()) {
@@ -408,8 +423,8 @@ pub(crate) fn plan(
             .filter(|&r| !regions[r].done && !regions[r].candidates.is_empty())
             .min_by_key(|&r| {
                 // The balls deep in an array first, the furthest from its middle first:
-                // each has one place on the side of the middle, which a ball nearer the
-                // middle, with several, would otherwise take.
+                // each has one place on the side away from the middle, which a ball
+                // nearer the middle would otherwise take.
                 let far = regions[r].toward.map(|m| {
                     let c = center_of(&pads[regions[r].pad].shape);
                     let (dx, dy) = ((c.x - m.x) as i128, (c.y - m.y) as i128);
@@ -448,16 +463,21 @@ pub(crate) fn plan(
                 taken += regions[q].candidates.len() - left;
                 least = least.min(left);
             }
-            // For a ball deep in an array, a place on the side of the array's middle
-            // before any other: the ways between the balls further out are those of the
-            // balls that get out on their layer, and a via among them closes them.
-            let outward = regions[r].toward.is_some_and(|m| {
+            // For a ball deep in an array, a place on the side away from the array's
+            // middle before any other, as a board routed by hand has them: the vias of
+            // each quarter of the array then stand in rows that the tracks of the other
+            // layers leave it between, outwards, and the rows through its middle are free
+            // of them. The ways out on the balls' own layer, between the balls of the
+            // first ring, are those of the second ring's balls, planned before.
+            // Towards the middle, `glasgow-revC3` had 24 to 29 connections open in
+            // four orders at a minute where it has 4 to 7 (`docs/benchmarks.md`).
+            let inward = regions[r].toward.is_some_and(|m| {
                 let from = center_of(&pads[regions[r].pad].shape);
                 let side =
                     |at: i64, from: i64, to: i64| (at - from).signum() * (to - from).signum();
-                side(c.at.x, from.x, m.x) < 0 || side(c.at.y, from.y, m.y) < 0
+                side(c.at.x, from.x, m.x) > 0 || side(c.at.y, from.y, m.y) > 0
             });
-            let key = (outward, usize::MAX - least, taken, c.far);
+            let key = (inward, usize::MAX - least, taken, c.far);
             if best.as_ref().is_none_or(|(b, _)| key < *b) {
                 best = Some((key, k));
             }
@@ -500,6 +520,10 @@ pub(crate) fn plan(
     out
 }
 
+/// How many pads at most a net has for a ball of it in the second ring of an array to
+/// be given its way out.
+const EXIT_PADS: usize = 8;
+
 /// How many tracks at most pass between two balls for them to be of an array whose
 /// inner balls are looked at.
 const ARRAY_TRACKS: i64 = 3;
@@ -512,6 +536,34 @@ const ARRAY_TRACKS: i64 = 3;
 /// further in does, whatever is routed first: its depth, in balls from the nearest one
 /// with none beside it on some side, is more than `n`.
 fn deep(design: &Design) -> Vec<(usize, Point)> {
+    balls(design)
+        .into_iter()
+        .filter(|b| b.depth > b.tracks)
+        .map(|b| (b.pad, b.middle))
+        .collect()
+}
+
+/// A ball of an area array.
+#[derive(Clone, Copy, Debug)]
+struct Ball {
+    pad: usize,
+    at: Point,
+    layer: LayerId,
+    /// In balls from the nearest one with none beside it on some side.
+    depth: i64,
+    /// How many tracks of its net pass between it and the nearest ball beside it.
+    tracks: i64,
+    /// The middle of its array.
+    middle: Point,
+    /// The balls beside it, right, above, left and below: where each is, and whether it
+    /// is the last of the array that way.
+    beside: [Option<(Point, bool)>; 4],
+}
+
+/// The balls of area arrays whose nets are routed: an array is pads of one size with no
+/// hole, on one layer, in rows both ways, with room for a few tracks at most between two
+/// of them.
+fn balls(design: &Design) -> Vec<Ball> {
     let rules = &design.rules;
     let stack = rules.layers();
     let pads = &design.board.pads;
@@ -621,7 +673,7 @@ fn deep(design: &Design) -> Vec<(usize, Point)> {
         }
         boxes.insert(k, around);
     }
-    let mut out = Vec::new();
+    let mut out: Vec<Ball> = Vec::new();
     for (k, &(i, at, layer, size)) in single.iter().enumerate() {
         let (Some(d), Some(a)) = (depth[k], array[k]) else {
             continue;
@@ -645,14 +697,106 @@ fn deep(design: &Design) -> Vec<(usize, Point)> {
             rules.clearance(Some(net), layer),
         );
         let tracks = ((gap - c) / (w + c).max(1)).max(0);
-        if d > tracks {
-            let b = boxes[&a];
-            let middle = Point::new(
-                b.min().x + (b.max().x - b.min().x) / 2,
-                b.min().y + (b.max().y - b.min().y) / 2,
-            );
-            out.push((i, middle));
+        let b = boxes[&a];
+        let middle = Point::new(
+            b.min().x + (b.max().x - b.min().x) / 2,
+            b.min().y + (b.max().y - b.min().y) / 2,
+        );
+        let mut sides = [None; 4];
+        for (side, m) in beside[k].iter().enumerate() {
+            if let Some(m) = m.filter(|&m| member(m)) {
+                let last = beside[m][side].is_none_or(|n| !member(n));
+                sides[side] = Some((single[m].1, last));
+            }
         }
+        out.push(Ball {
+            pad: i,
+            at,
+            layer,
+            depth: d,
+            tracks,
+            middle,
+            beside: sides,
+        });
+    }
+    out
+}
+
+/// The ways out of the second ring of the area arrays that one track passes between two
+/// balls of: for each of its balls, a track on its layer to the middle of the four balls
+/// round one of the two ways between the balls outside it, and from there straight out of
+/// the array, where that is free in `world`, into which it is put. The first ring's balls
+/// get out any way, and a ball further in gets out by a via. A ball of the second ring
+/// has those two ways alone, each of which a track that runs along the first ring closes
+/// for it and for every ball beside it: such a track is the shortest way from one end of
+/// the array to the other, and a search takes it. With every way out taken by its ball
+/// first, there is no room for one.
+fn ring_exits(
+    design: &Design,
+    world: &mut World<'_>,
+    usable: &dyn Fn(usize) -> Option<NetId>,
+    width_of: &dyn Fn(NetId, LayerId) -> i64,
+) -> Vec<Escape> {
+    let rules = &design.rules;
+    let mut out = Vec::new();
+    let mut found = balls(design);
+    found.sort_by_key(|b| (b.at.y, b.at.x));
+    for b in found.iter().filter(|b| b.depth == 1 && b.tracks == 1) {
+        let Some(net) = usable(b.pad) else { continue };
+        let width = width_of(net, b.layer);
+        let reach = {
+            let shape = design.board.pads[b.pad].shape.bbox();
+            (shape.max().x - shape.min().x) / 2 + rules.clearance(Some(net), b.layer) + width
+        };
+        // Out past the ball beside it that is the last one that way, to either side of it.
+        let mut ways: Vec<[Point; 3]> = Vec::new();
+        for (side, beside) in b.beside.iter().enumerate() {
+            let Some((at, true)) = *beside else { continue };
+            let (ux, uy) = ((at.x - b.at.x).signum(), (at.y - b.at.y).signum());
+            let pitch = (at.x - b.at.x).abs().max((at.y - b.at.y).abs());
+            let half = pitch / 2;
+            // Round the array one way first, so that the balls of a side take turns.
+            let turns = if side < 2 { [1, -1] } else { [-1, 1] };
+            for t in turns {
+                let (vx, vy) = (-uy * t, ux * t);
+                let mid = Point::new(b.at.x + (ux + vx) * half, b.at.y + (uy + vy) * half);
+                let end = Point::new(
+                    b.at.x + ux * (pitch + reach) + vx * half,
+                    b.at.y + uy * (pitch + reach) + vy * half,
+                );
+                ways.push([b.at, mid, end]);
+            }
+        }
+        let free = |world: &World<'_>, way: &[Point; 3]| {
+            way.windows(2).all(|w| {
+                Shape::track(w[0], w[1], width)
+                    .is_ok_and(|s| world.track(net, b.layer, &s, None) == Verdict::Free)
+            })
+        };
+        let Some(way) = ways.into_iter().find(|w| free(world, w)) else {
+            continue;
+        };
+        let tracks: Vec<Track> = way
+            .windows(2)
+            .map(|w| Track {
+                start: w[0],
+                end: w[1],
+                mid: None,
+                width,
+                layer: b.layer,
+                net: Some(net),
+            })
+            .collect();
+        for t in &tracks {
+            if let Ok(shape) = Shape::track(t.start, t.end, t.width) {
+                world.add_track(net, t.layer, shape);
+            }
+        }
+        out.push(Escape {
+            net,
+            tracks,
+            via: None,
+        });
     }
     out
 }
@@ -942,7 +1086,7 @@ mod tests {
     }
 
     #[test]
-    fn the_balls_too_deep_in_an_array_get_a_via_towards_its_middle() {
+    fn the_balls_too_deep_in_an_array_get_a_via_away_from_its_middle() {
         let d = array(7);
         // Two rings get out on their layer, the outer one and the one that goes between
         // its balls: the nine balls inside them do not.
@@ -955,8 +1099,9 @@ mod tests {
             drill: 200_000,
         };
         let escapes = plan(&d, &mut world_of(&d), 150_000, Some(small), true);
+        let (exits, escapes): (Vec<_>, Vec<_>) = escapes.iter().partition(|e| e.via.is_none());
         assert_eq!(escapes.len(), 9);
-        let mut inward = 0;
+        let mut outward = 0;
         for e in &escapes {
             let via = e.via.as_ref().expect("a via");
             assert_eq!((via.diameter, via.drill), (300_000, 200_000));
@@ -966,31 +1111,57 @@ mod tests {
             };
             let from = track.start;
             assert_eq!(track.end, via.at);
-            // The four balls at the corners of the nine, the furthest from the middle,
-            // have theirs on the side of the middle: the four places between the nine.
+            // The four balls at the corners of the nine have theirs on the side away from
+            // the middle, so that the vias of the four quarters leave the rows through
+            // the middle free of them on the other layers.
             let side = |at: i64, from: i64, to: i64| (at - from).signum() * (to - from).signum();
-            let towards =
-                side(via.at.x, from.x, middle.x) >= 0 && side(via.at.y, from.y, middle.y) >= 0;
+            let away =
+                side(via.at.x, from.x, middle.x) <= 0 && side(via.at.y, from.y, middle.y) <= 0;
             if from.x != middle.x && from.y != middle.y {
-                assert!(towards, "{via:?} from {from:?}");
+                assert!(away, "{via:?} from {from:?}");
             }
-            inward += usize::from(towards && from != middle);
+            outward += usize::from(away && from != middle);
         }
-        assert!(inward >= 4, "{inward}");
+        assert!(outward >= 4, "{outward}");
+        // The sixteen balls of the second ring have their ways out between the balls of
+        // the first, each its own, before any via is placed.
+        assert_eq!(exits.len(), 16);
+        for e in &exits {
+            let [first, second] = &e.tracks[..] else {
+                panic!("{:?}", e.tracks)
+            };
+            let ring = |p: Point| {
+                [p.x, p.y]
+                    .into_iter()
+                    .map(|c| (c / 800_000).min(6 - c / 800_000))
+                    .min()
+            };
+            assert_eq!(first.start.x % 800_000, 0);
+            assert_eq!(first.start.y % 800_000, 0);
+            assert_eq!(ring(first.start), Some(1), "{first:?}");
+            assert_eq!(first.end, second.start);
+            // Its end is past the first ring's pads by a track and its clearance.
+            let out = |c: i64| (-c).max(c - 4_800_000);
+            assert_eq!(
+                out(second.end.x).max(out(second.end.y)),
+                475_000,
+                "{second:?}"
+            );
+        }
         // They break no rule, with each other or the balls.
         let mut board = d.board.clone();
-        board
-            .tracks
-            .extend(escapes.iter().flat_map(|e| e.tracks.iter().cloned()));
-        board
-            .vias
-            .extend(escapes.iter().filter_map(|e| e.via.clone()));
+        for e in exits.iter().chain(&escapes) {
+            board.tracks.extend(e.tracks.iter().cloned());
+            board.vias.extend(e.via.clone());
+        }
         let broken = drc::check(&board, &d.rules).unwrap();
         assert!(broken.is_empty(), "{broken:?}");
-        // Not asked for, or with no smaller via to give them, there are none: no ball is
-        // trapped while nothing is routed.
+        // Not asked for, there are none: no ball is trapped while nothing is routed. With
+        // no smaller via to give the nine, the second ring has its ways out all the same.
         assert!(plan(&d, &mut world_of(&d), 150_000, Some(small), false).is_empty());
-        assert!(plan(&d, &mut world_of(&d), 150_000, None, true).is_empty());
+        let without = plan(&d, &mut world_of(&d), 150_000, None, true);
+        assert_eq!(without.len(), 16);
+        assert!(without.iter().all(|e| e.via.is_none()));
         // An array of five by five has one ball that deep, and one of four by four none.
         assert_eq!(deep(&array(5)).len(), 1);
         assert!(deep(&array(4)).is_empty());

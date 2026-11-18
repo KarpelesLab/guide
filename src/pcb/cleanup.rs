@@ -1,12 +1,12 @@
 //! Cleanup after routing: fewer vias, then shorter and straighter tracks. Every change is
 //! checked against the world as routing is, so cleanup can't make a route illegal.
 
-use super::RouteOptions;
 use super::detail::{self, NetCtx, Params, octile};
 use super::geometry::{NetCopper, Seg};
 use super::router::Job;
 use super::world::{Verdict, World};
-use crate::geom::{LayerId, Point, Shape};
+use super::{Design, RouteOptions};
+use crate::geom::{LayerId, Point, Rect, Shape};
 
 /// How much dearer vias are when a net is rerouted to lose some.
 pub(crate) const VIA_COST_FACTOR: f64 = 10.0;
@@ -36,6 +36,7 @@ fn node_budget(connections: u64) -> u64 {
 /// Cleans up every routed net, and returns the nodes its searches expanded.
 pub(crate) fn run(
     world: &mut World<'_>,
+    design: &Design,
     jobs: &[Job],
     copper: &mut [Option<NetCopper>],
     params: Params,
@@ -71,6 +72,31 @@ pub(crate) fn run(
             }
         }
     }
+    if options.shorten {
+        // The nets that an earlier run left as they are too: it looked at each with the
+        // others where they were then.
+        expanded += shorten(world, design, jobs, copper, params, options);
+        // And every net pulled tight again, a few times over: tracks side by side round
+        // a corner are each in the next one's way, and the one on the inside goes first.
+        let length = |copper: &[Option<NetCopper>]| -> f64 {
+            copper.iter().flatten().map(NetCopper::length).sum()
+        };
+        for _ in 0..TIDY_SWEEPS {
+            let before = length(copper);
+            for (job, slot) in jobs.iter().zip(copper.iter_mut()) {
+                let Some(c) = slot else { continue };
+                if stopped(world) {
+                    return expanded;
+                }
+                if !(bounded && job.plane) {
+                    tidy(world, &job.ctx, c);
+                }
+            }
+            if length(copper) > before * (1.0 - TIDY_AGAIN) {
+                break;
+            }
+        }
+    }
     for j in order {
         let job = &jobs[j];
         let Some(c) = &mut copper[j] else { continue };
@@ -100,6 +126,367 @@ pub(crate) fn run(
         }
     }
     expanded
+}
+
+/// How much less than a run of tracks a way between its two ends must cost at least for
+/// the run to be searched for again, in pitches and as a share of what it costs: a run
+/// that goes round a pad costs more than the straight line and has no shorter way.
+const SHORTER_PITCHES: f64 = 3.0;
+const SHORTER_SHARE: f64 = 0.06;
+
+/// How many nodes the search for a shorter run may expand for each pitch of the run's
+/// length, at least and at most, and how many pitches round the run it is kept to.
+const SHORTER_NODES: f64 = 150.0;
+const SHORTER_MIN: u64 = 4_000;
+const SHORTER_MAX: u64 = 120_000;
+const SHORTER_WINDOW: i64 = 12;
+
+/// How many times at most every net is pulled tight again once the shorter runs are
+/// found.
+const TIDY_SWEEPS: usize = 4;
+
+/// What share of the nets' length one time through them must take off for another.
+const TIDY_AGAIN: f64 = 5e-4;
+
+/// How many times the nets are gone through for shorter runs, and how many runs of one
+/// net are searched for in one of them: a run that moves leaves room for another's.
+const SHORTER_SWEEPS: usize = 3;
+
+/// The share of cleanup's time, and of the work that a budget leaves, that the search
+/// for shorter runs may have.
+const SHORTER_PART: f64 = 0.6;
+const SHORTER_TRIES: usize = 24;
+
+/// A run of a net's tracks and vias from one pad or branch to the next.
+#[derive(Clone, Debug)]
+struct Chain {
+    segs: Vec<usize>,
+    /// The vias along it, its ends apart.
+    vias: Vec<Point>,
+    ends: [Point; 2],
+    length: f64,
+}
+
+/// The runs of a net's copper, whose tracks meet at their ends only: from each pad or
+/// place where more or fewer than two tracks meet, along tracks and through vias, to the
+/// next. Not those with an end that leads nowhere.
+fn chains(c: &NetCopper, ctx: &NetCtx) -> Vec<Chain> {
+    use std::collections::BTreeMap;
+    // A place where tracks are joined: a point on a layer, or on every layer where a via
+    // or a pad of more layers is.
+    const ALL: u8 = u8::MAX;
+    let mut vias = c.vias.clone();
+    vias.sort_unstable();
+    let pad = |p: Point, l: u8| {
+        ctx.pads
+            .iter()
+            .any(|t| t.center == p && t.layers.contains(LayerId(l)))
+    };
+    let node = |p: Point, l: u8| {
+        if vias.binary_search(&p).is_ok() || pad(p, l) {
+            (p, ALL)
+        } else {
+            (p, l)
+        }
+    };
+    let mut at: BTreeMap<(Point, u8), Vec<usize>> = BTreeMap::new();
+    for (i, s) in c.segs.iter().enumerate() {
+        at.entry(node(s.a, s.l)).or_default().push(i);
+        at.entry(node(s.b, s.l)).or_default().push(i);
+    }
+    let is_pad = |n: (Point, u8)| n.1 == ALL && ctx.pads.iter().any(|t| t.center == n.0);
+    let joint = |n: (Point, u8)| is_pad(n) || at.get(&n).is_none_or(|v| v.len() != 2);
+    let mut used = vec![false; c.segs.len()];
+    let mut out = Vec::new();
+    for (&n, segs) in &at {
+        if !joint(n) {
+            continue;
+        }
+        for &first in segs {
+            if used[first] {
+                continue;
+            }
+            let mut chain = Chain {
+                segs: Vec::new(),
+                vias: Vec::new(),
+                ends: [n.0, n.0],
+                length: 0.0,
+            };
+            let (mut here, mut seg) = (n, first);
+            loop {
+                used[seg] = true;
+                let s = c.segs[seg];
+                chain.segs.push(seg);
+                chain.length += s.length();
+                let next = if node(s.a, s.l) == here && s.a == here.0 {
+                    s.b
+                } else {
+                    s.a
+                };
+                here = node(next, s.l);
+                if joint(here) {
+                    break;
+                }
+                if here.1 == ALL {
+                    chain.vias.push(here.0);
+                }
+                let Some(&k) = at[&here].iter().find(|&&k| !used[k]) else {
+                    break;
+                };
+                seg = k;
+            }
+            chain.ends[1] = here.0;
+            // An end where nothing else is leads nowhere.
+            let open = |n: (Point, u8)| !is_pad(n) && at.get(&n).is_none_or(|v| v.len() < 2);
+            if !open(n) && !open(here) && chain.ends[0] != chain.ends[1] {
+                out.push(chain);
+            }
+        }
+    }
+    out
+}
+
+/// What a run costs, as a search counts it: its length, and a via's price for each of
+/// its vias.
+fn cost(length: f64, vias: usize, options: &RouteOptions) -> f64 {
+    length + vias as f64 * 1e6 * options.via_cost * SHORTER_VIA
+}
+
+/// How many times what a via costs while routing it costs a run that is searched for
+/// again: with nothing to move, a dearer via costs no connection, as it does while nets
+/// are routed (`docs/benchmarks.md`), and a run that went under another net for a
+/// millimetre saved is one via pair more.
+const SHORTER_VIA: f64 = 3.0;
+
+/// How much a run costs more than the straight way between its ends, if that is enough
+/// for it to be searched for again.
+fn excess(chain: &Chain, pitch: i64, options: &RouteOptions) -> Option<f64> {
+    let old = cost(chain.length, chain.vias.len(), options);
+    let over = old - octile(chain.ends[0], chain.ends[1]);
+    (over >= (SHORTER_PITCHES * pitch as f64).max(SHORTER_SHARE * old)).then_some(over)
+}
+
+/// Looks for shorter runs of every net ([`RouteOptions::shorten`]), the nets with the
+/// most to gain first, and returns the nodes expanded.
+fn shorten(
+    world: &mut World<'_>,
+    design: &Design,
+    jobs: &[Job],
+    copper: &mut [Option<NetCopper>],
+    params: Params,
+    options: &RouteOptions,
+) -> u64 {
+    // Of the time and of the work that cleanup has, a share: what is cut off a fill by a
+    // run that went another way is joined to it again afterwards.
+    let began = std::time::Instant::now();
+    let time = world
+        .run()
+        .and_then(super::control::Run::part_left)
+        .map(|left| left.mul_f64(SHORTER_PART));
+    let work = world
+        .run()
+        .and_then(super::control::Run::work_left)
+        .map(|left| (left as f64 * SHORTER_PART) as u64);
+    let stopped = |world: &World<'_>, expanded: u64| {
+        world.run().is_some_and(super::control::Run::poll)
+            || time.is_some_and(|t| began.elapsed() >= t)
+            || work.is_some_and(|w| expanded >= w)
+    };
+    let bounded = world.run().is_some_and(super::control::Run::bounded);
+    let mut expanded = 0;
+    // Where runs moved, the last time through the nets.
+    let mut last: Option<Vec<Rect>> = None;
+    for _ in 0..SHORTER_SWEEPS {
+        let mut places = Places {
+            near: last.as_deref(),
+            moved: Vec::new(),
+        };
+        // By net, what its runs cost more than straight ways would.
+        let mut order: Vec<(f64, usize)> = Vec::new();
+        for (j, (job, slot)) in jobs.iter().zip(copper.iter_mut()).enumerate() {
+            let Some(c) = slot else { continue };
+            if bounded && job.plane {
+                continue;
+            }
+            let mut split = c.detached();
+            split.split_at_joints(&job.ctx);
+            let over: f64 = chains(&split, &job.ctx)
+                .iter()
+                .filter_map(|ch| excess(ch, params.pitch, options))
+                .sum();
+            if over > 0.0 {
+                order.push((over, j));
+            }
+        }
+        order.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+        let mut gained = false;
+        for (_, j) in order {
+            if stopped(world, expanded) {
+                return expanded;
+            }
+            let Some(c) = &mut copper[j] else { continue };
+            let (more, better) = shorter(world, design, &jobs[j], c, params, options, &mut places);
+            expanded += more;
+            gained |= better;
+        }
+        if !gained {
+            break;
+        }
+        // Another time through the nets, for the runs near one that moved: it left room.
+        let moved = places.moved;
+        last = Some(moved);
+    }
+    expanded
+}
+
+/// Where runs are looked at, and where they moved.
+struct Places<'a> {
+    /// If any, the boxes that a run must be near one of to be looked at: where runs moved
+    /// the last time through the nets.
+    near: Option<&'a [Rect]>,
+    /// The boxes of the runs that moved, this time.
+    moved: Vec<Rect>,
+}
+
+/// Looks for a shorter way for each run of one net, the one with the most to gain first.
+/// Returns the nodes expanded, and whether any run changed.
+fn shorter(
+    world: &mut World<'_>,
+    design: &Design,
+    job: &Job,
+    c: &mut NetCopper,
+    params: Params,
+    options: &RouteOptions,
+    places: &mut Places<'_>,
+) -> (u64, bool) {
+    let (near, moved) = (places.near, &mut places.moved);
+    let ctx = &job.ctx;
+    let apart = c.pieces(ctx).apart();
+    let reach = SHORTER_WINDOW * params.pitch;
+    let around = |split: &NetCopper, ch: &Chain| {
+        let mut r = Rect::new(ch.ends[0], ch.ends[0]);
+        for &i in &ch.segs {
+            let s = split.segs[i];
+            r = r.union(&Rect::new(s.a, s.a)).union(&Rect::new(s.b, s.b));
+        }
+        r.expand(reach)
+    };
+    let mut expanded = 0;
+    let mut better = false;
+    c.unplace(world);
+    let mut tried: Vec<[Point; 2]> = Vec::new();
+    // The ends of the tracks that the searches made.
+    let mut fresh: Vec<(u8, Point)> = Vec::new();
+    for _ in 0..SHORTER_TRIES {
+        if world.run().is_some_and(super::control::Run::poll) {
+            break;
+        }
+        let mut split = c.detached();
+        split.split_at_joints(ctx);
+        let Some((_, chain)) = chains(&split, ctx)
+            .into_iter()
+            .filter(|ch| !tried.contains(&ch.ends))
+            // After the first time through the nets, where a run has moved since.
+            .filter(|ch| {
+                near.is_none_or(|near| {
+                    let r = around(&split, ch);
+                    near.iter().any(|m| m.intersects(&r))
+                })
+            })
+            .filter(|ch| {
+                // Not a run that a search has just made.
+                !ch.segs.iter().all(|&i| {
+                    let s = split.segs[i];
+                    fresh.binary_search(&(s.l, s.a)).is_ok()
+                        && fresh.binary_search(&(s.l, s.b)).is_ok()
+                })
+            })
+            .filter_map(|ch| excess(&ch, params.pitch, options).map(|e| (e, ch)))
+            .max_by(|a, b| a.0.total_cmp(&b.0))
+        else {
+            break;
+        };
+        tried.push(chain.ends);
+        tried.push([chain.ends[1], chain.ends[0]]);
+        let old = cost(chain.length, chain.vias.len(), options);
+        // The net without the run.
+        let mut less = split.detached();
+        let mut k = 0;
+        less.segs.retain(|_| {
+            k += 1;
+            !chain.segs.contains(&(k - 1))
+        });
+        less.vias.retain(|v| !chain.vias.contains(v));
+        let pieces = less.pieces(ctx);
+        if pieces.apart() <= apart {
+            // A run that the net is joined without: a way round that closed on itself.
+            moved.push(around(&split, &chain));
+            less.prune(ctx);
+            *c = less;
+            better = true;
+            continue;
+        }
+        if pieces.apart() != apart + 1 || apart != 0 {
+            continue;
+        }
+        let between = super::router::completion(design, ctx, &less, params.pitch);
+        let window = around(&split, &chain);
+        let b = params.bounds;
+        let nodes = (chain.length / params.pitch as f64 * SHORTER_NODES) as u64;
+        let p = Params {
+            via_cost: params.via_cost * SHORTER_VIA,
+            max_expansions: nodes
+                .clamp(SHORTER_MIN, SHORTER_MAX)
+                .min(params.max_expansions),
+            bounds: Rect::new(
+                Point::new(window.min().x.max(b.min().x), window.min().y.max(b.min().y)),
+                Point::new(window.max().x.min(b.max().x), window.max().y.min(b.max().y)),
+            ),
+            partial: false,
+            stubs: false,
+            forest: false,
+            ..params
+        };
+        let steps = detail::StepCache::default();
+        let found = match detail::route_net(world, &between, &steps, p, None, None) {
+            Ok(t) => {
+                expanded += t.expanded;
+                Some(NetCopper::from_tree(&between, &t))
+            }
+            Err((_, e)) => {
+                expanded += e;
+                None
+            }
+        };
+        let Some(new) = found else { continue };
+        let gain = old - cost(new.length(), new.vias.len(), options);
+        if gain < (params.pitch as f64).max(SHORTER_SHARE / 2.0 * old) {
+            continue;
+        }
+        let mut whole = less;
+        fresh.extend(new.segs.iter().flat_map(|s| [(s.l, s.a), (s.l, s.b)]));
+        fresh.sort_unstable();
+        fresh.dedup();
+        whole.segs.extend(new.segs);
+        for v in new.vias {
+            if !whole.vias.contains(&v) {
+                whole.vias.push(v);
+            }
+        }
+        whole.prune(ctx);
+        if whole.pieces(ctx).apart() > apart {
+            continue;
+        }
+        *c = whole;
+        better = true;
+        moved.push(window);
+    }
+    if better {
+        drop_idle_vias(c, ctx);
+        pull_tight(world, ctx, c);
+    }
+    c.place(world, ctx);
+    (expanded, better)
 }
 
 /// A net's copper without the vias that join nothing, and with its runs pulled tight, in
@@ -475,7 +862,7 @@ mod tests {
     use super::super::tests::{MM, design, smd};
     use super::super::world::World;
     use super::super::{RouteOptions, router};
-    use super::fewer_hops;
+    use super::{fewer_hops, shorter};
     use crate::geom::Point;
 
     #[test]
@@ -548,5 +935,149 @@ mod tests {
         fewer_hops(&mut world, &jobs[1], under, params, &options);
         assert_eq!(under.vias.len(), 2, "{under:?}");
         assert_eq!(under.pieces(&jobs[1].ctx).apart(), 0);
+    }
+
+    #[test]
+    fn a_way_round_is_made_shorter_where_there_is_a_shorter_one() {
+        // Three nets of two pads on the top layer, 10 mm apart, each routed the long way
+        // round: the first round nothing, the second round a track of a fourth net that
+        // goes on for 10 mm either way, and the third with a straight track as well.
+        let pads = vec![
+            smd(0, 0, 1),
+            smd(10 * MM, 0, 1),
+            smd(0, 40 * MM, 2),
+            smd(10 * MM, 40 * MM, 2),
+            smd(0, 80 * MM, 3),
+            smd(10 * MM, 80 * MM, 3),
+            smd(5 * MM, 30 * MM, 4),
+            smd(5 * MM, 50 * MM, 4),
+        ];
+        let d = design(2, pads, 5);
+        let options = RouteOptions::default();
+        let mut world = World::new(
+            &d.board,
+            &d.rules,
+            &d.outline,
+            d.edge_clearance,
+            &d.obstacles,
+        )
+        .unwrap();
+        world.configure(&d, &options);
+        let pitch = router::pitch(&d, &options);
+        let jobs = router::jobs(&d, &world, pitch, &[], &[]);
+        assert_eq!(jobs.len(), 4);
+        let seg = |a: (i64, i64), b: (i64, i64)| Seg {
+            a: Point::new(a.0, a.1),
+            b: Point::new(b.0, b.1),
+            l: 0,
+        };
+        let round = |y: i64, by: i64| {
+            let mut c = NetCopper::default();
+            c.segs = vec![
+                seg((0, y), (0, y + by)),
+                seg((0, y + by), (10 * MM, y + by)),
+                seg((10 * MM, y + by), (10 * MM, y)),
+            ];
+            c
+        };
+        let mut twice = round(80 * MM, 5 * MM);
+        twice.segs.push(seg((0, 80 * MM), (10 * MM, 80 * MM)));
+        let mut wall = NetCopper::default();
+        wall.segs = vec![seg((5 * MM, 30 * MM), (5 * MM, 50 * MM))];
+        let mut copper = [round(0, 5 * MM), round(40 * MM, -12 * MM), twice, wall];
+        for (job, c) in jobs.iter().zip(copper.iter_mut()) {
+            c.place(&mut world, &job.ctx);
+        }
+        let params = Params {
+            pitch,
+            via_cost: options.via_cost,
+            layer_bias: options.layer_bias,
+            bounds: crate::geom::Rect::new(
+                Point::new(-10 * MM, -20 * MM),
+                Point::new(20 * MM, 100 * MM),
+            ),
+            max_expansions: options.max_expansions,
+            under_pads: false,
+            partial: false,
+            stubs: false,
+            forest: false,
+        };
+        let [free, under, looped, _] = &mut copper;
+        let mut places = super::Places {
+            near: None,
+            moved: Vec::new(),
+        };
+        // Straight across, where nothing is in the way.
+        let (_, better) = shorter(
+            &mut world,
+            &d,
+            &jobs[0],
+            free,
+            params,
+            &options,
+            &mut places,
+        );
+        assert!(better);
+        assert!(free.vias.is_empty(), "{free:?}");
+        assert_eq!(free.length(), (10 * MM) as f64, "{free:?}");
+        assert_eq!(free.pieces(&jobs[0].ctx).apart(), 0);
+        // Under the track in the way, which costs two vias and less than 24 mm of track.
+        let (_, better) = shorter(
+            &mut world,
+            &d,
+            &jobs[1],
+            under,
+            params,
+            &options,
+            &mut places,
+        );
+        assert!(better);
+        assert_eq!(under.vias.len(), 2, "{under:?}");
+        assert!(under.length() < (12 * MM) as f64, "{under:?}");
+        assert_eq!(under.pieces(&jobs[1].ctx).apart(), 0);
+        // The way round that the net is joined without goes, with no search.
+        let (nodes, better) = shorter(
+            &mut world,
+            &d,
+            &jobs[2],
+            looped,
+            params,
+            &options,
+            &mut places,
+        );
+        assert!(better);
+        assert_eq!(nodes, 0);
+        assert_eq!(looped.length(), (10 * MM) as f64, "{looped:?}");
+        assert_eq!(places.moved.len(), 3);
+        // And what is as short as it gets stays as it is.
+        let (_, better) = shorter(
+            &mut world,
+            &d,
+            &jobs[0],
+            free,
+            params,
+            &options,
+            &mut places,
+        );
+        assert!(!better);
+        // Nor is a run looked at that is near nothing that moved.
+        let far = [crate::geom::Rect::new(
+            Point::new(500 * MM, 0),
+            Point::new(501 * MM, MM),
+        )];
+        places.near = Some(&far);
+        let mut again = round(0, 5 * MM);
+        free.unplace(&mut world);
+        again.place(&mut world, &jobs[0].ctx);
+        let (nodes, better) = shorter(
+            &mut world,
+            &d,
+            &jobs[0],
+            &mut again,
+            params,
+            &options,
+            &mut places,
+        );
+        assert!(!better && nodes == 0);
     }
 }

@@ -390,7 +390,7 @@ impl NetCopper {
 
     /// Cuts the tracks where another ends on them, or a via or a pad's centre is, so that
     /// tracks only meet at their ends.
-    fn split_at_joints(&mut self, ctx: &NetCtx) {
+    pub(crate) fn split_at_joints(&mut self, ctx: &NetCtx) {
         let mut out: Vec<Seg> = Vec::with_capacity(self.segs.len());
         for (i, s) in self.segs.iter().enumerate() {
             let inside = |p: Point| p != s.a && p != s.b && on_seg(p, s.a, s.b);

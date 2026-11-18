@@ -10,6 +10,8 @@ use core::fmt;
 use core::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use super::zones::Fill;
+use crate::geom::drc::{Track, Via};
 use crate::search::SearchLimits;
 
 /// What a run is doing, for [`Progress`].
@@ -88,7 +90,8 @@ pub use crate::control::Stopped;
 
 /// What may stop a run from outside, and who hears of its progress.
 ///
-/// Create this with [`Default`] and set the fields. Nothing here changes the result of a
+/// Create this with [`Default`] and set the fields. Nothing here but
+/// [`refill`](RunControl::refill) changes the result of a
 /// run that is left to finish: a progress callback only listens, and a run that a deadline
 /// or the flag stops says so in [`Routed::stopped`](super::Routed::stopped). Such a result
 /// is valid, and holds what was routed until then, but depends on the moment: the
@@ -138,6 +141,51 @@ pub struct RunControl<'a> {
     /// stopped by its work budget fills its zones in any case, as its result is the same
     /// on any machine.
     pub fill_on_stop: bool,
+    /// The host's own fill of its zones around routes, for a host that
+    /// [fills its zones itself](super::Zones::fills): given the tracks and the vias of the
+    /// run as they stand ([`Refill`]), it returns the fills of the zones as its board
+    /// would then have them, each [`Fill`] one connected piece on one layer, or `None` if
+    /// it has none to give now, as when its own time is short.
+    ///
+    /// A run with a [budget](super::RouteOptions::work_budget) or a deadline that
+    /// [tells the pads its routes cut off their fills](super::RouteOptions::pour_cuts)
+    /// estimates those fills on a grid while it routes: an estimate that takes a place
+    /// between two tracks for filled where the host's fill, with its least width and its
+    /// islands, leaves none. With this, a board with fills on an outer layer, which
+    /// routes cut, has the pads cut off told by the host's fills instead, exactly: a pad
+    /// that its zone's fill touches is joined to it, and no other is. They are asked for
+    /// at most three times while
+    /// [every net is negotiated at once](super::RouteOptions::whole), and at most three
+    /// times once routing is over. And on any board they are asked for once more when
+    /// cleanup is over ([`Refill::last`]): the stubs to a plane that those fills make
+    /// needless, as a pour of an outer layer joins their pads to the net, are taken out
+    /// again ([`Stats::stubs_pruned`](super::Stats::stubs_pruned)) and returned apart
+    /// ([`Routed::spare`](super::Routed::spare)), and a
+    /// result with no [fills](super::Routed::fills) of its own is counted on them.
+    /// Where it returns `None`, and between those times, the estimate stands. The call
+    /// is made on the thread that routes; the run waits for it, and its time is the
+    /// run's, also past a deadline for the last one. A run is as reproducible as what
+    /// this returns.
+    pub refill: Option<&'a RefillFn<'a>>,
+}
+
+/// A host's fill of its zones around a run's routes ([`RunControl::refill`]).
+pub type RefillFn<'a> = dyn Fn(&Refill<'_>) -> Option<Vec<Fill>> + 'a;
+
+/// What a run asks its host's fill for ([`RunControl::refill`]): the copper that the
+/// [`Design`](super::Design) does not have.
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub struct Refill<'a> {
+    /// The tracks of the run as they stand: its routes, and those of an
+    /// [`Earlier`](super::Earlier) run, moved or not.
+    pub tracks: &'a [Track],
+    /// Its vias, likewise.
+    pub vias: &'a [Via],
+    /// Whether routing and cleanup are over: these fills are then also what the stubs
+    /// that they make needless are told by, and what the result is counted on. A run
+    /// asks so once, also when its deadline has passed.
+    pub last: bool,
 }
 
 impl Default for RunControl<'_> {
@@ -148,6 +196,7 @@ impl Default for RunControl<'_> {
             progress: None,
             progress_interval: Duration::from_millis(100),
             fill_on_stop: true,
+            refill: None,
         }
     }
 }
@@ -160,6 +209,7 @@ impl fmt::Debug for RunControl<'_> {
             .field("progress", &self.progress.map(|_| "Fn"))
             .field("progress_interval", &self.progress_interval)
             .field("fill_on_stop", &self.fill_on_stop)
+            .field("refill", &self.refill.map(|_| "Fn"))
             .finish()
     }
 }
@@ -291,6 +341,23 @@ impl<'a> Run<'a> {
             self.cut.set(self.cut.get().or(why));
             self.stop.store(true, Ordering::Relaxed);
         }
+    }
+
+    /// The host's fill of its zones around these routes, if it gives one.
+    pub(crate) fn refill(&self, tracks: &[Track], vias: &[Via], last: bool) -> Option<Vec<Fill>> {
+        let asked = Refill { tracks, vias, last };
+        self.control.refill.and_then(|f| f(&asked))
+    }
+
+    /// Whether the caller's flag stopped the run. Looks at it.
+    pub(crate) fn cancelled(&self) -> bool {
+        self.poll();
+        self.why.get() == Some(Stopped::Cancelled)
+    }
+
+    /// Whether the host gives fills of its own.
+    pub(crate) fn refills(&self) -> bool {
+        self.control.refill.is_some()
     }
 
     /// Whether the deadline, if there is one, leaves less than `needed`.

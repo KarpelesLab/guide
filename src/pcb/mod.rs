@@ -239,7 +239,7 @@ use crate::geom::{GeomError, LayerId, LayerSet, Rules, Shape};
 use crate::id::NetId;
 
 pub use crate::geom::drc::MaskOpening;
-pub use control::{Phase, Progress, RunControl, Stopped};
+pub use control::{Phase, Progress, Refill, RefillFn, RunControl, Stopped};
 pub use measure::{coupling, net_length};
 pub use report::{Blocker, Cause, CopperKind, DesignItem, Endpoint, OpenConnection};
 #[cfg(feature = "kicad")]
@@ -672,7 +672,8 @@ pub struct RouteOptions {
     /// is taken out of them: a pad that is then no longer on the largest piece of its
     /// fill is joined to it again by a stub that moves nothing, in cleanup's share of the
     /// time. The grid errs on the side of a cut, and a stub. A run with no budget counts
-    /// none.
+    /// none. A host that fills its zones itself can give its own fill around the routes
+    /// to tell them by ([`RunControl::refill`]).
     pub pour_cuts: bool,
     /// Whether a run with a [budget](RouteOptions::work_budget) or a deadline settles what
     /// its passes of rip-up leave open. The default is `true`. Rip-up takes a net out for
@@ -859,6 +860,12 @@ pub struct Stats {
     /// on, each time the net was given a turn to join them to it again
     /// ([`RouteOptions::pour_cuts`]).
     pub pour_cuts: usize,
+    /// How many times the host gave its own fill of the zones around the routes, to tell
+    /// those pieces by ([`RunControl::refill`]).
+    pub refills: usize,
+    /// The stubs to fills that the host's own fill around the routes made needless, and
+    /// that were taken out again ([`RunControl::refill`]).
+    pub stubs_pruned: usize,
     /// The chains of moves tried for the connections that rip-up left open
     /// ([`RouteOptions::settle`]), those of them kept, and the connections that these
     /// made.
@@ -937,6 +944,14 @@ pub struct Routed {
     /// now, in place of what was given for them. What was given for any other net is
     /// not in the result, and stays on the board as the host has it.
     pub taken_back: Vec<NetId>,
+    /// The stubs that the host's own fill around the routes made needless and that were
+    /// taken out of [`tracks`](Routed::tracks) and [`vias`](Routed::vias) for it
+    /// ([`RunControl::refill`], [`Stats::stubs_pruned`]): the tracks and the vias of each.
+    /// A host that goes on from this result in another run gives them back with the
+    /// routes, as copper of the board or in [`Earlier`]: that run plans a net with a plane
+    /// on the plane alone, and would make each of them again on a board that has less
+    /// room by then, and take them out again at its end.
+    pub spare: (Vec<Track>, Vec<Via>),
 }
 
 impl Routed {

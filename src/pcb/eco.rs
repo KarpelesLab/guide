@@ -571,6 +571,7 @@ fn route_kept(
         tried: routed.tried,
         failed: routed.failed,
         taken_back: Vec::new(),
+        spare: routed.spare,
     };
     all.tracks.extend(routed.tracks);
     all.vias.extend(routed.vias);

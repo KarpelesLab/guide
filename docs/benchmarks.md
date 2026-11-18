@@ -5174,6 +5174,128 @@ board, 1.8 to a batch on average. The counts do not depend on it.
 - Vias: `tinytapeout-demo` 395 to 455 and `lumenpnp-mobo` 414 to 531, where cadlab's
   router has 238 and 263 to 340.
 
+## PCB routing on the host's own fills
+
+What was changed after [the release above](#pcb-routing-of-every-net-at-once), 0.0.17,
+for the same host, cadlab: `RunControl::refill`, a call back into a host that fills its
+zones itself, for its fill around the routes as they stand
+([decision](architecture.md#decisions)). Measured on 2026-11-18 through cadlab's adapter
+and its `route_bench`, on a machine that other work shared: what decided between two
+versions of the code was a budget of nodes, which is the same on any machine, and the
+runs with a deadline are those of the adapter as it was when each was made.
+
+### What
+
+`corne-cherry` was the one board of cadlab's twelve where its own router left fewer
+connections open than `guide`: 0 to 4 against 5 to 10 at 60 s. Each of those was a pad of
+a ground or a supply that `guide` had told joined, 482 of 482 connections on its own
+board, and that cadlab's fill around the routes left off its pour. The cells that
+`guide` tells the pads cut off by (`pcb::pours`) keep a place between two tracks as
+filled where the host's fill, with its least width and its islands taken out, has
+nothing, and a stub that ended there joined its pad to no copper. Cadlab's router fills
+the zones itself between two negotiations.
+
+- **The host's fill.** `RunControl::refill` is given the tracks and vias of the run and
+  returns the host's fills. The pieces are then those, to the nanometre: a pad is on the
+  pieces that touch it, a route on those that hold its ends and its vias. On a board
+  with a fill planned on an outer layer it is asked for when the negotiation for every
+  net tells the pads cut off, three times at most, and at each round of stubs once
+  routing is over, three at most; on any board once more when cleanup is over.
+- **A wire to a place that is no longer fill.** The negotiation kept a wire that ended
+  at a place in a fill as joined to the fill when that place was on no piece of it any
+  more, and never routed its pad again. This is what the host's fills showed, and it
+  was so with the cells too. Such a wire now goes.
+- **More rounds for the pads cut off, and another order.** Each time the pads cut off
+  are told, the negotiation has forty more rounds: `corne-cherry`'s ended at its
+  hundredth with a second telling still to come. One that ends on its own with points
+  still shared, having cost no more than half of what its share has left, is begun again
+  with the nets moved another way, three times at most, and the one with the fewest
+  shared is kept.
+- **Stubs that a pour makes needless.** A net with a plane has a stub for every pad off
+  the plane. By the fill asked for when cleanup is over, a stub whose ends the host's
+  fills, the board's copper and the net's other routes join without it is taken out,
+  and returned apart (`Routed::spare`) for a host that runs again from the routes.
+
+### Results
+
+At a budget of nodes, which gives the same routes from source and from the crate, the
+nine boards that a budget cuts, three orders of the nets, connections open, 0.0.17
+first:
+
+| board | 40 million nodes, 0.0.17 | with this | 150 million, two orders, 0.0.17 | with this |
+|---|---|---|---|---|
+| nrfmicro | 0 | 0 | | 0, 0 |
+| sweep-v2.2 | 9 | 9 | 3, 3 | 3, 3 |
+| corne-cherry | 79 | 79 | 3, 3 | 2, 1 |
+| tinytapeout-demo | 43 | 41 | 0, 0 | 0, 2 |
+| buspirate5-rev10 | 0 | 0 | 0, 0 | 0, 0 |
+| lumenpnp-mobo | 0 | 0 | 0, 0 | 0, 0 |
+| cynthion | 38 | 35 | 11, 9 | 11, 11 |
+| glasgow-revC3 | 105 | 105 | 28, 27 | 30, 28 |
+| glasgow-revD1 | 441 | 441 | | |
+| all | 715 | 710 | | |
+
+At 40 million nodes the negotiation is cut a third of the way through on
+`corne-cherry`, before any pad cut off is told. At 150 million, where it ends, that
+board has 2 and 1 open for 3 and 3. The three boards that have one or two more at 150
+million are boards with planes on inner layers, where no fill is asked for while
+routing: their first runs are the same as with 0.0.17 to the node, and what differs is
+which of cadlab's later runs, each in another order, ends with less open.
+`tinytapeout-demo`'s second order has 4 open after its first run and its run on the
+fixed board with either version; with 0.0.17 the runs that had the routes back closed
+them, and here they closed two.
+
+At 60 s, through the adapter, four orders of the nets, three threads for the
+negotiation, with other work on the machine:
+
+- `corne-cherry`: 2, 1, 0 and 0 open, for 5 to 10 with 0.0.17 and 0 to 4 for cadlab's
+  router. With the host's fills and the wires to places that are fill no more still
+  kept: 4, 6, 6 and 2. The fill of that board takes cadlab 0.35 s, and its first run
+  asks for it five to seven times.
+- `nrfmicro`: 0 in all four, for 0, 0, 0 and 1. Its negotiation never ends with nothing
+  shared: 20 to 64 points in each of sixteen attempts, the best of each four 20, 23, 15
+  and 10. The order that had left a connection of its USB receptacle open closes in 3 s.
+- Vias, by the stubs taken out: `lumenpnp-mobo`'s first run ends with 133 stubs to its
+  planes for 254, and the board with 402 to 408 vias in three orders at 40 million
+  nodes for 416, 523 and 529, the two higher counts being runs in which cadlab's own
+  pass for the same, which is two fills once all its runs are over, was not made;
+  `tinytapeout-demo` 96 stubs for 122.
+
+### Tried and not kept
+
+- **The host's fill at every telling on every board.** On `lumenpnp-mobo`, whose nets
+  with zones are planned on inner planes, which few routes cross, four fills of 1.4 s
+  each of the first run's 42 s, and none left for the stubs at the end. Hence the
+  fills while routing only where a fill is planned on an outer layer.
+- **The stubs taken out and not given back.** The first version left them out of the
+  routes for good. A later run of the host that takes the routes back plans a net with
+  a plane on the plane alone, makes each stub again where there is room, and ended with
+  72 connections open on its own board for 7: `tinytapeout-demo` had 4 open at 150
+  million nodes for 0. Hence `Routed::spare`.
+- **Dearer vias in the negotiation**, for the vias that the host counts beside its own
+  router's (`lumenpnp-mobo` 409 to 529 against 336 to 343 with 0.0.17). A via at 24 and
+  at 40 steps of the grid for 10, at 40 million nodes over three orders on the nine
+  boards: 765 and 794 connections open for 710, with 11355 and 11085 vias for 11851
+  (`corne-cherry` 102 and 85 open for 79, `cynthion` 47 and 63 for 35,
+  `tinytapeout-demo` 48 and 65 for 41, and at 24 with more vias, not fewer). At 60 s, where
+  more negotiations end, two orders at 24 had as few open on five boards of six and
+  `corne-cherry` 433 and 435 vias for 535 and 626: it is a gain where the rounds end
+  and a loss where the budget ends them, and the default stays.
+
+### What this does not show
+
+- The released crate behind cadlab's adapter on a quiet machine, beside cadlab's own
+  router: measured after the release.
+- A host other than cadlab. The pieces are told with `planes::pieces`, which takes a
+  fill for a polygon with holes that touches the pads it joins; a host whose fill
+  leaves a gap at a pad and joins it by tracks of its own would have every pad cut off.
+- Boards whose fill takes long. Cadlab's adapter gives a fill while routing only within
+  15 % of the run's time, and the one at the end after the deadline only if a fill is
+  within 3 % of the whole budget: on `glasgow-revD1`, some 5 s a fill, the stubs are
+  taken out when the first run ends before its deadline and not otherwise.
+- The vias of the other nets. Of `lumenpnp-mobo`'s some 280 are not stubs, where
+  cadlab's router has some 207, and nothing here touches them.
+
 ## PCB differential pairs and lengths
 
 Differential pairs routed side by side, and nets meandered to their lengths, by `pcb::route`

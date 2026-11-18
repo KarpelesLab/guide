@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.20](https://github.com/KarpelesLab/guide/compare/v0.0.19...v0.0.20) - 2026-11-18
+
+### Added
+
+- *(pcb)* the second ring of an array of balls has its ways out planned and the balls further in go away from its middle, a run of tracks that costs more than the straight way is looked for again once routing is over (RouteOptions::shorten), and a host can ask which tracks from pad to pad a fill makes needless (needless_between) ([#26](https://github.com/KarpelesLab/guide/pull/26))
+
+### Other
+
+- *(benchmarks)* twice the pitch as released, beside cadlab's router on a quiet machine, with what it reaches of the vias and what got longer ([#24](https://github.com/KarpelesLab/guide/pull/24))
+
 ## [0.0.19](https://github.com/KarpelesLab/guide/compare/v0.0.18...v0.0.19) - 2026-11-18
 
 ### Added

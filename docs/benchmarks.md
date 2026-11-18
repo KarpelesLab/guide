@@ -5057,6 +5057,38 @@ with 0.0.16. So the table says how the two stand under the same load, and no mor
 `nrfmicro` is closed in every run, the first in 18 s, where 0.0.16 had 0 to 2 open at
 the deadline. `corne-cherry` has 5 to 10 for 15 to 21, and is still behind 0 to 4.
 
+**As released**, 0.0.17 from crates.io behind cadlab's adapter, which turns `whole` on
+in the first run of a run with a budget, the same four runs of each side by side on a
+quiet machine: the twelve boards 173 to 191 open (median 185.5) against 324 to 340
+(335), the eleven without `glasgow-revD1` 55 to 59 against 81 to 101. `nrfmicro` 0, 0, 0
+and 1 against 0 in every run, closed in 7 to 18 s in the three; `sweep-v2.2` 3 in every
+run of both; `corne-cherry` 5, 8, 10 and 5 against 3, 4, 0 and 3, as in the table above
+to the connection, so that it is not the load that leaves it behind; `tinytapeout-demo`
+0 to 4 against 2 to 15, `buspirate5-rev10` 0 against 2 to 12, `lumenpnp-mobo` 0 against 4
+to 13, `cynthion` 11 to 12 against 28 to 29, `glasgow-revC3` 31 to 35 against 31 to 36,
+`glasgow-revD1` 118 to 134 against 239 to 250. Vias over the four runs: `lumenpnp-mobo`
+409 to 529 against 336 to 343, `tinytapeout-demo` 379 to 494 against 240 to 290,
+`sweep-v2.2` 18 to 24 against 21 to 28, `glasgow-revC3` 375 to 388 against 415 to 439.
+Pads short of two spokes: 88 to 97 with 1 to 3 that have none, against 154 to 162 and
+35 to 45. The curated boards, which are routed with no budget and with `whole` off:
+1150 of 1151 connections with 712 vias, as before.
+
+What `corne-cherry` has open in those runs are pads of its two grounds and of a supply
+that cadlab's fill leaves cut off from their pours once the run is over, between other
+pads with a track at each end, and no room for a stub: the run itself ends with 482 of
+its 482 connections, by the cells that stand for the fill here. With a budget of nodes,
+where cadlab runs no later run that moves routes, the board has 3 open (below). The
+other router fills the zones itself between two negotiations; the pour rounds here need
+the host's fill in place of the cells, as a call back into the host.
+
+**The passes on six layers, timed call by call.** `glasgow-revD1` at 40 million nodes
+with `whole` off, a timer round each call that a turn of the passes makes: 33.1 s in
+the passes, 31.2 s of it inside the searches themselves (22.9 s in 3052 from the tree,
+8.3 s in 3464 looks from the terminals), 0.8 s telling the nets' pieces, 0.8 s pruning.
+The third of a pass that was put outside the searches after 0.0.16 is not between the
+turns. A step of those searches is an exact query, 1.3 million nodes a second, where a
+step of the negotiation is a look at its grid, 3 million.
+
 **A budget of 150 million nodes**, two orders, which lets the negotiation end on the
 boards it ends on: `corne-cherry` 3 and 3 open, `tinytapeout-demo` 0 and 0,
 `buspirate5-rev10` 0 and 0, `lumenpnp-mobo` 0 and 0, `cynthion` 11 and 9, `glasgow-revC3`

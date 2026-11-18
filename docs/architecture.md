@@ -1124,6 +1124,26 @@ it (`nrfmicro`'s last connection had no way in five of them), and the time it ta
 time those runs do not have. A host sets it in its last run, where the routes that the
 run was given are looked at as well.
 
+**A run that moves no route plans its escapes round the routes it is given.** A run
+[from routes](../src/pcb/mod.rs) planned its escapes on the board without them, as a
+first run does, and put the routes on it afterwards, each cut where it no longer fitted.
+For most pads that is the escape a first run planned, in the same place, under the route
+that came of it. But a first run takes out the escapes that nothing used, and gives
+their places to other nets: the escape is then planned again where another net's via
+is, that via does not fit beside it, and its net begins the run in pieces. A run that
+moves routes makes that net's route again round the escape, and it is how a ball deep in
+an array that a first run left shut in comes out on a board that is full: planned round
+the routes in every run, `glasgow-revC3` had 29 connections open over four orders at
+150 million nodes for 22. A run with
+[`rip_ups`](../src/pcb/mod.rs) at none has nothing to make it again with. A host's last
+run, for shorter ways, is such a run, and `cynthion` ended every one of them with two
+pads of a supply open under its array, which was put down to a pour that the run had
+cut and that the count of the fills had missed: it was the supply's via between four
+balls, in the place where the ball beside it has its dog-bone planned. In such a run
+the escapes are now planned with the routes where they are: a pad that its net's route
+leaves is out already, and no escape goes where another net's route is
+([results](benchmarks.md#pcb-routing-from-routes-with-none-moved)).
+
 **`needless` leaves a track from pad to pad, and `needless_between` tells it.** What a
 fill makes needless was told of vias and of the tracks that led to them: with a track
 from pad to pad gone, another net's pour may take its room, and a pad that it reached

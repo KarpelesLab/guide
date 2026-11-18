@@ -1164,6 +1164,46 @@ fn taken_back(design: &Design, earlier: &Earlier) -> TakenBack {
     (routes, kept)
 }
 
+/// The routes of a net that a run was given, as tracks and vias of its width and its via.
+fn route_copper(
+    design: &Design,
+    net: NetId,
+    segs: &[Seg],
+    vias: &[Point],
+) -> (Vec<Track>, Vec<Via>) {
+    let rules = &design.rules;
+    let spec = &design.nets[net.index()];
+    let tracks: Vec<Track> = segs
+        .iter()
+        .map(|s| Track {
+            start: s.a,
+            end: s.b,
+            mid: None,
+            width: spec
+                .track_width
+                .max(rules.track_width(Some(net), LayerId(s.l))),
+            layer: LayerId(s.l),
+            net: Some(net),
+        })
+        .collect();
+    let bottom = LayerId((rules.layer_count() - 1) as u8);
+    let vias: Vec<Via> = spec
+        .via
+        .into_iter()
+        .flat_map(|size| {
+            vias.iter().map(move |&at| Via {
+                at,
+                drill: size.drill,
+                diameter: size.diameter,
+                from: LayerId(0),
+                to: bottom,
+                net: Some(net),
+            })
+        })
+        .collect();
+    (tracks, vias)
+}
+
 /// Routes everything but meanders.
 fn route_all<'a>(
     design: &'a Design,
@@ -1249,6 +1289,31 @@ fn route_all<'a>(
     // Escapes from fine-pitch footprints, which become fixed copper of their nets.
     let mut crossings = 0;
     let escapes = {
+        // In a run that moves no route ([`RouteOptions::rip_ups`] at none), planned on
+        // the board with the routes that the run was given where they are: a pad that its
+        // net's route leaves is out already, and no escape goes where another net's route
+        // is. Planned without them, each pad has the escape again that a first run
+        // planned for it, and where that run gave the place to another net since, the
+        // other net's route does not fit beside the escape and is cut there as the run
+        // begins. A run that moves routes then routes that net again, round the escape,
+        // which is how a ball deep in an array that a first run left shut in comes out
+        // on a full board; a run that does not leaves it open (`cynthion`: a supply's
+        // via between four balls, where the ball beside it has its dog-bone planned, and
+        // the supply's two pads open after a run that only looks for shorter ways, in
+        // every run of it: `docs/benchmarks.md`).
+        let with_routes;
+        let design = if taken_back.is_empty() || options.rip_ups > 0 {
+            design
+        } else {
+            let mut d = design.clone();
+            for (&net, (segs, vias)) in &taken_back {
+                let (tracks, vias) = route_copper(design, net, segs, vias);
+                d.board.tracks.extend(tracks);
+                d.board.vias.extend(vias);
+            }
+            with_routes = d;
+            &with_routes
+        };
         let mut world = world_of(design)?;
         // In a run with a budget, for the balls deep in an area array too.
         let mut escapes =
@@ -1708,35 +1773,7 @@ fn route_all<'a>(
     // A net with nothing to route has no route to take back: what was given for it stays
     // where it is, in the way of the others as copper of the board is.
     for (net, (segs, vias)) in core::mem::take(&mut taken_back) {
-        let spec = &design.nets[net.index()];
-        let tracks: Vec<Track> = segs
-            .iter()
-            .map(|s| Track {
-                start: s.a,
-                end: s.b,
-                mid: None,
-                width: spec
-                    .track_width
-                    .max(rules.track_width(Some(net), LayerId(s.l))),
-                layer: LayerId(s.l),
-                net: Some(net),
-            })
-            .collect();
-        let bottom = LayerId((rules.layer_count() - 1) as u8);
-        let vias: Vec<Via> = spec
-            .via
-            .into_iter()
-            .flat_map(|size| {
-                vias.iter().map(move |&at| Via {
-                    at,
-                    drill: size.drill,
-                    diameter: size.diameter,
-                    from: LayerId(0),
-                    to: bottom,
-                    net: Some(net),
-                })
-            })
-            .collect();
+        let (tracks, vias) = route_copper(design, net, &segs, &vias);
         let _ = pairs::Undo::place(&mut world, &tracks, &vias);
         own_fixed.0.extend(tracks);
         own_fixed.1.extend(vias);

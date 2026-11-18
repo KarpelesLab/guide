@@ -5824,6 +5824,68 @@ In cadlab's adapter, not here, and found by this:
 - Tracks that end at the edge of a pad. Counted outside the pads of their nets,
   `guide`'s track is nearer cadlab's router's than by its whole length, and no shorter.
 
+## PCB routing from routes, with none moved
+
+What was changed after [the release above](#pcb-routing-out-of-an-array-and-shorter-after-it),
+0.0.20, for the same host, cadlab, which makes its last run a run for shorter ways: the
+routes of every run before it given back, nothing to route, no rip-up
+([decisions](architecture.md#decisions)). Measured on 2026-11-18 through cadlab's
+adapter and its `route_bench`, with a budget of nodes, one thread, so that two versions
+of the code are compared on the same searches.
+
+### What
+
+`cynthion`'s run for shorter ways came back, in every run of it, with two pads of a
+supply open that were joined before it, and the host kept the routes it had. Looked at
+on the board: the supply's via between four balls of the array was gone, with the three
+tracks that met at it. It was not in the world's way when the first run made it. In the
+run from routes it was, by a track and a via of the ball beside it, another supply's:
+that ball's dog-bone, planned as the run began on a board without the routes, in the
+place where a first run had planned it, had not used it, and had given it to the other
+net since. The same happened in the runs that move routes, where it cost time and no
+connection: 74 to 78 nets of 334 were routed again in each of them, 16 to 22 of them
+moved aside.
+
+A run with `rip_ups` at none now plans its escapes on the board with the routes it was
+given on it.
+
+### Results
+
+`cynthion`, 150 million nodes, one thread, the host's adapter otherwise the same:
+
+| | nets routed again in the run for shorter ways | connections open after it, for 8 before | kept by the host | vias at the end | track at the end |
+|---|---|---|---|---|---|
+| 0.0.20 | 7, 2 of them with no way | 11 | no | 426 | 3558 mm |
+| escapes round the routes, in a run that moves none | 4 | 8 | yes, 97 mm less | 424 | 3449 mm |
+
+### Tried and not kept
+
+- **Escapes round the routes in every run from routes.** The runs that move routes then
+  route 12 nets again where they routed 74 to 78, and close less: over four orders at
+  150 million nodes `glasgow-revC3` had 7, 9, 7 and 6 connections open for 6, 9, 4 and
+  3, `tinytapeout-demo` none either way and `corne-cherry` 1, 0, 2 and 0 either way. An
+  escape planned over another net's route is how the ball it is for gets out.
+- **A negotiation for every net ended when it has stopped gaining**: once six rounds
+  have passed since the points shared last fell by a tenth, in place of twelve since
+  the fewest, with the best round's routes kept for what follows. `tinytapeout-demo`'s
+  has 3335 points shared after its first round, 113 after its eleventh, and between 49
+  and 230 for the 26 rounds after it, in which its vias go from 381 to 425; ended
+  sooner, the passes after it had more to do than the rounds cost. Over four orders at
+  150 million nodes, the best round's routes kept either way: `tinytapeout-demo` 4
+  connections open for 2, `corne-cherry` 10 for 5, `glasgow-revC3` 25 for 24; by the
+  medians `tinytapeout-demo` 364 vias for 341 and `glasgow-revC3` 377 for 392, the
+  others within three in a hundred.
+- **The searches for fewer vias left to a host's last run by option**, where every run
+  has them. Where that run is made the board ends within two in a hundred of the same
+  track and vias, and where the time leaves none for it the vias of every run stay:
+  `cynthion` 446 at a minute for 423, by the medians of four orders.
+
+### What this does not show
+
+- A run that moves routes without the nets cut as it begins: the escapes planned again
+  are what it has for the balls left shut in, and no other way to those was tried.
+- More than one thread, or a deadline: the comparison is by nodes.
+
 ## PCB differential pairs and lengths
 
 Differential pairs routed side by side, and nets meandered to their lengths, by `pcb::route`

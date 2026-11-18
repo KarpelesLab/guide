@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.18](https://github.com/KarpelesLab/guide/compare/v0.0.17...v0.0.18) - 2026-11-18
+
+### Added
+
+- *(pcb)* a host that fills its zones itself is asked for its fill around the routes, which tells the pads cut off and the stubs that a pour makes needless (RunControl::refill) ([#20](https://github.com/KarpelesLab/guide/pull/20))
+
+### Other
+
+- *(benchmarks)* the negotiation for every net as released, beside cadlab's router on a quiet machine, what corne-cherry has open, and the passes on six layers timed call by call
+
 ## [0.0.17](https://github.com/KarpelesLab/guide/compare/v0.0.16...v0.0.17) - 2026-11-17
 
 ### Added

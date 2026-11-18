@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.17](https://github.com/KarpelesLab/guide/compare/v0.0.16...v0.0.17) - 2026-11-17
+
+### Added
+
+- *(pcb)* a negotiation for every net that its share ends in near its end goes on once, and what it was measured to do
+- *(pcb)* every net can be routed against every other at once before the passes, on one grid (RouteOptions::whole, off by default)
+
+### Fixed
+
+- *(pcb)* a net that a negotiation for every net ended with in pieces is not taken out whole when its turn finds no way for the rest
+
+### Other
+
+- *(benchmarks)* a net at the width its tracks have, tried, and where a pass on six layers spends its time
+
 ## [0.0.16](https://github.com/KarpelesLab/guide/compare/v0.0.15...v0.0.16) - 2026-11-17
 
 ### Added

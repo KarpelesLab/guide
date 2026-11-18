@@ -986,6 +986,52 @@ reported as `Cause::Apart`. Not a net with a plane, whose terminals on that worl
 places on a fill that the other nets' routes have not cut yet: counted there it was
 left with more open than it has.
 
+**A host that fills its zones itself is asked for its fill around the routes**
+([results](benchmarks.md#pcb-routing-on-the-hosts-own-fills)). A run with a budget tells
+the pads that its routes cut off the fills their nets are planned on by cells of a grid
+(`pcb::pours`), cut by the routes' clearance and half the zone's least width. That is an
+estimate, and it errs where a board is all pours: a place between two tracks that the
+cells keep is a place where the host's fill, with its least width, its reliefs and its
+islands taken out, has no copper at all. `corne-cherry` ended a run with every connection
+made on guide's board and five to ten pads off their pours on cadlab's, each a stub that
+ended in such a place. `RunControl::refill` is a call back into the host: given the
+tracks and vias as they stand, it returns its fills, a polygon a piece, or `None` when
+it has no time for one.
+
+- *The pieces are the host's, exactly.* With those fills, a pad is on the pieces that
+  touch it, a route on the pieces that hold its ends and its vias, and what is not one
+  with the largest piece is cut off: the same terminals and places to join as the cells
+  give, told by `planes::pieces` to the nanometre. The cells stay for what is asked
+  thousands of times, the score of a chain while routes settle.
+- *When.* On a board with a fill planned on an outer layer, at each of the three times
+  the negotiation for every net tells the pads cut off, and at each of the three rounds
+  of stubs once routing is over. A net planned on inner planes alone has few routes
+  through them, and its board is asked once: when cleanup is over.
+- *That last fill is also what the stubs are judged by.* A net with a plane is planned on
+  the plane alone, as no pour of an outer layer is safe from routes, and every pad off the
+  plane has its stub. Once the routes are where they stay, the host's fill says which
+  pads a pour joins: a stub whose ends the fills, the board's own copper and the net's
+  other routes join without it is taken out, one at a time, so that a pour with five
+  pads keeps the one via that takes it to the plane. And a result with no fills of its
+  own is counted on that fill. The stubs that went are in the result apart
+  (`Routed::spare`): a host that runs again from these routes gives them back, as a run
+  that had the routes without them made each again on a board with less room, and ended
+  with 72 connections open on its own board where the run before it had 7.
+- *A wire that ends where the fill is no more is no connection.* The negotiation kept a
+  wire that ended at a place in a fill as joined to the fill's terminal when that place
+  was on no piece any longer, and so never routed its pad again, with the host's fills or
+  with the cells. Such a wire now goes, and its pad is a terminal to join.
+- *More rounds, and another order.* Each time the pads cut off are told, the negotiation
+  has forty more rounds. And one that ends on its own with points still shared, having
+  cost no more than half of what its share has left, is begun again with its nets moved another
+  way, three times at most, and the one with the fewest shared is kept: where the
+  prices have every net fixed, another order has other nets there.
+
+A run is then as reproducible as the host's answers, and the host's time is the run's.
+Dearer vias in the negotiation, 24 and 40 steps for 10, were measured for the vias
+that hosts count and not kept: fewer vias, and connections lost wherever the budget
+ends the rounds.
+
 **Differential pairs are routed side by side last, in place of their nets' routes.** Routing
 pairs first, before anything else, as fixed copper, coupled `udb-s`'s USB pair a little better,
 60% of its length side by side in place of 50%, but cost other nets their room: `GB-LIVE32`

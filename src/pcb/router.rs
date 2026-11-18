@@ -410,7 +410,10 @@ pub(crate) fn jobs(
 }
 
 /// A net's copper as the board's tracks.
-fn copper_tracks<'c>(ctx: &'c NetCtx, c: &'c NetCopper) -> impl Iterator<Item = Track> + 'c {
+pub(crate) fn copper_tracks<'c>(
+    ctx: &'c NetCtx,
+    c: &'c NetCopper,
+) -> impl Iterator<Item = Track> + 'c {
     c.segs.iter().map(move |s| Track {
         start: s.a,
         end: s.b,
@@ -422,7 +425,7 @@ fn copper_tracks<'c>(ctx: &'c NetCtx, c: &'c NetCopper) -> impl Iterator<Item = 
 }
 
 /// A net's copper as the board's vias, through every layer.
-fn copper_vias<'c>(
+pub(crate) fn copper_vias<'c>(
     design: &Design,
     ctx: &'c NetCtx,
     c: &'c NetCopper,
@@ -1059,6 +1062,10 @@ const POUR_ROUNDS: usize = 3;
 /// The share of a work budget that routing leaves for those stubs.
 const POUR_WORK: f64 = 0.03;
 
+/// How many times a negotiation for every net that ended with points still shared is
+/// begun again in another order.
+const WHOLE_AGAIN: u64 = 3;
+
 /// What [`route_all`] returns: the result, how the last search of each net that failed
 /// ended, for the nets left open, the fill that the joining of zones' pieces ended on,
 /// if it was made, by net the width it was routed at where that is narrower than its
@@ -1691,6 +1698,13 @@ fn route_all<'a>(
         }
         copper[j] = Some(c);
     }
+    // What the run has added to the design as copper of its own until here, which a host
+    // that fills its zones around the routes is given with them: the routes of an earlier
+    // run that stay where they are, the escapes, and the pairs routed first.
+    let mut own_fixed: (Vec<Track>, Vec<Via>) = (
+        design.board.tracks[original.board.tracks.len()..].to_vec(),
+        design.board.vias[original.board.vias.len()..].to_vec(),
+    );
     // A net with nothing to route has no route to take back: what was given for it stays
     // where it is, in the way of the others as copper of the board is.
     for (net, (segs, vias)) in core::mem::take(&mut taken_back) {
@@ -1724,7 +1738,10 @@ fn route_all<'a>(
             })
             .collect();
         let _ = pairs::Undo::place(&mut world, &tracks, &vias);
+        own_fixed.0.extend(tracks);
+        own_fixed.1.extend(vias);
     }
+    let own_fixed = own_fixed;
     let pours = (hurried && options.pour_cuts && !planned.is_empty() && !run.poll())
         .then(|| Pours::plan(design, &world, &planned, &jobs, bounds, pitch));
     // Every net against every other at once, on one grid: what that ends with is each
@@ -1759,24 +1776,63 @@ fn route_all<'a>(
             }
             Some(w)
         };
-        let whole = whole::route(
-            design,
-            &world,
-            &make,
-            &jobs,
-            pours.as_ref(),
-            options,
-            run,
-            (share, was),
-            pitch,
-            bounds,
-        );
+        let attempt = |options: &RouteOptions| {
+            whole::route(
+                design,
+                &world,
+                &make,
+                &jobs,
+                pours.as_ref(),
+                (&own_fixed.0, &own_fixed.1),
+                options,
+                run,
+                (share, was),
+                pitch,
+                bounds,
+            )
+        };
+        let began = (std::time::Instant::now(), run.work());
+        let mut whole = attempt(options);
+        // A negotiation that ended on its own with points still shared, in a small part
+        // of its share, is begun again with the nets moved in their order another way,
+        // and the one that ends with the fewest shared is kept: its rounds stop where
+        // the prices have every net fixed where it is, and another order has other
+        // nets there.
+        for again in 1..=WHOLE_AGAIN {
+            let Some(w) = whole.as_ref().filter(|w| w.ended && w.shared > 0) else {
+                break;
+            };
+            // Each has cost what the ones before did, at most, for there to be room.
+            let took = began.0.elapsed() / again as u32;
+            let worked = (run.work() - began.1) / again;
+            if run.poll()
+                || run.part_left().is_some_and(|left| left < took * 2)
+                || run.limits(u64::MAX).max_expansions < worked.saturating_mul(2)
+            {
+                break;
+            }
+            let other = RouteOptions {
+                seed: Some(
+                    options
+                        .seed
+                        .unwrap_or(0)
+                        .wrapping_add(again.wrapping_mul(0x9E37_79B9_7F4A_7C15)),
+                ),
+                ..*options
+            };
+            if let Some(next) = attempt(&other)
+                && (next.shared, next.taken_out) < (w.shared, w.taken_out)
+            {
+                whole = Some(next);
+            }
+        }
         run.resume(was);
         if let Some(w) = whole {
             negotiated_whole = true;
             stats.whole = (w.rounds, w.shared, w.taken_out, 0);
             stats.whole_made.1 = w.vias_saved;
             stats.pour_cuts += w.pour_cuts;
+            stats.refills += w.refills;
             for (k, sites) in &w.sites {
                 jobs[*k].ctx = pours::with_sites(&jobs[*k].ctx, sites, pitch);
             }
@@ -2653,7 +2709,26 @@ fn route_all<'a>(
     // move nothing: now that nothing moves any more, a piece that is cut off stays so.
     if let Some(pours) = &pours {
         for _ in 0..POUR_ROUNDS {
+            if run.poll() {
+                break;
+            }
             let mut joined = false;
+            // By the host's own fill around the routes as they are, if it gives one, on
+            // a board with pours that routes cut.
+            let real = pours
+                .outer(design)
+                .then(|| {
+                    pours.refill(
+                        run,
+                        design,
+                        &jobs,
+                        &copper,
+                        (&own_fixed.0, &own_fixed.1),
+                        false,
+                    )
+                })
+                .flatten();
+            stats.refills += usize::from(real.is_some());
             for k in pours.jobs().collect::<Vec<usize>>() {
                 if run.poll() {
                     break;
@@ -2661,7 +2736,9 @@ fn route_all<'a>(
                 let Some(c) = copper[k].as_ref() else {
                     continue;
                 };
-                let Some(again) = pours.rejoin(&world, design, &jobs, &copper, k, pitch) else {
+                let Some(again) =
+                    pours.rejoin(&world, design, &jobs, &copper, k, pitch, real.as_ref(), &[])
+                else {
                     continue;
                 };
                 let ctx = completion(design, &again.ctx, c, pitch);
@@ -2749,6 +2826,44 @@ fn route_all<'a>(
                 via_kinds.resize(vias.len(), CopperKind::Pair);
             }
         }
+    }
+    // The stubs that the host's own fill around the routes as they stay makes needless,
+    // for a host that gives it: a net with a plane has one for every pad off its plane,
+    // whatever pour joins the pad.
+    // Whatever stopped the run but its caller: nothing is searched for here, and the host
+    // says itself whether it has the time for a fill.
+    let mut host_fills: Option<Vec<Fill>> = None;
+    let mut spare: (Vec<Track>, Vec<Via>) = Default::default();
+    if let Some(pours) = &pours
+        && !run.cancelled()
+        && let Some(real) = pours.refill(
+            run,
+            design,
+            &jobs,
+            &copper,
+            (&own_fixed.0, &own_fixed.1),
+            true,
+        )
+    {
+        stats.refills += 1;
+        for k in pours.jobs().collect::<Vec<usize>>() {
+            let Some(c) = copper[k].as_ref() else {
+                continue;
+            };
+            let Some((mut less, gone)) = pours.without_needless(design, &jobs, k, c, &real) else {
+                continue;
+            };
+            let vias = gone.vias.len();
+            spare.0.extend(copper_tracks(&jobs[k].ctx, &gone));
+            spare.1.extend(copper_vias(design, &jobs[k].ctx, &gone));
+            if let Some(mut old) = copper[k].take() {
+                old.unplace(&mut world);
+            }
+            less.place(&mut world, &jobs[k].ctx);
+            copper[k] = Some(less);
+            stats.stubs_pruned += vias;
+        }
+        host_fills = Some(real.fills);
     }
     let (v, l) = measure(&copper);
     stats.after_cleanup = (v + paired.0, l + paired.1);
@@ -2855,8 +2970,13 @@ fn route_all<'a>(
             given.sort_unstable();
             given
         },
+        spare,
     };
-    let counted = counted.or(Some(first_fills).filter(|f| !f.is_empty()));
+    // Counted on the host's fill around the routes, if it gave one once they were where
+    // they stay.
+    let counted = counted
+        .or(host_fills)
+        .or(Some(first_fills).filter(|f| !f.is_empty()));
     let floors: BTreeMap<NetId, usize> = jobs
         .iter()
         .zip(&floor)

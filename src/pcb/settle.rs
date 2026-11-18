@@ -468,7 +468,18 @@ impl Settle<'_> {
         let nets: Vec<&NetCtx> = jobs.iter().map(|j| &j.ctx).collect();
         let cut: usize = self.pours.map_or(0, |p| {
             p.jobs()
-                .filter_map(|j| p.rejoin(world, self.design, jobs, routes.copper, j, self.pitch))
+                .filter_map(|j| {
+                    p.rejoin(
+                        world,
+                        self.design,
+                        jobs,
+                        routes.copper,
+                        j,
+                        self.pitch,
+                        None,
+                        &[],
+                    )
+                })
                 .map(|again| again.cut)
                 .sum()
         });

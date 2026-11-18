@@ -29,6 +29,7 @@ use super::router::{Job, pad_center};
 use super::spokes::{HELD, HELD_TIMES};
 use super::world::{Class, Verdict, World};
 use super::{Design, RouteOptions};
+use crate::geom::drc::{Track, Via};
 use crate::geom::{EntryId, LayerId, LayerSet, Point, Rect, Shape, SpatialIndex};
 use crate::id::NetId;
 use crate::space::FastMap;
@@ -83,6 +84,8 @@ const NEARLY: usize = 4;
 /// How many times the pads that the routes cut off their fills are told, and their nets
 /// planned again with them, for the nets round them to make room.
 const POUR_ROUNDS: usize = 3;
+/// How many more rounds there may be for each of those times.
+const POUR_MORE: usize = 40;
 
 /// What a via costs when the nets are routed again for fewer of them, and what a net may
 /// be longer for each one less: a tenth, and eight steps for each.
@@ -1849,6 +1852,8 @@ pub(crate) struct Whole {
     /// routes to end at, and how many pieces of fill were told to be cut off in all.
     pub(crate) sites: Vec<(usize, Vec<TermPad>)>,
     pub(crate) pour_cuts: usize,
+    /// How many times the host gave its own fill for that.
+    pub(crate) refills: usize,
     /// Whether the rounds ended on their own, and not with their share.
     pub(crate) ended: bool,
 }
@@ -2029,6 +2034,7 @@ pub(crate) fn route<'r>(
     make_world: &(dyn Fn() -> Option<World<'r>> + Sync),
     jobs: &[Job],
     pours: Option<&Pours>,
+    fixed: (&[Track], &[Via]),
     options: &RouteOptions,
     run: &Run<'r>,
     (share, was): (f64, Option<super::Stopped>),
@@ -2312,6 +2318,7 @@ pub(crate) fn route<'r>(
     let mut given_up = false;
     let mut pour_rounds = 0;
     let mut pour_cuts = 0;
+    let mut refills = 0;
     let mut sites: Vec<(usize, Vec<TermPad>)> = Vec::new();
     let threads = options.threads.max(1);
     let lock = RwLock::new(board);
@@ -2485,7 +2492,11 @@ pub(crate) fn route<'r>(
         let mut regions: Vec<Rect> = nets.iter().map(|n| n.region).collect();
         let connections: usize = nets.iter().map(|n| n.conns.len()).sum();
         let mut extended = false;
-        for it in 0..ROUNDS {
+        let mut it = 0;
+        // Each time the pads cut off are told, the rounds have as many more for them.
+        while it < ROUNDS + POUR_MORE * pour_rounds {
+            it += 1;
+            let it = it - 1;
             rounds = it + 1;
             let mut todo = batches(&reroute, &regions);
             todo.reverse();
@@ -2574,12 +2585,32 @@ pub(crate) fn route<'r>(
                             })
                         })
                         .collect();
+                    // By the host's own fill around the routes as they are, if it gives
+                    // one.
+                    let real = pours
+                        .outer(design)
+                        .then(|| pours.refill(run, design, jobs, &copper, fixed, false))
+                        .flatten();
+                    refills += usize::from(real.is_some());
                     for k in pours.jobs() {
                         if run.poll() {
                             break;
                         }
-                        let Some(again) = pours.rejoin(world, design, jobs, &copper, k, pitch)
-                        else {
+                        // With the places in its fill that the rounds before gave it.
+                        let given = sites
+                            .iter()
+                            .find(|(j, _)| *j == k)
+                            .map_or(&[][..], |(_, s)| s.as_slice());
+                        let Some(again) = pours.rejoin(
+                            world,
+                            design,
+                            jobs,
+                            &copper,
+                            k,
+                            pitch,
+                            real.as_ref(),
+                            given,
+                        ) else {
                             continue;
                         };
                         pour_cuts += again.cut;
@@ -2629,11 +2660,11 @@ pub(crate) fn route<'r>(
                         for w in &mut net.wires {
                             if let (Some(_), Some(&n)) = (w.from, w.nodes.first()) {
                                 let p = w.start.map_or_else(|| board.node_point(n), |s| s.0);
-                                w.from = at(p, n as usize / cells).or(w.from);
+                                w.from = at(p, n as usize / cells);
                             }
                             if let (Some(_), Some(&n)) = (w.to, w.nodes.last()) {
                                 let p = w.end.map_or_else(|| board.node_point(n), |s| s.0);
-                                w.to = at(p, n as usize / cells).or(w.to);
+                                w.to = at(p, n as usize / cells);
                             }
                         }
                         match sites.iter_mut().find(|(j, _)| *j == k) {
@@ -2859,6 +2890,7 @@ pub(crate) fn route<'r>(
         vias_saved,
         sites,
         pour_cuts,
+        refills,
         ended: !cut,
     })
 }

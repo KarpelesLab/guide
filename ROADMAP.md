@@ -297,7 +297,11 @@ Each item is independently useful, and they can land in any order.
   the room that the spokes of a pad in a pour of its net need can cost other nets'
   tracks (`RouteOptions::spoke_cost`), and the connections of a board in two parts that
   only the schematic joins are found once and told (`Cause::Apart`,
-  [benchmarks](docs/benchmarks.md#pcb-routing-with-room-for-spokes))
+  [benchmarks](docs/benchmarks.md#pcb-routing-with-room-for-spokes)),
+  and a host that fills its zones itself is asked for its fill around the routes,
+  which is then what tells the pads cut off and the stubs that a pour makes needless
+  (`RunControl::refill`,
+  [benchmarks](docs/benchmarks.md#pcb-routing-on-the-hosts-own-fills))
   ([benchmarks](docs/benchmarks.md#pcb-routing-with-a-second-wait)). A pass of such a
   run ends where it has stopped gaining, and what the passes leave open is settled: a
   route for each open connection across other nets' routes, with the nets it crosses cut

@@ -54,6 +54,89 @@ fn ball_grid() -> Design {
 }
 
 #[test]
+fn escapes_are_planned_around_the_routes_that_a_run_is_given() {
+    use super::{Earlier, RunControl, route_from};
+    // The ball grid, with a pad outside it for the ball beside net 1's on the grid's edge
+    // too, so that its net is one to route.
+    let mut d = ball_grid();
+    let edge = d
+        .board
+        .pads
+        .iter()
+        .find(|p| {
+            p.shape
+                .bbox()
+                .intersects(&Rect::new(Point::new(0, MM), Point::new(0, MM)))
+        })
+        .unwrap()
+        .net
+        .unwrap();
+    d.board.pads.push(smd(-5 * MM, MM, edge.0));
+    let options = RouteOptions {
+        vias_in_pads: false,
+        ..RouteOptions::default()
+    };
+    let first = route_checked(&d, &options);
+    assert!(first.unrouted.is_empty(), "{:?}", first.unrouted);
+    // Where the ball of net 1, at a millimetre either way, has its dog-bone: towards the
+    // corner of the grid, between four balls.
+    let own = first
+        .vias
+        .iter()
+        .find(|v| v.net == Some(NetId(1)))
+        .unwrap()
+        .clone();
+    assert!(own.at.x < MM && own.at.y < MM, "{own:?}");
+    // A run that moves no route, given a track of the other net into that place as a
+    // route of its, and nothing of net 1: the escape of net 1 is planned where that
+    // leaves it room, and not where it was, with the route cut for it.
+    let options = RouteOptions {
+        rip_ups: 0,
+        ..options
+    };
+    let width = first
+        .tracks
+        .iter()
+        .find(|t| t.net == Some(edge))
+        .unwrap()
+        .width;
+    let given = Track {
+        start: Point::new(0, MM),
+        end: Point::new(450_000, 550_000),
+        mid: None,
+        width,
+        layer: LayerId(0),
+        net: Some(edge),
+    };
+    let earlier = Earlier::new(vec![given], Vec::new());
+    let routed = route_from(&d, &earlier, &options, &RunControl::default()).unwrap();
+    assert!(
+        !routed.vias.iter().any(|v| v.at == own.at),
+        "{:?}",
+        routed.vias
+    );
+    assert!(!routed.unrouted.contains(&edge), "{:?}", routed.unrouted);
+    let found = drc::check(&routed.board(&d), &d.rules).unwrap();
+    assert!(found.is_empty(), "{found:?}");
+    // A run that moves routes plans the escape where it was, and has the other net's
+    // route to make again round it.
+    let moving = RouteOptions {
+        vias_in_pads: false,
+        ..RouteOptions::default()
+    };
+    let routed = route_from(&d, &earlier, &moving, &RunControl::default()).unwrap();
+    assert!(
+        routed
+            .vias
+            .iter()
+            .any(|v| v.at == own.at && v.net == Some(NetId(1))),
+        "{:?}",
+        routed.vias
+    );
+    assert!(routed.unrouted.is_empty(), "{:?}", routed.unrouted);
+}
+
+#[test]
 fn without_vias_in_pads_a_pad_gets_its_via_beside_it() {
     // A pad on the top and one on the bottom, one above the other but for a millimetre.
     let mut d = design(2, vec![smd(0, 0, 1), smd(MM, 0, 1)], 2);

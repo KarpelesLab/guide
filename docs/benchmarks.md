@@ -5649,8 +5649,9 @@ each was worth:
   fills its board again without them and looks at what that fill joins and what it
   leaves of its reliefs: a track from pad to pad stays in `needless`, as the fill
   without it is another.
-- **The price of a point that is claimed stops at thirty times a step**, where it went
-  to a thousand: what is still shared is the history's to price.
+- **At the first pitch the price of a point that is claimed stops at thirty times a
+  step**, where it went to a thousand: what is still shared is the history's to price.
+  At twice the pitch it is as it was.
 
 ### Results
 
@@ -5663,21 +5664,26 @@ each was worth:
 | and the ways out of the second ring, for every net | 11, 9, 8, 11 | 39 |
 | and those only for a net with no zone and no more than eight pads | 5, 4, 6, 7 | 22 |
 
-At a budget of 40 million nodes, three orders, it has 36 open for 100. The other two
+At a budget of 40 million nodes, three orders, it has 41 open for 100. The other two
 boards with such arrays: `glasgow-revD1`, 256 balls, 395 open over four orders at a
 minute for 392 and 437 at 40 million nodes for 433; `cynthion` 8 in every order, as
 before. With the ways out for every net `glasgow-revD1` had 426 for 388: a ball of a
 supply in the second ring goes to its plane by a via where it is.
 
-The nine boards that a budget of 40 million nodes cuts, three orders: 621 connections
+The nine boards that a budget of 40 million nodes cuts, three orders: 620 connections
 open for 675 with 0.0.19 (`nrfmicro` 0, `sweep-v2.2` 9, `corne-cherry` 79,
-`tinytapeout-demo` 36 for 30, `buspirate5-rev10` 0, `lumenpnp-mobo` 0, `cynthion` 24,
-`glasgow-revC3` 36 for 100, `glasgow-revD1` 437 for 433).
+`tinytapeout-demo` 30, `buspirate5-rev10` 0, `lumenpnp-mobo` 0, `cynthion` 24,
+`glasgow-revC3` 41 for 100, `glasgow-revD1` 437 for 433).
 
 The price at thirty, beside a thousand, four orders at a minute with the rest as it is:
-`corne-cherry` 1, 0, 2 and 1 open with a median of 498 vias and 7621 mm of track, for 2,
-1, 0 and 0 with 559 and 8276 mm; `tinytapeout-demo` 13 open for 16, 349 vias for 352;
-the others within their spread. At 40 million nodes 621 for 620.
+`corne-cherry`, two layers, 1, 0, 2 and 1 open with a median of 506 vias and 7590 mm of
+track, for 2, 1, 0 and 0 with 566 and 8269 mm. At twice the pitch, on four layers, it
+has less copper too and leaves more open: `glasgow-revC3` 6, 8, 10 and 9 with 396 vias
+and 4348 mm, for 11, 4, 5 and 7 with 407 and 4496 mm, and 33 to 36 over four orders in
+three such comparisons for 22 to 27; `tinytapeout-demo` 0, 1, 1 and 4 for 0, 3, 1 and 0.
+So it is thirty at the first pitch alone. At 40 million nodes, where `corne-cherry`'s
+negotiation is cut before the price is there, the boards of two layers are the same
+with both.
 
 Shorter runs, on the first run of `tinytapeout-demo` as cleanup begins: 6033 mm, and
 5704, 5651 and 5602 mm after each of three times through the nets, two seconds a time;

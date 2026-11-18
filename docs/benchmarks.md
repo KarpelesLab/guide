@@ -5282,10 +5282,51 @@ negotiation, with other work on the machine:
   `corne-cherry` 433 and 435 vias for 535 and 626: it is a gain where the rounds end
   and a loss where the budget ends them, and the default stays.
 
+### As released
+
+0.0.18 from crates.io behind cadlab's adapter (cadlab's D114), beside cadlab's own
+router, on 2026-11-18 with nothing else on the machine: 60 s a board, four runs of
+cadlab's router with seeds 1 to 4 on three threads and four orders of `guide`'s nets
+with three threads for its negotiation, two runs of each at a time, in the same half
+hour. Connections open:
+
+| board | layers | cadlab's router: open by run (min / median / max); vias, length, time | guide 0.0.18: open by run (min / median / max); vias, length, time |
+|---|---|---|---|
+| buspirate-flash-sop | 2 | 0, 0, 0, 0 (0 / 0 / 0); 4, 460.2 mm, 0.5 s | 0, 0, 0, 0 (0 / 0 / 0); 5, 497.1 mm, 0.4 s |
+| buspirate-rs232 | 2 | 0, 0, 0, 0 (0 / 0 / 0); 10, 280.9 mm, 0.5 s | 0, 0, 0, 0 (0 / 0 / 0); 4, 358.6 mm, 0.4 s |
+| lumenpnp-ringlight | 2 | 0, 0, 0, 0 (0 / 0 / 0); 1, 176.5 mm, 0.4 s | 0, 0, 0, 0 (0 / 0 / 0); 4, 206.1 mm, 0.7 s |
+| nrfmicro | 2 | 0, 0, 0, 0 (0 / 0 / 0); 46, 453.6 mm, 11.4 s | 0, 0, 0, 0 (0 / 0 / 0); 48, 536.2 mm, 19.2 s |
+| sweep-v2.2 | 2 | 3, 3, 3, 3 (3 / 3 / 3); 21, 2160.9 mm, 51.8 s | 3, 3, 3, 3 (3 / 3 / 3); 18, 2210.5 mm, 58.4 s |
+| corne-cherry | 2 | 3, 4, 0, 3 (0 / 3 / 4); 484, 8273.0 mm, 28.9 s | 2, 1, 0, 0 (0 / 0.5 / 2); 625, 8906.3 mm, 58.4 s |
+| tinytapeout-demo | 4 | 15, 3, 15, 2 (2 / 9 / 15); 238, 4930.2 mm, 60.2 s | 0, 4, 0, 4 (0 / 2 / 4); 427, 5610.8 mm, 58.3 s cut |
+| buspirate5-rev10 | 4 | 4, 2, 12, 5 (2 / 4.5 / 12); 314, 3044.6 mm, 30.4 s | 0, 0, 0, 0 (0 / 0 / 0); 368, 3469.5 mm, 46.4 s cut |
+| lumenpnp-mobo | 4 | 13, 9, 4, 33 (4 / 11 / 33); 340, 5370.3 mm, 62.0 s cut | 0, 0, 0, 0 (0 / 0 / 0); 408, 6292.1 mm, 53.2 s |
+| cynthion | 4 | 28, 29, 29, 28 (28 / 28.5 / 29); 476, 3176.6 mm, 62.2 s cut | 12, 11, 12, 11 (11 / 11.5 / 12); 643, 3959.9 mm, 55.5 s cut |
+| glasgow-revC3 | 4 | 36, 37, 35, 31 (31 / 35.5 / 37); 415, 3436.4 mm, 60.2 s cut | 35, 33, 31, 34 (31 / 33.5 / 35); 392, 3650.4 mm, 58.9 s cut |
+| glasgow-revD1 | 6 | 241, 243, 238, 250 (238 / 242 / 250); 898, 7744.3 mm, 63.6 s cut | 122, 135, 118, 134 (118 / 128 / 135); 1253, 8718.3 mm, 57.6 s cut |
+| all twelve | | 343, 330, 336, 355 (330 / 339.5 / 355) | 174, 187, 164, 186 (164 / 180 / 187) |
+| the eleven without glasgow-revD1 | | 102, 87, 98, 105 (87 / 100 / 105) | 52, 52, 46, 52 (46 / 52 / 52) |
+
+No DRC error but connections open in the 96 runs, and no call of `guide` over 59.3 s.
+`guide` is behind in every run on no board: `corne-cherry` has 0 to 2 open against 0 to
+4, for 5 to 10 with 0.0.17, and `nrfmicro` none in any order, for one in one of four.
+Against 0.0.17 a day earlier nothing has more open by its range (`glasgow-revD1` 118 to
+135 for 118 to 134), and the twelve boards have 164 to 187 for 173 to 191.
+
+What it does not reach: within 15 % of cadlab's router's vias on `lumenpnp-mobo` (402 to
+411 against 309 to 343, for 409 to 529) and on `tinytapeout-demo` (385 to 427 against
+238 to 290, for 379 to 494). The stubs went; the vias of the other nets are as they
+were. The pads in pours short of two spokes, cadlab's count over the twelve boards, are
+90 to 100 in the four orders for 88 to 97 with 0.0.17, against 154 to 162 after
+cadlab's router. At 40 million nodes the crate gives the 710 that the source gave.
+
+In cadlab's adapter, not here, and found by this: a fill that takes long (5.7 s on
+`glasgow-revD1`) asked for after the deadline cost that board its second run, 136 to
+150 open for 118 to 135, so the adapter refuses the last fill after a deadline unless
+a fill was timed and took no more than 3 % of the budget.
+
 ### What this does not show
 
-- The released crate behind cadlab's adapter on a quiet machine, beside cadlab's own
-  router: measured after the release.
 - A host other than cadlab. The pieces are told with `planes::pieces`, which takes a
   fill for a polygon with holes that touches the pads it joins; a host whose fill
   leaves a gap at a pad and joins it by tracks of its own would have every pad cut off.

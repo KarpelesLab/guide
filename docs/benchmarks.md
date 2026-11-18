@@ -5500,6 +5500,77 @@ with three quarters of it.
   nodes over three orders `corne-cherry` 88 open for 79 and `glasgow-revC3` 103 for
   100, with as many vias on `tinytapeout-demo`, 362 to 422 for 370 to 418.
 
+### As released
+
+0.0.19 from crates.io behind cadlab's adapter (cadlab's D115), which names the heat pads
+in `Zones::via_pads` and asks `needless` with the fill that counts its last run, beside
+cadlab's own router, on 2026-11-18 with nothing else on the machine: 60 s a board, four
+runs of cadlab's router with seeds 1 to 4 on three threads and four orders of `guide`'s
+nets with three threads for its negotiation, two runs of each at a time, in the same
+half hour. Connections open:
+
+| board | layers | cadlab's router: open by run (min / median / max); vias, length, time | guide 0.0.19: open by run (min / median / max); vias, length, time |
+|---|---|---|---|
+| buspirate-flash-sop | 2 | 0, 0, 0, 0 (0 / 0 / 0); 4, 460.2 mm, 0.5 s | 0, 0, 0, 0 (0 / 0 / 0); 5, 497.1 mm, 0.4 s |
+| buspirate-rs232 | 2 | 0, 0, 0, 0 (0 / 0 / 0); 10, 280.9 mm, 0.5 s | 0, 0, 0, 0 (0 / 0 / 0); 4, 358.6 mm, 0.4 s |
+| lumenpnp-ringlight | 2 | 0, 0, 0, 0 (0 / 0 / 0); 1, 176.5 mm, 0.4 s | 0, 0, 0, 0 (0 / 0 / 0); 4, 205.3 mm, 0.8 s |
+| nrfmicro | 2 | 0, 0, 0, 0 (0 / 0 / 0); 46, 453.6 mm, 11.3 s | 0, 0, 0, 0 (0 / 0 / 0); 48, 536.2 mm, 19.1 s |
+| sweep-v2.2 | 2 | 3, 3, 3, 3 (3 / 3 / 3); 21, 2160.9 mm, 51.3 s | 3, 3, 3, 3 (3 / 3 / 3); 18, 2210.5 mm, 58.4 s |
+| corne-cherry | 2 | 3, 4, 0, 3 (0 / 3 / 4); 484, 8273.0 mm, 28.9 s | 2, 1, 0, 0 (0 / 0.5 / 2); 604, 8804.6 mm, 58.3 s |
+| tinytapeout-demo | 4 | 14, 3, 15, 2 (2 / 8.5 / 15); 240, 4932.7 mm, 61.4 s | 0, 7, 1, 0 (0 / 0.5 / 7); 372, 6066.9 mm, 59.1 s cut |
+| buspirate5-rev10 | 4 | 4, 2, 12, 5 (2 / 4.5 / 12); 314, 3044.6 mm, 30.1 s | 0, 0, 0, 0 (0 / 0 / 0); 308, 3569.4 mm, 22.3 s |
+| lumenpnp-mobo | 4 | 13, 9, 5, 33 (5 / 11 / 33); 340, 5370.3 mm, 61.8 s cut | 0, 0, 0, 0 (0 / 0 / 0); 331, 6686.0 mm, 54.4 s |
+| cynthion | 4 | 28, 29, 29, 28 (28 / 28.5 / 29); 476, 3176.6 mm, 62.0 s cut | 8, 8, 8, 8 (8 / 8 / 8); 405, 3762.2 mm, 57.9 s |
+| glasgow-revC3 | 4 | 36, 31, 35, 31 (31 / 33 / 36); 415, 3436.4 mm, 61.4 s cut | 29, 30, 33, 34 (29 / 31.5 / 34); 359, 4006.2 mm, 59.4 s cut |
+| glasgow-revD1 | 6 | 241, 288, 376, 307 (241 / 297.5 / 376); 898, 7744.3 mm, 64.2 s cut | 105, 93, 112, 105 (93 / 105 / 112); 1112, 9233.4 mm, 58.0 s cut |
+| all twelve | | 342, 369, 475, 412 (342 / 390.5 / 475) | 147, 142, 157, 150 (142 / 148.5 / 157) |
+| the eleven without glasgow-revD1 | | 101, 81, 99, 105 (81 / 100 / 105) | 42, 49, 45, 45 (42 / 45 / 49) |
+
+No DRC error but connections open in the 96 runs, and no call of `guide` over 59.8 s.
+`guide` is behind in every run on no board, and ahead in every run on four. Against
+0.0.18 a day earlier: `cynthion` 8 open in every order for 11 to 12, `glasgow-revD1` 93
+to 112 for 118 to 135, `glasgow-revC3` 29 to 34 for 31 to 35, `corne-cherry` 2, 1, 0 and
+0 as before, and `tinytapeout-demo` 0, 7, 1 and 0 for 0, 4, 0 and 4: one order has more,
+whose first run left 4 and whose run on the fixed board ended with no time for one that
+moves routes. The twelve boards have 142 to 157 for 164 to 187.
+
+Vias, the range of the four runs against cadlab's router's, and 0.0.18's in brackets:
+`lumenpnp-mobo` 331 to 348 against 309 to 343 (402 to 411), `buspirate5-rev10` 308 to
+348 against 291 to 314 (349 to 372), `cynthion` 405 to 430 against 469 to 482 (604 to
+699), `glasgow-revC3` 330 to 359 against 415 to 439 (379 to 403), `glasgow-revD1` 1080
+to 1114 against 826 to 898 (1202 to 1253), `corne-cherry` 522 to 609 against 445 to 505
+(534 to 625), `tinytapeout-demo` 362 to 462 against 240 to 290 (385 to 427). What it
+does not reach is within 15 % of cadlab's router's median on two of the three boards it
+was asked for: `lumenpnp-mobo` is there, 336 against 339.5; `tinytapeout-demo` is 41 %
+over, for 54 %, with 296 to 370 vias in its nets without zones for 195 to 232; and
+`corne-cherry` 22 % over, as it was, its two grounds with 134 to 162 vias for 63 to 75.
+
+Track is longer than it was on the boards negotiated at twice the pitch: by the medians
+of the four runs against cadlab's router's, and by the first runs of 0.0.18's table in
+brackets, `tinytapeout-demo` 23 % over (14 %), `lumenpnp-mobo` 20 % (17 %),
+`buspirate5-rev10` 17 % (14 %), `glasgow-revC3` 12 % (6 %), `glasgow-revD1` 21 %
+(13 %); `cynthion` has less, 19 % (25 %).
+
+Pads in pours short of two spokes, cadlab's count over the twelve boards: 73 to 77 in
+the four orders for 90 to 100 with 0.0.18, against 154 to 170 after cadlab's router;
+with none, 0 to 3 for 1 to 3. `buspirate5-rev10` 29 to 34 for 33 to 43,
+`glasgow-revD1` 23 to 28 for 38 to 42, `tinytapeout-demo` 9 to 14 for 6 to 10.
+
+At 40 million nodes the crate gives the 675 that the source gave, to the via. At 150
+million, two orders, 0.0.18 in brackets: `corne-cherry` 2 and 1 (2 and 1),
+`tinytapeout-demo` 0 and 3 (0 and 2), `cynthion` 8 and 8 (11 and 11), `glasgow-revC3`
+24 and 26 (30 and 28), `buspirate5-rev10`, `lumenpnp-mobo` and `nrfmicro` none,
+`sweep-v2.2` 3 and 3. The curated boards, with `whole` off and no host: 1150 of 1151
+connections with 712 vias and 37556357 nodes, as before.
+
+In cadlab's adapter, not here, and found by this: asked for only when there was time
+for two fills of the board, `needless` was not asked in two of `tinytapeout-demo`'s
+four orders, whose last runs came back at 56 and 57 s, and the board kept 430 and 490
+vias there; with the time of one, and the second fill only where the first opens a
+connection, it has 362 and 462. And the fill that a run asks for when its cleanup is
+over is given only before the run's deadline now: what it told, `needless` tells by a
+fill that the host makes anyway.
+
 ### What this does not show
 
 - The vias that the passes add after a negotiation that was cut. `tinytapeout-demo`

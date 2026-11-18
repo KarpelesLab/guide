@@ -1091,6 +1091,47 @@ with vias let into the exposed pads of `corne-cherry`'s two packages, whose grou
 a pin beside them, the room under the packages went to those vias, and the board had 1,
 4 and 3 connections open for 2, 1 and 0.
 
+**The second ring of an array has its ways out before anything is routed, and the
+balls further in go away from its middle**
+([results](benchmarks.md#pcb-routing-out-of-an-array-and-shorter-after-it)). Between two
+balls that one track passes, the first ring gets out any way, a ball of the second has
+two ways, between the balls of the first to either side of the one in front of it, and
+a ball further in has none on its layer. The dog-bones of the balls further in were
+planned; the second ring was left to routing, and a track along the first ring, which
+is the shortest way from one side of the array to the other, closes both ways of every
+ball it passes. No order of the nets and no price makes a search leave them free: it is
+a plan, as the dog-bones are. So each ball of the second ring has its way out as fixed
+copper of its net first: to the middle of the four balls beside it, and straight out
+past the first ring. Not for a net with a zone or with more than eight pads, whose ball
+goes to its plane by a via where it is: with those too, the array of 256 balls of
+`glasgow-revD1` had 426 connections open over four orders for 388. And the dog-bones of
+the balls further in are on the side away from the middle, each quarter of the array to
+its own corner, as the boards routed by hand have them, where they were towards it: the
+rows through the middle are then free of vias on the other layers, and `glasgow-revC3`
+has 4 to 7 connections open at a minute for 29 to 34.
+
+**Shorter ways are looked for once routing is over, by option, and a host asks once**
+(`RouteOptions::shorten`). Cleanup pulled each run of tracks tight where it lay. It did
+not ask whether the run would lie there if it were routed now: a net that went round
+another keeps the way round when the other has moved, and a negotiation leaves every
+route where its prices put it. With the option, each run from one pad or branch to the
+next that costs more than the straight way is taken out and searched for again between
+the two pieces that this leaves the net in, everything else where it is, and kept if it
+is cheaper; what that cuts off a planned fill is joined to it again. It is an option and
+not the rule, and it is not for every run of a host that routes in several: a board
+whose routes were made shorter after its first run was a harder one for the runs after
+it (`nrfmicro`'s last connection had no way in five of them), and the time it takes is
+time those runs do not have. A host sets it in its last run, where the routes that the
+run was given are looked at as well.
+
+**`needless` leaves a track from pad to pad, and `needless_between` tells it.** What a
+fill makes needless was told of vias and of the tracks that led to them: with a track
+from pad to pad gone, another net's pour may take its room, and a pad that it reached
+has a neck of copper less. Both are the host's to see, on a fill that it makes without
+the track, and `guide` makes none. `needless_between` tells every track that the pads of
+its net are joined without, for a host that does that: fills its board without them,
+puts back what a connection or a relief needs, and fills it again.
+
 **Differential pairs are routed side by side last, in place of their nets' routes.** Routing
 pairs first, before anything else, as fixed copper, coupled `udb-s`'s USB pair a little better,
 60% of its length side by side in place of 50%, but cost other nets their room: `GB-LIVE32`

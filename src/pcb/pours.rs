@@ -294,7 +294,14 @@ impl Pours {
             .map(|s| ctx.widths.get(usize::from(s.l)).copied().unwrap_or(0))
             .collect();
         let diameters = vec![ctx.via.map_or(0, |(d, _)| d); c.vias.len()];
-        let gone = needless(design, net.net, c, (&widths, &diameters), &real.fills)?;
+        let gone = needless(
+            design,
+            net.net,
+            c,
+            (&widths, &diameters),
+            &real.fills,
+            false,
+        )?;
         let ns = c.segs.len();
         let (mut out, mut taken) = (c.detached(), c.detached());
         out.keep.clear();
@@ -890,7 +897,8 @@ fn pad_touches(pad: &crate::geom::drc::Pad, copper: &Shape, layers: LayerSet) ->
 /// and the rest of `c`: whatever is one piece with it stays one, joined to the largest
 /// fill or not. A small piece of fill with no pad on it is joined to nothing for its own
 /// sake, unless a zone of the net keeps its islands. And a track that a via taken out
-/// leaves leading nowhere is needless too. `widths` are the tracks' widths, by
+/// leaves leading nowhere is needless too; with `between`, so is every track that the
+/// groups are as joined without, one from a pad to another that a fill joins among them. `widths` are the tracks' widths, by
 /// position in `c`'s, and `diameters` its vias'. `None` if nothing is needless, or the
 /// net has no fill.
 ///
@@ -911,6 +919,7 @@ pub(crate) fn needless(
     c: &NetCopper,
     (widths, diameters): (&[i64], &[i64]),
     fills: &[Fill],
+    between: bool,
 ) -> Option<Vec<bool>> {
     let own: Vec<Fill> = fills
         .iter()
@@ -1066,6 +1075,24 @@ pub(crate) fn needless(
         gone[ns + v] = true;
         if joined(&gone) != before {
             gone[ns + v] = false;
+        }
+    }
+    // With `between`, the tracks as well, the longest first: one from pad to pad whose
+    // two pads a fill joins, or part of the way between them. For a host that fills its
+    // zones again without them and looks at what that fill joins.
+    if between {
+        let mut order: Vec<usize> = (0..ns).collect();
+        order.sort_by(|&a, &b| {
+            c.segs[b]
+                .length()
+                .total_cmp(&c.segs[a].length())
+                .then(a.cmp(&b))
+        });
+        for i in order {
+            gone[i] = true;
+            if joined(&gone) != before {
+                gone[i] = false;
+            }
         }
     }
     if !gone.iter().any(|&g| g) {
@@ -1566,6 +1593,18 @@ mod tests {
         // that joins the pour to the plane. The track between the pads that no fill
         // reaches stays too: they are one piece by it, if not with the plane.
         assert_eq!(needless(&d, &tracks, &vias, &fills), (vec![0, 1], vec![0]));
+        // A track from one pad on the pour to the other is not told, whatever the pour
+        // joins, unless it is asked for: the fill without it is another fill, for the
+        // host to make and look at. Asked for, it goes, and with it the track from the
+        // second pad to the via that stays, which is in the pour as the pad is. The
+        // track between the pads off the pour stays then too.
+        let mut more = tracks.clone();
+        more.push(track((3 * MM, 2 * MM), (8 * MM, 2 * MM)));
+        assert_eq!(needless(&d, &more, &vias, &fills), (vec![0, 1], vec![0]));
+        assert_eq!(
+            super::super::needless_between(&d, &more, &vias, &fills),
+            (vec![0, 1, 2, 4], vec![0])
+        );
         // With no pour, each pad needs its stub.
         let none: (Vec<usize>, Vec<usize>) = Default::default();
         assert_eq!(needless(&d, &tracks, &vias, &fills[..1]), none);

@@ -5581,6 +5581,160 @@ fill that the host makes anyway.
 - A host whose pours have no priorities among them, or a board with one net's pour to
   a layer: a track from pad to pad that a fill makes needless could go there.
 
+## PCB routing out of an array, and shorter after it
+
+What was changed after [the release above](#pcb-routing-at-twice-the-pitch), 0.0.19, for
+the same host, cadlab: the board on which both routers left the most open for its size,
+whose connections all end at one array of balls, and the track, which was longer than
+cadlab's router's on every board ([decisions](architecture.md#decisions)). Measured on
+2026-11-18 through cadlab's adapter and its `route_bench`. What decided between two
+versions of the code was a budget of nodes where that could, and four orders at a minute
+where it could not; the runs with a deadline are those of the source as it was when each
+was made, several at a time.
+
+### What
+
+**Where the connections of `glasgow-revC3` were left.** 29 to 34 at a minute, and every
+one at a ball of its array of 121 at 0.8 mm, between two of which one track passes. Its
+own board takes the first ring out on the top, the second between the balls of the
+first, and every ball further in through a via of 0.4 mm on the diagonal away from the
+middle, 46 of them, each quarter of the array to its own corner. `guide` gave the balls
+further in their dog-bones towards the middle, and no ball of the second ring anything:
+a net that came first went along the first ring, the shortest way from one side of the
+array to the other, and closed the two ways out of every ball of the second ring that
+it passed.
+
+**Where the track was longer**, net by net beside cadlab's router's on
+`tinytapeout-demo` and `lumenpnp-mobo` (`CADLAB_BENCH_BY_NET` writes a result's nets and
+tracks): of the nets with no zone that both routers closed, 70 % and 64 % were more than
+a tenth longer with `guide`, and 7 % and 3 % a twentieth shorter. Three things, by what
+each was worth:
+
+- *A net keeps the way round another that has moved since.* The routes of a negotiation
+  are where the prices of its rounds put them, and a net that the passes took round
+  another is not looked at again when that one goes. Cleanup pulled each run tight and
+  looked for fewer vias; it looked for no other way.
+- *A net with a pour is joined pad to pad by tracks that the pour joins as well.* It is
+  joined up again each time the routes of others cut its pour, while those still move,
+  and a pad off its plane goes to the pad beside it where that is nearer than a via:
+  `lumenpnp-mobo`'s ground had 402 tracks and 448 mm for 20 vias, where cadlab's router,
+  which plans on the pours, has 93 tracks and 124 mm for 21.
+- *A track goes to the middle of its pad*, and cadlab's router's ends at the first point
+  of its grid on the pad's copper. On `buspirate-rs232` `guide` had 359 mm for 281 mm,
+  28 % more, of which 292 mm for 272 mm, 7 % more, is outside the pads of its net
+  (`route_bench` tells that length too). That part is copper on copper, and is left as
+  it is.
+
+**What was done:**
+
+- **The ways out of the second ring of an array are planned before anything else**, in
+  a run with a budget: each ball of that ring, where one track passes between two
+  balls, has a track to the middle of the four balls beside it and from there straight
+  out past the first ring, as copper of its net, if that is free; for a net with no
+  zone and no more than eight pads. The first ring gets out any way.
+- **The dog-bones of the balls further in are on the side away from the middle**, where
+  they were towards it.
+- **`RouteOptions::shorten`**, off by default: in cleanup, each run of a net's tracks
+  from one pad or branch to the next that costs more than the straight way between its
+  ends, by three pitches and six hundredths of itself, is taken out, the longest way
+  round first, and searched for again between the two pieces that this leaves the net
+  in, within twelve pitches of where it was, with every other route where it is. The
+  new one is kept if it costs less, a via at three times what it costs while routing.
+  Three times through the nets, the second and third for the runs near one that moved;
+  then every net is pulled tight again. The routes that a run was given and has not
+  moved are looked at too, and what a run that went another way cuts off a planned fill
+  is joined to it again afterwards.
+- **`needless_between`**: as `needless`, and the tracks that the pads of their nets are
+  joined without as well, the longest first, whatever they end at. For a host that
+  fills its board again without them and looks at what that fill joins and what it
+  leaves of its reliefs: a track from pad to pad stays in `needless`, as the fill
+  without it is another.
+- **At the first pitch the price of a point that is claimed stops at thirty times a
+  step**, where it went to a thousand: what is still shared is the history's to price.
+  At twice the pitch it is as it was.
+
+### Results
+
+`glasgow-revC3`, connections open in four orders at a minute, with each part:
+
+| | open by order | sum |
+|---|---|---|
+| 0.0.19: dog-bones towards the middle, nothing for the second ring | 29, 30, 32, 34 | 125 |
+| dog-bones away from the middle | 24, 27, 29, 25 | 105 |
+| and the ways out of the second ring, for every net | 11, 9, 8, 11 | 39 |
+| and those only for a net with no zone and no more than eight pads | 5, 4, 6, 7 | 22 |
+
+At a budget of 40 million nodes, three orders, it has 41 open for 100. The other two
+boards with such arrays: `glasgow-revD1`, 256 balls, 395 open over four orders at a
+minute for 392 and 437 at 40 million nodes for 433; `cynthion` 8 in every order, as
+before. With the ways out for every net `glasgow-revD1` had 426 for 388: a ball of a
+supply in the second ring goes to its plane by a via where it is.
+
+The nine boards that a budget of 40 million nodes cuts, three orders: 620 connections
+open for 675 with 0.0.19 (`nrfmicro` 0, `sweep-v2.2` 9, `corne-cherry` 79,
+`tinytapeout-demo` 30, `buspirate5-rev10` 0, `lumenpnp-mobo` 0, `cynthion` 24,
+`glasgow-revC3` 41 for 100, `glasgow-revD1` 437 for 433).
+
+The price at thirty, beside a thousand, four orders at a minute with the rest as it is:
+`corne-cherry`, two layers, 1, 0, 2 and 1 open with a median of 506 vias and 7590 mm of
+track, for 2, 1, 0 and 0 with 566 and 8269 mm. At twice the pitch, on four layers, it
+has less copper too and leaves more open: `glasgow-revC3` 6, 8, 10 and 9 with 396 vias
+and 4348 mm, for 11, 4, 5 and 7 with 407 and 4496 mm, and 33 to 36 over four orders in
+three such comparisons for 22 to 27; `tinytapeout-demo` 0, 1, 1 and 4 for 0, 3, 1 and 0.
+So it is thirty at the first pitch alone. At 40 million nodes, where `corne-cherry`'s
+negotiation is cut before the price is there, the boards of two layers are the same
+with both.
+
+Shorter runs, on the first run of `tinytapeout-demo` as cleanup begins: 6033 mm, and
+5704, 5651 and 5602 mm after each of three times through the nets, two seconds a time;
+of 288 runs searched for, 124 came back cheaper, by 442 mm in all, 83 the same, 51
+dearer and 30 not at all. `lumenpnp-mobo` 6769 mm and 6641 after the first time, with a
+millimetre more from the second. Behind cadlab's adapter, which asks for it in a run of
+its own once its other runs are over: 201 to 372 mm and 4 to 15 vias less on
+`tinytapeout-demo`, 135 to 141 mm and 28 vias on `glasgow-revC3`, 37 to 93 mm on
+`lumenpnp-mobo`.
+
+Tracks between pads that a pour joins, taken out by cadlab's adapter by what
+`needless_between` tells and its own fill without them: `lumenpnp-mobo` 569 to 809
+tracks and 513 to 652 mm, `corne-cherry` 430 to 457 mm, `cynthion` 311 to 319 mm,
+`buspirate5-rev10` 240 mm, `tinytapeout-demo` 212 to 255 mm, `glasgow-revC3` 135 to
+143 mm; a pad in a hundred or so is left short of a spoke by the first fill, and has
+its tracks back.
+
+### Tried and not kept
+
+- **Ways out for the first ring too**, straight out of each ball: `glasgow-revC3` 17,
+  14, 17 and 11 open in two orders of two variants, for 16 and 13 without.
+- **Shorter runs at the end of each run**, the first among them. `nrfmicro`'s last
+  connection, which the run after the first closes in one order, had no way in five
+  runs after a first one whose routes were made shorter (58 s and one open, for 19 s
+  and none); `lumenpnp-mobo`'s first run ended 4 to 7 s later and left no time for the
+  run that closes its last connection (2, 2, 0 and 1 open for none); `glasgow-revD1`
+  had 471 connections open over four orders for 428, with 8800 to 8962 mm of track for
+  9064 to 9439. So a host asks for it once, in its last run.
+- **A share of cleanup's time by option, a fifth for a twelfth**: no gain that the
+  first run's time did not cost the runs after it.
+- **A via at its routing price in a run that is searched for again**: `lumenpnp-mobo`
+  ended with 13 to 15 vias more, a millimetre saved each; at three times, 3 more to
+  one fewer, and `tinytapeout-demo` 6 to 15 fewer for 4.
+- **The history at twice its step with the price at a hundred**: `tinytapeout-demo` 372
+  and 383 vias in two orders for 321 and 318.
+- **Every net after the first time through**, in place of those near a run that moved:
+  two seconds a time for a millimetre on `lumenpnp-mobo`.
+
+### What this does not show
+
+- The released crate behind the released adapter, beside cadlab's router in the same
+  half hour: below, once it is released.
+- An array that two tracks pass between two balls of, or one with balls left out in
+  its middle rows: the corpus has neither, and the ways out are planned for one track.
+- Shorter ways on a board that a minute does not finish. cadlab's adapter keeps no time
+  for them: with 6 % of the minute and four verifications kept, `tinytapeout-demo` had
+  13 connections open over four orders for 6, `lumenpnp-mobo` 4 for none and
+  `glasgow-revC3` 36 for 22, for 5 %, 1 % and 3 % of their track.
+- Tracks that end at the edge of a pad. Counted outside the pads of their nets,
+  `guide`'s track is nearer cadlab's router's than by its whole length, and no shorter.
+
 ## PCB differential pairs and lengths
 
 Differential pairs routed side by side, and nets meandered to their lengths, by `pcb::route`

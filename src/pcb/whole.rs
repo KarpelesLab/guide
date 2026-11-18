@@ -57,10 +57,17 @@ const DIAG: f32 = 1.05;
 
 /// The price of a claimed point at first, what it is multiplied by after each round, and
 /// the most it is: past that, sharing is out of the question anyway, and a search only
-/// goes further for it.
+/// goes further for it. At the first pitch the most is thirty times a step, at which a
+/// net goes thirty steps round a point rather than share it, and what is still shared is
+/// the history's to price, which rises for as long as a point is shared: at a thousand,
+/// `corne-cherry` ended a minute with 566 vias and 8269 mm of track over four orders
+/// where it has 506 and 7590, for as many connections. At twice the pitch it stays at a
+/// thousand, as VPR has it and cadlab's router: `glasgow-revC3` had 33 to 36 connections
+/// open over four orders at thirty where it has 22 to 27 (`docs/benchmarks.md`).
 const PRES: f32 = 0.6;
 const PRES_STEP: f32 = 1.6;
 const PRES_MAX: f32 = 1000.0;
+const PRES_MAX_FIRST: f32 = 30.0;
 /// What a round adds to the price of a point that was shared in it.
 const HISTORY: f32 = 0.5;
 /// How many rounds there are at most, and how many may pass since the best.
@@ -2742,7 +2749,7 @@ pub(crate) fn route<'r>(
                     board.add_history(*c, HISTORY);
                 }
             }
-            pres = (pres * PRES_STEP).min(PRES_MAX);
+            pres = (pres * PRES_STEP).min(if coarse { PRES_MAX } else { PRES_MAX_FIRST });
             // The nets with something shared, and those whose routes are near it.
             let mut set: BTreeSet<usize> = BTreeSet::new();
             hot.sort_unstable();

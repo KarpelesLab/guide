@@ -70,7 +70,13 @@
 //!    vias; a run of tracks between two vias that both go back to one layer is replaced
 //!    by tracks on that layer where they fit near it; then each run of tracks between
 //!    pads, vias and branches is pulled tight, by replacing runs with straight or 45°
-//!    shortcuts where those are legal.
+//!    shortcuts where those are legal. With [`RouteOptions::shorten`], before the
+//!    searches for fewer vias, each run of a net's tracks from one pad or branch to the
+//!    next that costs more than the straight way between its ends is taken out and
+//!    searched for again between the two pieces that this leaves the net in, every
+//!    other route where it is, and the new one is kept if it costs less: a route keeps
+//!    the way round another that has moved since, until something looks for a shorter
+//!    one.
 //! 5. **Differential pairs**, [`Design::pairs`]: each pair's two routes are taken out, and
 //!    the pair is routed side by side in their place, at its gap, where it fits: a search
 //!    for its centreline, wide enough for both tracks, offset into the two tracks, with
@@ -166,7 +172,13 @@
 //! row's pads are left side by side, by the clearance of the [area](crate::geom::RuleArea)
 //! that both tracks are in if one has its own, and is on that pad's lattice, and each ball too deep
 //! in an area array to get out on its layer, whose net's own via fits nowhere beside it,
-//! gets a dog-bone with [`RouteOptions::fanout_via`]. And a net in
+//! gets a dog-bone with [`RouteOptions::fanout_via`], on the side away from the array's
+//! middle, so that the vias of its four quarters leave the rows through the middle to
+//! the tracks of the other layers. Before those, each ball of the second ring of an
+//! array that one track passes between two balls of has its way out between two balls of
+//! the first ring as copper of its net: a track that runs along the first ring, the
+//! shortest way from one side of the array to the other, would close those ways for
+//! every ball it passes. And a net in
 //! the way of another's route is moved aside before it is taken out: cut where the route
 //! crosses it and mended around the route, with nothing else moved
 //! ([`Stats::shoved`]), or failing that, cut, given the next turn, and mended across
@@ -764,6 +776,20 @@ pub struct RouteOptions {
     /// How many threads [`whole`](RouteOptions::whole) routes nets on, side by side where
     /// their pads are apart. The default is 1; the routes are the same for any number.
     pub threads: usize,
+    /// Whether cleanup looks for a shorter way for each run of a net's tracks from one
+    /// pad or branch to the next, with every other route where it is. The default is
+    /// `false`. A net that was routed while others were in its way keeps the way round
+    /// them when they have moved, and after a negotiation
+    /// ([`whole`](RouteOptions::whole)) the routes are where the prices of its rounds
+    /// put them: each such run is taken out, longest way round first, and searched for
+    /// again between the two pieces it leaves, at the price of a via that routing has,
+    /// and the new one is kept if it costs less. Then the searches for fewer vias, as
+    /// without. The routes that a run [was given](route_from) and has not moved are
+    /// looked at as well, where the rest of cleanup leaves them as the run before left
+    /// them: a host that routes in several runs sets it in the last. Not the routes of a
+    /// net of a [pair](Design::pairs) or of one with a [length](Design::lengths) to
+    /// keep, which stay as they are.
+    pub shorten: bool,
 }
 
 impl Default for RouteOptions {
@@ -805,6 +831,7 @@ impl Default for RouteOptions {
             whole: false,
             whole_share: 0.5,
             threads: 1,
+            shorten: false,
         }
     }
 }
@@ -1220,6 +1247,38 @@ pub fn needless(
     vias: &[crate::geom::drc::Via],
     fills: &[Fill],
 ) -> (Vec<usize>, Vec<usize>) {
+    needless_of(design, tracks, vias, fills, false)
+}
+
+/// As [`needless`], and the tracks that the pads of their nets are joined without as well,
+/// whatever they end at: a track from a pad to another, or part of the way, where a fill
+/// joins the two. A net with a plane that is routed while its pours are cut by the routes
+/// of others, or before they are known, has tracks from pad to pad that the pour around
+/// the pads joins as well once it is filled.
+///
+/// Without such a track the fills are not the same: the room it leaves may go to the
+/// pour of another net, where the layer has one with a higher priority, and the fill that
+/// joined its pads is then another; and a pad that it reached has one neck of copper less
+/// to its net, which matters where the fill reaches the pad by a thermal relief. So this
+/// is for a host that fills its zones again without what is told here, counts what that
+/// fill leaves open and what it leaves of its reliefs, and puts back what it has to:
+/// [`needless`] tells what can go on the word of the fills given alone.
+pub fn needless_between(
+    design: &Design,
+    tracks: &[crate::geom::drc::Track],
+    vias: &[crate::geom::drc::Via],
+    fills: &[Fill],
+) -> (Vec<usize>, Vec<usize>) {
+    needless_of(design, tracks, vias, fills, true)
+}
+
+fn needless_of(
+    design: &Design,
+    tracks: &[crate::geom::drc::Track],
+    vias: &[crate::geom::drc::Via],
+    fills: &[Fill],
+    between: bool,
+) -> (Vec<usize>, Vec<usize>) {
     let layers = design.rules.layer_count();
     let bottom = crate::geom::LayerId(layers.saturating_sub(1) as u8);
     let mut nets: Vec<crate::id::NetId> = fills
@@ -1257,7 +1316,8 @@ pub fn needless(
         c.vias = of_vias.iter().map(|&i| vias[i].at).collect();
         let widths: Vec<i64> = of_tracks.iter().map(|&i| tracks[i].width).collect();
         let diameters: Vec<i64> = of_vias.iter().map(|&i| vias[i].diameter).collect();
-        let Some(gone) = pours::needless(design, net, &c, (&widths, &diameters), fills) else {
+        let Some(gone) = pours::needless(design, net, &c, (&widths, &diameters), fills, between)
+        else {
             continue;
         };
         let ns = of_tracks.len();

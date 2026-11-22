@@ -3452,3 +3452,34 @@ fn tree_of(board: &Board, net: &WNet) -> Tree {
     tree
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::{Conflict, Ranked, none_new, rank};
+
+    #[test]
+    fn a_net_routed_with_others_stands_if_it_is_in_no_claim_that_it_was_not_in() {
+        // In order, a via's cell before the points of the layers.
+        let then: Vec<Conflict> = vec![(None, 4), (Some(0), 3), (Some(0), 9), (Some(1), 2)];
+        // In fewer of them, or in the same: it stands.
+        assert!(none_new(&[], &then));
+        assert!(none_new(&[(None, 4), (Some(0), 9)], &then));
+        assert!(none_new(&then, &then));
+        // In one more, on a layer or by a via: it does not.
+        assert!(!none_new(&[(Some(0), 4)], &then));
+        assert!(!none_new(&[(None, 5), (Some(0), 3)], &then));
+        assert!(!none_new(&[(Some(1), 2)], &[]));
+    }
+
+    #[test]
+    fn of_two_nodes_that_cost_the_same_the_one_nearer_the_targets_is_first() {
+        let mut heap = Ranked::default();
+        heap.push(rank(10.0, 4.0), 1);
+        heap.push(rank(10.0, 1.0), 2);
+        heap.push(rank(9.0, 8.0), 3);
+        // Within a sixteenth of a step, the costs are the same.
+        heap.push(rank(10.03, 0.5), 4);
+        let order: Vec<u32> = core::iter::from_fn(|| heap.pop().map(|e| e.1)).collect();
+        assert_eq!(order, [3, 4, 2, 1]);
+    }
+}

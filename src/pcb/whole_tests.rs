@@ -61,6 +61,41 @@ fn the_routes_are_the_same_on_any_number_of_threads() {
 }
 
 #[test]
+fn more_nets_than_are_routed_at_once_have_the_same_routes_on_any_number_of_threads() {
+    // Twenty nets across each other: more than the few that are routed at once, and
+    // each in the way of the others of its few, so that some are routed again at their
+    // turn.
+    let d = crossed(20);
+    let one = route_checked(&d, &whole());
+    assert!(one.unrouted.is_empty());
+    for threads in [3, 16] {
+        let options = RouteOptions { threads, ..whole() };
+        let more = route_checked(&d, &options);
+        assert_eq!(one.tracks, more.tracks);
+        assert_eq!(one.vias, more.vias);
+        assert_eq!(one.stats.work, more.stats.work);
+    }
+    // And whatever a budget stops it in.
+    for part in [8, 64, 512, 4096] {
+        let budget = RouteOptions {
+            work_budget: Some(one.stats.work * part / 8192 + 1),
+            ..whole()
+        };
+        let alone = route_checked(&d, &budget);
+        let more = route_checked(
+            &d,
+            &RouteOptions {
+                threads: 3,
+                ..budget
+            },
+        );
+        assert_eq!(alone.tracks, more.tracks);
+        assert_eq!(alone.vias, more.vias);
+        assert_eq!(alone.stats.work, more.stats.work);
+    }
+}
+
+#[test]
 fn a_budget_that_ends_it_leaves_a_legal_board_and_the_passes_go_on() {
     let d = crossed(8);
     let all = route_checked(&d, &whole());

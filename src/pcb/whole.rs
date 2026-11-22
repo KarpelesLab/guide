@@ -63,6 +63,14 @@ const BEND45: f32 = 0.4;
 const BEND90: f32 = 1.5;
 const WRONG_WAY: f32 = 1.8;
 const DIAG: f32 = 1.05;
+/// What a via costs a net with a plane at twice the pitch, as a share of what it costs the
+/// others: half, which is ten steps of the first pitch, as it is on a board of two layers
+/// and in cadlab's router. At twice the pitch a via costs the others twenty steps of the
+/// first, which keeps their vias down; a net with a plane then joined two of its pads by a
+/// track of up to that length where each could go to the plane by a via where it is
+/// (`glasgow-revC3`'s nine nets with zones: 674 mm of track for cadlab's router's 481, and
+/// 91 vias for 120).
+const PLANE_VIA: f32 = 0.5;
 
 /// The price of a claimed point at first, what it is multiplied by after each round, and
 /// the most it is: past that, sharing is out of the question anyway, and a search only
@@ -348,6 +356,8 @@ struct WNet {
     bbox: (i32, i32, i32, i32),
     /// The length of its connections as the crow flies, which orders the nets.
     length: i64,
+    /// What a via costs it in the rounds, in steps.
+    via: f32,
 }
 
 /// SplitMix64.
@@ -572,6 +582,12 @@ struct Board {
     along: Vec<u8>,
     hole_clearance: i64,
     hole_to_hole: i64,
+    /// What a via costs more on a grid finer than the pitch when the nets are routed again
+    /// for fewer of them: as many steps more as the steps are shorter, so that one costs
+    /// the same length of track. In the rounds a via costs its ten steps on any grid:
+    /// dearer there, `nrfmicro` ended fewer of its negotiations with nothing shared (5
+    /// connections open over twelve orders for 2).
+    via_scale: f32,
 }
 
 fn code(class: Class, key: u64, owners: &mut Vec<(u64, u32)>) -> u16 {
@@ -1872,12 +1888,13 @@ impl Board {
             }
         };
         own(sc, &net, 1);
+        let via = net.via;
         let (res, nodes) = self.route_net(
             world,
             sc,
             &mut net,
             task.mode,
-            VIA,
+            via,
             ctl,
             task.keep.as_deref(),
             task.margin,
@@ -2410,7 +2427,7 @@ pub(crate) fn route<'r>(
     options: &RouteOptions,
     run: &Run<'r>,
     (share, was): (f64, Option<super::Stopped>),
-    (pitch, coarse): (i64, bool),
+    (pitch, coarse, finer): (i64, bool, i64),
     bounds: Rect,
 ) -> Result<Whole, NoWhole> {
     let rules = &design.rules;
@@ -2436,6 +2453,14 @@ pub(crate) fn route<'r>(
     // negotiation at it: a track's width and its clearance, at which two tracks side by
     // side are still a step apart.
     let pitch = if coarse { pitch * 2 } else { pitch };
+    // Or finer, by halves of `finer`: a board whose negotiation does not end at the pitch
+    // has passages between its parts that are off the grid's lines, and narrower than a
+    // step.
+    let pitch = if finer > 2 {
+        (pitch * 2 / finer).max(1000)
+    } else {
+        pitch
+    };
     let grid = make_grid(design, jobs, pitch, bounds);
     let cells = grid.cells();
     if cells == 0 || (layers as u64) * (cells as u64) >= u64::from(u32::MAX) / 8 {
@@ -2502,6 +2527,11 @@ pub(crate) fn route<'r>(
             keys: Vec::new(),
             bbox: (i32::MAX, i32::MAX, i32::MIN, i32::MIN),
             length,
+            via: if coarse && job.plane {
+                VIA * PLANE_VIA
+            } else {
+                VIA
+            },
         });
     }
     if group_keys.len() > GROUPS {
@@ -2611,6 +2641,7 @@ pub(crate) fn route<'r>(
             .collect(),
         hole_clearance: rules.spec().hole_clearance,
         hole_to_hole: rules.spec().hole_to_hole,
+        via_scale: if finer > 2 { finer as f32 / 2.0 } else { 1.0 },
     };
     // Where planes and the rooms of spokes are.
     {
@@ -3073,7 +3104,15 @@ pub(crate) fn route<'r>(
             for (c, _) in &points {
                 board.add_history(*c, HISTORY);
             }
-            pres = (pres * PRES_STEP).min(if coarse { PRES_MAX } else { PRES_MAX_FIRST });
+            // On a finer grid than the pitch the price rises as at twice the pitch: it is
+            // begun only where the rounds at the pitch, with their price stopped at thirty
+            // steps, did not end.
+            let most = if coarse || finer > 2 {
+                PRES_MAX
+            } else {
+                PRES_MAX_FIRST
+            };
+            pres = (pres * PRES_STEP).min(most);
             // The nets with something shared, and those whose routes are near it.
             let mut set: BTreeSet<usize> = BTreeSet::new();
             hot.sort_unstable();
@@ -3194,12 +3233,13 @@ pub(crate) fn route<'r>(
             flag: run.flag(),
             limit,
         };
+        let via = nets[i].via;
         let (res, pops) = board.route_net(
             world,
             &mut sc,
             &mut nets[i],
             Mode::Hard,
-            VIA,
+            via,
             &ctl,
             Some(&all),
             None,
@@ -3241,8 +3281,16 @@ pub(crate) fn route<'r>(
             flag: run.flag(),
             limit: nodes_for(taken[i]).0,
         };
-        let (res, pops) =
-            board.route_net(world, &mut sc, net, Mode::Hard, FEWER_VIA, &ctl, None, None);
+        let (res, pops) = board.route_net(
+            world,
+            &mut sc,
+            net,
+            Mode::Hard,
+            FEWER_VIA * board.via_scale,
+            &ctl,
+            None,
+            None,
+        );
         let (nv, nl) = board.measure(net);
         let ok = res.is_ok()
             && net.wires.len() >= old.len()

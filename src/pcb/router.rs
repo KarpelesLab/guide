@@ -1062,9 +1062,27 @@ const POUR_ROUNDS: usize = 3;
 /// The share of a work budget that routing leaves for those stubs.
 const POUR_WORK: f64 = 0.03;
 
-/// How many times a negotiation for every net that ended with points still shared is
-/// begun again in another order.
-const WHOLE_AGAIN: u64 = 3;
+/// What a negotiation for every net that ended with points still shared is begun again
+/// as, in order: the pitch (2, see [`WHOLE_FINER`]) and which other order of the nets.
+const WHOLE_ORDERS: [(i64, u64); 3] = [(2, 1), (2, 2), (2, 3)];
+
+/// What a negotiation at the first pitch that ended with points still shared is begun
+/// again as, in order: what the pitch is divided by, in halves (2 is the pitch), and
+/// which other order of the nets (0 is the one given).
+const WHOLE_FINER: [(i64, u64); 9] = [
+    (3, 0),
+    (4, 0),
+    (2, 1),
+    (3, 1),
+    (4, 1),
+    (6, 0),
+    (2, 2),
+    (3, 2),
+    (4, 2),
+];
+/// And how many points at most may still be shared for the finer grids, or one for each
+/// net if that is more: a board with more has another trouble than its grid.
+const FINER_SHARED: usize = 100;
 
 /// What [`route_all`] returns: the result, how the last search of each net that failed
 /// ended, for the nets left open, the fill that the joining of zones' pieces ended on,
@@ -1813,7 +1831,7 @@ fn route_all<'a>(
             }
             Some(w)
         };
-        let attempt = |options: &RouteOptions, coarse: bool| {
+        let attempt = |options: &RouteOptions, coarse: bool, finer: i64| {
             whole::route(
                 design,
                 &world,
@@ -1824,7 +1842,7 @@ fn route_all<'a>(
                 options,
                 run,
                 (share, was),
-                (pitch, coarse),
+                (pitch, coarse, finer),
                 bounds,
             )
         };
@@ -1834,43 +1852,97 @@ fn route_all<'a>(
         // with two layers a channel has to hold every track that fits it, and with more
         // the rounds that the coarser grid has the time for count for more.
         let mut coarse = rules.layer_count() > 2;
-        let mut whole = match attempt(options, coarse) {
+        let mut whole = match attempt(options, coarse, 2) {
             Err(whole::NoWhole::NoRoom) if !coarse && !run.poll() => {
                 coarse = true;
                 run.part(share, share);
-                attempt(options, true).ok()
+                attempt(options, true, 2).ok()
             }
             other => other.ok(),
         };
         // A negotiation that ended on its own with points still shared, in a small part
-        // of its share, is begun again with the nets moved in their order another way,
-        // and the one that ends with the fewest shared is kept: its rounds stop where
-        // the prices have every net fixed where it is, and another order has other
-        // nets there.
-        for again in 1..=WHOLE_AGAIN {
-            let Some(w) = whole.as_ref().filter(|w| w.ended && w.shared > 0) else {
+        // of its share, is begun again, and the one that ends with the fewest shared is
+        // kept: its rounds stop where the prices have every net fixed where it is.
+        //
+        // At twice the pitch, with the nets moved in their order another way: another
+        // order has other nets there.
+        //
+        // At the first pitch, where few enough are shared for the board to be nearly
+        // there, on finer grids as well, each in the order given and then in others. The
+        // pitch, half a track and its clearance, holds the ways that lie on its lines;
+        // between parts placed for routing by hand the passages are often narrower than a
+        // step and off those lines, and the rounds then go on for ever with the same few
+        // nets in each other's way (`nrfmicro`: 45 to 100 points shared from the tenth
+        // round on at 0.2 mm, in every order). Which grid ends with nothing shared is
+        // not to be told beforehand, so there are several, as cadlab's router has it for
+        // its whole run, and for the same board. A finer grid has as many times the cells
+        // as the square of what it is finer by, and is begun only with room for that.
+        let first = (began.0.elapsed(), run.work() - began.1);
+        let finer_on = !coarse
+            && whole
+                .as_ref()
+                .is_some_and(|w| w.shared <= FINER_SHARED.max(jobs.len()));
+        let tries: &[(i64, u64)] = if finer_on {
+            &WHOLE_FINER
+        } else {
+            &WHOLE_ORDERS
+        };
+        let (mut longest, mut most) = first;
+        for (again, &(finer, order)) in (1u32..).zip(tries) {
+            if whole.as_ref().is_none_or(|w| !w.ended || w.shared == 0) {
                 break;
+            }
+            // Each has cost what the ones before did, at most, for there to be room; where
+            // some are on finer grids, what the costliest of them did, and a finer grid
+            // its cells more than the first.
+            let (took, worked) = if finer_on {
+                let cells = (finer * finer) as f64 / 4.0;
+                (
+                    longest.max(first.0.mul_f64(cells)),
+                    most.max((first.1 as f64 * cells) as u64),
+                )
+            } else {
+                (
+                    began.0.elapsed() / again,
+                    (run.work() - began.1) / u64::from(again),
+                )
             };
-            // Each has cost what the ones before did, at most, for there to be room.
-            let took = began.0.elapsed() / again as u32;
-            let worked = (run.work() - began.1) / again;
-            if run.poll()
-                || run.part_left().is_some_and(|left| left < took * 2)
-                || run.limits(u64::MAX).max_expansions < worked.saturating_mul(2)
+            if run.poll() {
+                break;
+            }
+            // With twice that in what is left; on the finer grids, where one that ends
+            // costs less than those that did not, with as much, and one that has no room
+            // leaves the next its turn.
+            let times = if finer_on { 1 } else { 2 };
+            if run.part_left().is_some_and(|left| left < took * times)
+                || run.limits(u64::MAX).max_expansions < worked.saturating_mul(u64::from(times))
             {
+                if finer_on {
+                    continue;
+                }
                 break;
             }
             let other = RouteOptions {
-                seed: Some(
-                    options
-                        .seed
-                        .unwrap_or(0)
-                        .wrapping_add(again.wrapping_mul(0x9E37_79B9_7F4A_7C15)),
-                ),
+                seed: if order == 0 {
+                    options.seed
+                } else {
+                    Some(
+                        options
+                            .seed
+                            .unwrap_or(0)
+                            .wrapping_add(order.wrapping_mul(0x9E37_79B9_7F4A_7C15)),
+                    )
+                },
                 ..*options
             };
-            if let Ok(next) = attempt(&other, coarse)
-                && (next.shared, next.taken_out) < (w.shared, w.taken_out)
+            let at = (std::time::Instant::now(), run.work());
+            let next = attempt(&other, coarse, finer);
+            longest = longest.max(at.0.elapsed());
+            most = most.max(run.work() - at.1);
+            if let Ok(next) = next
+                && whole
+                    .as_ref()
+                    .is_none_or(|w| (next.shared, next.taken_out) < (w.shared, w.taken_out))
             {
                 whole = Some(next);
             }

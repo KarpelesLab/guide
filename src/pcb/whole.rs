@@ -38,8 +38,9 @@ pub(crate) static DBG_FILL_NS: std::sync::atomic::AtomicU64 = std::sync::atomic:
 pub(crate) static DBG_FILLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub(crate) static DBG_VIA_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub(crate) static DBG_VIAS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-pub(crate) static DBG_SEARCH_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-pub(crate) static DBG_PUSHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Searches and their nodes, by class: 0 all, 1 targets' box over 16 cells a side, 2 over 64, 3 searches over 20k
+/// nodes, 4 over 100k, 5 with no way.
+pub(crate) static DBG_S: [std::sync::atomic::AtomicU64; 12] = [const { std::sync::atomic::AtomicU64::new(0) }; 12];
 pub(crate) fn dbg_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("GUIDE_DBG").is_some())
@@ -348,7 +349,7 @@ struct Scratch {
     seen: Vec<u32>,
     target: Vec<u32>,
     stamp: u32,
-    heap: Heap,
+    heap: Ranked,
     own_vias: Vec<(i32, i32)>,
     near: Vec<EntryId>,
     /// What the nodes nearest a search's targets cost to them, by stamp.
@@ -407,6 +408,72 @@ impl Heap {
                 m = l;
             }
             if r < n && Heap::less(self.items[r], self.items[m]) {
+                m = r;
+            }
+            if m == i {
+                break;
+            }
+            self.items.swap(i, m);
+            i = m;
+        }
+        top
+    }
+}
+
+/// How many parts of a step the costs of a search are told apart by, where the order of
+/// its nodes is told: of two nodes that the way through them costs the same to within
+/// one, the one nearer the targets is looked at first. On a grid where a step costs the
+/// same along a line as its bound says, every node between two ends that one bend
+/// reaches is on a way that costs what the best way does, short of the bend still to
+/// come, which no bound counts: by their costs alone, a search looks at all of them
+/// before it reaches its target, and at a line of them with this.
+const PARTS: f32 = 16.0;
+
+/// The place of a node in the order of a search: the cost of the way through it first,
+/// then how far it is from the targets.
+#[inline]
+fn rank(f: f32, h: f32) -> u64 {
+    (u64::from((f * PARTS) as u32) << 32) | u64::from((h * PARTS) as u32)
+}
+
+/// A binary heap of ranks and nodes, the least first, and of equal ranks the least node.
+#[derive(Default)]
+struct Ranked {
+    items: Vec<(u64, u32)>,
+}
+
+impl Ranked {
+    fn clear(&mut self) {
+        self.items.clear();
+    }
+    fn push(&mut self, rank: u64, node: u32) {
+        let mut i = self.items.len();
+        self.items.push((rank, node));
+        while i > 0 {
+            let p = (i - 1) / 2;
+            if self.items[i] >= self.items[p] {
+                break;
+            }
+            self.items.swap(i, p);
+            i = p;
+        }
+    }
+    fn pop(&mut self) -> Option<(u64, u32)> {
+        let n = self.items.len();
+        if n == 0 {
+            return None;
+        }
+        self.items.swap(0, n - 1);
+        let top = self.items.pop();
+        let n = n - 1;
+        let mut i = 0;
+        loop {
+            let (l, r) = (2 * i + 1, 2 * i + 2);
+            let mut m = i;
+            if l < n && self.items[l] < self.items[m] {
+                m = l;
+            }
+            if r < n && self.items[r] < self.items[m] {
                 m = r;
             }
             if m == i {
@@ -1026,7 +1093,7 @@ impl Board {
             seen: vec![0; n],
             target: vec![0; n],
             stamp: 0,
-            heap: Heap::default(),
+            heap: Ranked::default(),
             own_vias: Vec::new(),
             near: Vec::new(),
             lb_cost: vec![0.0; n],
@@ -1366,7 +1433,7 @@ impl Board {
             sc.parent[i] = u32::MAX;
             sc.dir[i] = NONE;
             let h = bound(sc, floor, i, l, x, y);
-            sc.heap.push(c + h, n);
+            sc.heap.push(rank(c + h, h), n);
         }
         let mid_off: [isize; 8] = DIRS.map(|(dx, dy)| dy as isize * dw + dx as isize);
         let cell_off: [isize; 8] = DIRS.map(|(dx, dy)| dy as isize * gw as isize + dx as isize);
@@ -1380,7 +1447,9 @@ impl Board {
             let ui = u as usize;
             let (l, x, y) = self.unpack(u);
             let gu = sc.cost[ui];
-            if f > gu + bound(sc, floor, ui, l, x, y) + 1e-3 {
+            // Left behind by a cheaper way to the node since.
+            let h = bound(sc, floor, ui, l, x, y);
+            if f >> 32 > rank(gu + h, h) >> 32 {
                 continue;
             }
             if sc.target[ui] == stamp {
@@ -1478,7 +1547,7 @@ impl Board {
                 sc.parent[vi] = u;
                 sc.dir[vi] = nd as u8;
                 let h = bound(sc, floor, vi, l, nx, ny);
-                sc.heap.push(c + h, vi as u32);
+                sc.heap.push(rank(c + h, h), vi as u32);
             }
             if has_via {
                 let cell = grid.cidx(x, y);
@@ -1515,8 +1584,62 @@ impl Board {
                     sc.parent[vi] = u;
                     sc.dir[vi] = NONE;
                     let h = bound(sc, floor, vi, l2, x, y);
-                    sc.heap.push(c0 + h, v);
+                    sc.heap.push(rank(c0 + h, h), v);
                 }
+            }
+        }
+        if dbg_on() && pops > 60_000 && std::env::var_os("GUIDE_DBG_BIG").is_some() {
+            let mut sb = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+            let mut h0 = f32::INFINITY;
+            let mut sl = 0u32;
+            for &(n, _) in sources {
+                let (l, x, y) = self.unpack(n);
+                sb = (sb.0.min(x), sb.1.min(y), sb.2.max(x), sb.3.max(y));
+                h0 = h0.min(bound(sc, 0.0, n as usize, l, x, y));
+                sl |= 1 << l;
+            }
+            let mut tl = 0u32;
+            for &t in targets {
+                tl |= 1 << (t as usize / cells);
+            }
+            let (cost, len, vias) = found.map_or((0.0, 0, 0), |u| {
+                let (mut c, mut len, mut vias) = (u, 0, 0);
+                while sc.parent[c as usize] != u32::MAX {
+                    let p = sc.parent[c as usize];
+                    if p as usize / cells != c as usize / cells {
+                        vias += 1;
+                    }
+                    len += 1;
+                    c = p;
+                }
+                (sc.cost[u as usize], len, vias)
+            });
+            eprintln!(
+                "DBGBIG net={} pops={pops} pres={pres} h0={h0:.0} cost={cost:.0} len={len} vias={vias} srcs={} sbox={sb:?} slayers={sl:b} tgts={} tbox={tb:?} tlayers={tl:b} grid={}x{}",
+                id.0, sources.len(), targets.len(), grid.w, grid.h
+            );
+        }
+        if dbg_on() {
+            let side = (tb.2 - tb.0).max(tb.3 - tb.1);
+            let mut add = |k: usize| {
+                DBG_S[2 * k].fetch_add(1, Ordering::Relaxed);
+                DBG_S[2 * k + 1].fetch_add(pops, Ordering::Relaxed);
+            };
+            add(0);
+            if side > 16 {
+                add(1);
+            }
+            if side > 64 {
+                add(2);
+            }
+            if pops > 20_000 {
+                add(3);
+            }
+            if pops > 100_000 {
+                add(4);
+            }
+            if found.is_none() && !stopped {
+                add(5);
             }
         }
         if stopped {
@@ -3003,6 +3126,11 @@ pub(crate) fn route<'r>(
             if dbg_on() {
                 let vias: usize = nets.iter().map(|n| board.measure(n).0).sum();
                 let len: f64 = nets.iter().map(|n| board.measure(n).1).sum();
+                let d: Vec<u64> = DBG_S.iter().map(|a| a.swap(0, Ordering::Relaxed)).collect();
+                eprintln!(
+                    "DBGS it={it} all={}/{:.1}M box16={}/{:.1}M box64={}/{:.1}M big20k={}/{:.1}M big100k={}/{:.1}M noway={}/{:.1}M",
+                    d[0], d[1] as f64 / 1e6, d[2], d[3] as f64 / 1e6, d[4], d[5] as f64 / 1e6, d[6], d[7] as f64 / 1e6, d[8], d[9] as f64 / 1e6, d[10], d[11] as f64 / 1e6
+                );
                 eprintln!(
                     "DBGROUND it={it} t={:.2} cpu={:?} round={:.2}s nodes={} rerouted={} ahead={:?}/{} shared={total} nets_conf={} vias={vias} len={:.0}mm pres={pres:.1} fill={:.2}s/{} via={:.2}s/{} cut={cut}",
                     began.0.elapsed().as_secs_f64(),

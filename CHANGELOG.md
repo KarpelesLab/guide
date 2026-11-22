@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.24](https://github.com/KarpelesLab/guide/compare/v0.0.23...v0.0.24) - 2026-11-22
+
+### Added
+
+- *(pcb)* on a board of two layers a stub back to a fill pays eight times for a via ([#39](https://github.com/KarpelesLab/guide/pull/39))
+- *(pcb)* a net with a plane pays forty steps for a via at the first pitch, and of two ways as long as each other cleanup lays the one with less outside the pads ([#38](https://github.com/KarpelesLab/guide/pull/38))
+
+### Other
+
+- *(benchmarks)* where cadlab's router was still ahead, as released: finer grids for a negotiation that does not end, a via to a plane at twice the pitch, and the table beside cadlab's router ([#36](https://github.com/KarpelesLab/guide/pull/36))
+
 ## [0.0.23](https://github.com/KarpelesLab/guide/compare/v0.0.22...v0.0.23) - 2026-11-22
 
 ### Added

@@ -826,6 +826,51 @@ pub(crate) fn pull_tight(world: &World<'_>, ctx: &NetCtx, c: &mut NetCopper) {
     c.merge(ctx);
 }
 
+/// How much of the way from `from` through `way` on layer `l` is outside the boxes of the
+/// net's pads on that layer. A part inside two boxes counts for neither twice over: the
+/// boxes of a net's pads that overlap are few, and this only tells two ways apart.
+fn outside(ctx: &NetCtx, l: u8, from: Point, way: &[Point]) -> f64 {
+    let mut total = 0.0;
+    let mut a = from;
+    for &b in way {
+        let length = dist(a, b);
+        let mut inside = 0.0;
+        for pad in ctx.pads.iter().filter(|p| p.layers.contains(LayerId(l))) {
+            inside += within(&pad.bbox, a, b) * length;
+        }
+        total += (length - inside).max(0.0);
+        a = b;
+    }
+    total
+}
+
+/// The share of the straight line from `a` to `b` that is inside `rect`.
+fn within(rect: &Rect, a: Point, b: Point) -> f64 {
+    let (mut t0, mut t1) = (0.0f64, 1.0f64);
+    let d = ((b.x - a.x) as f64, (b.y - a.y) as f64);
+    let edges = [
+        (-d.0, (a.x - rect.min().x) as f64),
+        (d.0, (rect.max().x - a.x) as f64),
+        (-d.1, (a.y - rect.min().y) as f64),
+        (d.1, (rect.max().y - a.y) as f64),
+    ];
+    for (p, q) in edges {
+        if p == 0.0 {
+            if q < 0.0 {
+                return 0.0;
+            }
+            continue;
+        }
+        let t = q / p;
+        if p < 0.0 {
+            t0 = t0.max(t);
+        } else {
+            t1 = t1.min(t);
+        }
+    }
+    (t1 - t0).max(0.0)
+}
+
 /// A run of points made shorter: from each point, the furthest later one that a legal
 /// octilinear shortcut reaches.
 fn tighten(world: &World<'_>, ctx: &NetCtx, l: u8, run: &[Point]) -> Vec<Point> {
@@ -838,7 +883,8 @@ fn tighten(world: &World<'_>, ctx: &NetCtx, l: u8, run: &[Point]) -> Vec<Point> 
             if octile(run[i], run[j]) >= old {
                 continue;
             }
-            let found = ways(run[i], run[j]).into_iter().find(|way| {
+            let mut found: Option<(f64, Vec<Point>)> = None;
+            for way in ways(run[i], run[j]) {
                 let mut from = run[i];
                 let new: f64 = way
                     .iter()
@@ -849,16 +895,26 @@ fn tighten(world: &World<'_>, ctx: &NetCtx, l: u8, run: &[Point]) -> Vec<Point> 
                     })
                     .sum();
                 if new >= old {
-                    return false;
+                    continue;
                 }
                 let mut from = run[i];
-                way.iter().all(|&to| {
+                let free = way.iter().all(|&to| {
                     let ok = legal(world, ctx, from, to, l);
                     from = to;
                     ok
-                })
-            });
-            if let Some(way) = found {
+                });
+                if !free {
+                    continue;
+                }
+                // Of two ways, which are as long as each other, the one with less of its
+                // length outside the pads of the net: what is inside a pad is copper on
+                // copper, and a host leaves it out.
+                let out = outside(ctx, l, run[i], &way);
+                if found.as_ref().is_none_or(|(least, _)| out + 1.0 < *least) {
+                    found = Some((out, way));
+                }
+            }
+            if let Some((_, way)) = found {
                 next = (j, way);
                 break;
             }
@@ -949,6 +1005,88 @@ mod tests {
         fewer_hops(&mut world, &jobs[1], under, params, &options);
         assert_eq!(under.vias.len(), 2, "{under:?}");
         assert_eq!(under.pieces(&jobs[1].ctx).apart(), 0);
+    }
+
+    #[test]
+    fn of_two_ways_as_long_the_one_with_less_outside_the_pads_is_laid() {
+        // A pad 2 mm wide and one beside it, 3.2 mm along and 0.6 mm down: straight and
+        // then at 45 degrees, the track is inside the wide pad for a millimetre; at 45
+        // degrees first, it leaves the pad at once. Both are as long.
+        let pad = |x0: i64, y0: i64, x1: i64, y1: i64| crate::geom::drc::Pad {
+            shape: crate::geom::Shape::rect(crate::geom::Rect::new(
+                Point::new(x0, y0),
+                Point::new(x1, y1),
+            ))
+            .unwrap(),
+            layers: crate::geom::LayerSet::EMPTY.with(crate::geom::LayerId(0)),
+            hole: None,
+            net: Some(crate::id::NetId(1)),
+            clearance: None,
+            stack: Vec::new(),
+        };
+        let pads = vec![
+            pad(-MM, -300_000, MM, 300_000),
+            pad(2_700_000, -1_200_000, 3_700_000, 0),
+        ];
+        let d = design(2, pads, 2);
+        let options = RouteOptions::default();
+        let mut world = World::new(
+            &d.board,
+            &d.rules,
+            &d.outline,
+            d.edge_clearance,
+            &d.obstacles,
+        )
+        .unwrap();
+        world.configure(&d, &options);
+        let pitch = router::pitch(&d, &options);
+        let jobs = router::jobs(&d, &world, pitch, &[], &[]);
+        assert_eq!(jobs.len(), 1);
+        let ctx = &jobs[0].ctx;
+        let (a, b) = (Point::new(0, 0), Point::new(3_200_000, -600_000));
+        assert!(ctx.pads.iter().any(|p| p.center == a) && ctx.pads.iter().any(|p| p.center == b));
+        let corner = Point::new(0, -600_000);
+        let mut c = NetCopper::default();
+        c.segs = vec![Seg { a, b: corner, l: 0 }, Seg { a: corner, b, l: 0 }];
+        super::pull_tight(&world, ctx, &mut c);
+        let turn = Point::new(2_600_000, 0);
+        assert!(
+            c.segs
+                .iter()
+                .any(|s| (s.a, s.b) == (a, turn) || (s.a, s.b) == (turn, a)),
+            "{c:?}"
+        );
+        assert_eq!(c.segs.len(), 2, "{c:?}");
+        // What is outside the two boxes: 1.6 mm straight and a tenth of a millimetre
+        // across, for 2.1 mm and three tenths across the other way.
+        let straight_first = super::outside(ctx, 0, a, &[turn, b]);
+        let across_first = super::outside(ctx, 0, a, &[Point::new(600_000, -600_000), b]);
+        assert!(
+            (straight_first - 1_741_421.0).abs() < 2.0,
+            "{straight_first}"
+        );
+        assert!((across_first - 2_524_264.0).abs() < 2.0, "{across_first}");
+        // The same from the other end.
+        let mut c = NetCopper::default();
+        c.segs = vec![
+            Seg {
+                a: b,
+                b: corner,
+                l: 0,
+            },
+            Seg {
+                a: corner,
+                b: a,
+                l: 0,
+            },
+        ];
+        super::pull_tight(&world, ctx, &mut c);
+        assert!(
+            c.segs
+                .iter()
+                .any(|s| (s.a, s.b) == (a, turn) || (s.a, s.b) == (turn, a)),
+            "{c:?}"
+        );
     }
 
     #[test]

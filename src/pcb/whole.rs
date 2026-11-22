@@ -156,12 +156,17 @@ const NEAR_PRES: f32 = 5.0;
 /// the whole board to find that out.
 const POCKET: usize = 20_000;
 
-/// How many nets ahead of the one whose turn it is are routed at once, for each thread:
-/// the nets after the first are routed before their turn, against the claims as they are
-/// then, and what each ends with stands if nothing that its searches looked at has
-/// changed by its turn. With more of them ahead the threads have fewer waits for the
-/// longest search, and more of what they route is routed again.
-const AHEAD: usize = 2;
+/// How many nets of a round are routed at once, against the claims as they are before
+/// any of them: on whatever number of threads, so that the routes do not depend on it.
+/// With more of them the threads have fewer waits for the longest search, and more nets
+/// are routed without a word of those just before them.
+const WAVE: usize = 8;
+/// And how many at most, where one of them is expected to take long: the few are as many
+/// as it takes for the others to take [`WAVE_TIMES`] as long together as the longest, by
+/// what each took the last time it was routed, so that the threads have work while the
+/// longest search goes on.
+const WAVE_MOST: usize = 48;
+const WAVE_TIMES: u64 = 3;
 
 /// A terminal with more places than this is a plane's: a connection uses those near its
 /// other end.
@@ -361,10 +366,6 @@ struct Scratch {
     /// being routed claims it itself, for a net routed with its claims still in place.
     own_t: Vec<u8>,
     own_v: Vec<u8>,
-    /// By node, a bit for whether a search of the net that is being routed looked at what
-    /// is claimed round it, where that is kept.
-    read: Vec<u64>,
-    track: bool,
 }
 
 /// A binary heap of costs and nodes, the least first, and of equal costs the least node.
@@ -530,8 +531,6 @@ fn fp(p: Point) -> (f64, f64) {
 struct Ctl<'a, 'r> {
     run: Option<&'a Run<'r>>,
     flag: &'a AtomicBool,
-    /// Set for what was begun ahead of its turn and is no longer wanted.
-    abort: Option<&'a AtomicBool>,
     limit: u64,
 }
 
@@ -1102,8 +1101,6 @@ impl Board {
             lb_heap: Heap::default(),
             own_t: vec![0; self.layers * self.grid.dpoints()],
             own_v: vec![0; self.grid.cells()],
-            read: Vec::new(),
-            track: false,
         }
     }
 
@@ -1260,9 +1257,6 @@ impl Board {
             settled += 1;
             if settled >= limit {
                 return d;
-            }
-            if sc.track {
-                sc.read[vi >> 6] |= 1 << (vi & 63);
             }
             let (l, x, y) = self.unpack(v);
             self.ensure(world, gi, l, x, y, &mut sc.near);
@@ -1422,9 +1416,6 @@ impl Board {
             }
             let c = c0 + price(&self.hist_t[k]) + pres * occ;
             let i = n as usize;
-            if sc.track {
-                sc.read[i >> 6] |= 1 << (i & 63);
-            }
             if sc.seen[i] == stamp && sc.cost[i] <= c {
                 continue;
             }
@@ -1458,9 +1449,7 @@ impl Board {
             }
             pops += 1;
             if pops & 1023 == 0
-                && (ctl.run.is_some_and(Run::poll)
-                    || ctl.flag.load(Ordering::Relaxed)
-                    || ctl.abort.is_some_and(|a| a.load(Ordering::Relaxed)))
+                && (ctl.run.is_some_and(Run::poll) || ctl.flag.load(Ordering::Relaxed))
             {
                 stopped = true;
                 break;
@@ -1474,9 +1463,6 @@ impl Board {
             if pops == 2 * NEAR as u64 && pres >= NEAR_PRES && !hard {
                 floor = self.near_costs(world, sc, net, targets, pres, via_cost, NEAR);
                 pops += NEAR as u64;
-            }
-            if sc.track {
-                sc.read[ui >> 6] |= 1 << (ui & 63);
             }
             self.ensure(world, gi, l, x, y, &mut sc.near);
             let bits = self.groups[gi].moves[ui].load(Ordering::Relaxed);
@@ -1885,55 +1871,10 @@ impl Board {
             .collect()
     }
 
-    /// Routes a net with its claims still in place, as [`route_net`](Board::route_net)
-    /// routes one that has given them up: its searches do not count what it claims
-    /// itself. With `track`, returns the nodes round which they looked at what is
-    /// claimed, a bit for each.
-    #[allow(clippy::too_many_arguments)]
-    fn route_ahead(
-        &self,
-        world: &World<'_>,
-        sc: &mut Scratch,
-        net: &mut WNet,
-        mode: Mode,
-        via_cost: f32,
-        ctl: &Ctl<'_, '_>,
-        keep: Option<&[bool]>,
-        margin: Option<(i32, i32)>,
-        track: bool,
-    ) -> (Result<(), Stop>, u64, Vec<u64>) {
-        for &k in &net.keys {
-            let (hi, map, idx) = self.unkey(k);
-            if hi == net.halo {
-                if map == self.layers {
-                    sc.own_v[idx] = 1;
-                } else {
-                    sc.own_t[idx] = 1;
-                }
-            }
-        }
-        sc.track = track;
-        if track {
-            sc.read.clear();
-            sc.read.resize((self.layers * self.grid.cells()).div_ceil(64), 0);
-        }
-        let (res, pops) = self.route_net(world, sc, net, mode, via_cost, ctl, keep, margin);
-        sc.track = false;
-        for &k in &net.keys {
-            let (hi, map, idx) = self.unkey(k);
-            if hi == net.halo {
-                if map == self.layers {
-                    sc.own_v[idx] = 0;
-                } else {
-                    sc.own_t[idx] = 0;
-                }
-            }
-        }
-        (res, pops, core::mem::take(&mut sc.read))
-    }
-
-    /// Routes the net of a task, and returns it as it then is: as it was, if it was
-    /// stopped.
+    /// Routes the net of a task with its claims still in place, as
+    /// [`route_net`](Board::route_net) routes one that has given them up: its searches
+    /// do not count what it claims itself. Returns it as it then is, as it was if it was
+    /// stopped, with the points where its wires are in what another net claims.
     fn route_task(
         &self,
         world: &World<'_>,
@@ -1941,11 +1882,23 @@ impl Board {
         task: Task,
         ctl: &Ctl<'_, '_>,
         margin: Option<(i32, i32)>,
-        track: bool,
     ) -> Ahead {
         let mut net = task.net;
         let old = net.wires.clone();
-        let (res, nodes, read) = self.route_ahead(
+        let own = |sc: &mut Scratch, net: &WNet, to: u8| {
+            for &k in &net.keys {
+                let (hi, map, idx) = self.unkey(k);
+                if hi == net.halo {
+                    if map == self.layers {
+                        sc.own_v[idx] = to;
+                    } else {
+                        sc.own_t[idx] = to;
+                    }
+                }
+            }
+        };
+        own(sc, &net, 1);
+        let (res, nodes) = self.route_net(
             world,
             sc,
             &mut net,
@@ -1954,54 +1907,54 @@ impl Board {
             ctl,
             task.keep.as_deref(),
             margin,
-            track,
         );
         if res.is_err() {
             net.wires = old;
         }
-        Ahead {
-            net,
-            keep: task.keep,
-            read,
-            nodes,
-            stopped: res.is_err(),
-            from: task.from,
-        }
-    }
-
-    /// Whether searches of a net of class `halo` that looked round the nodes of `read`
-    /// looked at one of the claims of `changed`, which are in order: a step from a node
-    /// is priced by the points of the double grid within two of the node's own on its
-    /// layer, and a via by its cell.
-    fn looked_at(&self, read: &[u64], halo: usize, changed: &[u64]) -> bool {
-        let lo = self.key(halo, 0, 0);
-        let hi = self.key(halo + 1, 0, 0);
-        let from = changed.partition_point(|&k| k < lo);
-        let to = changed.partition_point(|&k| k < hi);
-        let cells = self.grid.cells();
-        let dn = self.grid.dpoints();
-        let dw = self.grid.dw() as usize;
-        let (w, h) = (self.grid.w, self.grid.h);
-        let bit = |n: usize| read.get(n >> 6).is_some_and(|v| v >> (n & 63) & 1 != 0);
-        for &k in &changed[from..to] {
-            let (_, map, idx) = self.unkey(k);
-            if map == self.layers {
-                if (0..self.layers).any(|l| bit(l * cells + idx)) {
-                    return true;
-                }
-                continue;
-            }
-            let (l, d) = (idx / dn, idx % dn);
-            let (i, j) = ((d % dw) as i32, (d / dw) as i32);
-            for y in ((j - 1) / 2).max(0)..=((j + 2) / 2).min(h - 1) {
-                for x in ((i - 1) / 2).max(0)..=((i + 2) / 2).min(w - 1) {
-                    if bit(l * cells + self.grid.cidx(x, y)) {
-                        return true;
+        // What its wires are in, by the claims as they are without its own.
+        let mut conflicts = Vec::new();
+        {
+            let cells = self.grid.cells();
+            let dn = self.grid.dpoints();
+            let occ = &self.occ_t[net.halo];
+            let others_t = |k: usize| count(&occ[k]) > u16::from(sc.own_t[k]);
+            for w in &net.wires {
+                for (k, &n) in w.nodes.iter().enumerate() {
+                    let (l, x, y) = self.unpack(n);
+                    if k == 0 {
+                        let idx = self.grid.didx(2 * x, 2 * y);
+                        if others_t(l * dn + idx) {
+                            conflicts.push((Some(l as u8), idx as u32));
+                        }
+                        continue;
+                    }
+                    let p = w.nodes[k - 1];
+                    if p as usize / cells != l {
+                        let idx = self.grid.cidx(x, y);
+                        if count(&self.occ_v[net.halo][idx]) > u16::from(sc.own_v[idx]) {
+                            conflicts.push((None, idx as u32));
+                        }
+                        continue;
+                    }
+                    let (_, px, py) = self.unpack(p);
+                    for (i, j) in [(px + x, py + y), (2 * x, 2 * y)] {
+                        let idx = self.grid.didx(i, j);
+                        if others_t(l * dn + idx) {
+                            conflicts.push((Some(l as u8), idx as u32));
+                        }
                     }
                 }
             }
+            conflicts.sort_unstable();
+            conflicts.dedup();
         }
-        false
+        own(sc, &net, 0);
+        Ahead {
+            net,
+            conflicts,
+            nodes,
+            stopped: res.is_err(),
+        }
     }
 
     /// How many vias a net's wires have, and how long they are, in nanometres.
@@ -2151,29 +2104,15 @@ fn find(p: &mut [usize], mut i: usize) -> usize {
     i
 }
 
-/// The keys that are in one of two lists and not in the other, each list in order.
-fn changed_keys(a: &[u64], b: &[u64]) -> Vec<u64> {
-    let mut out = Vec::new();
-    let (mut i, mut j) = (0, 0);
-    while i < a.len() && j < b.len() {
-        match a[i].cmp(&b[j]) {
-            core::cmp::Ordering::Less => {
-                out.push(a[i]);
-                i += 1;
-            }
-            core::cmp::Ordering::Greater => {
-                out.push(b[j]);
-                j += 1;
-            }
-            core::cmp::Ordering::Equal => {
-                i += 1;
-                j += 1;
-            }
+/// Whether every point of `now` is one of `then`, both in order.
+fn none_new(now: &[Conflict], then: &[Conflict]) -> bool {
+    let mut k = 0;
+    now.iter().all(|c| {
+        while k < then.len() && then[k] < *c {
+            k += 1;
         }
-    }
-    out.extend_from_slice(&a[i..]);
-    out.extend_from_slice(&b[j..]);
-    out
+        k < then.len() && then[k] == *c
+    })
 }
 
 /// Process CPU seconds, and the main thread's seconds waiting for a CPU.
@@ -2194,12 +2133,10 @@ pub(crate) fn dbg_num(name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
-/// A net to route, at its turn or ahead of it.
+/// A net to route.
 struct Task {
     /// Its turn in the round.
     at: usize,
-    /// How many nets of the round had had their turn when it was handed out.
-    from: usize,
     net: WNet,
     /// Its wires to route it from, if it keeps any.
     keep: Option<Vec<bool>>,
@@ -2211,12 +2148,10 @@ struct Task {
 /// A net as it was routed.
 struct Ahead {
     net: WNet,
-    keep: Option<Vec<bool>>,
-    /// The nodes round which its searches looked at what is claimed.
-    read: Vec<u64>,
+    /// The points where its wires were in what another net claimed then.
+    conflicts: Vec<Conflict>,
     nodes: u64,
     stopped: bool,
-    from: usize,
 }
 
 /// Of a net's wires, those marked to be kept that still hold together: a wire that began
@@ -2809,21 +2744,15 @@ pub(crate) fn route<'r>(
     let mut first_round: Option<(std::time::Duration, u64)> = None;
     let threads = options.threads.max(1);
     let board = board;
-    // The nets to route ahead of their turns, the next first, and whether there are no
-    // more to come.
+    // The nets to route, the next first, and whether there are no more to come.
     let queue: Mutex<(VecDeque<Task>, bool)> = Mutex::new((VecDeque::new(), false));
     let wake = std::sync::Condvar::new();
-    // Set for the nets begun ahead of their turns to be given up.
-    let abort = AtomicBool::new(false);
     let flag = run.flag();
     let (done_tx, done_rx) = mpsc::channel::<(usize, Ahead)>();
-    // How many nets after the one whose turn it is are routed ahead of theirs.
-    let ahead = if threads > 1 {
-        threads * dbg_num("GUIDE_DBG_AHEAD", AHEAD)
-    } else {
-        0
-    };
+    let wave = dbg_num("GUIDE_DBG_WAVE", WAVE).max(1);
     let mut dbg_spec = (0u64, 0u64, 0u64, 0u64);
+    // Fresh nodes of rejected nets, and what the waves would take on 2, 3, 4 and 6 threads, in nodes.
+    let mut dbg_ideal = (0u64, [0u64; 4]);
     // How far round the ends of a connection its search looks, in cells at least and in
     // hundredths of what the ends span.
     let margin: Option<(i32, i32)> = {
@@ -2833,7 +2762,7 @@ pub(crate) fn route<'r>(
     std::thread::scope(|scope| {
         for _ in 1..threads {
             let done_tx = done_tx.clone();
-            let (board, queue, wake, abort) = (&board, &queue, &wake, &abort);
+            let (board, queue, wake) = (&board, &queue, &wake);
             scope.spawn(move || {
                 let Some(world) = make_world() else { return };
                 let mut sc = board.scratch();
@@ -2860,11 +2789,10 @@ pub(crate) fn route<'r>(
                     let ctl = Ctl {
                         run: None,
                         flag,
-                        abort: Some(abort),
                         limit: task.limit,
                     };
                     let at = task.at;
-                    let routed = board.route_task(&world, &mut sc, task, &ctl, margin, true);
+                    let routed = board.route_task(&world, &mut sc, task, &ctl, margin);
                     if done_tx.send((at, routed)).is_err() {
                         break;
                     }
@@ -2879,6 +2807,12 @@ pub(crate) fn route<'r>(
         let mut extended = false;
         let mut it = 0;
         let mut round_began = began;
+        // By net, the nodes that it took the last time it was routed: before the first,
+        // its length in cells.
+        let mut taken: Vec<u64> = nets
+            .iter()
+            .map(|n| (n.length / grid.g.max(1)).max(1) as u64)
+            .collect();
         // Each time the pads cut off are told, the rounds have as many more for them.
         while it < ROUNDS + POUR_MORE * pour_rounds {
             it += 1;
@@ -2886,180 +2820,152 @@ pub(crate) fn route<'r>(
             rounds = it + 1;
             let dbg_round = (std::time::Instant::now(), run.work());
             let dbg_batches = 0;
-            // The nets of the round have their turns one after another: a net is routed
-            // against the claims of all the others as they are then, from its wires that
-            // are in no other net's way, gives up its claims and claims what it ends
-            // with. On more threads than one the nets after the one whose turn it is are
-            // routed ahead of theirs, against the claims as the threads find them, and
-            // what a net was routed as ahead of its turn stands when its turn comes if
-            // it was routed from the same wires and its searches looked at nothing that
-            // a net has given up or claimed since it was handed out: the searches would
-            // be the same step for step. If not, it is routed again then. So the routes
-            // are those of one thread, whatever the number.
+            // The nets of the round, a few at a time. Those few are routed at once, each
+            // against the claims of all the others as they are before any of the few,
+            // from its wires that are in no other net's way; then they have their turns
+            // one after another: a net gives up its claims and claims what it was routed
+            // as, if that is in no claim that it was not in when it was routed, and else
+            // it is routed again there and then, against the claims as they are. So a net
+            // is never in another's way without having counted it, and the routes are the
+            // same on any number of threads: what a net is routed as depends on the
+            // claims alone, and those change between the few and not while they are
+            // routed.
             let mode = Mode::Share(pres);
             let partial = it > 0;
             let n = reroute.len();
-            let mut specs: Vec<Option<Ahead>> = (0..n).map(|_| None).collect();
-            // By turn, whether its net was handed out to be routed ahead.
-            let mut sent = vec![false; n];
-            // By turn taken, what the net of that turn gave up or claimed.
-            let mut changes: Vec<Vec<u64>> = Vec::with_capacity(n);
-            // The next turn to hand out, and how many handed out are not back.
-            let mut next = 0;
-            let mut out = 0usize;
             let mut head = 0;
-            // Takes back what was handed out, and waits for what is under way.
-            macro_rules! recall {
-                () => {{
-                    abort.store(true, Ordering::Relaxed);
-                    {
-                        let mut q = queue
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        out -= q.0.len();
-                        q.0.clear();
-                    }
-                    while out > 0 {
-                        match done_rx.recv_timeout(std::time::Duration::from_millis(20)) {
-                            Ok(_) => out -= 1,
-                            Err(mpsc::RecvTimeoutError::Timeout) => {}
-                            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                        }
-                    }
-                    abort.store(false, Ordering::Relaxed);
-                    for p in head..n {
-                        specs[p] = None;
-                        sent[p] = false;
-                    }
-                    next = head;
-                }};
-            }
             'turns: while head < n {
-                let i = reroute[head];
+                let end = {
+                    let most = dbg_num("GUIDE_DBG_MOST", WAVE_MOST).max(wave);
+                    let (mut end, mut sum, mut max) = (head, 0u64, 0u64);
+                    while end < n
+                        && end - head < most
+                        && (end - head < wave || sum < (WAVE_TIMES + 1) * max)
+                    {
+                        let took = taken[reroute[end]];
+                        sum += took;
+                        max = max.max(took);
+                        end += 1;
+                    }
+                    end
+                };
                 let budget = run.limits(u64::MAX).max_expansions;
-                // The nets after this one, to be routed ahead.
-                if ahead > 0 {
-                    let to = (head + 1 + ahead).min(n);
-                    next = next.max(head + 1);
-                    if next < to {
-                        let mut q = queue
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        while next < to {
-                            let net = &nets[reroute[next]];
-                            q.0.push_back(Task {
-                                at: next,
-                                from: head,
-                                keep: partial.then(|| board.clear_wires(net)),
-                                net: net.clone(),
-                                mode,
-                                limit: budget,
-                            });
-                            sent[next] = true;
-                            out += 1;
-                            next += 1;
-                        }
-                        drop(q);
-                        wake.notify_all();
+                {
+                    let mut q = queue
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    for at in head..end {
+                        let net = &nets[reroute[at]];
+                        q.0.push_back(Task {
+                            at,
+                            keep: partial.then(|| board.clear_wires(net)),
+                            net: net.clone(),
+                            mode,
+                            limit: budget,
+                        });
                     }
                 }
-                // This one: as it was routed ahead, if it was and that stands.
-                let mut routed: Option<Ahead> = None;
-                if sent[head] {
-                    while specs[head].is_none() {
-                        // Not begun yet: it is routed here and now. Under way: until it
-                        // is back, the next one that no thread has begun is routed here.
-                        let task = {
-                            let mut q = queue
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
-                            match q.0.iter().position(|t| t.at == head) {
-                                Some(k) => {
-                                    q.0.remove(k);
-                                    out -= 1;
-                                    break;
-                                }
-                                None => q.0.pop_front(),
-                            }
-                        };
-                        if let Some(task) = task {
-                            out -= 1;
-                            let ctl = Ctl {
-                                run: Some(run),
-                                flag,
-                                abort: None,
-                                limit: task.limit,
-                            };
-                            let at = task.at;
-                            specs[at] = Some(board.route_task(world, &mut sc, task, &ctl, margin, true));
-                            continue;
-                        }
-                        match done_rx.recv_timeout(std::time::Duration::from_millis(5)) {
-                            Ok((at, r)) => {
-                                out -= 1;
-                                specs[at] = Some(r);
-                            }
-                            Err(mpsc::RecvTimeoutError::Timeout) => {
-                                if run.poll() {
-                                    break;
-                                }
-                            }
-                            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                        }
-                    }
-                    if let Some(spec) = specs[head].take() {
-                        dbg_spec.0 += 1;
-                        dbg_spec.2 += spec.nodes;
-                        let same = !partial || Some(board.clear_wires(&nets[i])) == spec.keep;
-                        let stands = same
-                            && !spec.stopped
-                            && (spec.from..head).all(|q| {
-                                !board.looked_at(&spec.read, nets[i].halo, &changes[q])
-                            });
-                        if stands {
-                            routed = Some(spec);
-                        } else {
-                            dbg_spec.1 += 1;
-                            dbg_spec.3 += spec.nodes;
-                        }
-                    }
+                if end - head > 1 {
+                    wake.notify_all();
                 }
-                let routed = match routed {
-                    Some(r) => r,
-                    None => {
+                let mut routed: Vec<Option<Ahead>> = (head..end).map(|_| None).collect();
+                let mut left = end - head;
+                while left > 0 {
+                    let task = queue
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .0
+                        .pop_front();
+                    if let Some(task) = task {
                         let ctl = Ctl {
                             run: Some(run),
                             flag,
-                            abort: None,
-                            limit: budget,
+                            limit: task.limit,
                         };
-                        let task = Task {
-                            at: head,
-                            from: head,
-                            keep: partial.then(|| board.clear_wires(&nets[i])),
-                            net: nets[i].clone(),
-                            mode,
-                            limit: budget,
-                        };
-                        board.route_task(world, &mut sc, task, &ctl, margin, false)
+                        let at = task.at;
+                        routed[at - head] =
+                            Some(board.route_task(world, &mut sc, task, &ctl, margin));
+                        left -= 1;
+                        continue;
                     }
-                };
-                let mut stopped = routed.stopped || routed.nodes > budget;
-                run.charge(routed.nodes.min(budget));
-                if !stopped {
-                    let old = nets[i].keys.clone();
-                    board.uncommit(&mut nets[i]);
-                    let length = nets[i].length;
-                    nets[i] = routed.net;
-                    board.commit(&mut nets[i]);
-                    changes.push(changed_keys(&old, &nets[i].keys));
+                    match done_rx.recv_timeout(std::time::Duration::from_millis(5)) {
+                        Ok((at, r)) => {
+                            routed[at - head] = Some(r);
+                            left -= 1;
+                        }
+                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                            run.poll();
+                        }
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+                // Their turns.
+                {
+                    let ns: Vec<u64> = routed.iter().flatten().map(|r| r.nodes).collect();
+                    let (sum, max) = (ns.iter().sum::<u64>(), ns.iter().copied().max().unwrap_or(0));
+                    for (k, t) in [2u64, 3, 4, 6].into_iter().enumerate() {
+                        dbg_ideal.1[k] += max.max(sum / t);
+                    }
+                }
+                let first = head;
+                let mut stopped = false;
+                for r in routed {
+                    let Some(r) = r else {
+                        stopped = true;
+                        break;
+                    };
+                    let i = reroute[head];
+                    let mut spent = r.nodes;
+                    taken[i] = r.nodes.max(1);
+                    stopped = r.stopped || spent > budget;
+                    dbg_spec.0 += 1;
+                    dbg_spec.2 += r.nodes;
+                    if !stopped {
+                        let before = nets[i].clone();
+                        board.uncommit(&mut nets[i]);
+                        nets[i] = r.net;
+                        board.commit(&mut nets[i]);
+                        if head > first && !none_new(&board.conflicts(&nets[i]), &r.conflicts) {
+                            dbg_spec.1 += 1;
+                            dbg_spec.3 += r.nodes;
+                            board.uncommit(&mut nets[i]);
+                            nets[i] = before;
+                            board.commit(&mut nets[i]);
+                            let limit = budget - spent;
+                            let ctl = Ctl {
+                                run: Some(run),
+                                flag,
+                                limit,
+                            };
+                            let task = Task {
+                                at: head,
+                                keep: partial.then(|| board.clear_wires(&nets[i])),
+                                net: nets[i].clone(),
+                                mode,
+                                limit,
+                            };
+                            let again = board.route_task(world, &mut sc, task, &ctl, margin);
+                            spent += again.nodes;
+                            dbg_ideal.0 += again.nodes;
+                            stopped = again.stopped || spent > budget;
+                            if !stopped {
+                                board.uncommit(&mut nets[i]);
+                                nets[i] = again.net;
+                                board.commit(&mut nets[i]);
+                            }
+                        }
+                    }
+                    run.charge(spent.min(budget));
+                    if stopped || run.poll() {
+                        stopped = true;
+                        break;
+                    }
                     head += 1;
-                    stopped = run.poll();
                     // The first round, once it has routed a share of the nets' length,
                     // says what the whole negotiation takes: with less than that left, it
                     // is given up here.
-                    if it == 0 && !sampled && !stopped {
-                        length_done += length;
+                    if it == 0 && !sampled {
+                        length_done += nets[i].length;
                         if length_done as f64 >= SAMPLE * total_length as f64 && length_done > 0 {
                             sampled = true;
                             let share = length_done as f64 / total_length as f64;
@@ -3087,7 +2993,6 @@ pub(crate) fn route<'r>(
                 if stopped {
                     // A net that was stopped is as it was. Near its end, the
                     // negotiation goes on once.
-                    recall!();
                     let shared: usize = nets.iter().map(|n| board.conflicts(n).len()).sum();
                     if !extended
                         && it > 0
@@ -3104,8 +3009,6 @@ pub(crate) fn route<'r>(
                     break;
                 }
             }
-            recall!();
-            let _ = (&specs, &sent, next);
             if given_up {
                 break;
             }
@@ -3132,14 +3035,18 @@ pub(crate) fn route<'r>(
                     d[0], d[1] as f64 / 1e6, d[2], d[3] as f64 / 1e6, d[4], d[5] as f64 / 1e6, d[6], d[7] as f64 / 1e6, d[8], d[9] as f64 / 1e6, d[10], d[11] as f64 / 1e6
                 );
                 eprintln!(
-                    "DBGROUND it={it} t={:.2} cpu={:?} round={:.2}s nodes={} rerouted={} ahead={:?}/{} shared={total} nets_conf={} vias={vias} len={:.0}mm pres={pres:.1} fill={:.2}s/{} via={:.2}s/{} cut={cut}",
+                    "DBGROUND it={it} t={:.2} cpu={:?} round={:.2}s nodes={} rerouted={} ahead={:?}/{:?} shared={total} nets_conf={} vias={vias} len={:.0}mm pres={pres:.1} fill={:.2}s/{} via={:.2}s/{} cut={cut}",
                     began.0.elapsed().as_secs_f64(),
                     dbg_cpu(),
                     dbg_round.0.elapsed().as_secs_f64(),
                     run.work() - dbg_round.1,
                     reroute.len(),
                     dbg_spec,
-                    dbg_batches,
+                    {
+                        let seq = dbg_spec.2 - dbg_spec.3 + dbg_ideal.0;
+                        let _ = dbg_batches;
+                        dbg_ideal.1.map(|w| ((seq as f64 / (w + dbg_ideal.0).max(1) as f64) * 100.0).round() / 100.0)
+                    },
                     net_conf.iter().filter(|&&c| c > 0).count(),
                     len / 1e6,
                     DBG_FILL_NS.load(Ordering::Relaxed) as f64 / 1e9,
@@ -3385,7 +3292,6 @@ pub(crate) fn route<'r>(
         Ctl {
             run: Some(run),
             flag: run.flag(),
-            abort: None,
             limit: run.limits(u64::MAX).max_expansions,
         }
     }

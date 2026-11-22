@@ -680,6 +680,86 @@ impl<'r> World<'r> {
         }
     }
 
+    /// The places that a track of `net`, `width` wide on `layer`, may turn at to pass as
+    /// near as the rules let it to what is in its way within `area`, added to `out`: round
+    /// each corner of every such thing, the eight corners of the octagon whose sides are
+    /// as far from it as the track's centre has to stay, and [`CORNER_MARGIN`] further.
+    /// A track along a side of that octagon keeps exactly its distance from the corner,
+    /// so a way that goes from one of these places to the next is the tightest way round
+    /// in the eight directions. Some of them are too near the thing itself, between two
+    /// of its corners: whoever uses them asks [`track`](World::track) of each track.
+    pub(crate) fn corners(
+        &self,
+        net: NetId,
+        layer: LayerId,
+        width: i64,
+        area: &Rect,
+        out: &mut Vec<Point>,
+    ) {
+        let l = usize::from(layer.0);
+        let Some(index) = self.layers.get(l) else {
+            return;
+        };
+        let ours = self.clearance(Some(net), layer);
+        let mut near = self.scratch.borrow_mut();
+        index.query(&area.expand(self.reach + width / 2), &mut near);
+        for &id in near.iter() {
+            let Some(other) = index.get(id) else { continue };
+            let meta = self.meta[l][id.slot() as usize];
+            let own = same_net(Some(net), meta.net) || self.tied(meta.tie, net);
+            let required = match meta.kind {
+                Kind::Copper if own => continue,
+                Kind::Copper => self.required((net, ours), meta),
+                Kind::Hole if own => continue,
+                Kind::Hole => meta.own.unwrap_or(0).max(self.rules.spec().hole_clearance),
+                Kind::Keepout { tracks, except, .. } => {
+                    if !tracks || self.excepted(except, net) {
+                        continue;
+                    }
+                    0
+                }
+                Kind::Edge => self.edge_clearance,
+                Kind::Mask { .. } if own => continue,
+                Kind::Mask { margin } => margin + MASK_GUARD,
+            };
+            let (corners, polygon, reach2) = other.core_corners();
+            let d = (reach2 + 1) / 2 + required + width / 2 + CORNER_MARGIN;
+            // Inside a polygon's box grown by that, a place is nearer than that to one of
+            // its sides.
+            let inside = polygon.then(|| {
+                let mut b = Rect::new(corners[0], corners[0]);
+                for &c in &corners {
+                    b = b.union(&Rect::new(c, c));
+                }
+                b.expand(d - 2)
+            });
+            let r = d as f64 / (core::f64::consts::PI / 8.0).cos();
+            for c in corners {
+                for k in 0..8 {
+                    let at =
+                        core::f64::consts::PI / 8.0 + f64::from(k) * core::f64::consts::PI / 4.0;
+                    let p = Point::new(
+                        c.x + (r * at.cos()).round() as i64,
+                        c.y + (r * at.sin()).round() as i64,
+                    );
+                    let within = |b: &Rect| {
+                        p.x > b.min().x && p.x < b.max().x && p.y > b.min().y && p.y < b.max().y
+                    };
+                    if inside.as_ref().is_some_and(within) {
+                        continue;
+                    }
+                    if p.x >= area.min().x
+                        && p.x <= area.max().x
+                        && p.y >= area.min().y
+                        && p.y <= area.max().y
+                    {
+                        out.push(p);
+                    }
+                }
+            }
+        }
+    }
+
     /// How far any rule can reach, which a query for what is near a shape is widened by.
     pub(crate) fn reach(&self) -> i64 {
         self.reach
@@ -898,27 +978,9 @@ impl<'r> World<'r> {
             .unwrap_or(&self.run_layers)
     }
 
-    /// The net whose plane a track on `layer` ending at `at` is in, as its index plus one,
-    /// or zero, and what a track of another net costs there over its length.
-    pub(crate) fn plane_toll(&self, layer: u8, at: Point) -> (u32, f64) {
-        let Some(p) = &self.planes else {
-            return (0, 0.0);
-        };
-        let Some(tile) = p.grid.tile_of(at) else {
-            return (0, 0.0);
-        };
-        let cells = p.grid.cols * p.grid.rows;
-        (
-            p.nets
-                .get(usize::from(layer) * cells + tile)
-                .copied()
-                .unwrap_or(0),
-            p.cost,
-        )
-    }
-
     /// The net whose pad's spoke a track on `layer` ending at `at` is in the room of, as
-    /// [`plane_toll`](World::plane_toll) says of planes.
+    /// its index plus one, or zero, and what a track of another net costs there over its
+    /// length.
     pub(crate) fn spoke_toll(&self, layer: u8, at: Point) -> (u32, f64) {
         self.spokes.as_ref().map_or((0, 0.0), |s| s.toll(layer, at))
     }
@@ -1157,6 +1219,10 @@ impl<'r> World<'r> {
 /// not exactly ours: a micrometre.
 const MASK_GUARD: i64 = 1000;
 
+/// How much further than the rules ask a place to turn at keeps a track from the corner
+/// it goes round ([`World::corners`]): its coordinates are rounded to a nanometre.
+const CORNER_MARGIN: i64 = 500;
+
 /// Whether two shapes break a clearance: closer than it, or touching.
 fn violates(a: &Shape, b: &Shape, clearance: i64) -> bool {
     if clearance > 0 {
@@ -1178,6 +1244,52 @@ mod tests {
     use super::{Verdict, World};
     use crate::geom::{LayerId, Point, Rect, Shape};
     use crate::id::NetId;
+
+    #[test]
+    fn the_corners_round_a_pad_are_as_far_from_it_as_a_track_has_to_stay() {
+        // A pad of net 2, 0.6 mm square, and one of net 1 far from it: a track of net 1,
+        // 0.2 mm wide, keeps its centre 0.3 mm from the first, by the clearance of 0.2 mm
+        // and half its width.
+        let d = design(2, vec![smd(0, 0, 2), smd(20 * MM, 0, 1)], 3);
+        let world = World::new(
+            &d.board,
+            &d.rules,
+            &d.outline,
+            d.edge_clearance,
+            &d.obstacles,
+        )
+        .unwrap();
+        let area = Rect::new(Point::new(-2 * MM, -2 * MM), Point::new(2 * MM, 2 * MM));
+        let mut corners = Vec::new();
+        world.corners(NetId(1), LayerId(0), 200_000, &area, &mut corners);
+        // Two for each corner of the pad's square that are not on a side of it grown by
+        // that distance, and two that are: four times four.
+        assert_eq!(corners.len(), 16, "{corners:?}");
+        let pad = &d.board.pads[0].shape;
+        for &c in &corners {
+            // No track through one of them is too near the pad along a side of the
+            // octagon there, and none is further off than the margin and a rounding.
+            let dot = Shape::circle(c, 200_000).unwrap();
+            assert!(!pad.violates(&dot, 200_000).unwrap(), "{c:?}");
+            assert!(
+                pad.violates(&dot, 200_000 + 600).unwrap() || {
+                    // The corners of the octagon are further from the pad's corner than its
+                    // sides, by one part in thirteen.
+                    let far = Shape::circle(c, 200_000 + 2 * 26_000).unwrap();
+                    pad.violates(&far, 200_000).unwrap()
+                },
+                "{c:?}"
+            );
+        }
+        // Net 2's own track finds none there: its pad is not in its way.
+        let mut own = Vec::new();
+        world.corners(NetId(2), LayerId(0), 200_000, &area, &mut own);
+        assert!(own.is_empty(), "{own:?}");
+        // And none on the other layer, where the pad has no copper.
+        let mut below = Vec::new();
+        world.corners(NetId(1), LayerId(1), 200_000, &area, &mut below);
+        assert!(below.is_empty(), "{below:?}");
+    }
 
     #[test]
     fn the_steps_from_a_node_are_judged_by_one_query_as_by_one_each() {

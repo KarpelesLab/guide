@@ -100,6 +100,16 @@ const PRES_MAX_FIRST: f32 = 30.0;
 const HISTORY: f32 = 0.5;
 /// How many rounds there are at most, and how many may pass since the best.
 const ROUNDS: usize = 100;
+/// And at twice the pitch, where the price of a shared point goes on rising to a
+/// thousand steps as it does in cadlab's router: as many as that router has. By the
+/// fortieth the price has been at its most for twenty, and the rounds after it move the
+/// same few nets from one shared point to the next while the vias and the track of all
+/// of them rise (`tinytapeout-demo`: 44 points shared after the fortieth and 16 to 28
+/// after some 150, with 349 to 388 vias for 394 to 458). What is still shared is taken
+/// out and routed again by the passes, which have the time that the rounds leave: at 150
+/// million nodes over six orders the board has 305 vias and 5037 mm at forty rounds for
+/// 311.5 and 5412 mm at a hundred (`docs/benchmarks.md`).
+const ROUNDS_COARSE: usize = 40;
 const STALE: usize = 12;
 /// How many times the first round a negotiation has to have room for in its share to be
 /// worth beginning: the first round is each net once, with nothing priced yet, and a
@@ -584,10 +594,8 @@ struct Board {
     occ_v: Vec<Vec<AtomicU16>>,
     hist_t: Vec<AtomicU32>,
     hist_v: Vec<AtomicU32>,
-    /// By layer and cell, the net that a plane or a spoke's room there is of, plus one.
-    plane: Vec<u32>,
+    /// By layer and cell, the net that a spoke's room there is of, plus one.
     spoke: Vec<u32>,
-    plane_cost: f32,
     spoke_cost: f32,
     /// By layer, the direction its tracks run along: 0 across, 1 up, 2 either.
     along: Vec<u8>,
@@ -599,6 +607,9 @@ struct Board {
     /// dearer there, `nrfmicro` ended fewer of its negotiations with nothing shared (5
     /// connections open over twelve orders for 2).
     via_scale: f32,
+    /// Whether a search that is kept round its two ends and finds no way there is over:
+    /// it is not made again over the whole board.
+    near_only: bool,
 }
 
 fn code(class: Class, key: u64, owners: &mut Vec<(u64, u32)>) -> u16 {
@@ -862,6 +873,67 @@ impl Board {
         Some(copper.max(holes).max(mixed) as f64)
     }
 
+    /// How much further copper that is off the grid keeps a track's centre than `r`,
+    /// the distance that the rules ask: a track on the grid is looked at where its points
+    /// are, half a step apart along a diagonal at most, and passes nearer than two of
+    /// them in a row are to what lies between them.
+    fn between(&self, r: f64) -> f64 {
+        let s = self.grid.g as f64 * core::f64::consts::SQRT_2 / 2.0;
+        (r * r + s * s / 4.0).sqrt() - r
+    }
+
+    /// Whether a point is a cell of the grid.
+    fn on_grid(&self, p: Point) -> bool {
+        (p.x - self.grid.ox).rem_euclid(self.grid.g) == 0
+            && (p.y - self.grid.oy).rem_euclid(self.grid.g) == 0
+    }
+
+    /// The keys that copper of a net claims, wherever it is: tracks between cells of the
+    /// grid along its eight directions and vias on its cells as wires claim them, and
+    /// the rest by as much more as keeps a track on the grid clear of it between two of
+    /// the grid's points.
+    fn copper_keys(&self, halo: usize, c: &NetCopper) -> Vec<u64> {
+        let mut keys = Vec::new();
+        for s in &c.segs {
+            let l = usize::from(s.l);
+            if l >= self.layers {
+                continue;
+            }
+            let (dx, dy) = (s.b.x - s.a.x, s.b.y - s.a.y);
+            let on = self.on_grid(s.a)
+                && self.on_grid(s.b)
+                && (dx == 0 || dy == 0 || dx.abs() == dy.abs());
+            self.claim_seg(halo, l, fp(s.a), fp(s.b), !on, &mut keys);
+        }
+        for &v in &c.vias {
+            self.claim_via(halo, fp(v), !self.on_grid(v), &mut keys);
+        }
+        keys.sort_unstable();
+        keys.dedup();
+        keys
+    }
+
+    /// Adds a net's claims to those of the others, or takes them away again.
+    fn occupy(&self, keys: &[u64], add: bool) {
+        for &k in keys {
+            let (hi, map, idx) = self.unkey(k);
+            let at = if map == self.layers {
+                &self.occ_v[hi][idx]
+            } else {
+                &self.occ_t[hi][idx]
+            };
+            let n = count(at);
+            at.store(
+                if add {
+                    n.saturating_add(1)
+                } else {
+                    n.saturating_sub(1)
+                },
+                Ordering::Relaxed,
+            );
+        }
+    }
+
     /// The keys that a piece of track of a net claims.
     fn claim_seg(
         &self,
@@ -869,6 +941,7 @@ impl Board {
         layer: usize,
         a: (f64, f64),
         b: (f64, f64),
+        off: bool,
         out: &mut Vec<u64>,
     ) {
         let mine = self.halos[halo];
@@ -876,6 +949,7 @@ impl Board {
         let dn = self.grid.dpoints();
         for (hi, theirs) in self.halos.iter().enumerate() {
             let r = self.track_track(&mine, theirs) - 1.0;
+            let r = if off { r + self.between(r) } else { r };
             if let Some((i0, j0, i1, j1)) = self
                 .grid
                 .drange((min.0 - r, min.1 - r), (max.0 + r, max.1 + r))
@@ -908,12 +982,13 @@ impl Board {
     }
 
     /// The keys that a via of a net claims.
-    fn claim_via(&self, halo: usize, at: (f64, f64), out: &mut Vec<u64>) {
+    fn claim_via(&self, halo: usize, at: (f64, f64), off: bool, out: &mut Vec<u64>) {
         let mine = self.halos[halo];
         let dn = self.grid.dpoints();
         for (hi, theirs) in self.halos.iter().enumerate() {
             if let Some(r) = self.track_via(theirs, &mine) {
                 let r = r - 1.0;
+                let r = if off { r + self.between(r) } else { r };
                 if let Some((i0, j0, i1, j1)) =
                     self.grid.drange((at.0 - r, at.1 - r), (at.0 + r, at.1 + r))
                 {
@@ -1021,15 +1096,15 @@ impl Board {
         for w in &net.wires {
             let (segs, vias) = self.geometry(w);
             for (l, a, b) in segs {
-                self.claim_seg(net.halo, l, fp(a), fp(b), &mut keys);
+                self.claim_seg(net.halo, l, fp(a), fp(b), false, &mut keys);
             }
             for v in vias {
-                self.claim_via(net.halo, fp(v), &mut keys);
+                self.claim_via(net.halo, fp(v), false, &mut keys);
             }
             if w.nodes.len() == 1 {
                 let (l, _, _) = self.unpack(w.nodes[0]);
                 let p = fp(self.node_point(w.nodes[0]));
-                self.claim_seg(net.halo, l, p, p, &mut keys);
+                self.claim_seg(net.halo, l, p, p, false, &mut keys);
             }
             for &n in &w.nodes {
                 let (_, x, y) = self.unpack(n);
@@ -1484,7 +1559,7 @@ impl Board {
         let cell_off: [isize; 8] = DIRS.map(|(dx, dy)| dy as isize * gw as isize + dx as isize);
         let base_cost = self.base_costs();
         let bend_cost = [0.0, BEND45, BEND90];
-        let tolls = !self.plane.is_empty() || !self.spoke.is_empty();
+        let tolls = !self.spoke.is_empty();
         let mut pops = 0u64;
         let mut found = None;
         let mut stopped = false;
@@ -1557,25 +1632,18 @@ impl Board {
                 }
                 let vi = (ui as isize + cell_off[nd]) as usize;
                 let mut base = base_cost[l][nd];
-                if tolls {
-                    if let Some(&p) = self.plane.get(vi)
-                        && p != 0
-                        && p != own
-                    {
-                        base *= 1.0 + self.plane_cost;
-                    }
-                    if let Some(&p) = self.spoke.get(vi)
-                        && p != 0
-                        && p & !HELD != own
-                    {
-                        base *= 1.0
-                            + self.spoke_cost
-                                * if p & HELD != 0 {
-                                    HELD_TIMES as f32
-                                } else {
-                                    1.0
-                                };
-                    }
+                if tolls
+                    && let Some(&p) = self.spoke.get(vi)
+                    && p != 0
+                    && p & !HELD != own
+                {
+                    base *= 1.0
+                        + self.spoke_cost
+                            * if p & HELD != 0 {
+                                HELD_TIMES as f32
+                            } else {
+                                1.0
+                            };
                 }
                 let hist = price(&hist_l[km]) + price(&hist_l[kq]);
                 let c = gu + (base + hist) * (1.0 + pres * occ) + bend_cost[t as usize];
@@ -1785,7 +1853,7 @@ impl Board {
                 world, sc, net, &sources, &targets, mode, via_cost, &left, within,
             );
             expanded += pops;
-            if matches!(found, Ok(None)) && within != all {
+            if matches!(found, Ok(None)) && within != all && !self.near_only {
                 let left = Ctl {
                     limit: ctl.limit.saturating_sub(expanded),
                     ..*ctl
@@ -2256,6 +2324,9 @@ pub(crate) struct Whole {
     pub(crate) refills: usize,
     /// Whether the rounds ended on their own, and not with their share.
     pub(crate) ended: bool,
+    /// Whether they ended at the most rounds that there are, with points still shared and
+    /// fewer of them than twelve rounds before.
+    pub(crate) capped: bool,
 }
 
 /// The pads of fine pitch: those of routed nets with no hole and another net's pad so near
@@ -2418,34 +2489,21 @@ fn spanning(ctx: &NetCtx) -> (Vec<(usize, usize)>, i64) {
     (conns, length)
 }
 
-/// Negotiates for every net of `jobs` at once, and returns what each ends with.
-///
-/// `make_world` makes a world as `world` is for a thread of its own to ask, with no run:
-/// `threads` of them route the nets of a round a few at a time ([`WAVE`]), each against
-/// the claims as they are before any of the few, and the few then have their turns in
-/// their order, so that what comes out is the same for any number of threads.
-///
-/// `None` if the board is not one for it: too many classes of nets, too large a grid, or
-/// nothing to route.
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
-pub(crate) fn route<'r>(
+/// How many rounds a negotiation has at most: at twice the pitch, forty, as cadlab's
+/// router has; at the first, a hundred; and forty more each time the pads that the
+/// routes cut off their fills were told.
+fn most_rounds(coarse: bool, pour_rounds: usize) -> usize {
+    (if coarse { ROUNDS_COARSE } else { ROUNDS }) + POUR_MORE * pour_rounds
+}
+
+/// The pitch of a negotiation's grid, given the lattice's.
+fn grid_pitch(
     design: &Design,
-    world: &World<'r>,
-    make_world: &(dyn Fn() -> Option<World<'r>> + Sync),
     jobs: &[Job],
-    pours: Option<&Pours>,
-    fixed: (&[Track], &[Via]),
     options: &RouteOptions,
-    run: &Run<'r>,
-    (share, was): (f64, Option<super::Stopped>),
     (pitch, coarse, finer): (i64, bool, i64),
-    bounds: Rect,
-) -> Result<Whole, NoWhole> {
+) -> i64 {
     let rules = &design.rules;
-    let layers = rules.layer_count();
-    if jobs.is_empty() || layers == 0 {
-        return Err(NoWhole::Not);
-    }
     // The pitch is half the tightest pitch of the tracks as they are routed: those of a
     // net routed narrower are its narrow ones.
     let pitch = if options.pitch.is_some() {
@@ -2467,11 +2525,30 @@ pub(crate) fn route<'r>(
     // Or finer, by halves of `finer`: a board whose negotiation does not end at the pitch
     // has passages between its parts that are off the grid's lines, and narrower than a
     // step.
-    let pitch = if finer > 2 {
+    if finer > 2 {
         (pitch * 2 / finer).max(1000)
     } else {
         pitch
-    };
+    }
+}
+
+/// The grid of a negotiation at `pitch` with nothing claimed on it, the nets as they are
+/// before any is routed, each with the places where its routes may end at its pads, and
+/// a search's memory. `world` is the board that the grid's places are asked of, with no
+/// route of the nets on it; `tolls` is the world that says where the rooms of spokes
+/// are, which may be the same.
+#[allow(clippy::too_many_lines)]
+fn setup(
+    design: &Design,
+    world: &World<'_>,
+    tolls: &World<'_>,
+    jobs: &[Job],
+    (pitch, coarse, finer): (i64, bool, i64),
+    bounds: Rect,
+    run: &Run<'_>,
+) -> Result<(Board, Vec<WNet>, Scratch), NoWhole> {
+    let rules = &design.rules;
+    let layers = rules.layer_count();
     let grid = make_grid(design, jobs, pitch, bounds);
     let cells = grid.cells();
     if cells == 0 || (layers as u64) * (cells as u64) >= u64::from(u32::MAX) / 8 {
@@ -2643,9 +2720,7 @@ pub(crate) fn route<'r>(
         groups,
         hist_t: (0..layers * dn).map(|_| AtomicU32::new(0)).collect(),
         hist_v: (0..cells).map(|_| AtomicU32::new(0)).collect(),
-        plane: Vec::new(),
         spoke: Vec::new(),
-        plane_cost: 0.0,
         spoke_cost: 0.0,
         along: (0..layers)
             .map(|l| if layers < 2 { 2 } else { (l % 2) as u8 })
@@ -2653,31 +2728,30 @@ pub(crate) fn route<'r>(
         hole_clearance: rules.spec().hole_clearance,
         hole_to_hole: rules.spec().hole_to_hole,
         via_scale: if finer > 2 { finer as f32 / 2.0 } else { 1.0 },
+        near_only: false,
     };
-    // Where planes and the rooms of spokes are.
+    // Where the rooms of spokes are. A plane of another net costs a track nothing here,
+    // as in cadlab's router: at twice its length inside one, the nets of a board with
+    // planes had half the board's layers at half price for a via, and went under each
+    // other where they had room to go round (`tinytapeout-demo`, four layers, at 150
+    // million nodes over four orders: 324 vias and 5133 mm with 5 connections open, for
+    // 299 and 5071 mm with none; `docs/benchmarks.md`). The passes that route a net at a
+    // time, and move others for it, pay for a plane as they did.
     {
-        let (mut plane, mut spoke) = (Vec::new(), Vec::new());
-        let (mut any_plane, mut any_spoke) = (false, false);
+        let mut spoke = Vec::new();
+        let mut any_spoke = false;
         for l in 0..layers {
             for y in 0..grid.h {
                 for x in 0..grid.w {
-                    let at = grid.cell(x, y);
-                    let (p, pc) = world.plane_toll(l as u8, at);
-                    let (s, scost) = world.spoke_toll(l as u8, at);
-                    any_plane |= p != 0;
+                    let (s, cost) = tolls.spoke_toll(l as u8, grid.cell(x, y));
                     any_spoke |= s != 0;
-                    board.plane_cost = pc as f32;
-                    board.spoke_cost = scost as f32;
-                    plane.push(p);
+                    board.spoke_cost = cost as f32;
                     spoke.push(s);
                 }
             }
             if run.poll() {
                 return Err(NoWhole::Not);
             }
-        }
-        if any_plane {
-            board.plane = plane;
         }
         if any_spoke {
             board.spoke = spoke;
@@ -2709,6 +2783,48 @@ pub(crate) fn route<'r>(
             return Err(NoWhole::Not);
         }
     }
+    Ok((board, nets, sc))
+}
+
+/// Negotiates for every net of `jobs` at once, and returns what each ends with.
+///
+/// `make_world` makes a world as `world` is for a thread of its own to ask, with no run:
+/// `threads` of them route the nets of a round a few at a time ([`WAVE`]), each against
+/// the claims as they are before any of the few, and the few then have their turns in
+/// their order, so that what comes out is the same for any number of threads.
+///
+/// `None` if the board is not one for it: too many classes of nets, too large a grid, or
+/// nothing to route.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+pub(crate) fn route<'r>(
+    design: &Design,
+    world: &World<'r>,
+    make_world: &(dyn Fn() -> Option<World<'r>> + Sync),
+    jobs: &[Job],
+    pours: Option<&Pours>,
+    fixed: (&[Track], &[Via]),
+    options: &RouteOptions,
+    run: &Run<'r>,
+    (share, was): (f64, Option<super::Stopped>),
+    (pitch, coarse, finer): (i64, bool, i64),
+    bounds: Rect,
+) -> Result<Whole, NoWhole> {
+    let rules = &design.rules;
+    let layers = rules.layer_count();
+    if jobs.is_empty() || layers == 0 {
+        return Err(NoWhole::Not);
+    }
+    let pitch = grid_pitch(design, jobs, options, (pitch, coarse, finer));
+    let (board, mut nets, mut sc) = setup(
+        design,
+        world,
+        world,
+        jobs,
+        (pitch, coarse, finer),
+        bounds,
+        run,
+    )?;
+    let grid = board.grid;
     // The nets in order, the shortest first.
     let mut order: Vec<usize> = (0..nets.len()).collect();
     order.sort_by_key(|&i| (nets[i].length, nets[i].net));
@@ -2736,6 +2852,7 @@ pub(crate) fn route<'r>(
     let mut rounds = 0;
     let mut cut = false;
     let mut given_up = false;
+    let mut capped = false;
     let mut pour_rounds = 0;
     let mut pour_cuts = 0;
     let mut refills = 0;
@@ -2800,7 +2917,7 @@ pub(crate) fn route<'r>(
         let mut it = 0;
         let mut round_began = began;
         // Each time the pads cut off are told, the rounds have as many more for them.
-        while it < ROUNDS + POUR_MORE * pour_rounds {
+        while it < most_rounds(coarse, pour_rounds) {
             it += 1;
             let it = it - 1;
             rounds = it + 1;
@@ -3143,6 +3260,8 @@ pub(crate) fn route<'r>(
             order.sort_by_key(|&i| core::cmp::Reverse(net_conf[i]));
             order.sort_by_key(|&i| nets[i].length);
         }
+        // Whether the rounds ended at the most that there are.
+        capped = !cut && !given_up && it >= most_rounds(coarse, pour_rounds);
         // The threads have nothing more to do.
         queue
             .lock()
@@ -3336,7 +3455,224 @@ pub(crate) fn route<'r>(
         pour_cuts,
         refills,
         ended: !cut,
+        capped,
     })
+}
+
+/// How many nodes a search may expand that routes a net again among the routes as they
+/// are: for each step of the net's length, at least and at most. A net with no better way
+/// looks at every place it can get to before it says so.
+const AGAIN_PER_STEP: u64 = 200;
+const AGAIN_LEAST: u64 = 20_000;
+const AGAIN_NODES: u64 = 400_000;
+/// How many times the nets are gone through: once for fewer vias alone, and then for
+/// shorter ways as well, for as long as a time through them gains.
+const AGAIN_SWEEPS: usize = 3;
+/// How much shorter a net routed again with as many vias has to be to be kept: this
+/// share of its length, and a step at least.
+const AGAIN_SHORTER: f64 = 0.02;
+
+/// What routing the nets again among the routes as they are ended with.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct Again {
+    /// The nets looked at, and those of them that were kept as routed again.
+    pub(crate) tried: usize,
+    pub(crate) kept: usize,
+    /// The vias that those have fewer, and the track, in nanometres.
+    pub(crate) vias: usize,
+    pub(crate) shorter: f64,
+    /// The nodes that the searches expanded.
+    pub(crate) expanded: u64,
+}
+
+/// Routes each net again where the others are, once every net has its route and none is
+/// in another's way, and keeps what has fewer vias and is little longer, or as many and is
+/// shorter: what cadlab's router does after its own negotiation, by the negotiation's
+/// search, which is one over a grid whose every place was asked of the board once.
+///
+/// The routes are no longer the negotiation's: the passes made some, cleanup pulled them
+/// tight, and an earlier run may have left them. So each net claims on the grid what its
+/// copper keeps others away from wherever it lies ([`Board::copper_keys`]), a net gives
+/// up its claims while it is routed again where nothing is claimed, and what the search
+/// finds is the net's only if `world`, which has every other net's copper as it is, says
+/// that all of it is free: the grid errs on the side of room for copper that is off it,
+/// and a route that it allows and the world does not is not kept.
+///
+/// `base` is the board without the routes, which the grid is asked of; `may` says by job
+/// whether its net may be routed again. A net that is not joined whole, one with copper
+/// to keep, and one whose routes are stubs to its plane are left as they are.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn again(
+    design: &Design,
+    base: &World<'_>,
+    world: &mut World<'_>,
+    jobs: &[Job],
+    copper: &mut [Option<NetCopper>],
+    may: &[bool],
+    options: &RouteOptions,
+    run: &Run<'_>,
+    (pitch, coarse): (i64, bool),
+    bounds: Rect,
+    until: Option<std::time::Instant>,
+) -> Again {
+    let mut out = Again::default();
+    if jobs.is_empty() || design.rules.layer_count() == 0 {
+        return out;
+    }
+    let pitch = grid_pitch(design, jobs, options, (pitch, coarse, 2));
+    let Ok((mut board, mut nets, mut sc)) =
+        setup(design, base, world, jobs, (pitch, coarse, 2), bounds, run)
+    else {
+        return out;
+    };
+    // No layer has a direction of its own here: that is for the nets to find room among
+    // each other, and with every route where it is, a step across it is a step, and a
+    // way on one layer that is no longer than one through a via is the better of the two.
+    board.along = vec![2; board.layers];
+    // And a net's better way is near the one it has.
+    board.near_only = true;
+    let late = |run: &Run<'_>| {
+        run.poll() || run.ending() || until.is_some_and(|t| std::time::Instant::now() >= t)
+    };
+    // What every net claims as it is.
+    let mut keys: Vec<Vec<u64>> = nets
+        .iter()
+        .map(|n| {
+            copper[n.job]
+                .as_ref()
+                .map_or_else(Vec::new, |c| board.copper_keys(n.halo, c))
+        })
+        .collect();
+    for k in &keys {
+        board.occupy(k, true);
+    }
+    let whole = |ctx: &NetCtx, c: &NetCopper| {
+        let pieces = c.pieces(ctx);
+        pieces.apart() == 0 && pieces.missing().is_empty()
+    };
+    let per_via = 1e6 * options.via_cost * super::cleanup::VIA_COST_FACTOR / 2.0;
+    let eligible: Vec<bool> = nets
+        .iter()
+        .map(|n| {
+            let job = &jobs[n.job];
+            may.get(n.job).copied().unwrap_or(false)
+                && !job.plane
+                && copper[n.job]
+                    .as_ref()
+                    .is_some_and(|c| c.keep.is_empty() && !c.is_empty() && whole(&job.ctx, c))
+        })
+        .collect();
+    for sweep in 0..AGAIN_SWEEPS {
+        // The nets with the most vias first, and then the longest for what they join.
+        let mut order: Vec<usize> = (0..nets.len()).filter(|&i| eligible[i]).collect();
+        let measure = |i: usize| {
+            let c = copper[nets[i].job].as_ref();
+            (
+                c.map_or(0, |c| c.vias.len()),
+                c.map_or(0.0, NetCopper::length) - nets[i].length as f64,
+            )
+        };
+        order.sort_by(|&a, &b| {
+            let (ma, mb) = (measure(a), measure(b));
+            mb.0.cmp(&ma.0).then(mb.1.total_cmp(&ma.1)).then(a.cmp(&b))
+        });
+        let mut gained = false;
+        for i in order {
+            if late(run) {
+                return out;
+            }
+            let j = nets[i].job;
+            let ctx = &jobs[j].ctx;
+            let Some(mut old) = copper[j].take() else {
+                continue;
+            };
+            let (ov, ol) = (old.vias.len(), old.length());
+            // The first time through the nets is for fewer vias alone: a net laid a
+            // shorter way first may be in the way that another has to lose a via by. A
+            // net with no via is looked at once for a shorter way, the second time.
+            if ov == 0 && (sweep != 1 || ol <= nets[i].length as f64 * (1.0 + AGAIN_SHORTER)) {
+                copper[j] = Some(old);
+                continue;
+            }
+            out.tried += 1;
+            board.occupy(&keys[i], false);
+            old.unplace(world);
+            let mut found: Option<NetCopper> = None;
+            // With vias dear, which finds the fewest and the shortest way with those;
+            // and where that has fewer and is too long for them, at their own price.
+            for via in [FEWER_VIA, nets[i].via] {
+                // As many nodes as its length has steps, a few hundred times over: a net
+                // with no better way looks at every place it can get to before it says so.
+                let steps = (ol / board.grid.g as f64) as u64;
+                let most = (steps * AGAIN_PER_STEP).clamp(AGAIN_LEAST, AGAIN_NODES);
+                let limit = run.limits(most).max_expansions;
+                let ctl = Ctl {
+                    run: Some(run),
+                    flag: run.flag(),
+                    limit,
+                };
+                nets[i].wires.clear();
+                let (res, pops) = board.route_net(
+                    base,
+                    &mut sc,
+                    &mut nets[i],
+                    Mode::Hard,
+                    via,
+                    &ctl,
+                    None,
+                    Some((WINDOW, WINDOW_SHARE)),
+                );
+                run.charge(pops);
+                out.expanded += pops;
+                if res.is_err() || nets[i].wires.is_empty() {
+                    break;
+                }
+                let mut c = NetCopper::from_tree(ctx, &tree_of(&board, &nets[i]));
+                c.prune(ctx);
+                let free = c.free_in(world, ctx, pitch);
+                if free.segs.len() != c.segs.len() || free.vias.len() != c.vias.len() {
+                    continue;
+                }
+                super::cleanup::tighten_net(world, ctx, &mut c);
+                if !whole(ctx, &c) {
+                    continue;
+                }
+                let (nv, nl) = (c.vias.len(), c.length());
+                // A via less may cost what it does when cleanup routes a net again for
+                // fewer: half of what a via costs that search, in track.
+                let fewer = nv < ov && nl <= ol + (ov - nv) as f64 * per_via;
+                let shorter = sweep > 0
+                    && nv == ov
+                    && nl < ol - (ol * AGAIN_SHORTER).max(board.grid.g as f64);
+                if fewer || shorter {
+                    out.vias += ov - nv;
+                    out.shorter += ol - nl;
+                    found = Some(c);
+                    break;
+                }
+                if nv >= ov {
+                    break;
+                }
+            }
+            nets[i].wires.clear();
+            let mut now = match found {
+                Some(c) => {
+                    out.kept += 1;
+                    gained = true;
+                    keys[i] = board.copper_keys(nets[i].halo, &c);
+                    c
+                }
+                None => old,
+            };
+            now.place(world, ctx);
+            copper[j] = Some(now);
+            board.occupy(&keys[i], true);
+        }
+        if !gained && sweep > 0 {
+            break;
+        }
+    }
+    out
 }
 
 /// A net's wires as a tree of steps.
@@ -3362,7 +3698,16 @@ fn tree_of(board: &Board, net: &WNet) -> Tree {
 
 #[cfg(test)]
 mod tests {
-    use super::{Conflict, FEWER_VIA, PLANE_VIA, PLANE_VIA_FIRST, Ranked, VIA, none_new, rank};
+    use super::super::control::Run;
+    use super::super::geometry::{NetCopper, Seg};
+    use super::super::tests::{MM, design, smd};
+    use super::super::world::World;
+    use super::super::{Design, RouteOptions, RunControl, router};
+    use super::{
+        Conflict, FEWER_VIA, PLANE_VIA, PLANE_VIA_FIRST, POUR_MORE, Ranked, VIA, again, count, fp,
+        most_rounds, none_new, rank, setup,
+    };
+    use crate::geom::{Point, Rect};
 
     #[test]
     fn a_via_of_a_net_with_a_plane_has_its_own_price_at_either_pitch() {
@@ -3370,6 +3715,16 @@ mod tests {
         // them; at twice the pitch, as much track as ten steps of the first.
         assert_eq!(PLANE_VIA_FIRST, FEWER_VIA);
         assert_eq!(VIA * PLANE_VIA * 2.0, VIA);
+    }
+
+    #[test]
+    fn a_negotiation_at_twice_the_pitch_has_the_rounds_of_cadlab_s_router() {
+        assert_eq!(most_rounds(true, 0), 40);
+        assert_eq!(most_rounds(false, 0), 100);
+        // And as many more for each time the pads cut off their fills are told, at
+        // either pitch.
+        assert_eq!(most_rounds(true, 2), 40 + 2 * POUR_MORE);
+        assert_eq!(most_rounds(false, 1), 100 + POUR_MORE);
     }
 
     #[test]
@@ -3384,6 +3739,201 @@ mod tests {
         assert!(!none_new(&[(Some(0), 4)], &then));
         assert!(!none_new(&[(None, 5), (Some(0), 3)], &then));
         assert!(!none_new(&[(Some(1), 2)], &[]));
+    }
+
+    /// Three nets of two pads on the top of two layers: the first two each under and
+    /// back up by two vias, one for nothing and one under the third, a track that goes
+    /// on for 20 mm either way; `shift` moves the copper of the third off the grid.
+    fn hops(shift: i64) -> (Design, Vec<NetCopper>) {
+        let pads = vec![
+            smd(0, 0, 1),
+            smd(4 * MM, 0, 1),
+            smd(0, 40 * MM, 2),
+            smd(4 * MM, 40 * MM, 2),
+            smd(2 * MM + shift, 20 * MM, 3),
+            smd(2 * MM + shift, 60 * MM, 3),
+        ];
+        let d = design(2, pads, 4);
+        let seg = |a: (i64, i64), b: (i64, i64), l: u8| Seg {
+            a: Point::new(a.0, a.1),
+            b: Point::new(b.0, b.1),
+            l,
+        };
+        let hop = |y: i64| {
+            let mut c = NetCopper::default();
+            c.segs = vec![
+                seg((0, y), (MM, y), 0),
+                seg((MM, y), (3 * MM, y), 1),
+                seg((3 * MM, y), (4 * MM, y), 0),
+            ];
+            c.vias = vec![Point::new(MM, y), Point::new(3 * MM, y)];
+            c
+        };
+        let mut wall = NetCopper::default();
+        wall.segs = vec![seg((2 * MM + shift, 20 * MM), (2 * MM + shift, 60 * MM), 0)];
+        (d, vec![hop(0), hop(40 * MM), wall])
+    }
+
+    fn world_of<'a>(d: &'a Design, options: &RouteOptions) -> World<'a> {
+        let mut world = World::new(
+            &d.board,
+            &d.rules,
+            &d.outline,
+            d.edge_clearance,
+            &d.obstacles,
+        )
+        .unwrap();
+        world.configure(d, options);
+        world
+    }
+
+    #[test]
+    fn a_net_routed_again_among_the_others_loses_the_hop_that_is_under_nothing() {
+        for shift in [0, 37_000] {
+            let (d, copper) = hops(shift);
+            let options = RouteOptions::default();
+            let base = world_of(&d, &options);
+            let mut world = world_of(&d, &options);
+            let pitch = router::pitch(&d, &options);
+            let jobs = router::jobs(&d, &world, pitch, &[], &[]);
+            assert_eq!(jobs.len(), 3);
+            let mut copper: Vec<Option<NetCopper>> = copper.into_iter().map(Some).collect();
+            for (job, c) in jobs.iter().zip(copper.iter_mut()) {
+                c.as_mut().unwrap().place(&mut world, &job.ctx);
+            }
+            let control = RunControl::default();
+            let run = Run::new(&control, Some(10_000_000));
+            let bounds = Rect::new(Point::new(-10 * MM, -10 * MM), Point::new(14 * MM, 70 * MM));
+            let got = again(
+                &d,
+                &base,
+                &mut world,
+                &jobs,
+                &mut copper,
+                &[true, true, true],
+                &options,
+                &run,
+                (pitch, false),
+                bounds,
+                None,
+            );
+            // The hop under nothing goes, and its net is one track on the top layer.
+            let free = copper[0].as_ref().unwrap();
+            assert!(free.vias.is_empty(), "{shift}: {free:?}");
+            assert!(free.segs.iter().all(|s| s.l == 0), "{shift}: {free:?}");
+            assert_eq!(free.pieces(&jobs[0].ctx).apart(), 0);
+            assert!(
+                (free.length() - 4.0 * MM as f64).abs() < 1.0,
+                "{shift}: {free:?}"
+            );
+            // The one under the third net's track stays: on the grid or off it, that
+            // track claims what a track of another net may not be in.
+            let under = copper[1].as_ref().unwrap();
+            assert_eq!(under.vias.len(), 2, "{shift}: {under:?}");
+            assert_eq!(under.pieces(&jobs[1].ctx).apart(), 0);
+            assert_eq!((got.kept, got.vias), (1, 2), "{shift}: {got:?}");
+            // And every net is in the world as it is kept: nothing there is in the way
+            // of the copper of any of them once its own is taken out.
+            for (job, c) in jobs.iter().zip(copper.iter_mut()) {
+                let c = c.as_mut().unwrap();
+                c.unplace(&mut world);
+                let free = c.free_in(&world, &job.ctx, pitch);
+                assert_eq!(
+                    (free.segs.len(), free.vias.len()),
+                    (c.segs.len(), c.vias.len())
+                );
+                c.place(&mut world, &job.ctx);
+            }
+        }
+    }
+
+    #[test]
+    fn a_net_that_may_not_be_routed_again_is_left_as_it_is() {
+        let (d, copper) = hops(0);
+        let options = RouteOptions::default();
+        let base = world_of(&d, &options);
+        let mut world = world_of(&d, &options);
+        let pitch = router::pitch(&d, &options);
+        let jobs = router::jobs(&d, &world, pitch, &[], &[]);
+        let mut copper: Vec<Option<NetCopper>> = copper.into_iter().map(Some).collect();
+        for (job, c) in jobs.iter().zip(copper.iter_mut()) {
+            c.as_mut().unwrap().place(&mut world, &job.ctx);
+        }
+        let control = RunControl::default();
+        let run = Run::new(&control, Some(10_000_000));
+        let bounds = Rect::new(Point::new(-10 * MM, -10 * MM), Point::new(14 * MM, 70 * MM));
+        let got = again(
+            &d,
+            &base,
+            &mut world,
+            &jobs,
+            &mut copper,
+            &[false, true, true],
+            &options,
+            &run,
+            (pitch, false),
+            bounds,
+            None,
+        );
+        assert_eq!(copper[0].as_ref().unwrap().vias.len(), 2);
+        assert_eq!((got.kept, got.vias), (0, 0), "{got:?}");
+    }
+
+    #[test]
+    fn copper_off_the_grid_claims_what_a_track_between_two_points_would_be_too_near() {
+        let (d, _) = hops(0);
+        let options = RouteOptions::default();
+        let world = world_of(&d, &options);
+        let pitch = router::pitch(&d, &options);
+        let jobs = router::jobs(&d, &world, pitch, &[], &[]);
+        let control = RunControl::default();
+        let run = Run::new(&control, Some(10_000_000));
+        let bounds = Rect::new(Point::new(-10 * MM, -10 * MM), Point::new(14 * MM, 70 * MM));
+        let (board, nets, _) =
+            setup(&d, &world, &world, &jobs, (pitch, false, 2), bounds, &run).unwrap();
+        let g = board.grid.g;
+        let at = board.grid.cell(20, 20);
+        let track = |a: Point, b: Point| {
+            let mut c = NetCopper::default();
+            c.segs = vec![Seg { a, b, l: 0 }];
+            board.copper_keys(nets[0].halo, &c).len()
+        };
+        // Along a line of the grid, a track claims what a wire there does.
+        let on = track(at, Point::new(at.x + 8 * g, at.y));
+        let mut wire = Vec::new();
+        board.claim_seg(
+            nets[0].halo,
+            0,
+            fp(at),
+            fp(Point::new(at.x + 8 * g, at.y)),
+            false,
+            &mut wire,
+        );
+        wire.sort_unstable();
+        wire.dedup();
+        assert_eq!(on, wire.len());
+        // A third of a step off it, more: by what lies between two points of the grid.
+        let off = track(
+            Point::new(at.x, at.y + g / 3),
+            Point::new(at.x + 8 * g, at.y + g / 3),
+        );
+        assert!(off > on, "{off} for {on}");
+        assert!(board.between(400_000.0) > 0.0 && board.between(400_000.0) < g as f64 / 2.0);
+        // What is claimed is given up again whole.
+        let mut c = NetCopper::default();
+        c.segs = vec![Seg {
+            a: at,
+            b: Point::new(at.x + 8 * g, at.y + g / 3),
+            l: 0,
+        }];
+        c.vias = vec![Point::new(at.x + g / 2, at.y)];
+        let keys = board.copper_keys(nets[0].halo, &c);
+        board.occupy(&keys, true);
+        assert!(board.occ_t.iter().flatten().any(|a| count(a) == 1));
+        assert!(board.occ_v.iter().flatten().any(|a| count(a) == 1));
+        board.occupy(&keys, false);
+        assert!(board.occ_t.iter().flatten().all(|a| count(a) == 0));
+        assert!(board.occ_v.iter().flatten().all(|a| count(a) == 0));
     }
 
     #[test]

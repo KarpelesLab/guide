@@ -1286,6 +1286,62 @@ its capacitors had 2.6 mm of track where the other way has 2.1 mm and cadlab's r
 1.8 mm. The pads' boxes say which; a part inside two of them counts once for each, which
 is nothing between two ways.
 
+**A plane of another net costs a track nothing in the negotiation.** The passes that
+route a net at a time charge a track twice its length inside another net's plane, so
+that a plane is cut only where it must be. In the negotiation that made half the layers
+of a board of four dear and a via half its price beside them: after its first round, in
+which nothing is priced yet, `tinytapeout-demo` had 244 vias and 5153 mm of track where
+cadlab's router, with the same search at the same pitch, has 184 and 4494 mm, and twice
+as many points shared before the rounds began. With no price for a plane there, five
+boards at 150 million nodes over four orders have as many or fewer vias and less track
+on four of the five, and `tinytapeout-demo` none open for five
+([benchmarks](benchmarks.md#pcb-routing-with-each-net-routed-again-where-the-others-are)).
+
+**Forty rounds at twice the pitch, and no other order after the fortieth.** cadlab's
+router has forty. By then the price of a shared point has been at its thousand steps
+for twenty rounds; what the rounds after it do is move the same few nets from one
+shared point to the next, and each move adds a via or a way round. The passes take out
+what is still shared and route it again, and have the time: `tinytapeout-demo` at 150
+million nodes ends with 7 % less track. A negotiation that its last round ended has
+said what its prices say, and is not begun again in another order of its nets, as one
+that ended for being no better than twelve rounds before still is. At the first pitch,
+where the price stops at thirty steps, the hundred stay.
+
+**Each net routed again where the others are, by the negotiation's search.** A net that
+went under another in an early round keeps its vias when the other has moved: nothing
+routes it again once it is in no net's way. cadlab's router routes each net again once
+its routes are legal, with vias dear, and keeps what has fewer; cleanup here did the
+same with the searches that route a net among fixed copper, which ask the board about
+every step, and had the time for a part of the nets. `whole::again` does it with the
+negotiation's own search. Its grid knew only the routes it made itself, on its own
+points; now a net claims what its copper keeps others away from wherever that lies, and
+copper off the grid claims as much more as a track on the grid can pass nearer than its
+points say, between two of them. What a search finds on those claims is kept only if
+the world allows every track and via of it, with the other nets' copper as it is: the
+grid has four classes of nets at most, and errs. No layer has a direction in it, as the
+rounds have for the nets to find room among each other: a way on one layer is then
+never dearer than the same way through a via. The first time through the nets it keeps
+only what has fewer vias, at what cleanup lets a via less cost in track, and after that
+a way with as many that is shorter by a fiftieth and a step.
+
+**A run of tracks laid round the corners of what is beside it.** The lattice puts a
+track on its lines, a part of a pitch further from a pad than it has to be, and by a
+way that many steps longer. In a run for shorter ways, cleanup lays each stretch of a
+run of tracks as the shortest way through the corners near it: round each corner of a
+pad, each end of a track, each via and hole of another net, the eight corners of the
+octagon whose sides are as far from it as the track's centre must stay. A track along
+such a side keeps exactly its distance, so the ways through those corners in the eight
+directions are the tightest there are, and the world says of each track whether it may
+be there. cadlab's gridless pass does this with the hulls of what a track passes. Only
+in the run for shorter ways, a host's last: a route against a pad's corner leaves no
+room there for the route that a later run would move it for.
+
+**A pass on the finer lattice that took no net out is the last.** The passes on the
+finer lattice are for the few nets that the first left, and the second of them has
+every net free to be taken out again. Where the first took none out and moved none
+aside, no net was kept from that, and the second would search for the same ways among
+the same routes, with whatever the first did make in the way as well.
+
 **A track is laid no wider than a pad of its net where it meets it, by a function the
 host calls.** `pcb::neck_at_pads` takes tracks that are routed and the pads with the
 widest a track may be at each ([`PadEntry`]: the host's own measure of a pad, or the

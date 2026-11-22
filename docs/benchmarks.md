@@ -5911,6 +5911,132 @@ at a time.
   are what it has for the balls left shut in, and no other way to those was tried.
 - More than one thread, or a deadline: the comparison is by nodes.
 
+## PCB routing with each net routed again where the others are
+
+What was changed after [the release below](#pcb-routing-with-a-pour-on-the-pads-own-layer),
+0.0.24, with the same aim: level with cadlab's own router or ahead of it on every measure
+on every board of its corpus ([decisions](architecture.md#decisions)). Measured on
+2026-11-23 through cadlab's adapter and its `route_bench`, on a machine of 64 threads at a
+load of 2 to 7, with a checkout of this crate before it was released; the table beside
+cadlab's router at 60 s, with the crate from crates.io, follows the release.
+
+### Where the two negotiations part
+
+Counted with prints and switches in both routers that are in neither release.
+`tinytapeout-demo`, four layers, after the first round, in which each net is routed once
+with next to nothing priced, both at the same pitch of 0.2 mm:
+
+| | cadlab's router | `guide` 0.0.24 | `guide`, a plane and a spoke's room at no price |
+|---|---|---|---|
+| vias | 184 | 244 | 221 |
+| track | 4494 mm | 5153 mm | 5014 mm |
+| points shared | 2007 | 5429 | |
+| the ground, by net | 32 connections, no via, 32 mm | 124 connections, 27 vias, 318 mm | |
+| the other nets | 173 vias, 4076 mm | 216 vias, 4390 mm | 194 vias, 4260 mm |
+
+So a third of what the rounds have to settle is there before the first of them ends, and
+it is not the rounds that put it there. The ground is planned on its planes alone, each
+pad on the top layer with a stub of its own, where cadlab's router takes the pads that the
+pour on their own layer joins as joined; and the other nets pay twice their length inside
+a plane, which on a board with a plane on two of its four layers halves what a via costs
+them beside a way round.
+
+What the rounds route again was not it. With every net near a shared point routed again
+whole, as cadlab's router has it, with the nets of a round one at a time and not eight,
+and with both, the vias of `tinytapeout-demo` at twice the pitch went from 243 to 247 after
+the first round to 403 to 406 after the ninth, for 247 and 410 with neither.
+
+### What was changed
+
+- **A plane of another net costs a track nothing in the negotiation.** The passes that
+  route a net at a time pay for it as they did
+  ([`RouteOptions::plane_cost`](../src/pcb/mod.rs)). At 150 million nodes, four orders,
+  medians, with the price and without it:
+
+  | board | open, with | open, without | vias | track |
+  |---|---|---|---|---|
+  | `tinytapeout-demo` | 0, 1, 0, 4 | 0, 0, 0, 0 | 324 for 299 | 5133 for 5071 mm |
+  | `buspirate5-rev10` | 0, 0, 0, 0 | 0, 0, 0, 0 | 322 for 308.5 | 3068 for 3017 mm |
+  | `lumenpnp-mobo` | 0, 0, 0, 0 | 0, 0, 0, 0 | 331.5 for 333 | 5483 for 5407 mm |
+  | `cynthion` | 8, 8, 8, 8 | 8, 8, 8, 8 | 418 for 416.5 | 3088 for 3072 mm |
+  | `glasgow-revC3` | 6, 5, 5, 5 | 6, 6, 6, 4 | 406.5 for 395 | 3699 for 3613 mm |
+
+- **Forty rounds at most at twice the pitch**, as cadlab's router has, where there were a
+  hundred, and a negotiation that ends at its last round is not begun again in another
+  order. `tinytapeout-demo` has 44 points shared after its fortieth round and 16 to 28
+  after some 150, with 349 to 388 vias as the rounds end for 394 to 458: at 150 million
+  nodes over six orders, 305 vias and 5037 mm with forty for 311.5 and 5412 mm with a
+  hundred. At the first pitch, where the price of a shared point stops at thirty steps,
+  the hundred stay: `corne-cherry` had 11, 2, 3 and 9 connections open in four orders at
+  60 s with forty for 4, 0, 0 and 0.
+- **Each net routed again where the others are**, once every route is where it is
+  (`whole::again`): the negotiation's search, over a grid of which every place was asked
+  of the board once, in place of the searches of cleanup, which cost many times as much a
+  net. The routes are no longer the negotiation's by then, so each net claims on the grid
+  what its copper keeps other nets' away from wherever it lies, by as much more for copper
+  off the grid as a track on it may pass nearer between two of the grid's points; a net
+  gives up its claims while it is routed where nothing is claimed; and what the search
+  finds is kept only if the world, which has the others' copper as it is, allows all of
+  it. The first time through the nets is for fewer vias alone, at what cleanup lets a via
+  less cost in track, and the times after for a way as short with as many as well. No
+  layer has a direction of its own in it: with those, `buspirate-rs232` kept 7, 6, 6 and
+  5 vias in four orders where cleanup alone leaves 5, 5, 5 and 4. On the negotiation's
+  grid in a run with a budget, 1 to 4 s a board; at the pitch in a run for shorter ways
+  ([`RouteOptions::shorten`](../src/pcb/mod.rs)).
+- **A run of tracks laid round the corners of what is beside it**, off the lattice, in a
+  run for shorter ways (`cleanup::round_corners`): cadlab's gridless pass. The corners are
+  those of the octagon round each corner of a pad, a track's end, a via or a hole, whose
+  sides are as far from it as the track's centre has to stay; each stretch of a run is the
+  shortest way through the corners near it by tracks in the eight directions that the
+  world allows, and is laid if it is shorter.
+
+  `tinytapeout-demo` at 150 million nodes, six orders, medians, with the two changes
+  above in all four:
+
+  | | vias | track |
+  |---|---|---|
+  | round the corners alone | 315 | 5200 mm |
+  | routed again alone | 308.5 | 5102 mm |
+  | both | 305 | 5037 mm |
+  | neither, a plane at its price and a hundred rounds: as 0.0.24 | 333 | 5202 mm |
+
+- **A pass on the finer lattice that took no net out is the last.** The next has every
+  net free to be taken out again and nothing else. `sweep-v2.2`, whose three open
+  connections no router makes, had a pass of 13 s and one of 6 s for them, and has the
+  first: its minute ends after 39 to 41 s for 58, with cadlab's adapter no longer
+  beginning a run that moves routes after a first run that moved none.
+
+At 40 million nodes, three orders of each of the nine boards that a budget cuts, 594
+connections open for 0.0.24's 597: `glasgow-revC3` 39 for 42, and each of the other eight
+with as many as it had.
+
+### Tried and not kept
+
+- *The negotiation at the first pitch on four layers, its price rising to a thousand
+  steps* (`tinytapeout-demo`, four orders at 60 s): its share ends it after 25 to 78
+  rounds with 42 to 122 points shared, and the board has 6, 2, 0 and 4 open with 344 vias.
+- *A net with a plane planned on its pours of the outer layers as well*, as cadlab's
+  router has it: the first round has 168 vias where it had 247, and at 150 million nodes
+  over six orders the board ends with 337.5 vias, 5442 mm and 5 connections open for 300,
+  5071 mm and none.
+- *The price of a shared point rising at the first pitch*, again, now that each net is
+  routed again afterwards: `corne-cherry` 505.5 vias and 8200 mm over four orders for 432
+  and 7556 mm.
+- *The pads cut off their fills told at the last round too*, and forty rounds more for
+  them: `tinytapeout-demo` 316 vias and 5501 mm at 60 s for 309.5 and 5186 mm.
+- *Every net near a shared point routed again whole, and the nets of a round one at a
+  time* (above).
+
+### What this does not show
+
+More than four or six runs of anything; other boards than cadlab's twelve. Still behind
+cadlab's router after this, by the same runs: the vias that a round of the negotiation at
+twice the pitch leaves on `tinytapeout-demo` (299 to 305 at 150 million nodes for the 272.5
+of cadlab's router at 60 s, where 0.0.24 had 333), which no net loses by being routed
+again alone, as the nets in its way would have to move with it; and the time of the
+passes on the finer lattice for connections that have no way, where one of them moved a
+net aside (`cynthion`: two passes of 14 s and 11 s for its eight nets at their net ties).
+
 ## PCB routing with a pour on the pads' own layer
 
 What was changed after [the release below](#pcb-routing-where-cadlabs-router-was-still-ahead),

@@ -50,6 +50,10 @@ const RIP_PENALTY: f64 = 10.0;
 
 const HISTORY_STEP: f64 = 0.5;
 
+/// The share of what cleanup has left that routing each net again among the others may
+/// have.
+const AGAIN_PART: f64 = 0.5;
+
 /// How many times a pair routed first may be moved out of a net's way, and routed again.
 const PAIR_RIP_UPS: u32 = 4;
 
@@ -1799,13 +1803,37 @@ fn route_all<'a>(
     );
     // A net with nothing to route has no route to take back: what was given for it stays
     // where it is, in the way of the others as copper of the board is.
+    let mut back_copper: Vec<(Vec<Track>, Vec<Via>)> = Vec::new();
     for (net, (segs, vias)) in core::mem::take(&mut taken_back) {
         let (tracks, vias) = route_copper(design, net, &segs, &vias);
         let _ = pairs::Undo::place(&mut world, &tracks, &vias);
-        own_fixed.0.extend(tracks);
-        own_fixed.1.extend(vias);
+        own_fixed.0.extend(tracks.iter().cloned());
+        own_fixed.1.extend(vias.iter().cloned());
+        back_copper.push((tracks, vias));
     }
     let own_fixed = own_fixed;
+    // A world for each thread of its own: the board as this one has it, the pairs
+    // routed first locked in it, and no run.
+    let make_with = |pairs_first: &PairsFirst| {
+        let mut w = World::new(
+            &before_pairs.board,
+            rules,
+            &before_pairs.outline,
+            before_pairs.edge_clearance,
+            &before_pairs.obstacles,
+        )
+        .ok()?;
+        w.configure(before_pairs, options);
+        for (i, r) in pairs_first.routes.iter().enumerate() {
+            if let Some(r) = r {
+                let _ = pairs::Undo::place(&mut w, &r.tracks, &r.vias);
+                for net in [design.pairs[i].positive, design.pairs[i].negative] {
+                    w.set_locked(net, true);
+                }
+            }
+        }
+        Some(w)
+    };
     let pours = (hurried && options.pour_cuts && !planned.is_empty() && !run.poll())
         .then(|| Pours::plan(design, &world, &planned, &jobs, bounds, pitch));
     // Every net against every other at once, on one grid: what that ends with is each
@@ -1818,28 +1846,7 @@ fn route_all<'a>(
         let was = run.cut();
         let share = options.whole_share.clamp(0.0, 1.0);
         run.part(share, share);
-        // A world for each thread of its own: the board as this one has it, the pairs
-        // routed first locked in it, and no run.
-        let make = || {
-            let mut w = World::new(
-                &before_pairs.board,
-                rules,
-                &before_pairs.outline,
-                before_pairs.edge_clearance,
-                &before_pairs.obstacles,
-            )
-            .ok()?;
-            w.configure(before_pairs, options);
-            for (i, r) in pairs_first.routes.iter().enumerate() {
-                if let Some(r) = r {
-                    let _ = pairs::Undo::place(&mut w, &r.tracks, &r.vias);
-                    for net in [design.pairs[i].positive, design.pairs[i].negative] {
-                        w.set_locked(net, true);
-                    }
-                }
-            }
-            Some(w)
-        };
+        let make = || make_with(&pairs_first);
         let attempt = |options: &RouteOptions, coarse: bool, finer: i64| {
             whole::route(
                 design,
@@ -1898,7 +1905,10 @@ fn route_all<'a>(
         };
         let (mut longest, mut most) = first;
         for (again, &(finer, order)) in (1u32..).zip(tries) {
-            if whole.as_ref().is_none_or(|w| !w.ended || w.shared == 0) {
+            if whole
+                .as_ref()
+                .is_none_or(|w| !w.ended || w.shared == 0 || w.capped)
+            {
                 break;
             }
             // Each has cost what the ones before did, at most, for there to be room; where
@@ -2038,10 +2048,20 @@ fn route_all<'a>(
     let settles = hurried && options.rip_ups > 0 && options.settle;
     // By job, whether a negotiation for it was given up, and is not tried again.
     let mut spent = vec![0u8; jobs.len()];
+    // Whether the pass before, on the finer lattice, took no net out and moved none aside.
+    let mut idle_pass = false;
     'passes: for pass in 0..=FINE_PASSES {
         if run.poll() {
             break;
         }
+        // Another pass on the finer lattice has every net free to be taken out again: after
+        // one that took none out, it has the same to say ([`said_all`]). `sweep-v2.2`'s
+        // three connections that no router makes had a pass of 13 s and one of 6 s for
+        // them, and have the first.
+        if idle_pass {
+            break;
+        }
+        let pass_began = (stats.rip_ups, stats.shoved);
         let params = if pass == 0 {
             run.phase(Phase::Detail);
             params
@@ -2087,6 +2107,9 @@ fn route_all<'a>(
         let mut peak = (made_by(&jobs, &copper, &apart), pass_from);
         // And how many nets have had a turn since.
         let mut turns = 0usize;
+        // How many nets have had their turn when each has had one: all of them in the
+        // first pass, and in those on the finer lattice the few that it is for.
+        let all_turns = if pass == 0 { jobs.len() } else { queue.len() };
         while let Some(j) = queue.pop_front() {
             tell(&jobs, &copper, &missing, &apart, queue.len() + 1);
             if run.poll() {
@@ -2110,7 +2133,7 @@ fn route_all<'a>(
                 } else {
                     STALL_NODES
                 };
-                if turns > jobs.len() && stats.expanded - peak.1 > patience {
+                if turns > all_turns && stats.expanded - peak.1 > patience {
                     queue.clear();
                     break;
                 }
@@ -2690,6 +2713,7 @@ fn route_all<'a>(
                 }
             }
         }
+        idle_pass = said_all(pass, pass_began, (stats.rip_ups, stats.shoved));
         // What the passes leave open is made a connection at a time, each kept only if the
         // board has more for it.
         if settles && !run.ending() && !run.poll() {
@@ -2941,6 +2965,52 @@ fn route_all<'a>(
                 _ => false,
             })
             .collect();
+        // Each net again where the others are, by the negotiation's search: for fewer
+        // vias and shorter ways, before the searches of cleanup, which cost many times
+        // as much a net.
+        if (options.whole || options.shorten)
+            && hurried
+            && !run.poll()
+            && let Some(mut base) = make_with(&pairs_first)
+        {
+            for (tracks, vias) in &back_copper {
+                let _ = pairs::Undo::place(&mut base, tracks, vias);
+            }
+            let may: Vec<bool> = jobs
+                .iter()
+                .map(|job| {
+                    let net = job.ctx.net;
+                    !design
+                        .pairs
+                        .iter()
+                        .any(|p| p.positive == net || p.negative == net)
+                        && !design.lengths.iter().any(|l| l.nets.contains(&net))
+                })
+                .collect();
+            let until = run
+                .part_left()
+                .map(|left| std::time::Instant::now() + left.mul_f64(AGAIN_PART));
+            // On the negotiation's grid, twice the pitch on more than two layers, where
+            // the routes are its own; at the pitch in a run for shorter ways, whose routes
+            // are where they stay, and a way that only the finer grid has is one to take.
+            let coarse = rules.layer_count() > 2 && !options.shorten;
+            let again = whole::again(
+                design,
+                &base,
+                &mut world,
+                &jobs,
+                &mut copper,
+                &may,
+                options,
+                run,
+                (pitch, coarse),
+                bounds,
+                until,
+            );
+            stats.again.0 += again.tried;
+            stats.again.1 += again.kept;
+            stats.again.2 += again.vias;
+        }
         stats.expanded += cleanup::run(
             &mut world,
             design,
@@ -3173,6 +3243,16 @@ fn apart_on(bare: &World<'_>, ctx: &NetCtx, params: Params, finest: Params) -> (
     }
     let (finer, more) = look(finest);
     (finer.map_or(apart, |f| f.min(apart)), expanded + more)
+}
+
+/// Whether a pass has said all that the passes after it would: one on the finer lattice,
+/// `pass` past the first, that took no net out and moved none aside, by how many were
+/// taken out and moved aside in the run when it began and when it ended. The next has
+/// every net free to be taken out again and nothing else that this one had not, so where
+/// none was taken out, none was kept from it, and what this pass found no way for has
+/// none in the next, with whatever this one made in the way as well.
+fn said_all(pass: usize, began: (usize, usize), ended: (usize, usize)) -> bool {
+    pass > 0 && began == ended
 }
 
 /// Whether a net has no more to gain: `floor` of its connections have no way on the board
@@ -3697,9 +3777,22 @@ fn plane_map(design: &Design, fills: &[Fill], grid: Corridor, cost: f64) -> Plan
 #[cfg(test)]
 mod tests {
     use super::super::tests::{MM, design, smd};
-    use super::{BRANCH_CUTS, BRANCH_TERMINALS, loses_branches, row_origins};
+    use super::{BRANCH_CUTS, BRANCH_TERMINALS, loses_branches, row_origins, said_all};
     use crate::geom::drc::Pad;
     use crate::geom::{Point, Rect, Shape};
+
+    #[test]
+    fn a_pass_on_the_finer_lattice_that_moved_no_net_is_the_last() {
+        // The first pass is never the last for that: the lattice of the next is finer.
+        assert!(!said_all(0, (3, 1), (3, 1)));
+        // One on the finer lattice that took no net out and moved none aside is.
+        assert!(said_all(1, (3, 1), (3, 1)));
+        assert!(said_all(2, (0, 0), (0, 0)));
+        // And one that took a net out, or moved one aside, is not: the next has the nets
+        // that this one could take out no more free again.
+        assert!(!said_all(1, (3, 1), (4, 1)));
+        assert!(!said_all(1, (3, 1), (3, 2)));
+    }
 
     #[test]
     fn a_net_s_lattice_starts_at_its_pad_in_a_row_of_fine_pitch() {

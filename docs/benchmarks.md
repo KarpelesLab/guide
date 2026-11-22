@@ -5911,6 +5911,145 @@ at a time.
   are what it has for the balls left shut in, and no other way to those was tried.
 - More than one thread, or a deadline: the comparison is by nodes.
 
+## PCB routing with a pour on the pads' own layer
+
+What was changed after [the release below](#pcb-routing-where-cadlabs-router-was-still-ahead),
+0.0.23, with the same aim: level with cadlab's own router or ahead of it on every measure
+on every board of its corpus ([decisions](architecture.md#decisions)). It is still not
+met. Measured on 2026-11-22 and 23 with 0.0.24 from crates.io through cadlab's adapter and
+its `route_bench`, on a machine of 64 threads at a load of 2 to 6.
+
+### The two routers stage by stage
+
+Counted with prints in both that are in neither release, one run of each at 60 s on
+three threads. `tinytapeout-demo`, four layers:
+
+| | cadlab's router | `guide` 0.0.23 |
+|---|---|---|
+| the rounds of the negotiation | 38 in 17 s, 2 points shared at the end | 177 in 23 s at twice the pitch, 12 to 116 shared from the eleventh on |
+| as the rounds end | 255 vias, 4686 mm | 458 vias, 5792 mm |
+| after the pass for fewer vias | 248 vias, 5013 mm (1.9 s, after its rounds for the pours) | 381 vias, 5660 mm (0.4 s) |
+| after what closes the rest | | 412 vias, 5978 mm |
+| the result | 244 vias, 4947 mm, 19 open | 344 vias, 5453 mm, none open |
+
+The gap is made in the rounds, where only the wires in another net's way are routed again
+and a wire that went under another stays there: by net, in cadlab's dumps of one run of
+each, the nets that both routers complete with no via in either are as long or shorter
+here on every board, and the nets where this router has more vias carry its extra track
+(`tinytapeout-demo`: 43 nets, 144 vias for 66, 2223 mm for 1965). Negotiated at cadlab's
+pitch, this board's rounds take 0.8 to 1.8 s for 0.15 s, the share ends them after the
+twelfth with 151 points shared, and the minute ends with 8 connections open for none.
+
+`corne-cherry`, two layers, both at the same pitch, by the points shared after each
+round: 4792, 2220, 1457, 1020, 712, 471, 325, 280, 237, 193, 141, 60, 34, 18 for cadlab's
+router, which ends after 9 s; 4338, 1942, 1373, 866, 638, 413, 370, 310, 289, 172, 160,
+157, 174, 125 here, and 66 to 168 for the seventy rounds after, until the share ends
+them at 19.7 s. They part at the tenth round, where cadlab's price for a shared point
+goes on rising and this one stops at thirty steps, for the copper (tried rising again
+in 0.0.23, below, and not kept).
+
+### A via of a net with a pour, on two layers
+
+By the nets with zones and the others, four runs of each at 60 s with 0.0.23: the vias
+that `corne-cherry` had over cadlab's router were all those of its two grounds, 140 to
+157 against 65 to 71, with half the track (349 to 496 mm against 879 to 928 mm); its
+other nets had 349 to 368 against 370 to 416. Both routers leave the pours in as many
+pieces; cadlab's joins them by tracks along the pads' own layer, from its pass for fewer
+vias, which routes a net again a connection at a time. The pass here routes a net again
+whole and keeps it or not: with the time to end and the nets with planes first it took
+40 to 50 vias inside the negotiation and left the grounds with 131 to 157 at the end of
+the minute. With forty steps for the via of a net with a plane from the first round on,
+at the first pitch, and eight times the passes' price in the stubs back to a fill on two
+layers, four orders at 60 s:
+
+| `corne-cherry` | 0.0.23 | 0.0.24 | cadlab's router |
+|---|---|---|---|
+| vias of the two grounds | 130 to 157 | 92 to 111 | 65 to 71 |
+| vias of the board | 459 to 519 | 418 to 458 | 441 to 481 |
+| track | 7407 to 7520 mm | 7230 to 7659 mm | 8036 to 8203 mm |
+| connections open | 0, 2, 0, 2 | 4, 0, 1, 1 and 1, 0, 0, 1 | 3, 3, 2, 4 |
+
+(0.0.24 measured twice; its runs end on the deadline in two orders of four.)
+`lumenpnp-ringlight`'s ground has one via and 4.2 to 4.5 mm of track for two and 2.9 mm,
+and the board 1, 3, 3 and 3 vias as cadlab's router's. Twenty and thirty steps: 464 and
+484 vias with 1 and 4 open, 457 and 459 with 5 and none, over two orders.
+
+### Less outside the pads
+
+`buspirate-rs232`, four orders: 294.6 to 299.6 mm of track for 297.7 to 302.7 mm, and
+284 mm outside the pads of its nets for 287 mm; cadlab's router has 281 and 272 mm, with
+ten vias for five. Its nets of two pads between a SOIC and its capacitors are 2.1 mm
+each for 2.6 mm (cadlab's router: 1.8 mm, a straight track from the one pad's copper to
+the other's).
+
+### Beside cadlab's router, 0.0.24
+
+Four runs of each, one of each at a time side by side: cadlab's router with seeds 1 to 4
+on three threads, `guide` in four orders with three threads for its negotiation.
+Connections open by run, and vias and track by the medians:
+
+| board | cadlab's router: open | `guide` 0.0.24: open | vias, `guide` against cadlab's | track |
+|---|---|---|---|---|
+| `buspirate-flash-sop` | 0, 0, 0, 0 | 0, 0, 0, 0 | 6 against 4 | 443 against 461 mm |
+| `buspirate-rs232` | 0, 0, 0, 0 | 0, 0, 0, 0 | 5 against 10 | 297 against 281 mm |
+| `lumenpnp-ringlight` | 0, 0, 0, 0 | 0, 0, 0, 0 | 3 against 3 | 168 against 177 mm |
+| `nrfmicro` | 0, 0, 0, 0 | 0, 0, 0, 0 | 42.5 against 47.5 | 440 against 450 mm |
+| `sweep-v2.2` | 3, 3, 3, 3 | 3, 3, 3, 3 | 21 against 25.5 | 2137 against 2159 mm |
+| `corne-cherry` | 3, 3, 2, 4 | 1, 0, 0, 1 | 430 against 459 | 7541 against 8103 mm |
+| `tinytapeout-demo` | 19, 2, 5, 5 | 0, 3, 0, 0 | 358.5 against 272.5 | 5687 against 4913 mm |
+| `buspirate5-rev10` | 4, 2, 4, 8 | 0, 0, 0, 0 | 329.5 against 302 | 3078 against 3129 mm |
+| `lumenpnp-mobo` | 8, 12, 7, 15 | 0, 0, 0, 0 | 337.5 against 343.5 | 5532 against 5462 mm |
+| `cynthion` | 28, 29, 29, 28 | 8, 8, 8, 8 | 427.5 against 478 | 3165 against 3184 mm |
+| `glasgow-revC3` | 36, 32, 33, 31 | 8, 7, 8, 7 | 415 against 419.5 | 3949 against 3462 mm |
+| `glasgow-revD1` | 111, 110, 94, 102 | 28, 22, 39, 36 | 1200.5 against 1084.5 | 10073 against 9090 mm |
+| all twelve | 212, 193, 177, 196 | 48, 43, 58, 55 | | |
+
+No DRC error other than unrouted in the 96 runs. By cadlab's count of equal, better and
+worse over six measures on each board (open, vias, track, track outside the pads, pads
+short of two necks, time): 24 better, 29 equal, 2 with ranges that overlap and 17 worse,
+for 21, 28, 3 and 20 with 0.0.23. No longer behind: the vias of `corne-cherry` and of
+`lumenpnp-ringlight`, and the track of `cynthion`, where cadlab's adapter now ends the
+runs that move routes after one that has said all there is, and has the time for the
+tracks between pads that a pour joins. Still behind: the vias of `tinytapeout-demo`
+(+32 %), `glasgow-revD1` (+11 %), `buspirate5-rev10` (+9 %) and `buspirate-flash-sop` (6
+against 4, two of them joining the pieces of a pour with no track); the track of
+`tinytapeout-demo` (+16 %), `glasgow-revC3` (+14 %), `glasgow-revD1` (+11 %) and
+`buspirate-rs232` (+6 %); the time of `sweep-v2.2`, `corne-cherry` and
+`buspirate5-rev10`. By the nets that both routers complete, the medians of the four
+pairs of runs: `tinytapeout-demo` +34 % vias and +18 % track, `glasgow-revD1` +6 % and
++5 %, `buspirate5-rev10` +13 % and +4 %, `glasgow-revC3` 11 % fewer vias and +5 % track,
+`cynthion` 21 % fewer and level, `corne-cherry` 6 % less of both.
+
+`tinytapeout-demo`'s runs end on the deadline and move from one measurement to the next:
+0, 3, 0 and 0 open in the table's runs, 0, 7, 1 and 0 the second time, and 2, 0, 0 and 0
+the third, beside 0.0.23 in the same five minutes, which had 2, 0, 0 and 0 with as many
+vias (357 to 376 for 343 to 381).
+
+With budgets of nodes, which do not move with the machine, one thread: the nine boards
+that 40 million cut have 597 connections open over three orders for 591, eight of them
+the same as with 0.0.23 to the order, and `corne-cherry` 36, 28 and 22 for 33, 21 and 26,
+with 438 to 441 vias for 477 to 557. At 150 million, two orders: `corne-cherry` 8 and 0
+for 0 and 2, with 430 and 456 vias for 503 and 504; `tinytapeout-demo` 0 and 0 with 320
+and 329 vias, `glasgow-revC3` 6 and 6, `cynthion` 8 and 8, as 0.0.23. A via to the other
+side was the cheap way back to a pour, and the dearer one costs `corne-cherry` a
+connection where the nodes run out.
+
+### Tried and not kept
+
+- *The negotiation at cadlab's pitch on four layers* (`tinytapeout-demo`, above).
+- *The pass for fewer vias given the time to end at the first pitch, the nets with
+  planes first* (above): the board's vias the same.
+- *Twenty and thirty steps for the via of a net with a plane* (above).
+
+### What this does not show
+
+More than four runs, but for `tinytapeout-demo`; other boards than cadlab's twelve; the
+routers side by side on the generated boards. Not begun: the pass for fewer vias made by
+the negotiation's own search on the routes as the passes and the later runs leave them,
+which needs the claims of routes that are off its grid; cadlab's gridless pass, which
+lays a track along the hull of what it passes (the nets with as many vias in both
+routers are 5 % longer here on the boards at twice the pitch, and level at the first).
+
 ## PCB routing where cadlab's router was still ahead
 
 What was changed after [the release below](#pcb-routing-faster-and-out-of-a-deeper-array),

@@ -1272,8 +1272,9 @@ boards there have planes on inner layers, where a via is the way.
 The stubs that take a pad back to a fill that the routes cut it off, once routing is
 over, have the same choice on two layers and made the same one at the price of the
 passes, 1 mm of track: there a via costs them eight times that (`lumenpnp-ringlight`'s
-ground: one via and 4.4 mm of track for two and 2.9 mm; `corne-cherry` with both, four
-orders at 60 s: 418 to 456 vias and 1, 0, 0 and 1 connections open).
+ground: one via and 4.2 to 4.5 mm of track for two and 2.9 mm; `corne-cherry` with both,
+four orders at 60 s, measured twice: 418 to 458 vias, and 4, 0, 1 and 1 connections open
+the one time, 1, 0, 0 and 1 the other).
 
 **Of two ways as long as each other, cleanup lays the one with less outside the pads.**
 Between two points that are not in line there are two octilinear ways, straight and then

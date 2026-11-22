@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.25](https://github.com/KarpelesLab/guide/compare/v0.0.24...v0.0.25) - 2026-11-22
+
+### Added
+
+- *(pcb)* each net is routed again where the others are by the negotiation's search, a run of tracks is laid round the corners beside it, and the negotiation has forty rounds at twice the pitch and no price for a plane ([#42](https://github.com/KarpelesLab/guide/pull/42))
+
+### Other
+
+- *(benchmarks)* a pour on the pads' own layer, as released: the two routers stage by stage, the via of a net with a plane on two layers, and the table beside cadlab's router ([#40](https://github.com/KarpelesLab/guide/pull/40))
+
 ## [0.0.24](https://github.com/KarpelesLab/guide/compare/v0.0.23...v0.0.24) - 2026-11-22
 
 ### Added

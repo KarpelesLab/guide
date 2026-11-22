@@ -198,7 +198,10 @@
 //! ([`RouteOptions::crossings`]). A net whose pads the board itself keeps apart, as on a
 //! board in two parts that only the schematic joins, is looked for once on the board with
 //! no route on it when a search for it fails, and has no more turns once it has every
-//! connection that there is a way for ([`Cause::Apart`]).
+//! connection that there is a way for ([`Cause::Apart`]). So is a net of two pads that a
+//! search across every route of the board, on the finest lattice of the run, found no way
+//! for: a pad that no track leaves at the board's clearance. The run tells such nets
+//! ([`Routed::apart`]).
 //!
 //! A host whose fill makes thermal reliefs can have the room of their spokes kept: tracks
 //! of other nets then pay to be where a pad's spoke will be
@@ -1015,6 +1018,12 @@ pub struct Routed {
     /// out and put back since, and a run on the board as it is returned may find a way
     /// for some of these too. Only after a run that ended on its own is the list final.
     pub failed: Vec<NetId>,
+    /// Of the nets left open, in order, those with a connection that has no way on the
+    /// board with no route on it: what such a net has open no run joins, whatever its
+    /// order of the nets and whatever it may move. Its open connections have
+    /// [`Cause::Apart`], or [`Cause::Enclosed`] by items of the board where the pad they
+    /// end at is shut in nearby, which says by what.
+    pub apart: Vec<NetId>,
     /// In [`route_from`], the nets whose routes of the earlier run were taken back, in
     /// order: [`tracks`](Routed::tracks) and [`vias`](Routed::vias) hold what they have
     /// now, in place of what was given for them. What was given for any other net is

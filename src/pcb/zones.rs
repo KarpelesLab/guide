@@ -520,6 +520,17 @@ impl Parts {
     }
 }
 
+impl Parts {
+    /// Whether a shape may touch the fill: `false` only if it certainly does not, with no
+    /// part of the fill within a nanometre of it.
+    pub(crate) fn may_touch(&self, other: &Shape) -> bool {
+        let mut near = self.near.borrow_mut();
+        self.index.query(&other.bbox().expand(2), &mut near);
+        near.iter()
+            .any(|id| self.parts[id.slot() as usize].touches(other))
+    }
+}
+
 /// Whether a shape may be closer to the fill than a clearance, or touch it for a clearance
 /// of zero: `false` only if it certainly is not.
 trait MayBeClose {

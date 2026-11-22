@@ -1202,6 +1202,10 @@ const SHARE_LOOKS: usize = 4;
 /// millimetres from where it started.
 const WINDOW: i64 = 24;
 
+/// How many nodes a search that may cross routes has once it leaves its window for the
+/// whole board, and then a look from its other end, before it has all that it may expand.
+const DEEP_LOOK: u64 = 200_000;
+
 /// How many [`LOOKS`] a terminal is taken to have passed once a look from it reached the
 /// tree.
 const REACHED: u8 = u8::MAX;
@@ -1502,6 +1506,39 @@ impl<'a> NetRun<'a> {
         for within in [Some(window), None] {
             if within.is_none() && window == self.space.params.bounds {
                 break;
+            }
+            // Before a search goes over the whole board with all it may expand, it has
+            // [`DEEP_LOOK`] nodes, and then a look as long has from the other end: where
+            // that end is the one shut in by what may not be crossed, in more room than a
+            // first look goes through, the search to it says so only once it has been
+            // everywhere else (cynthion: 6.3 million nodes, 9 s, from a pad to one at a
+            // net tie that no track leaves, in each pass on the finer lattice).
+            let deep = DEEP_LOOK.min(full);
+            if within.is_none() && deep < full {
+                let (path, expanded) = match from {
+                    Some(t) => self.backward(t, deep, true),
+                    None => self.forward(to, deep),
+                };
+                *budget = budget.saturating_sub(expanded);
+                if path != Err(Failure::Budget) {
+                    return path;
+                }
+                let other = match (from, to) {
+                    (Some(t), _) => Some((self.forward(&[t], deep), t)),
+                    (None, &[t]) if !self.dead[t] => Some((self.backward(t, deep, true), t)),
+                    _ => None,
+                };
+                if let Some(((path, expanded), t)) = other {
+                    *budget = budget.saturating_sub(expanded);
+                    match path {
+                        Ok(path) => return Ok(path),
+                        Err(Failure::NoPath) => {
+                            self.dead[t] = true;
+                            return Err(Failure::NoPath);
+                        }
+                        Err(Failure::Budget) => {}
+                    }
+                }
             }
             self.space.window = within;
             let (path, expanded) = match from {

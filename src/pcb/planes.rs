@@ -57,19 +57,46 @@ pub(crate) struct Piece {
     /// The shape in parts of few edges, if it has many, made when a point is first asked
     /// about.
     parts: core::cell::OnceCell<Option<super::zones::Parts>>,
+    /// How many points were asked about before the parts were made.
+    asked: core::cell::Cell<u32>,
 }
+
+/// How many points a piece is asked about by its edges before its parts are made.
+const DIRECT_HOLDS: u32 = 4096;
 
 impl Piece {
     /// Whether a point is in the piece, to a nanometre: by its parts if it has many edges,
     /// as the fill of a plane has thousands, and a net of hundreds of pads asks about
     /// tens of places beside each.
     pub(crate) fn holds(&self, p: Point) -> bool {
+        // The first questions are answered by the edges themselves: the parts of a fill
+        // of thousands of edges take as long to make as some thousands of such answers
+        // (cynthion's ground: 0.1 to 0.5 s a piece, 1.5 s for the 1600 questions that
+        // telling the needless vias of the board asks its pieces, which the edges answer
+        // in a twentieth of that).
+        if self.parts.get().is_none() {
+            let asked = self.asked.get();
+            if asked < DIRECT_HOLDS {
+                self.asked.set(asked + 1);
+                return self.area.contains_point(p);
+            }
+        }
         match self
             .parts
             .get_or_init(|| super::zones::Parts::of(&self.shape))
         {
             Some(parts) => parts.holds(p),
             None => self.area.contains_point(p),
+        }
+    }
+
+    /// Whether a shape touches the piece, exactly: by its parts first once they are made,
+    /// which say that most of what is beside a fill does not touch it for the few edges
+    /// of the parts near it.
+    pub(crate) fn touches(&self, other: &Shape) -> bool {
+        match self.parts.get() {
+            Some(Some(parts)) => parts.may_touch(other) && self.shape.touches(other),
+            _ => self.shape.touches(other),
         }
     }
 }
@@ -91,6 +118,7 @@ pub(crate) fn pieces_by_net(design: &Design, fills: &[Fill]) -> Vec<(NetId, Vec<
             area,
             layer: f.layer,
             parts: core::cell::OnceCell::new(),
+            asked: core::cell::Cell::new(0),
         };
         match out.iter_mut().find(|(n, _)| *n == net) {
             Some((_, list)) => list.push(piece),
@@ -528,4 +556,65 @@ pub(crate) fn connect(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::Fill;
+    use super::super::tests::{MM, design, smd};
+    use super::super::zone_tests::zone;
+    use super::{DIRECT_HOLDS, pieces_by_net};
+    use crate::geom::{LayerId, Point, Shape};
+
+    #[test]
+    fn a_piece_answers_its_first_points_by_its_edges_and_the_same_by_its_parts() {
+        // A fill of a few hundred edges: a comb, whose teeth a point is in or between.
+        let teeth = 80i64;
+        let width = (teeth - 1) * 2 * MM + MM;
+        let mut ring = vec![Point::new(0, 0), Point::new(width, 0)];
+        for k in (0..teeth).rev() {
+            let x = k * 2 * MM;
+            ring.extend([Point::new(x + MM, 5 * MM), Point::new(x, 5 * MM)]);
+            if k > 0 {
+                ring.extend([Point::new(x, MM), Point::new(x - MM, MM)]);
+            }
+        }
+        let shape = Shape::polygon(&ring, &[]).unwrap();
+        let mut d = design(1, vec![smd(0, -10 * MM, 1)], 2);
+        d.zones.zones.push(zone(1, 0, 200 * MM));
+        let fills = [Fill {
+            zone: 0,
+            layer: LayerId(0),
+            shape,
+        }];
+        let by_net = pieces_by_net(&d, &fills);
+        let piece = &by_net[0].1[0];
+        // In a tooth, between two, in the back of the comb, and outside it.
+        let asked = |k: i64| {
+            [
+                (Point::new(k * 2 * MM + MM / 2, 3 * MM), true),
+                (Point::new(k * 2 * MM + 3 * MM / 2, 3 * MM), false),
+                (Point::new(k * 2 * MM + 3 * MM / 2, MM / 2), true),
+                (Point::new(k * 2 * MM + MM / 2, 6 * MM), false),
+            ]
+        };
+        let dot = |p: Point| Shape::circle(p, 2).unwrap();
+        for (p, inside) in asked(3) {
+            assert_eq!(piece.holds(p), inside, "{p:?}");
+            assert_eq!(piece.touches(&dot(p)), inside, "{p:?}");
+        }
+        // No parts were made for those: the edges said.
+        assert!(piece.parts.get().is_none());
+        // Once it has been asked often enough it has them, and says the same.
+        for _ in 0..=DIRECT_HOLDS {
+            piece.holds(Point::new(MM / 2, 3 * MM));
+        }
+        assert!(matches!(piece.parts.get(), Some(Some(_))));
+        for k in [0, 3, 40, 78] {
+            for (p, inside) in asked(k) {
+                assert_eq!(piece.holds(p), inside, "{p:?}");
+                assert_eq!(piece.touches(&dot(p)), inside, "{p:?}");
+            }
+        }
+    }
 }

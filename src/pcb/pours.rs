@@ -958,7 +958,7 @@ pub(crate) fn needless(
             if layers.contains(piece.layer)
                 && of_fill[f] != usize::MAX
                 && piece.bbox.intersects(&near)
-                && (ends.iter().any(|&at| piece.holds(at)) || piece.shape.touches(copper))
+                && (ends.iter().any(|&at| piece.holds(at)) || piece.touches(copper))
             {
                 out.push(of_fill[f]);
             }

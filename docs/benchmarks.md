@@ -6019,13 +6019,21 @@ Two runs of each; the first run ends at its share, 42.2 s, in all four.
 | those, and the search round its two ends late | 5 | 5 |
 | the vias for the nets with no zone, and the search round its ends | 3 | (not run to its end) |
 
-At 40 million nodes, three orders of the nets, the nine boards a budget cuts: 576
-connections open for 620. `nrfmicro` 1 for 0, `sweep-v2.2` 9 for 9, `corne-cherry` 75 for
-79, `tinytapeout-demo` 22 for 30, `buspirate5-rev10` and `lumenpnp-mobo` none either way,
-`cynthion` 24 for 24, `glasgow-revC3` 34 for 41, `glasgow-revD1` 411 for 437: that board
-has no negotiation at this budget, and the vias of its array alone are worth those 26.
+At 40 million nodes, three orders of the nets, the nine boards a budget cuts, 0.0.21
+and this behind the same adapter (cadlab at its commit `921ac7a`, whose fill differs
+from the one of the tables above): 593 connections open for 615. `nrfmicro` 2 for 0,
+`sweep-v2.2` 9 for 9, `corne-cherry` 80 for 81, `tinytapeout-demo` 33 for 23,
+`buspirate5-rev10` and `lumenpnp-mobo` none either way, `cynthion` 24 for 24,
+`glasgow-revC3` 34 for 41, `glasgow-revD1` 411 for 437: that board has no negotiation at
+this budget, and the vias of its array alone are worth those 26. `tinytapeout-demo`'s
+negotiation is cut by this budget in its first rounds, and what the nets routed again
+at their turn cost, a tenth of the nodes, is rounds that it does not have; on the fill
+before, the same two had 22 for 30.
 
-@@W150@@
+At 150 million nodes, two orders: `corne-cherry` 0 and 2 open for 1 and 0,
+`tinytapeout-demo` 0 and 0 either way with 325 and 322 vias for 353 and 364,
+`glasgow-revC3` 8 and 6 for 9 and 9, `cynthion` 8 and 8 and `sweep-v2.2` 3 and 3 either
+way, `buspirate5-rev10` and `lumenpnp-mobo` none.
 
 ### Tried and not kept
 
@@ -6037,6 +6045,11 @@ has no negotiation at this budget, and the vias of its array alone are worth tho
 - **More nets at once where one of them took long the last time**, up to 48, so that
   the others fill the time of the longest: 12 % of the nets routed again for 6 %, and by
   the nodes 1.9 times as fast on three threads for 1.8, 2.2 on four for 1.9.
+- **The search round its two ends at the first pitch too**, on two layers:
+  `corne-cherry` at 150 million nodes over three orders, 6, 9 and 2 connections open
+  with it, 4, 4 and 0 without, 2, 1 and 1 with 48 cells and the whole box round the
+  ends, and 1, 2 and 1 with 0.0.21. The price stops at thirty steps there, and the ways
+  round that such a board needs are long.
 - **The search round its two ends in every round.** With 24 cells and half the box, the
   first eight rounds are the same to the point; with 12 and a quarter they cost 15 to
   20 % less, for as many points shared. It is where a price makes a search look far that

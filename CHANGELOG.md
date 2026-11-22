@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.23](https://github.com/KarpelesLab/guide/compare/v0.0.22...v0.0.23) - 2026-11-22
+
+### Added
+
+- *(pcb)* a negotiation at the first pitch that does not end is begun again on finer grids, a net with a plane pays half for a via at twice the pitch, and a track is laid no wider than a pad of its net where it meets it ([#35](https://github.com/KarpelesLab/guide/pull/35))
+
+### Other
+
+- *(benchmarks)* faster and out of a deeper array as released, beside cadlab's router ([#33](https://github.com/KarpelesLab/guide/pull/33))
+
 ## [0.0.22](https://github.com/KarpelesLab/guide/compare/v0.0.21...v0.0.22) - 2026-11-22
 
 ### Added

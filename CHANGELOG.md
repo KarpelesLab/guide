@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.26](https://github.com/KarpelesLab/guide/compare/v0.0.25...v0.0.26) - 2026-11-22
+
+### Added
+
+- *(pcb)* a net that has no way on the board is told once, a search across routes looks from its other end, each net is routed again before the fills are joined again, and a piece of fill answers its first points by its edges ([#45](https://github.com/KarpelesLab/guide/pull/45))
+
+### Other
+
+- *(benchmarks)* each net routed again where the others are, as released: the table beside cadlab's router ([#43](https://github.com/KarpelesLab/guide/pull/43))
+
 ## [0.0.25](https://github.com/KarpelesLab/guide/compare/v0.0.24...v0.0.25) - 2026-11-22
 
 ### Added

@@ -5911,6 +5911,127 @@ at a time.
   are what it has for the balls left shut in, and no other way to those was tried.
 - More than one thread, or a deadline: the comparison is by nodes.
 
+## PCB routing where cadlab's router was still ahead
+
+What was changed after [the release below](#pcb-routing-faster-and-out-of-a-deeper-array),
+0.0.22, with the aim of being level with cadlab's own router or ahead of it on every
+measure on every board of its corpus, by taking from that router what it still did
+better ([decisions](architecture.md#decisions)). That aim is not met: this says what
+moved and what did not. Measured on 2026-11-22 with 0.0.23 from crates.io through
+cadlab's adapter and its `route_bench`, on a machine of 64 threads that other work
+shared: with budgets of nodes where two versions are compared, which do not depend on
+the load, and with a deadline of 60 s for the table beside cadlab's router.
+
+### A negotiation that does not end, on finer grids
+
+`nrfmicro`, two layers, 85 connections, negotiated at its pitch of 0.2 mm, by the points
+still shared after each round, in the order of the nets given: 597, 376, 290, 248, 217,
+125, 95, 89, 87, 69, 65 and then 47 to 83 for twenty rounds, until twelve rounds had
+gained nothing. Begun again four times in other orders, as 0.0.22 did, it ended the same
+way, and the passes after it left a connection of the USB receptacle open in seven
+orders of twelve. On the finer grids as they were first tried, the price stopped at
+thirty steps there too, the same order: 0.133 mm down to 18 shared and no further,
+0.1 mm to 22, and 0.067 mm, 1609 shared after its first round, to none in 23 rounds; in
+other orders it is the grid of 0.1 mm that ends, or that of 0.133 mm. Through cadlab's
+adapter at 60 s, one thread, twelve orders at once:
+
+| | connections open, by order | orders with any open | time |
+|---|---|---|---|
+| 0.0.22 | 1, 1, 0, 0, 0, 1, 2, 2, 0, 0, 2, 2 | 7 | 6 to 59 s |
+| the finer grids, with the price stopped at thirty steps there too | 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 2, 0 | 2 | 4 to 53 s |
+| 0.0.23: the price rising to a thousand on the finer grids | 0 in all twelve | 0 | 5 to 34 s |
+
+At 40 million nodes, three orders: none open for 2. With a via dearer on a finer grid
+by what its steps are shorter, in the rounds too: 5 open over twelve orders for 2, so
+only the routing again for fewer vias has it dearer.
+
+### A via to a plane at twice the pitch
+
+At twice the pitch, on more than two layers, a via cost every net ten steps, twice the
+track that it costs at the first pitch and in cadlab's router. By the nets that both
+routers close, one run of each at 60 s, `glasgow-revC3`'s nine nets with zones: 543 mm
+of track and 91 vias, where cadlab's router has 485 mm and 120; with five steps for a
+net with a plane, 431 mm and 122. At 100 million nodes, three orders, ten steps for
+every net and five for those with planes:
+
+| board | open | vias (median) | track (median) |
+|---|---|---|---|
+| `glasgow-revC3` | 7, 12, 8 → 6, 7, 10 | 434 → 408 | 3944 → 3830 mm |
+| `tinytapeout-demo` | 8, 1, 0 → 0, 2, 0 | 365 → 372 | 5341 → 5451 mm |
+| `cynthion` | 8, 8, 8 → 8, 8, 8 | 421 → 433 | 3155 → 3141 mm |
+| `buspirate5-rev10` | 0, 0, 0 → 0, 0, 0 | 317 → 328 | 3115 → 3084 mm |
+
+### Budgets of nodes, 0.0.22 and 0.0.23
+
+40 million nodes, three orders, the nine boards that a budget cuts: 591 connections
+open for 593 (`nrfmicro` 0 for 2, `tinytapeout-demo` 25 for 33, `glasgow-revC3` 42 for
+34, `glasgow-revD1` 411, `corne-cherry` 80, `cynthion` 24 and `sweep-v2.2` 9 either way,
+`buspirate5-rev10` and `lumenpnp-mobo` none). 150 million, two orders: `glasgow-revC3`
+6 and 6 for 8 and 6, `corne-cherry` 0 and 2 and `tinytapeout-demo` 0 and 0 either way,
+with 321 and 329 vias for 325 and 322.
+
+### Beside cadlab's router at 60 s
+
+Four runs of each, one of each at a time side by side: cadlab's router with seeds 1 to 4
+on three threads, `guide` in four orders with three threads for its negotiation; a load
+of 3 to 5 until the last five minutes of the half hour, 16 to 19 then. Connections open
+by run, and vias and track by the medians:
+
+| board | cadlab's router: open | `guide` 0.0.23: open | vias, `guide` against cadlab's | track |
+|---|---|---|---|---|
+| `buspirate-flash-sop` | 0, 0, 0, 0 | 0, 0, 0, 0 | 6 against 4 | 443 against 461 mm |
+| `buspirate-rs232` | 0, 0, 0, 0 | 0, 0, 0, 0 | 5 against 10 | 300 against 281 mm |
+| `lumenpnp-ringlight` | 0, 0, 0, 0 | 0, 0, 0, 0 | 4 against 3 | 167 against 177 mm |
+| `nrfmicro` | 0, 0, 0, 0 | 0, 0, 0, 0 | 41.5 against 47.5 | 441 against 450 mm |
+| `sweep-v2.2` | 3, 3, 3, 3 | 3, 3, 3, 3 | 21 against 25.5 | 2135 against 2159 mm |
+| `corne-cherry` | 3, 3, 2, 4 | 0, 2, 2, 2 | 504 against 459 | 7433 against 8103 mm |
+| `tinytapeout-demo` | 19, 2, 5, 5 | 1, 0, 0, 0 | 361.5 against 272.5 | 5419 against 4913 mm |
+| `buspirate5-rev10` | 4, 2, 4, 8 | 0, 0, 0, 0 | 329 against 302 | 3081 against 3129 mm |
+| `lumenpnp-mobo` | 9, 12, 7, 15 | 0, 0, 0, 0 | 337.5 against 342 | 5533 against 5448 mm |
+| `cynthion` | 28, 29, 30, 28 | 8, 8, 8, 8 | 428.5 against 478 | 3284 against 3184 mm |
+| `glasgow-revC3` | 36, 32, 40, 36 | 9, 7, 9, 9 | 415 against 418.5 | 3928 against 3449 mm |
+| `glasgow-revD1` | 113, 169, 149, 135 | 95, 90, 30, 38 | 1202.5 against 1037 | 9376 against 8825 mm |
+| all twelve | 215, 252, 240, 234 | 116, 110, 52, 60 | | |
+
+No DRC error other than unrouted in the 96 runs. What is open is level or better on
+every board, `glasgow-revD1` now in every run. Still behind: the vias of
+`tinytapeout-demo` (+33 %), `glasgow-revD1` (+16 %), `corne-cherry` (+10 %) and
+`buspirate5-rev10` (+9 %); the track of `glasgow-revC3` (+14 %, for +19 % with 0.0.22),
+`tinytapeout-demo` (+10 %), `buspirate-rs232` (+7 %) and `glasgow-revD1` (+6 %); the
+time of `corne-cherry` (52 to 59 s against 19 to 33 s), whose negotiation is ended by
+its share and not by itself. A board's totals count the nets that only `guide` closes
+(`glasgow-revC3`: 19 nets, 946 mm and 105 vias in one run); by the nets with no zone
+that both routers close, one run of each, `guide` had 7 % more track and 27 % more vias
+on `tinytapeout-demo`, 5 % and 5 % on `glasgow-revD1`, 2 % more and 14 % fewer on
+`glasgow-revC3`, 1 % and 6 % on `buspirate5-rev10`, and less of both on `cynthion`.
+`tinytapeout-demo`'s negotiation has some hundred points shared from its fifteenth round
+to the end of its share: what cadlab's router's rounds do there that these do not was
+not found.
+
+**A deadline on a loaded machine.** The same measurement half an hour earlier, at a
+load of 31 to 34, had 89 to 160 connections open for `guide` over the twelve boards and
+281 to 317 for cadlab's router, and `tinytapeout-demo` 399 vias for 361.5. Beside 0.0.22
+in one quarter hour at a load of 6 to 24, four orders: `tinytapeout-demo` 342 vias and
+5353 mm for 329.5 and 5279, `lumenpnp-mobo` 337.5 and 5533 for 342.5 and 5576, none open
+either way.
+
+### Tried and not kept
+
+- *The price of a shared point rising at the first pitch too, once four rounds have
+  gained nothing.* `nrfmicro` the same. `corne-cherry` at 150 million nodes, three
+  orders: 535 vias and 7736 mm with the price rising to a thousand, 541 and 7881 to a
+  hundred, for 503 and 7411, with 7 and 1 connections open for 7.
+- *A via dearer in the rounds on a finer grid* (above).
+
+### What this does not show
+
+More than four runs, or other boards than cadlab's twelve; a quiet machine for the whole
+of a measurement; the routers side by side on the generated boards. The function that
+lays a track no wider than the pad it meets, `pcb::neck_at_pads`, changes no route and
+is not in these numbers: cadlab calls it on the result of either router, and with it no
+pad of the twelve boards is met by a track wider than itself (91 were on `corne-cherry`
+and 58 on `tinytapeout-demo` with `guide`'s routes before).
+
 ## PCB routing faster, and out of a deeper array
 
 What was changed after [the release above](#pcb-routing-from-routes-with-none-moved),

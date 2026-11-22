@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.22](https://github.com/KarpelesLab/guide/compare/v0.0.21...v0.0.22) - 2026-11-22
+
+### Added
+
+- *(pcb)* the negotiation for every net routes its nets eight at a time on its threads, and the balls deep in an array whose nets' own via fits get their vias in rows ([#32](https://github.com/KarpelesLab/guide/pull/32))
+
+### Other
+
+- *(benchmarks)* from routes with none moved as released, beside cadlab's router on the same fill ([#30](https://github.com/KarpelesLab/guide/pull/30))
+
 ## [0.0.21](https://github.com/KarpelesLab/guide/compare/v0.0.20...v0.0.21) - 2026-11-18
 
 ### Fixed

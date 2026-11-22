@@ -34,6 +34,17 @@ use crate::geom::{EntryId, LayerId, LayerSet, Point, Rect, Shape, SpatialIndex};
 use crate::id::NetId;
 use crate::space::FastMap;
 
+pub(crate) static DBG_FILL_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(crate) static DBG_FILLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(crate) static DBG_VIA_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(crate) static DBG_VIAS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(crate) static DBG_SEARCH_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(crate) static DBG_PUSHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(crate) fn dbg_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("GUIDE_DBG").is_some())
+}
+
 /// The eight directions, counter-clockwise from east.
 const DIRS: [(i32, i32); 8] = [
     (1, 0),
@@ -510,6 +521,7 @@ impl Board {
         by: i32,
         near: &mut Vec<EntryId>,
     ) {
+        let dbg_t = std::time::Instant::now();
         let group = &self.groups[gi];
         let grid = &self.grid;
         let cells = grid.cells();
@@ -584,6 +596,8 @@ impl Board {
         }
         let (blocks_w, blocks) = self.blocks();
         group.filled[layer * blocks + (by * blocks_w + bx) as usize].store(1, Ordering::Release);
+        DBG_FILL_NS.fetch_add(dbg_t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        DBG_FILLS.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Makes sure the block of a cell on a layer was asked about.
@@ -641,6 +655,7 @@ impl Board {
         let cell = self.grid.cidx(x, y);
         let mut c = group.vias[cell].load(Ordering::Acquire);
         if c == 0 {
+            let dbg_t = std::time::Instant::now();
             let at = self.grid.cell(x, y);
             let class = if group.alone {
                 match world.via(group.net, at, d, drill, None) {
@@ -661,6 +676,8 @@ impl Board {
                 }
             };
             group.vias[cell].store(c, Ordering::Release);
+            DBG_VIA_NS.fetch_add(dbg_t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            DBG_VIAS.fetch_add(1, Ordering::Relaxed);
         }
         match c {
             1 => true,
@@ -2539,6 +2556,8 @@ pub(crate) fn route<'r>(
             let it = it - 1;
             rounds = it + 1;
             let mut todo = batches(&reroute, &regions);
+            let dbg_batches = todo.len();
+            let dbg_round = (std::time::Instant::now(), run.work());
             todo.reverse();
             while let Some(batch) = todo.pop() {
                 // A batch that is stopped is as it was before it.
@@ -2614,6 +2633,24 @@ pub(crate) fn route<'r>(
                 points.extend(c.into_iter().map(|c| (c, i)));
             }
             let total: usize = net_conf.iter().sum();
+            if dbg_on() {
+                let vias: usize = nets.iter().map(|n| board.measure(n).0).sum();
+                let len: f64 = nets.iter().map(|n| board.measure(n).1).sum();
+                eprintln!(
+                    "DBGROUND it={it} t={:.2} round={:.2}s nodes={} rerouted={} batches={} shared={total} nets_conf={} vias={vias} len={:.0}mm pres={pres:.1} fill={:.2}s/{} via={:.2}s/{} cut={cut}",
+                    began.0.elapsed().as_secs_f64(),
+                    dbg_round.0.elapsed().as_secs_f64(),
+                    run.work() - dbg_round.1,
+                    reroute.len(),
+                    dbg_batches,
+                    net_conf.iter().filter(|&&c| c > 0).count(),
+                    len / 1e6,
+                    DBG_FILL_NS.load(Ordering::Relaxed) as f64 / 1e9,
+                    DBG_FILLS.load(Ordering::Relaxed),
+                    DBG_VIA_NS.load(Ordering::Relaxed) as f64 / 1e9,
+                    DBG_VIAS.load(Ordering::Relaxed),
+                );
+            }
             if !cut && best.as_ref().is_none_or(|b| total < b.0) {
                 best = Some((total, nets.iter().map(|n| n.wires.clone()).collect()));
                 best_at = it;
@@ -2880,6 +2917,10 @@ pub(crate) fn route<'r>(
         }
     }
     let taken_out = out.len();
+    let dbg_tail = std::time::Instant::now();
+    if dbg_on() {
+        eprintln!("DBGTAIL taken_out={taken_out} cut={cut} rounds={rounds}");
+    }
     out.sort_by_key(|&i| (nets[i].length, i));
     fn ctl<'a, 'r>(run: &'a Run<'r>) -> Ctl<'a, 'r> {
         Ctl {
@@ -2912,6 +2953,9 @@ pub(crate) fn route<'r>(
         if run.poll() {
             break;
         }
+    }
+    if dbg_on() {
+        eprintln!("DBGTAIL hard reroute took {:.2}s", dbg_tail.elapsed().as_secs_f64());
     }
     // Fewer vias: each net with any again, with vias dear, kept if it has fewer and is
     // little longer. After a negotiation that its share ended, the nets with the most
@@ -2952,6 +2996,9 @@ pub(crate) fn route<'r>(
         if run.poll() {
             break;
         }
+    }
+    if dbg_on() {
+        eprintln!("DBGTAIL fewer vias saved {vias_saved} at {:.2}s", dbg_tail.elapsed().as_secs_f64());
     }
     // What each net ends with, as a tree.
     let mut trees: Vec<Option<Tree>> = vec![None; jobs.len()];

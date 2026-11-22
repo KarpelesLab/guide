@@ -1255,6 +1255,30 @@ could go to the plane by a via where it is: `glasgow-revC3`'s nine nets with zon
 543 mm of track and 91 vias where cadlab's router has 485 mm and 120. With five steps
 for those nets they have 431 mm and 122, and the board's other nets the room.
 
+**And forty steps at the first pitch.** A board of two layers has its pours on the layers
+its pads are on. A pad that the routes cut off its pour has two ways back to its net: a
+track on its own layer, or a via to the pour on the other side. At ten steps the via won
+wherever the track would be longer than 2 mm, and `corne-cherry`'s two grounds ended a
+minute with 130 to 157 vias over four orders where cadlab's router has 65 to 71 and
+twice the track. Its router has them from its pass for fewer vias, which routes a net
+again a connection at a time; the pass here has all of a net of seventy pads to route
+again at once and to keep or not, and kept none of it, with all its time or without
+(measured: with the time to end, and the nets with planes first, 131 to 157). So a net
+with a plane pays the price of that pass from the first round on, forty steps: 92 to 111
+vias for the two grounds, 427 to 459 for the board where it had 459 to 519, with 4, 0, 1
+and 0 connections open for 0, 2, 0 and 2. At twice the pitch it stays at five: the
+boards there have planes on inner layers, where a via is the way.
+
+**Of two ways as long as each other, cleanup lays the one with less outside the pads.**
+Between two points that are not in line there are two octilinear ways, straight and then
+at 45 degrees or the other way round, and pulling a run tight took the first that was
+legal. Where a run ends on a pad that is long in one direction, one of the two is inside
+the pad for most of its first part, and what is inside a pad of the net is copper on
+copper, which a host leaves out: `buspirate-rs232`'s nets of two pads between a SOIC and
+its capacitors had 2.6 mm of track where the other way has 2.1 mm and cadlab's router
+1.8 mm. The pads' boxes say which; a part inside two of them counts once for each, which
+is nothing between two ways.
+
 **A track is laid no wider than a pad of its net where it meets it, by a function the
 host calls.** `pcb::neck_at_pads` takes tracks that are routed and the pads with the
 widest a track may be at each ([`PadEntry`]: the host's own measure of a pad, or the

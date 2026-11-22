@@ -71,6 +71,17 @@ const DIAG: f32 = 1.05;
 /// (`glasgow-revC3`'s nine nets with zones: 674 mm of track for cadlab's router's 481, and
 /// 91 vias for 120).
 const PLANE_VIA: f32 = 0.5;
+/// What a via costs a net with a plane at the first pitch, in steps: what a via costs when
+/// the nets are routed again for fewer of them ([`FEWER_VIA`]), from the first round on. A
+/// board of two layers has its pours on the layers its pads are on, and a pad that the
+/// routes cut off its pour has two ways back: a track on its own layer to copper of its
+/// net, or a via to the pour on the other side. At ten steps the via won wherever the
+/// track was longer than 2 mm, and the pass for fewer vias, which has all of a net with
+/// seventy pads to route again at once and keep or not, took none of them back
+/// (`corne-cherry`'s two grounds: 130 to 157 vias over four orders, for the 65 to 71 of
+/// cadlab's router, whose own pass takes a net a connection at a time). At forty they have
+/// 92 to 111, and the board 427 to 459 vias for 459 to 519 (`docs/benchmarks.md`).
+const PLANE_VIA_FIRST: f32 = 40.0;
 
 /// The price of a claimed point at first, what it is multiplied by after each round, and
 /// the most it is: past that, sharing is out of the question anyway, and a search only
@@ -2527,10 +2538,10 @@ pub(crate) fn route<'r>(
             keys: Vec::new(),
             bbox: (i32::MAX, i32::MAX, i32::MIN, i32::MIN),
             length,
-            via: if coarse && job.plane {
-                VIA * PLANE_VIA
-            } else {
-                VIA
+            via: match (job.plane, coarse) {
+                (true, true) => VIA * PLANE_VIA,
+                (true, false) => PLANE_VIA_FIRST,
+                (false, _) => VIA,
             },
         });
     }
@@ -3351,7 +3362,15 @@ fn tree_of(board: &Board, net: &WNet) -> Tree {
 
 #[cfg(test)]
 mod tests {
-    use super::{Conflict, Ranked, none_new, rank};
+    use super::{Conflict, FEWER_VIA, PLANE_VIA, PLANE_VIA_FIRST, Ranked, VIA, none_new, rank};
+
+    #[test]
+    fn a_via_of_a_net_with_a_plane_has_its_own_price_at_either_pitch() {
+        // At the first pitch, what a via costs when nets are routed again for fewer of
+        // them; at twice the pitch, as much track as ten steps of the first.
+        assert_eq!(PLANE_VIA_FIRST, FEWER_VIA);
+        assert_eq!(VIA * PLANE_VIA * 2.0, VIA);
+    }
 
     #[test]
     fn a_net_routed_with_others_stands_if_it_is_in_no_claim_that_it_was_not_in() {

@@ -5989,6 +5989,23 @@ are for the routes as they stay. `glasgow-revC3`, four orders at 60 s, before an
 `glasgow-revD1`, six layers, has 0.8 s for cleanup after a negotiation of 30 s, and is
 as it was: asking the grid of its board takes more than that.
 
+Not in a run with a budget of nodes (0.0.27). There the joining makes connections with
+the work that is left, each net routed again makes none, and 0.0.26, which had it first
+there too, left more open at 40 million nodes on one thread, the measure that does not
+move with the machine and that was not taken before that release:
+
+| 40 million nodes, three orders | 0.0.25 | 0.0.26 | 0.0.27 |
+|---|---|---|---|
+| `corne-cherry` | 36, 28, 22 | 48, 52, 52 | 36, 28, 22 |
+| `tinytapeout-demo` | 8, 4, 13 | 15, 11, 13 | 8, 4, 13 |
+| `glasgow-revC3` | 12, 15, 12 | 11, 12, 17 | 12, 15, 12 |
+| `glasgow-revD1` | 145, 136, 130 | 146, 136, 130 | 145, 136, 130 |
+| the nine boards that the budget cuts | 594 | 676 | 594 |
+
+With half of the work for it and the joining after, `corne-cherry` has 38 in the order
+given and `tinytapeout-demo` 10; with a quarter 38 and 9; with a tenth 38 and 8. At 150
+million nodes, two orders, 0.0.26 had `corne-cherry` at 12 and 0 for 8 and 0.
+
 ### Tried and not kept
 
 - *Two or three nets moved at once*, which the release below named: a net with vias is

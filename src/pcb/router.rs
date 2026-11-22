@@ -1315,37 +1315,9 @@ fn route_all<'a>(
             &with_routes
         };
         let mut world = world_of(design)?;
-        // In a run that moves routes, a pad that a route of its net leaves is out
-        // already and has no escape planned again: the board is the one without the
-        // routes, so that a pad still shut in has its escape where it fits, across
-        // another net's route if it has to, and the pads are told as joined by the
-        // board with them. Planned for every pad as in a first run, the escapes of the
-        // pads that were out cut the routes that had taken their places since, some
-        // sixty nets of `cynthion`'s 334 in each such run, for nothing.
-        let with_given;
-        let pads_of = if taken_back.is_empty()
-            || options.rip_ups == 0
-            || std::env::var("GUIDE_DBG_ESCJOIN").is_ok_and(|v| v == "0")
-        {
-            design
-        } else {
-            let mut d = design.clone();
-            for (&net, (segs, vias)) in &taken_back {
-                let (tracks, vias) = route_copper(design, net, segs, vias);
-                d.board.tracks.extend(tracks);
-                d.board.vias.extend(vias);
-            }
-            with_given = d;
-            &with_given
-        };
         // In a run with a budget, for the balls deep in an area array too.
-        let mut escapes = escape::plan(
-            pads_of,
-            &mut world,
-            pitch,
-            options.fanout_via,
-            run.bounded(),
-        );
+        let mut escapes =
+            escape::plan(design, &mut world, pitch, options.fanout_via, run.bounded());
         // And in a run with a budget, the crossings of the rows of fine pitch, around the
         // escapes: fixed copper of their nets as those are, as a route that rip-up may
         // take out is gone before the nets beside it have settled.

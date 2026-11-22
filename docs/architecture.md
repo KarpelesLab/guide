@@ -966,9 +966,12 @@ does it:
   is what is kept; but a negotiation that the share ends in with fewer points shared
   than a quarter of the connections has half of what is left then, once, as it is near
   its end and the passes have little to do after one that ends.
-- *Threads.* Nets whose regions are apart are routed side by side against the same
-  claims, on `RouteOptions::threads` threads, each with a world of its own to ask;
-  the batches are told by the nets alone, so the routes are the same on any number.
+- *Threads.* The nets of a round are routed eight at a time against the same claims,
+  on `RouteOptions::threads` threads, each with a world of its own to ask, and have
+  their turns in their order afterwards ([below](#decisions), "The nets of a round are
+  routed eight at a time"); the eights are told by the nets alone, so the routes are the
+  same on any number. Until 0.0.21 the nets routed side by side were those whose regions
+  were apart, 1.8 to a batch on a board whose nets span it.
 
 It is off by default: without a budget the passes complete the curated boards as they
 are, and a host that routes under one sets it.
@@ -1143,6 +1146,72 @@ balls, in the place where the ball beside it has its dog-bone planned. In such a
 the escapes are now planned with the routes where they are: a pad that its net's route
 leaves is out already, and no escape goes where another net's route is
 ([results](benchmarks.md#pcb-routing-from-routes-with-none-moved)).
+
+**The nets of a round are routed eight at a time, and each stands if it is in no claim
+it was not in** ([results](benchmarks.md#pcb-routing-faster-and-out-of-a-deeper-array)).
+The negotiation for every net routed side by side the nets whose regions were apart,
+the box of a net's pads and a quarter more: on `glasgow-revD1` that was 201 batches for
+363 nets, and three threads did little that one did not. Two ways to more were tried.
+*Routed ahead of its turn, a net keeps its route if nothing that its searches looked at
+has changed by then*: the routes are those of one thread exactly, and the searches that
+cost anything look at so much of the board that 80 to 90 % of what was routed ahead was
+routed again. *Routed with seven others against the claims as they are before any of
+the eight, a net keeps its route if that route is in no claim that it was not in when
+it was routed*, and is routed again at its turn if it is: 5 to 7 % of the nets are,
+with 10 to 13 % of the nodes, and by the nodes of its searches a round is 1.5, 1.8 and
+1.9 times as fast on two, three and four threads, where the longest search of each
+eight sets the limit. This is the second. It is what the engine's own batches do for
+graphs ([above](#decisions), "Determinism includes parallelism"), and for the same reason it is by a
+fixed number of nets, on one thread as on several: the routes are then the same on any
+number, which a run with a budget of nodes is measured by. A net of the eight does not
+see what the nets before it in the eight gave up, only that it runs into nothing new;
+the rounds end with as few points shared for the same nodes as with one net at a time
+(`glasgow-revD1`: 13129, 7620, 5255, 3685 and 2531 after the first five rounds for
+13307, 8019, 5014, 3723 and 2568). The claims and the prices are atomic counters that
+the searches read with no lock, and the nets that a place is only for are kept by block
+of cells, set once: a lock taken for each such place was 7 % of the samples of a run.
+
+**Late in a negotiation a search looks round its two ends first.** A search that has to
+enter a claimed point looks, before it does, at every place that costs less than
+entering it. Early that is a few steps round the point. From the sixth round on the
+price is five steps and more for each net that claims the point, at twice the pitch it
+ends at a thousand, and every place that costs less is the board: on `glasgow-revD1`
+the rounds from the ninth on cost 9 to 12 million nodes each for some ninety nets. From
+that price on (`NEAR_PRES`, where the costs round the targets are also first settled
+backwards), on the grid of twice the pitch, a search is kept to the box of its two ends and sixteen cells or half the
+box's longer side round it, and looks at the whole board only if it finds no way there.
+Those rounds then cost 2 to 3 million nodes, and the negotiation has fewer points
+shared for the same number of nodes (347 after 309 million for 459 after 299 million),
+with less track: what a search found beyond the box was a way round half the board.
+Not at the first pitch, on two layers: the price stops at thirty steps there, and the
+ways round that such a board needs are long (`corne-cherry` had 17 connections open over
+three orders at 150 million nodes with it for 8).
+The searches after the negotiation, where nothing claimed is entered, have a number of
+nodes each: a net with no way left looked at every free place of the board to say so,
+600 thousand nodes for one net of that board.
+
+**The balls deep in an array get their vias in rows where their nets' own via fits**
+([results](benchmarks.md#pcb-routing-faster-and-out-of-a-deeper-array)). The dog-bones
+of the balls too deep to get out on their layer were planned where the net's own via
+fits nowhere beside the ball and the smaller one does. Where the own via fits, as
+between the balls of `glasgow-revD1`'s array of 256 at 0.8 mm, nothing was planned: each
+net's search put its via where its own way was shortest, on the grid of the
+negotiation, and of 105 connections open at a minute 62 ended at that array, as did all
+14 that five minutes left. In an array of twelve such balls and more, most of which have
+a place for their own via, each ball of a net with no zone now has its via first: in
+the middle of four balls, on the side away from the array's middle, at the end of a
+track from the ball, the outermost ring first, as fixed copper of its net. The vias
+then stand in rows, and the lines of the balls between the rows are free on every other
+layer. It is the smaller via where a track of the net passes between two of those side
+by side and not between two of its own (0.45 mm vias at 0.8 mm leave 0.15 mm between
+their clearances for a track of 0.2 mm; 0.3 mm vias leave 0.3 mm). Not for a net with a
+zone: a via for every ball of a supply is more than the balls need where a pour joins
+some of them, and `cynthion` had 9 connections open in each of three orders for 8, with
+30 vias more. And no track out of the array from those vias on the other layers,
+though that is the rest of what a board routed by hand has: planned, ring by ring on
+the next inner layer along the lines of the balls, the tracks are walls to every net
+that is not theirs, and `glasgow-revD1` had 15 connections open for 5 at the same
+500 million nodes.
 
 **`needless` leaves a track from pad to pad, and `needless_between` tells it.** What a
 fill makes needless was told of vias and of the tracks that led to them: with a track

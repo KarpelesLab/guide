@@ -561,10 +561,6 @@ impl<'a> Run<'a> {
 
     /// Enters a phase, which is always told.
     pub(crate) fn phase(&self, phase: Phase) {
-        if super::whole::dbg_on() {
-            static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-            eprintln!("DBGPHASE {:?} t={:.2} work={}", phase, T0.get_or_init(std::time::Instant::now).elapsed().as_secs_f64(), self.work());
-        }
         let mut state = self.state.get();
         if state.phase != phase || self.last.get().is_none() {
             state.phase = phase;

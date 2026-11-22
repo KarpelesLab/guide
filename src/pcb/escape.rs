@@ -226,15 +226,23 @@ pub(crate) fn plan(
         };
         out = ring_exits(design, world, &found, &usable, &width_of);
         // Then the vias of the balls further in whose nets' own via fits beside them.
-        if dbg("GUIDE_DBG_AVIAS") {
-            let signals_only = !dbg("GUIDE_DBG_AVZ");
-            let wanted = |i: usize| {
-                routed(pads[i].net)
-                    .filter(|(net, _)| !joined(design, i) && !(signals_only && zoned(*net)))
-                    .and_then(|(net, spec)| spec.via.map(|v| (net, (v.diameter, v.drill))))
-            };
-            array_vias(design, world, &found, fanout, &wanted, &width_of, &mut out, &mut deep_vias);
-        }
+        // Not for a net with a zone: a via for each of its balls is more than they need
+        // where a pour joins some of them.
+        let wanted = |i: usize| {
+            routed(pads[i].net)
+                .filter(|(net, _)| !joined(design, i) && !zoned(*net))
+                .and_then(|(net, spec)| spec.via.map(|v| (net, (v.diameter, v.drill))))
+        };
+        array_vias(
+            design,
+            world,
+            &found,
+            fanout,
+            &wanted,
+            &width_of,
+            &mut out,
+            &mut deep_vias,
+        );
     }
     let mut regions: Vec<Region> = Vec::new();
     // The balls too deep in an area array to get out on their layer, whose nets' own via
@@ -559,11 +567,6 @@ fn deep(balls: &[Ball]) -> Vec<(usize, Point)> {
         .collect()
 }
 
-/// A switch for what is being tried, on unless the environment says 0.
-fn dbg(name: &str) -> bool {
-    std::env::var(name).map_or(true, |v| v != "0")
-}
-
 /// How many balls too deep to get out on their layer an array has for its vias and
 /// their ways out to be planned.
 const DEEP_ARRAY: usize = 12;
@@ -630,9 +633,13 @@ fn array_vias(
         let with_place = of_it
             .clone()
             .filter(|o| {
-                wanted(o.pad).zip(step_of(o)).is_some_and(|((net, own), step)| {
-                    places(o, step).iter().any(|&at| fits(world, o, net, at, own))
-                })
+                wanted(o.pad)
+                    .zip(step_of(o))
+                    .is_some_and(|((net, own), step)| {
+                        places(o, step)
+                            .iter()
+                            .any(|&at| fits(world, o, net, at, own))
+                    })
             })
             .count();
         let all = of_it.count();

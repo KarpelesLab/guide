@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.27](https://github.com/KarpelesLab/guide/compare/v0.0.26...v0.0.27) - 2026-11-22
+
+### Fixed
+
+- *(pcb)* in a run with a budget of nodes each net is routed again after its fills are joined again, as before 0.0.26 ([#46](https://github.com/KarpelesLab/guide/pull/46))
+
 ## [0.0.26](https://github.com/KarpelesLab/guide/compare/v0.0.25...v0.0.26) - 2026-11-22
 
 ### Added

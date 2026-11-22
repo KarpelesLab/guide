@@ -110,6 +110,18 @@ pub(crate) fn run(
                 break;
             }
         }
+        // And each run round the corners of what is beside it, off the lattice, now
+        // that the runs are where they stay.
+        for (j, (job, slot)) in jobs.iter().zip(copper.iter_mut()).enumerate() {
+            let Some(c) = slot else { continue };
+            if stopped(world) {
+                return expanded;
+            }
+            if !kept[j] {
+                round_corners(world, &job.ctx, c, params.pitch);
+                c.place(world, &job.ctx);
+            }
+        }
     }
     for j in order {
         let job = &jobs[j];
@@ -503,6 +515,13 @@ fn shorter(
     (expanded, better)
 }
 
+/// A net's copper, which is not in the world, without the vias that join nothing and with
+/// its runs pulled tight.
+pub(crate) fn tighten_net(world: &World<'_>, ctx: &NetCtx, c: &mut NetCopper) {
+    drop_idle_vias(c, ctx);
+    pull_tight(world, ctx, c);
+}
+
 /// A net's copper without the vias that join nothing, and with its runs pulled tight, in
 /// the world.
 fn tidy(world: &mut World<'_>, ctx: &NetCtx, c: &mut NetCopper) {
@@ -769,6 +788,200 @@ fn ways(a: Point, b: Point) -> Vec<Vec<Point>> {
 /// Replaces each run of tracks between pads, vias and branches with shortcuts where they
 /// are legal, longest first.
 pub(crate) fn pull_tight(world: &World<'_>, ctx: &NetCtx, c: &mut NetCopper) {
+    each_run(ctx, c, |l, run| tighten(world, ctx, l, run));
+}
+
+/// How many points of a run are looked at together for a way round the corners of what
+/// is beside them, how many pitches from the run a corner may be, how many corners are
+/// looked at, the nearest first, and how much shorter the way has to be, in nanometres.
+const ROUND_STRETCH: usize = 24;
+const ROUND_CORRIDOR: i64 = 4;
+const ROUND_CORNERS: usize = 240;
+const ROUND_GAIN: f64 = 1_000.0;
+
+/// Lays each run of tracks between pads, vias and branches round the corners of what is
+/// in its way, off the lattice: a run that the searches made keeps to the lattice's lines,
+/// and passes a pad or another net's track a part of a pitch further off than the rules
+/// ask, by a way that many steps longer. The corners are the world's
+/// ([`World::corners`]), a run's ends stay where they are, each stretch of it is the
+/// shortest way through the corners near it by tracks in the eight directions that the
+/// world allows, and is laid only if it is shorter: what cadlab's router does once its
+/// routes are final. Returns whether any run changed.
+pub(crate) fn round_corners(
+    world: &World<'_>,
+    ctx: &NetCtx,
+    c: &mut NetCopper,
+    pitch: i64,
+) -> bool {
+    let before = c.length();
+    each_run(ctx, c, |l, run| {
+        let round = round_run(world, ctx, l, run, pitch);
+        if round.len() == run.len() && round == run {
+            round
+        } else {
+            tighten(world, ctx, l, &round)
+        }
+    });
+    c.length() + ROUND_GAIN <= before
+}
+
+/// A run with each stretch of it laid round the corners beside it, where that is shorter.
+fn round_run(world: &World<'_>, ctx: &NetCtx, l: u8, run: &[Point], pitch: i64) -> Vec<Point> {
+    let mut pts = run.to_vec();
+    let mut i = 0;
+    while i + 1 < pts.len() {
+        if world.run().is_some_and(super::control::Run::poll) {
+            break;
+        }
+        let j = (i + ROUND_STRETCH).min(pts.len() - 1);
+        if j - i >= 2
+            && let Some(mid) = stretch(world, ctx, l, &pts[i..=j], pitch)
+        {
+            let n = mid.len();
+            pts.splice(i + 1..j, mid);
+            i = (i + n + 1).min(pts.len() - 1);
+            continue;
+        }
+        i = if j + 1 == pts.len() || j == i + 1 {
+            j
+        } else {
+            j - 1
+        };
+    }
+    pts
+}
+
+/// A shorter way between the two ends of `pts` through the corners near it, without the
+/// ends, if there is one.
+fn stretch(
+    world: &World<'_>,
+    ctx: &NetCtx,
+    l: u8,
+    pts: &[Point],
+    pitch: i64,
+) -> Option<Vec<Point>> {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+    let (a, b) = (pts[0], pts[pts.len() - 1]);
+    let cur: f64 = pts.windows(2).map(|w| dist(w[0], w[1])).sum();
+    if cur - octile(a, b) < ROUND_GAIN {
+        return None;
+    }
+    let corridor = ROUND_CORRIDOR * pitch;
+    let mut area = Rect::new(a, a);
+    for &p in pts {
+        area = area.union(&Rect::new(p, p));
+    }
+    let area = area.expand(corridor);
+    let mut found = Vec::new();
+    world.corners(
+        ctx.net,
+        LayerId(l),
+        ctx.widths[usize::from(l)],
+        &area,
+        &mut found,
+    );
+    // How far a point is from the run, squared.
+    let off = |q: Point| -> f64 {
+        pts.windows(2)
+            .map(|w| {
+                let (ux, uy) = ((w[1].x - w[0].x) as f64, (w[1].y - w[0].y) as f64);
+                let (vx, vy) = ((q.x - w[0].x) as f64, (q.y - w[0].y) as f64);
+                let len2 = ux * ux + uy * uy;
+                let t = if len2 > 0.0 {
+                    ((vx * ux + vy * uy) / len2).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let (dx, dy) = (vx - t * ux, vy - t * uy);
+                dx * dx + dy * dy
+            })
+            .fold(f64::MAX, f64::min)
+    };
+    let mut cand: Vec<(f64, Point)> = found
+        .into_iter()
+        // A corner helps only if a way through it is shorter than the stretch.
+        .filter(|&v| octile(a, v) + octile(v, b) < cur - ROUND_GAIN)
+        .map(|v| (off(v), v))
+        .filter(|&(d2, _)| d2 <= (corridor as f64) * (corridor as f64))
+        .collect();
+    cand.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
+    cand.dedup_by(|x, y| x.1 == y.1);
+    cand.truncate(ROUND_CORNERS);
+    let mut nodes = vec![a, b];
+    nodes.extend(cand.into_iter().map(|c| c.1).filter(|&v| v != a && v != b));
+    // A way from one place to another that the world allows: its turn, if it has one.
+    let edge = |u: Point, v: Point| -> Option<Vec<Point>> {
+        ways(u, v).into_iter().find_map(|way| {
+            let mut from = u;
+            way.iter()
+                .all(|&to| {
+                    let ok = legal(world, ctx, from, to, l);
+                    from = to;
+                    ok
+                })
+                .then(|| way[..way.len() - 1].to_vec())
+        })
+    };
+    let n = nodes.len();
+    let mut g = vec![f64::MAX; n];
+    let mut parent: Vec<Option<(usize, Vec<Point>)>> = vec![None; n];
+    let mut closed = vec![false; n];
+    let mut heap: BinaryHeap<Reverse<(u64, usize)>> = BinaryHeap::new();
+    let bound = cur - ROUND_GAIN;
+    g[0] = 0.0;
+    heap.push(Reverse((octile(a, b).to_bits(), 0)));
+    let mut checks = 0usize;
+    while let Some(Reverse((_, u))) = heap.pop() {
+        if closed[u] {
+            continue;
+        }
+        closed[u] = true;
+        if u == 1 {
+            break;
+        }
+        for v in 1..n {
+            if closed[v] || v == u {
+                continue;
+            }
+            let est = g[u] + octile(nodes[u], nodes[v]);
+            if est >= g[v] || est + octile(nodes[v], b) >= bound {
+                continue;
+            }
+            checks += 1;
+            if checks > 4 * ROUND_CORNERS * 8 {
+                return None;
+            }
+            if let Some(mid) = edge(nodes[u], nodes[v]) {
+                g[v] = est;
+                parent[v] = Some((u, mid));
+                heap.push(Reverse(((est + octile(nodes[v], b)).to_bits(), v)));
+            }
+        }
+    }
+    if g[1] >= bound {
+        return None;
+    }
+    // The points between the two ends, from the far one back.
+    let mut out: Vec<Point> = Vec::new();
+    let mut v = 1;
+    while let Some((u, mid)) = parent[v].take() {
+        out.extend(mid.into_iter().rev());
+        if u != 0 {
+            out.push(nodes[u]);
+        }
+        v = u;
+        if v == 0 {
+            break;
+        }
+    }
+    out.reverse();
+    Some(out)
+}
+
+/// Each run of a net's tracks between pads, vias and branches, on its layer, replaced by
+/// what `f` makes of its points.
+fn each_run(ctx: &NetCtx, c: &mut NetCopper, mut f: impl FnMut(u8, &[Point]) -> Vec<Point>) {
     let mut anchors: Vec<Point> = ctx.pads.iter().map(|p| p.center).collect();
     anchors.extend(c.vias.iter().copied());
     anchors.sort_unstable();
@@ -807,7 +1020,7 @@ pub(crate) fn pull_tight(world: &World<'_>, ctx: &NetCtx, c: &mut NetCopper) {
             };
             seg = n;
         }
-        let tight = tighten(world, ctx, l, &run);
+        let tight = f(l, &run);
         for w in tight.windows(2) {
             out.push(Seg {
                 a: w[0],
@@ -1087,6 +1300,72 @@ mod tests {
                 .any(|s| (s.a, s.b) == (a, turn) || (s.a, s.b) == (turn, a)),
             "{c:?}"
         );
+    }
+
+    #[test]
+    fn a_run_is_laid_round_the_corners_of_what_is_beside_it() {
+        // A net of two pads 10 mm apart on the top layer with a pad of another net
+        // halfway, and its route round that pad along a line a millimetre off: 0.4 mm
+        // further than a track 0.2 mm wide has to stay from a pad 0.6 mm wide at a
+        // clearance of 0.2 mm.
+        let pads = vec![smd(0, 0, 1), smd(10 * MM, 0, 1), smd(5 * MM, 0, 2)];
+        let d = design(2, pads, 3);
+        let options = RouteOptions::default();
+        let mut world = World::new(
+            &d.board,
+            &d.rules,
+            &d.outline,
+            d.edge_clearance,
+            &d.obstacles,
+        )
+        .unwrap();
+        world.configure(&d, &options);
+        let pitch = router::pitch(&d, &options);
+        let jobs = router::jobs(&d, &world, pitch, &[], &[]);
+        let ctx = &jobs[0].ctx;
+        let seg = |a: (i64, i64), b: (i64, i64)| Seg {
+            a: Point::new(a.0, a.1),
+            b: Point::new(b.0, b.1),
+            l: 0,
+        };
+        let mut c = NetCopper::default();
+        c.segs = vec![
+            seg((0, 0), (3 * MM, 0)),
+            seg((3 * MM, 0), (4 * MM, MM)),
+            seg((4 * MM, MM), (6 * MM, MM)),
+            seg((6 * MM, MM), (7 * MM, 0)),
+            seg((7 * MM, 0), (10 * MM, 0)),
+        ];
+        c.place(&mut world, ctx);
+        // Pulled tight on the points it has, it stays as it is: no shortcut is legal.
+        let before = c.length();
+        super::pull_tight(&world, ctx, &mut c);
+        assert!((c.length() - before).abs() < 1.0);
+        assert!(super::round_corners(&world, ctx, &mut c, pitch));
+        c.place(&mut world, ctx);
+        // Shorter by what the line was further off than it had to be, on a diagonal
+        // either side: some 0.3 mm.
+        assert!(
+            c.length() < before - 300_000.0,
+            "{} for {before}",
+            c.length()
+        );
+        assert_eq!(c.pieces(ctx).apart(), 0);
+        // Every track is one that the world allows, in one of the eight directions, and
+        // the nearest of them is as far from the pad as the rules ask and no further
+        // than a micrometre more.
+        let mut nearest = i64::MAX;
+        for s in &c.segs {
+            let (dx, dy) = (s.b.x - s.a.x, s.b.y - s.a.y);
+            assert!(dx == 0 || dy == 0 || dx.abs() == dy.abs(), "{s:?}");
+            assert!(super::legal(&world, ctx, s.a, s.b, 0), "{s:?}");
+            if s.a.y == s.b.y && s.a.x.min(s.b.x) <= 5 * MM && s.a.x.max(s.b.x) >= 5 * MM {
+                nearest = nearest.min(s.a.y.abs());
+            }
+        }
+        assert!((600_000..=601_000).contains(&nearest), "{nearest}: {c:?}");
+        // A second time finds nothing shorter.
+        assert!(!super::round_corners(&world, ctx, &mut c, pitch));
     }
 
     #[test]

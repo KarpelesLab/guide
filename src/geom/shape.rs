@@ -437,6 +437,21 @@ impl Shape {
         Ok(Area::of_shape(self, 0, tolerance, ArcSide::Outside)?.rings())
     }
 
+    /// The corners of what the shape is grown from, a circle's centre, the two ends of a
+    /// track's centerline or a polygon's vertices, in order and each once, with whether
+    /// that is a polygon, and how far the shape reaches beyond it, doubled.
+    pub(crate) fn core_corners(&self) -> (Vec<Point>, bool, i64) {
+        let mut corners = Vec::new();
+        self.core.any_edge(|a, b| {
+            corners.push(a);
+            corners.push(b);
+            false
+        });
+        corners.sort_unstable();
+        corners.dedup();
+        (corners, self.core.is_polygon(), self.radius2 + self.error2)
+    }
+
     /// Whether distances to this shape are exact. Only arcs' are not.
     #[inline]
     pub fn is_exact(&self) -> bool {

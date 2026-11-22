@@ -599,7 +599,10 @@ pub struct RouteOptions {
     pub planes: bool,
     /// What a track costs for its length inside another net's plane, a zone on an inner
     /// layer, over its length anywhere else, as a fraction of its length. The default is 1,
-    /// twice the cost, so that routes cut planes in pieces only where they must.
+    /// twice the cost, so that routes cut planes in pieces only where they must. Not in
+    /// the negotiation for every net at once ([`whole`](RouteOptions::whole)), where a
+    /// plane costs nothing: at twice their length there, the nets of a board with planes
+    /// went under each other where they had room to go round (`docs/benchmarks.md`).
     pub plane_cost: f64,
     /// Whether a via may be in a pad that has no hole, or touch one, its own net's included.
     /// The default is true. Without, as for boards whose vias are not filled and capped, a
@@ -781,7 +784,14 @@ pub struct RouteOptions {
     /// grids of two thirds, a half and a third of the pitch, in the order of the nets
     /// given and in others, where its share has room for them, and the one that ends
     /// with the fewest shared is kept: a board laid out for routing by hand has ways
-    /// between its parts that are off the lines of the pitch.
+    /// between its parts that are off the lines of the pitch. At twice the pitch it has
+    /// forty rounds at most, and at the first a hundred.
+    ///
+    /// In a run with a budget, once every route is where it is, each net is routed again
+    /// where the others are, by the negotiation's search on its grid, and kept if it has
+    /// fewer vias for little more track, or as many and is shorter
+    /// ([`Stats::again`]): not a net of a [pair](Design::pairs), one with a
+    /// [length](Design::lengths) to keep, or one whose routes are stubs to its plane.
     pub whole: bool,
     /// The share of the time that a deadline leaves, and of the work that a budget
     /// leaves, that [`whole`](RouteOptions::whole) may spend. The default is 0.5. A
@@ -809,6 +819,12 @@ pub struct RouteOptions {
     /// them: a host that routes in several runs sets it in the last. Not the routes of a
     /// net of a [pair](Design::pairs) or of one with a [length](Design::lengths) to
     /// keep, which stay as they are.
+    ///
+    /// In a run with a budget, each net is first routed again where the others are, as
+    /// after a negotiation ([`whole`](RouteOptions::whole)), at the pitch; and once the
+    /// runs are as short as the searches make them, each is laid round the corners of
+    /// what is beside it, off the lattice, where that is shorter: a track then passes a
+    /// pad or another net's track as near as the rules let it.
     pub shorten: bool,
 }
 
@@ -948,6 +964,11 @@ pub struct Stats {
     /// The connections that those routes made, and the vias that routing each net again
     /// for fewer of them saved.
     pub whole_made: (usize, usize),
+    /// Of the nets routed again where the others are, once every route is where it is
+    /// ([`RouteOptions::whole`] in a run with a budget, and
+    /// [`RouteOptions::shorten`]): those looked at, those kept as they were routed again,
+    /// and the vias that these have fewer.
+    pub again: (usize, usize, usize),
 }
 
 /// The result of [`route`].

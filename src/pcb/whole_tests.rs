@@ -1,8 +1,10 @@
 //! Tests of the negotiation for every net at once.
 
-use super::tests::{MM, design, outline, route_checked, smd};
+use super::tests::{MM, design, outline, route_checked, smd, through};
 use super::{RouteOptions, route};
-use crate::geom::{Point, Rect};
+use crate::geom::drc::Keepout;
+use crate::geom::{LayerId, LayerSet, Point, Rect, Shape};
+use crate::id::NetId;
 
 /// Nets across each other, each from the left edge to the right at another height, so
 /// that every one crosses every other.
@@ -175,4 +177,48 @@ fn on_more_than_two_layers_the_routes_are_legal_and_the_same_on_any_number_of_th
         assert_eq!(routed.tracks, again.tracks);
         assert_eq!(routed.vias, again.vias);
     }
+}
+
+#[test]
+fn a_plane_of_another_net_costs_a_track_nothing_in_the_negotiation() {
+    // Four layers, the second a plane of net 1, whose two pads are on one side of the
+    // board, and net 2 between two pads with holes on the other side, 14 mm apart across
+    // the direction of the top layer, with tracks kept off the two layers below the
+    // plane. On the plane's layer, along its direction, the way costs its 35 steps; on
+    // the top layer, in diagonals from side to side, half as much again. At twice its
+    // length inside the plane, as the passes that route a net at a time pay, the top
+    // layer was the cheaper of the two.
+    let mut d = design(
+        4,
+        vec![
+            through(3 * MM, 5 * MM, 1, 4),
+            through(3 * MM, 15 * MM, 1, 4),
+            through(14 * MM, 3 * MM, 2, 4),
+            through(14 * MM, 17 * MM, 2, 4),
+        ],
+        3,
+    );
+    d.outline = outline(Rect::new(Point::new(0, 0), Point::new(20 * MM, 20 * MM)));
+    d.edge_clearance = 300_000;
+    d.zones.zones.push(super::zone_tests::zone(1, 1, 20 * MM));
+    d.board.keepouts.push(Keepout {
+        shape: Shape::rect(Rect::new(Point::new(0, 0), Point::new(20 * MM, 20 * MM))).unwrap(),
+        layers: LayerSet::EMPTY.with(LayerId(2)).with(LayerId(3)),
+        tracks: true,
+        vias: false,
+        pads: false,
+        except: Vec::new(),
+    });
+    let options = RouteOptions {
+        cleanup: false,
+        ..whole()
+    };
+    let routed = route_checked(&d, &options);
+    assert!(routed.unrouted.is_empty());
+    assert!(routed.stats.whole.3 >= 1, "{:?}", routed.stats.whole);
+    let net = Some(NetId(2));
+    assert_eq!(routed.vias.iter().filter(|v| v.net == net).count(), 0);
+    let tracks: Vec<_> = routed.tracks.iter().filter(|t| t.net == net).collect();
+    assert!(!tracks.is_empty());
+    assert!(tracks.iter().all(|t| t.layer == LayerId(1)), "{tracks:?}");
 }

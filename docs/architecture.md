@@ -1269,6 +1269,12 @@ vias for the two grounds, 427 to 459 for the board where it had 459 to 519, with
 and 0 connections open for 0, 2, 0 and 2. At twice the pitch it stays at five: the
 boards there have planes on inner layers, where a via is the way.
 
+The stubs that take a pad back to a fill that the routes cut it off, once routing is
+over, have the same choice on two layers and made the same one at the price of the
+passes, 1 mm of track: there a via costs them eight times that (`lumenpnp-ringlight`'s
+ground: one via and 4.4 mm of track for two and 2.9 mm; `corne-cherry` with both, four
+orders at 60 s: 418 to 456 vias and 1, 0, 0 and 1 connections open).
+
 **Of two ways as long as each other, cleanup lays the one with less outside the pads.**
 Between two points that are not in line there are two octilinear ways, straight and then
 at 45 degrees or the other way round, and pulling a run tight took the first that was

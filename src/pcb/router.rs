@@ -1062,6 +1062,15 @@ const POUR_ROUNDS: usize = 3;
 /// The share of a work budget that routing leaves for those stubs.
 const POUR_WORK: f64 = 0.03;
 
+/// How many times its price a via costs such a stub on a board of two layers: there the
+/// fill that a pad was cut off is on the pad's own layer, and a track along that layer to
+/// copper of its net takes it back as a via to the other side does. At the price of the
+/// passes the via won wherever the track was longer than 1 mm (`lumenpnp-ringlight`'s
+/// ground: two vias and 2.9 mm of track in four orders of four, where cadlab's router has
+/// one via and 8.5 mm; with this, one and 4.4 mm). On more layers a net's plane is inside
+/// the board, and a via is the way to it.
+const POUR_VIA_TWO: f64 = 8.0;
+
 /// What a negotiation for every net that ended with points still shared is begun again
 /// as, in order: the pitch (2, see [`WHOLE_FINER`]) and which other order of the nets.
 const WHOLE_ORDERS: [(i64, u64); 3] = [(2, 1), (2, 2), (2, 3)];
@@ -2876,6 +2885,11 @@ fn route_all<'a>(
                         partial: true,
                         stubs: true,
                         forest: true,
+                        via_cost: if rules.layer_count() <= 2 {
+                            params.via_cost * POUR_VIA_TWO
+                        } else {
+                            params.via_cost
+                        },
                         ..params
                     };
                     let found = detail::route_net(&world, &ctx, &steps, stubs, None, None);

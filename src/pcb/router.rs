@@ -54,6 +54,11 @@ const HISTORY_STEP: f64 = 0.5;
 /// have.
 const AGAIN_PART: f64 = 0.5;
 
+/// The least time worth routing each net again in: the grid is asked of the board first,
+/// which on a board of six layers takes more than this (`glasgow-revD1`), and with less
+/// the joining of what the routes cut off their fills has it all.
+const AGAIN_LEAST: std::time::Duration = std::time::Duration::from_millis(1000);
+
 /// How many times a pair routed first may be moved out of a net's way, and routed again.
 const PAIR_RIP_UPS: u32 = 4;
 
@@ -716,6 +721,11 @@ pub(crate) fn run_from(
         routed.open = report::explain(design, &world, survey.open, &known);
     }
     routed.failed = failed
+        .keys()
+        .copied()
+        .filter(|n| routed.unrouted.binary_search(n).is_ok())
+        .collect();
+    routed.apart = apart
         .keys()
         .copied()
         .filter(|n| routed.unrouted.binary_search(n).is_ok())
@@ -2339,6 +2349,12 @@ fn route_all<'a>(
                     ..params
                 });
             }
+            // Whether a search that may cross the routes of every net, none of them locked,
+            // found no way for the net whole, on the finest lattice of the run: the board
+            // has none, wherever the others go.
+            let all_free =
+                rest.is_none() && params.pitch == finest.pitch && !world_ref.any_locked();
+            let mut no_way = false;
             for &partial in &attempts {
                 if done || options.rip_ups == 0 {
                     break;
@@ -2363,7 +2379,10 @@ fn route_all<'a>(
                         crossed = true;
                         done = true;
                     }
-                    Err(f) => why = Some(f),
+                    Err(f) => {
+                        why = Some(f);
+                        no_way |= shut_in(all_free, partial.partial, ctx.terminals, f);
+                    }
                 }
             }
             let partial = if options.keep_partial && !partial.partial && ctx.terminals > 2 {
@@ -2527,6 +2546,9 @@ fn route_all<'a>(
             // The first time a net finds no way, it is looked for one on the board with no
             // route on it. Not a net with a plane: its terminals there are places on a fill
             // that the routes of the others have not cut yet.
+            if hurried && no_way && !plane {
+                floor[j] = Some(1);
+            }
             if hurried && failed[j].is_some() && floor[j].is_none() && !plane {
                 if bare.is_none() {
                     let mut world = world_of(before_pairs)?;
@@ -2867,6 +2889,75 @@ fn route_all<'a>(
         if cleaned && !(options.cleanup && options.shorten) {
             break;
         }
+        // A net that this run has not moved is as the earlier run's cleanup left it.
+        let still: Vec<bool> = (0..jobs.len())
+            .map(|j| match (&as_given[j], &copper[j]) {
+                (Some((segs, vias)), Some(c)) => {
+                    let mut now = c.segs.clone();
+                    now.sort_unstable();
+                    let mut at = c.vias.clone();
+                    at.sort_unstable();
+                    *segs == now && *vias == at
+                }
+                _ => false,
+            })
+            .collect();
+        // Each net again where the others are, by the negotiation's search: for fewer
+        // vias and shorter ways, before the searches of cleanup, which cost many times
+        // as much a net.
+        //
+        // Before what the routes cut off the fills is joined to them again: a net laid
+        // another way cuts them elsewhere, and the stubs are for the routes as they stay.
+        // Not with less than [`AGAIN_LEAST`] to do it in, which is the joining's then.
+        if !cleaned
+            && options.cleanup
+            && (options.whole || options.shorten)
+            && hurried
+            && !run.poll()
+            && run
+                .part_left()
+                .is_none_or(|left| left.mul_f64(AGAIN_PART) >= AGAIN_LEAST)
+            && let Some(mut base) = make_with(&pairs_first)
+        {
+            run.phase(Phase::Cleanup);
+            for (tracks, vias) in &back_copper {
+                let _ = pairs::Undo::place(&mut base, tracks, vias);
+            }
+            let may: Vec<bool> = jobs
+                .iter()
+                .map(|job| {
+                    let net = job.ctx.net;
+                    !design
+                        .pairs
+                        .iter()
+                        .any(|p| p.positive == net || p.negative == net)
+                        && !design.lengths.iter().any(|l| l.nets.contains(&net))
+                })
+                .collect();
+            let until = run
+                .part_left()
+                .map(|left| std::time::Instant::now() + left.mul_f64(AGAIN_PART));
+            // On the negotiation's grid, twice the pitch on more than two layers, where
+            // the routes are its own; at the pitch in a run for shorter ways, whose routes
+            // are where they stay, and a way that only the finer grid has is one to take.
+            let coarse = rules.layer_count() > 2 && !options.shorten;
+            let again = whole::again(
+                design,
+                &base,
+                &mut world,
+                &jobs,
+                &mut copper,
+                &may,
+                options,
+                run,
+                (pitch, coarse),
+                bounds,
+                until,
+            );
+            stats.again.0 += again.tried;
+            stats.again.1 += again.kept;
+            stats.again.2 += again.vias;
+        }
         if let Some(pours) = &pours {
             for _ in 0..POUR_ROUNDS {
                 if run.poll() {
@@ -2952,65 +3043,6 @@ fn route_all<'a>(
             continue;
         }
         run.phase(Phase::Cleanup);
-        // A net that this run has not moved is as the earlier run's cleanup left it.
-        let still: Vec<bool> = (0..jobs.len())
-            .map(|j| match (&as_given[j], &copper[j]) {
-                (Some((segs, vias)), Some(c)) => {
-                    let mut now = c.segs.clone();
-                    now.sort_unstable();
-                    let mut at = c.vias.clone();
-                    at.sort_unstable();
-                    *segs == now && *vias == at
-                }
-                _ => false,
-            })
-            .collect();
-        // Each net again where the others are, by the negotiation's search: for fewer
-        // vias and shorter ways, before the searches of cleanup, which cost many times
-        // as much a net.
-        if (options.whole || options.shorten)
-            && hurried
-            && !run.poll()
-            && let Some(mut base) = make_with(&pairs_first)
-        {
-            for (tracks, vias) in &back_copper {
-                let _ = pairs::Undo::place(&mut base, tracks, vias);
-            }
-            let may: Vec<bool> = jobs
-                .iter()
-                .map(|job| {
-                    let net = job.ctx.net;
-                    !design
-                        .pairs
-                        .iter()
-                        .any(|p| p.positive == net || p.negative == net)
-                        && !design.lengths.iter().any(|l| l.nets.contains(&net))
-                })
-                .collect();
-            let until = run
-                .part_left()
-                .map(|left| std::time::Instant::now() + left.mul_f64(AGAIN_PART));
-            // On the negotiation's grid, twice the pitch on more than two layers, where
-            // the routes are its own; at the pitch in a run for shorter ways, whose routes
-            // are where they stay, and a way that only the finer grid has is one to take.
-            let coarse = rules.layer_count() > 2 && !options.shorten;
-            let again = whole::again(
-                design,
-                &base,
-                &mut world,
-                &jobs,
-                &mut copper,
-                &may,
-                options,
-                run,
-                (pitch, coarse),
-                bounds,
-                until,
-            );
-            stats.again.0 += again.tried;
-            stats.again.1 += again.kept;
-            stats.again.2 += again.vias;
-        }
         stats.expanded += cleanup::run(
             &mut world,
             design,
@@ -3187,6 +3219,7 @@ fn route_all<'a>(
             nets
         },
         failed: Vec::new(),
+        apart: Vec::new(),
         taken_back: {
             given.sort_unstable();
             given
@@ -3227,6 +3260,22 @@ fn apart_on(bare: &World<'_>, ctx: &NetCtx, params: Params, finest: Params) -> (
             ..params
         };
         let steps = StepCache::default();
+        // A net of two terminals is joined or it is not: the search for it whole says
+        // which, where the one that keeps what it reaches goes on from the other
+        // terminal with a share of the nodes, and says nothing if that runs out, with
+        // the first shut in after a few hundred.
+        if ctx.terminals == 2 {
+            let whole = Params {
+                partial: false,
+                forest: false,
+                ..p
+            };
+            return match detail::route_net(bare, ctx, &steps, whole, None, None) {
+                Ok(t) => (Some(0), t.expanded),
+                Err((Failure::NoPath, expanded)) => (Some(1), expanded),
+                Err((Failure::Budget, expanded)) => (None, expanded),
+            };
+        }
         match detail::route_net(bare, ctx, &steps, p, None, None) {
             Ok(t) if !t.out_of_budget => (
                 Some(NetCopper::from_tree(ctx, &t).pieces(ctx).apart()),
@@ -3242,6 +3291,11 @@ fn apart_on(bare: &World<'_>, ctx: &NetCtx, params: Params, finest: Params) -> (
         return (apart, expanded);
     }
     let (finer, more) = look(finest);
+    // A net of two terminals with no way on the lattice of `params` is apart only if the
+    // finest lattice says so too: its one connection is all it has.
+    if ctx.terminals == 2 {
+        return (finer.unwrap_or(0), expanded + more);
+    }
     (finer.map_or(apart, |f| f.min(apart)), expanded + more)
 }
 
@@ -3253,6 +3307,18 @@ fn apart_on(bare: &World<'_>, ctx: &NetCtx, params: Params, finest: Params) -> (
 /// none in the next, with whatever this one made in the way as well.
 fn said_all(pass: usize, began: (usize, usize), ended: (usize, usize)) -> bool {
     pass > 0 && began == ended
+}
+
+/// Whether a search that failed as `why` has said that a net has no way on the board,
+/// whatever the routes of the others: one for the net whole, of two terminals, on the
+/// finest lattice of the run, that might cross the routes of every net, `all_free`, and
+/// went everywhere it could. What it could
+/// not cross is the board's own, and stays. The passes after it have nothing to look for
+/// ([`stuck`]): cynthion's eight nets at its net ties, pads that no track leaves at the
+/// board's clearance, had a search of the whole board in each pass on the finer lattice,
+/// 9 s each for one of them, and the run no time for what comes after routing.
+fn shut_in(all_free: bool, partial: bool, terminals: usize, why: Failure) -> bool {
+    all_free && !partial && terminals == 2 && why == Failure::NoPath
 }
 
 /// Whether a net has no more to gain: `floor` of its connections have no way on the board
@@ -3780,6 +3846,125 @@ mod tests {
     use super::{BRANCH_CUTS, BRANCH_TERMINALS, loses_branches, row_origins, said_all};
     use crate::geom::drc::Pad;
     use crate::geom::{Point, Rect, Shape};
+
+    #[test]
+    fn a_net_of_two_pads_with_no_way_across_every_route_has_no_more_turns() {
+        use super::super::detail::Failure;
+        use super::{shut_in, stuck};
+        // The search for the net whole that may cross every route, on the finest lattice
+        // of the run, and went everywhere: the net has none.
+        assert!(shut_in(true, false, 2, Failure::NoPath));
+        // Not one that ran out of nodes, nor one that kept what it reached, nor one for a
+        // net of more pads, which may still join some of them, nor one with a net locked
+        // or on a lattice that a finer one follows.
+        assert!(!shut_in(true, false, 2, Failure::Budget));
+        assert!(!shut_in(true, true, 2, Failure::NoPath));
+        assert!(!shut_in(true, false, 3, Failure::NoPath));
+        assert!(!shut_in(false, false, 2, Failure::NoPath));
+        // Such a net is at its floor: one connection, and none to be had.
+        assert!(stuck(Some(1), 2, false, 0));
+        assert!(!stuck(None, 2, false, 0));
+    }
+
+    #[test]
+    fn a_search_across_routes_looks_from_its_other_end_before_it_has_the_whole_board() {
+        use super::super::detail::{
+            Corridor, Failure, History, NetCtx, Params, RipUp, StepCache, TermPad, route_net,
+        };
+        use super::super::world::World;
+        use crate::geom::drc::Keepout;
+        use crate::geom::{LayerId, LayerSet};
+        use crate::id::NetId;
+        // A net of two pads 100 mm apart on a board of one layer, 400 mm by 300 mm: the
+        // first is walled in by keepouts, which nothing crosses, and the second by a
+        // route of another net, which a search may cross. The look from the second finds
+        // it shut in with nothing crossed, so the search that may cross is from it, and
+        // went over the three million places of the board to say that the first pad is
+        // not to be reached. It has 200 000 nodes for that now, and then the first pad
+        // has a look of its own, which ends at its walls.
+        let mut d = design(1, vec![smd(0, 0, 1), smd(100 * MM, 0, 1)], 3);
+        let wall = |a: Point, b: Point| Keepout {
+            shape: Shape::rect(Rect::new(a, b)).unwrap(),
+            layers: LayerSet::first(1),
+            tracks: true,
+            vias: true,
+            pads: false,
+            except: Vec::new(),
+        };
+        d.board.keepouts.extend([
+            wall(Point::new(-MM, -MM), Point::new(MM, -MM / 2)),
+            wall(Point::new(-MM, MM / 2), Point::new(MM, MM)),
+            wall(Point::new(-MM, -MM), Point::new(-MM / 2, MM)),
+            wall(Point::new(MM / 2, -MM), Point::new(MM, MM)),
+        ]);
+        let bounds = Rect::new(
+            Point::new(-150 * MM, -150 * MM),
+            Point::new(250 * MM, 150 * MM),
+        );
+        let mut world = World::new(
+            &d.board,
+            &d.rules,
+            &d.outline,
+            d.edge_clearance,
+            &d.obstacles,
+        )
+        .unwrap();
+        let (x, r) = (100 * MM, MM);
+        let ring = [
+            Point::new(x - r, -r),
+            Point::new(x + r, -r),
+            Point::new(x + r, r),
+            Point::new(x - r, r),
+        ];
+        for k in 0..4 {
+            let side = Shape::track(ring[k], ring[(k + 1) % 4], 200_000).unwrap();
+            world.add_track(NetId(2), LayerId(0), side);
+        }
+        let pad = |x: i64, terminal: usize| TermPad {
+            center: Point::new(x, 0),
+            layers: LayerSet::EMPTY.with(LayerId(0)),
+            bbox: Rect::new(Point::new(x, 0), Point::new(x, 0)),
+            terminal,
+        };
+        let ctx = NetCtx::new(
+            NetId(1),
+            vec![200_000],
+            None,
+            vec![pad(0, 0), pad(x, 1)],
+            2,
+            8 * 200_000,
+        );
+        let params = Params {
+            pitch: 200_000,
+            via_cost: 3.0,
+            layer_bias: 0.0,
+            bounds,
+            max_expansions: 16_000_000,
+            under_pads: false,
+            partial: false,
+            stubs: false,
+            forest: false,
+        };
+        let history = History {
+            grid: Corridor {
+                origin: bounds.min(),
+                tile: 400 * MM,
+                cols: 1,
+                rows: 1,
+                cells: vec![0],
+            },
+            cost: vec![0.0],
+        };
+        let rip = RipUp {
+            penalty: Some(10.0),
+            history: &history,
+        };
+        let cache = StepCache::default();
+        match route_net(&world, &ctx, &cache, params, None, Some(rip)) {
+            Err((Failure::NoPath, expanded)) => assert!(expanded < 500_000, "{expanded}"),
+            other => panic!("{:?}", other.map(|t| t.expanded)),
+        }
+    }
 
     #[test]
     fn a_pass_on_the_finer_lattice_that_moved_no_net_is_the_last() {

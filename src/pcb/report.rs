@@ -134,7 +134,9 @@ pub enum Cause {
     /// of the nets and no budget joins them: two halves of a board that only the schematic
     /// joins, for one. Found in a run with a [budget](super::RouteOptions::work_budget) or
     /// a deadline, the first time a search for the net fails, and such a net then has no
-    /// more turns once it has every other connection.
+    /// more turns once it has every other connection. A connection of such a net with a
+    /// pad that items of the board alone shut in nearby has [`Cause::Enclosed`] instead,
+    /// which says by what; [`Routed::apart`](super::Routed::apart) has the nets either way.
     Apart,
 }
 
@@ -357,6 +359,7 @@ pub(crate) fn explain(
                 &mut (0..design.board.pads.len())
                     .filter(|p| design.board.pads[*p].net == Some(o.net) && !o.piece.contains(p)),
             );
+            let mut ends = (o.from, o.to);
             let cause = if via.is_none() && piece & rest == 0 {
                 Cause::NoLayer
             } else if known
@@ -364,7 +367,23 @@ pub(crate) fn explain(
                 .get(&o.net)
                 .is_some_and(|&f| counts.get(&o.net).is_some_and(|&c| c <= f))
             {
-                Cause::Apart
+                // A pad that the board's own shuts in nearby says by what: a host can
+                // name the pad beside it, where apart says only that there is no way.
+                // Whichever end of the connection it is, and that end is then the one
+                // the connection is told as going to.
+                let items = items.get_or_insert_with(|| Items::new(design));
+                let own = |pad: usize| {
+                    enclosed(design, world, items, o.net, pad, known)
+                        .filter(|by| by.iter().all(|b| matches!(b, Blocker::Item(_))))
+                };
+                if let Some(by) = own(o.to) {
+                    Cause::Enclosed { by }
+                } else if let Some(by) = own(o.from) {
+                    ends = (o.to, o.from);
+                    Cause::Enclosed { by }
+                } else {
+                    Cause::Apart
+                }
             } else {
                 match known.failed.get(&o.net) {
                     Some(Failure::Budget) => Cause::OutOfBudget,
@@ -381,8 +400,8 @@ pub(crate) fn explain(
             };
             OpenConnection {
                 net: o.net,
-                from: endpoint(design, o.from),
-                to: endpoint(design, o.to),
+                from: endpoint(design, ends.0),
+                to: endpoint(design, ends.1),
                 cause,
             }
         })

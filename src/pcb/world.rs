@@ -897,6 +897,11 @@ impl<'r> World<'r> {
         verdict
     }
 
+    /// Whether any net's routes are locked.
+    pub(crate) fn any_locked(&self) -> bool {
+        self.locked.iter().any(|&l| l)
+    }
+
     /// Whether a net's routes are locked, as [`set_locked`](World::set_locked) makes them.
     pub(crate) fn locked(&self, net: NetId) -> bool {
         self.locked.get(net.index()).copied().unwrap_or(false)

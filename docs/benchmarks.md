@@ -5911,6 +5911,107 @@ at a time.
   are what it has for the balls left shut in, and no other way to those was tried.
 - More than one thread, or a deadline: the comparison is by nodes.
 
+## PCB routing with a net that has no way told once
+
+What was changed after [the release below](#pcb-routing-with-each-net-routed-again-where-the-others-are),
+0.0.25, with the same aim: level with cadlab's own router or ahead of it on every measure
+on every board of its corpus ([decisions](architecture.md#decisions)). It is still not
+met. Measured on 2026-11-23 through cadlab's adapter and its `route_bench`, three threads
+for the negotiation, on a machine of 64 threads at a load of 3 to 15, with a checkout of
+this crate before it was released, and with prints in it that are in no release. The
+table beside cadlab's router with 0.0.26 from crates.io is in cadlab's `docs/ROUTER.md`
+and its decision D124.
+
+### What a connection with no way cost
+
+`cynthion`, four layers, has eight nets of two pads at its four net ties, each with a pad
+that no track leaves at the board's clearance from the pads beside it. One run of 60 s,
+the first run of the adapter, whose deadline is at 42 s:
+
+| | 0.0.25 | 0.0.26 |
+|---|---|---|
+| the first pass on the finer lattice | 12.5 s | 2.5 s |
+| the second | 9.3 s | none of its nets has a turn |
+| one of the eight nets, in each of the two passes | 6 523 250 nodes, 9.5 s | 238 059 nodes, 0.24 s, once |
+| the first run ends at | 40 to 42 s, its deadline | 20.7 s |
+| pads short of two spokes as the adapter ends, four orders | 5, 5, 1 and 1, two with none in two orders | 1, 1, 1 and 1 |
+
+- **The search from the pad that routes shut in went over the whole board.** A search
+  that may cross other nets' routes is from the terminal that a look found shut in with
+  nothing crossed, first within a window and then anywhere. Where the other end is the
+  one that nothing reaches, shut in by pads, that search crosses every route of the
+  board before it says so. It now has 200 000 nodes once it leaves its window, then a
+  look as long has from the other end, and only then all that it may expand
+  (`detail::DEEP_LOOK`).
+- **The search on the board with no route said nothing of them.** It kept what it
+  reached and went on from the other terminal with an eighth of its nodes, 500 257 on
+  this board, ran out, and a search that runs out says nothing: the eight nets had no
+  floor, and a turn in every pass. For a net of two terminals it is now the search for
+  the net whole, which says that it has a way, that it has none, or that it ran out.
+- **A search that may cross every route and finds none has said it for the run.** On the
+  finest lattice of the run, for a net of two terminals whole, with no net locked: what
+  it could not cross is the board's own (`router::shut_in`). Such a net has no more
+  turns, in no pass and in no chain of the settling.
+- **The run tells them** (`Routed::apart`), for the host's later runs to leave them
+  out, and their open connections say what shuts the pad in where the board's own does
+  (`Cause::Enclosed`, whichever end of the connection it is), which
+  `Cause::Apart` had hidden: cadlab's report of the eight was "the board keeps U1.14
+  apart from R59.2" in the first build of this, where its own router says "no legal way
+  out of R59.2 for a 0.127mm track: pad R59.1".
+
+### What telling the needless vias cost
+
+`pcb::needless` and `pcb::needless_between`, which cadlab's adapter asks after its runs, on
+`cynthion` as routed: 2.2 s and 1.9 s, of which 1.7 s and 1.5 s for the ground alone, 597
+tracks and vias against 184 pieces of fill. Not the measuring: each piece was cut into
+parts of few edges the first time a point was asked of it, 0.1 to 0.5 s for a piece of
+a plane, 15 such cuts in a run of 40 s, for the 1600 points that the question asks. A
+piece now answers its first 4096 points by its edges (`planes::DIRECT_HOLDS`), and has
+its parts when it has been asked more: 0.34 s and 0.28 s for the two, and no piece cut in
+that run. At 40 million nodes on one thread `cynthion`, `glasgow-revC3` and
+`tinytapeout-demo` have the same connections, vias and track to the tenth of a
+millimetre as before it, in as long.
+
+### Each net routed again before the fills are joined again
+
+In a run that its deadline ends, cleanup has 8 % of what the negotiation left, and the
+joining of what the routes cut off their fills came first: `glasgow-revC3` had 0.35 s of
+it left for [each net routed again](#pcb-routing-with-each-net-routed-again-where-the-others-are),
+89 nets of 369, where all of them take 0.7 s. It is first now, with half of cleanup's
+time and not with less than a second (`router::AGAIN_LEAST`), and the stubs to the fills
+are for the routes as they stay. `glasgow-revC3`, four orders at 60 s, before and after:
+
+| | open | vias | track |
+|---|---|---|---|
+| before | 12, 6, 10, 8 | 420, 398, 397, 410 | 3676, 3727, 3729, 3635 mm |
+| after | 11, 6, 9, 8 | 418, 398, 389, 409 | 3589, 3729, 3668, 3586 mm |
+
+`glasgow-revD1`, six layers, has 0.8 s for cleanup after a negotiation of 30 s, and is
+as it was: asking the grid of its board takes more than that.
+
+### Tried and not kept
+
+- *Two or three nets moved at once*, which the release below named: a net with vias is
+  looked for a way with fewer across the claims of the others at a price, the one or two
+  nets it crosses are taken out, the net is laid and they are routed again round it,
+  kept if all are whole and have fewer vias together. `tinytapeout-demo`, the first run:
+  of 92 nets with vias, 17 have such a way across one or two nets at 8 steps a claimed
+  point; for 2 the world does not allow it, for 11 a net crossed has no way round it, 2
+  are routed whole, and 1 is kept, for one via of 359. At 40 and at 150 steps 7 and 6
+  have such a way and none is kept.
+- *More of the time for cleanup*, 12 % for 8 %: `glasgow-revC3` 3623 mm for 3628 over
+  four orders. And 30 % and 50 % on `glasgow-revD1`: each net routed again begins with
+  the nets of most vias, 400 000 nodes each, and has 2 and 18 nets in 1 s and 2.2 s; the
+  board 14 and 13 connections open for 8, with 10 664 and 10 583 mm for 10 777.
+
+### What this does not show
+
+More than four runs of anything, and one of most. `corne-cherry`'s time, which is its
+negotiation at the first pitch: 151 rounds in 25 s, with 5389 points shared after the
+first, 100 after the thirtieth, 36 to 60 from the sixty-first to the seventy-third, and
+one from the hundred and thirty-eighth on. `glasgow-revD1`'s track, above. The vias and
+the track of `tinytapeout-demo`, as in the release below.
+
 ## PCB routing with each net routed again where the others are
 
 What was changed after [the release below](#pcb-routing-with-a-pour-on-the-pads-own-layer),

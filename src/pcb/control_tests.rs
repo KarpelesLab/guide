@@ -1092,7 +1092,64 @@ fn two_halves_that_the_board_keeps_apart_are_told_and_cost_one_look() {
     assert_eq!(routed.open.len(), 1);
     assert_eq!(routed.open[0].net, NetId(1));
     assert_eq!(routed.open[0].cause, Cause::Apart);
+    assert_eq!(routed.apart, vec![NetId(1)]);
     // And not at the price of every pass and every chain looking over half the board
     // again: one look with no route on it, and the search that failed before it.
     assert!(routed.stats.work < 2_000_000, "{}", routed.stats.work);
+}
+
+#[test]
+fn a_pad_that_the_board_shuts_in_is_told_whatever_room_the_other_end_has() {
+    use super::Cause;
+    // A net of two pads on a board of 300 mm by 200 mm, the first walled in by four
+    // keepouts and the other with the whole board to itself, and a net beside them that
+    // routes. The search for the first net with no route on the board is for the net
+    // whole: the one that kept what it reached went on from the second pad with an eighth
+    // of its nodes, half a million, ran out of them on a board of this size, and said
+    // nothing, so that the net had every pass to look again.
+    let mut d = design(
+        2,
+        vec![
+            smd(0, 0, 1),
+            smd(100 * MM, 0, 1),
+            smd(0, 5 * MM, 2),
+            smd(3 * MM, 5 * MM, 2),
+        ],
+        3,
+    );
+    let wall = |a: Point, b: Point| Keepout {
+        shape: Shape::rect(Rect::new(a, b)).unwrap(),
+        layers: LayerSet::first(2),
+        tracks: true,
+        vias: true,
+        pads: false,
+        except: Vec::new(),
+    };
+    d.board.keepouts.extend([
+        wall(Point::new(-MM, -MM), Point::new(MM, -MM / 2)),
+        wall(Point::new(-MM, MM / 2), Point::new(MM, MM)),
+        wall(Point::new(-MM, -MM), Point::new(-MM / 2, MM)),
+        wall(Point::new(MM / 2, -MM), Point::new(MM, MM)),
+    ]);
+    d.outline = outline(Rect::new(
+        Point::new(-100 * MM, -100 * MM),
+        Point::new(200 * MM, 100 * MM),
+    ));
+    let options = RouteOptions {
+        work_budget: Some(50_000_000),
+        ..RouteOptions::default()
+    };
+    let routed = route(&d, &options).unwrap();
+    assert_eq!(routed.stopped, None);
+    assert_eq!(routed.unrouted, vec![NetId(1)]);
+    // The net is apart, and its open connection says what shuts the pad in.
+    assert_eq!(routed.apart, vec![NetId(1)]);
+    assert_eq!(routed.open.len(), 1);
+    assert!(
+        matches!(&routed.open[0].cause, Cause::Enclosed { by } if by.len() == 4),
+        "{:?}",
+        routed.open[0].cause
+    );
+    // For less than the half million nodes that the look from the far pad had.
+    assert!(routed.stats.work < 400_000, "{}", routed.stats.work);
 }

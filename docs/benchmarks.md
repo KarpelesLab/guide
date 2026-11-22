@@ -5911,6 +5911,181 @@ at a time.
   are what it has for the balls left shut in, and no other way to those was tried.
 - More than one thread, or a deadline: the comparison is by nodes.
 
+## PCB routing faster, and out of a deeper array
+
+What was changed after [the release above](#pcb-routing-from-routes-with-none-moved),
+0.0.21, for the board that a minute does not finish: `glasgow-revD1`, six layers, 1948
+connections, an array of 256 balls. Its first run was stopped at its share of the minute
+with some 120 connections open, three minutes left 23 and five minutes 14, all at the
+array ([decisions](architecture.md#decisions)). Measured on 2026-11-22 through cadlab's
+adapter and its `route_bench`, on a machine of 64 threads that other work shared: with
+budgets of nodes where two versions of the code are compared, which do not depend on
+the load, and with a deadline, two runs side by side, where the load was low (10 to 16).
+
+### Where the time went
+
+0.0.21, `glasgow-revD1`, 60 s, the negotiation on three threads, timed phase by phase
+and round by round, and sampled (61 and 77 stacks of the running threads):
+
+| | from | to | what |
+|---|---|---|---|
+| escapes, planes, global | 0 | 2.5 s | |
+| negotiation | 2.5 s | 22.5 s | rounds of 6.4, 4.0, 4.2 and 4.3 s for 7.2, 13.5, 14.2 and 14.6 million nodes, a fifth cut by the share; 3469 points shared, 251 nets in another's way |
+| what is shared taken out, routed again | 22.5 s | 25.4 s | 133 nets |
+| passes | 25.4 s | 40.7 s | 13 million nodes, 0.86 million a second |
+| cleanup, report | 40.7 s | 42.2 s | 117 connections open |
+
+- *The rounds were on one thread, mostly.* The nets routed side by side were those
+  whose regions were apart: 236 batches for 561 nets in the first round, 201 for 363 in
+  the second.
+- *A fifth of the searches takes nine tenths of the nodes.* In the second round 340
+  searches of 1521 expand more than 20 thousand nodes each, 23.0 of 25.9 million
+  together, and 64 of them more than 100 thousand, 10.3 million. They are connections
+  across the board: one of 283 steps and four vias costs 392 where its bound says 290,
+  and a search looks at every place on six layers that the difference pays for. Their
+  targets are small (57 searches with a box of targets over 16 cells), so the bound is
+  not what is loose about them.
+- *The first round asks the board about 83 658 blocks of cells*, 3.4 s of its threads'
+  time, each step from a cell asked both ways.
+- *A lock.* The nets that a place is only for, round every pad, were in one map behind
+  a lock that every search took for each such place: 7 % of the samples.
+- *After the negotiation*, a net with no way where nothing is claimed looks at every
+  free place of the board to say so: 612 thousand nodes for one net, 2.9 s for 133.
+- *Late rounds.* Given the nodes (600 million), the rounds from the ninth on cost 9 to
+  12 million each for some ninety nets, 120 thousand a net: at a price of a hundred
+  steps for a shared point, a search that has to share looks at the board first.
+- *The array.* `escape::plan` planned nothing for it: its nets' own via fits between
+  four balls, so no ball was one for the smaller via, and each net's search put its via
+  where its way was shortest.
+
+`tinytapeout-demo`, the same way: fifty rounds in 19.6 s for 74.5 million nodes, its vias
+203 after the first and 438 after the last, 380 once each net was routed again for
+fewer; then 4.5 s of passes and settling and 8.4 s of cleanup; a first run of 35.2 s.
+
+### What
+
+- **The nets of a round, eight at a time.** Routed at once against the claims as they
+  are before any of the eight, on as many threads as there are; then, in their order,
+  each gives up its claims and claims what it was routed as if that is in no claim that
+  it was not in then, and is routed again at its turn if it is. Eight on one thread as
+  on several, so the routes are the same on any number.
+- **No lock in a search.** The claims and the prices are atomic counters, the nets that
+  a place is only for are kept by block of cells and set once.
+- **A step asked one way.** The step back from a cell of the same block is the same
+  track.
+- **Late in a negotiation at twice the pitch a search looks round its two ends first**:
+  from a price of five steps on, the box of the two ends and sixteen cells or half its longer side round
+  it, and the whole board only with no way there. And a search after the negotiation,
+  where nothing claimed is entered, has 100 thousand nodes or eight times what its net
+  took last.
+- **Of two nodes that cost the same, the one nearer the targets first.**
+- **The vias of the balls deep in an array, where their nets' own via fits**: in the
+  middle of four balls, on the side away from the array's middle, the outermost ring
+  first, for the nets with no zone, in an array of twelve such balls and more most of
+  which have a place for their own via; the smaller via where a track of the net passes
+  between two of those side by side and not between two of its own.
+
+### Results
+
+*The same routes on one thread and on three.* `tinytapeout-demo`, 150 million nodes: 0
+connections open, 328 vias, 5532.2 mm, 130.7 million nodes spent, on both, and the same
+again with the steps asked both ways.
+
+*What three threads make of a round*, by the nodes of its searches: the longest search
+of each eight, or a third of the eight's nodes if that is more, and the nets routed
+again on top.
+
+| | routed again at their turn | of the nodes | two threads | three | four | six |
+|---|---|---|---|---|---|---|
+| `glasgow-revD1`, 18 rounds | 5 to 7 % of the nets | 10 to 13 % | 1.5 | 1.8 | 1.9 | 1.9 |
+| `tinytapeout-demo`, 70 rounds | 10 % | 12 % | 1.6 | 1.9 | 2.0 | 2.0 |
+
+*With a deadline*, `glasgow-revD1` at 60 s, 0.0.21 and this side by side, three threads
+each, the machine's load 10 to 16:
+
+| | rounds in the share | their times | nodes a second in them | points shared at the end | nets taken out | open after the first run | nodes of the first run | open at the end |
+|---|---|---|---|---|---|---|---|---|
+| 0.0.21 | 4 and a part | 6.4, 4.0, 4.2, 4.3 s | 3.4 million | 3469 | 133 | 116 to 117 | 78.7 million | 109 to 110 |
+| now | 7 | 5.4, 3.0, 2.6, 2.7, 2.9, 1.7, 1.3 s | 4.2 million | 1107 | 80 | 21 to 40 | 97.9 million | 19 to 39 |
+
+Two runs of each; the first run ends at its share, 42.2 s, in all four.
+
+*With a budget of nodes*, one thread:
+
+| `glasgow-revD1`, 500 million nodes | open after the first run | at the end |
+|---|---|---|
+| eight at a time, no more | 25 | 24 |
+| the vias of the array, for every net | 12 | 12 |
+| those, and the search round its two ends late | 5 | 5 |
+| the vias for the nets with no zone, and the search round its ends | 3 | (not run to its end) |
+
+At 40 million nodes, three orders of the nets, the nine boards a budget cuts, 0.0.21
+and this behind the same adapter (cadlab at its commit `921ac7a`, whose fill differs
+from the one of the tables above): 593 connections open for 615. `nrfmicro` 2 for 0,
+`sweep-v2.2` 9 for 9, `corne-cherry` 80 for 81, `tinytapeout-demo` 33 for 23,
+`buspirate5-rev10` and `lumenpnp-mobo` none either way, `cynthion` 24 for 24,
+`glasgow-revC3` 34 for 41, `glasgow-revD1` 411 for 437: that board has no negotiation at
+this budget, and the vias of its array alone are worth those 26. `tinytapeout-demo`'s
+negotiation is cut by this budget in its first rounds, and what the nets routed again
+at their turn cost, a tenth of the nodes, is rounds that it does not have; on the fill
+before, the same two had 22 for 30.
+
+At 150 million nodes, two orders: `corne-cherry` 0 and 2 open for 1 and 0,
+`tinytapeout-demo` 0 and 0 either way with 325 and 322 vias for 353 and 364,
+`glasgow-revC3` 8 and 6 for 9 and 9, `cynthion` 8 and 8 and `sweep-v2.2` 3 and 3 either
+way, `buspirate5-rev10` and `lumenpnp-mobo` none.
+
+### Tried and not kept
+
+- **A net routed ahead of its turn, kept if nothing that its searches looked at has
+  changed.** The routes are those of one net at a time exactly, and the threads are
+  busy; but a search of 100 thousand nodes has looked at a sixth of the board, and 40 %
+  of the nodes routed ahead were routed again with six nets ahead in turns, 80 to 90 %
+  with the threads never waiting.
+- **More nets at once where one of them took long the last time**, up to 48, so that
+  the others fill the time of the longest: 12 % of the nets routed again for 6 %, and by
+  the nodes 1.9 times as fast on three threads for 1.8, 2.2 on four for 1.9.
+- **The search round its two ends at the first pitch too**, on two layers:
+  `corne-cherry` at 150 million nodes over three orders, 6, 9 and 2 connections open
+  with it, 4, 4 and 0 without, 2, 1 and 1 with 48 cells and the whole box round the
+  ends, and 1, 2 and 1 with 0.0.21. The price stops at thirty steps there, and the ways
+  round that such a board needs are long.
+- **The search round its two ends in every round.** With 24 cells and half the box, the
+  first eight rounds are the same to the point; with 12 and a quarter they cost 15 to
+  20 % less, for as many points shared. It is where a price makes a search look far that
+  it gains.
+- **A way out of the array from each via on another layer**, ring by ring on the next
+  inner layer, straight out along the vias' own row or along a line of balls beside
+  it, kept as copper of its net if a route ends on it. The tracks are walls to every net
+  that is not theirs: at 500 million nodes `glasgow-revD1` had 15 connections open for 5.
+- **The vias of the array for the nets with zones too**: `cynthion` 9 connections open
+  in each of three orders at 40 million nodes for 8, with 30 vias more, and
+  `glasgow-revD1` 5 after its first run at 500 million for 3. **And in an array most of
+  whose balls need the smaller via**, where the dog-bones were planned already:
+  `glasgow-revC3` had 12 open after its first run at 150 million nodes for 7, and 8 at
+  the end either way.
+- **A dearer via late in the negotiation**, 20 and 30 steps for 10 once fewer points are
+  shared than half the connections: `tinytapeout-demo` at 150 million nodes, two orders,
+  326 and 352 vias, and 335 and 327, for 308 and 335, with 0 and 4 open, and 1 and 0,
+  for 0 and 3. The wires routed late are few; the vias are made before.
+- **Escapes only for the pads that no route of their net leaves, in a run that moves
+  routes**, the board without the routes as before, so that a pad still shut in has its
+  escape across another net's route and one that is out has none planned again.
+  `cynthion`'s such runs route 13 nets again for 48, with no rip-up for 121, and end
+  with the same board to the via (8 open, 422 vias) in 63 million nodes for 74; but
+  `glasgow-revC3` over four orders at 150 million nodes has 8, 7, 7 and 6 open for 8, 6,
+  7 and 4.
+
+### What this does not show
+
+- A quiet machine for all of it: the times of the table with a deadline are from the
+  quarter of an hour in which the load was 10 to 16, and at a load of 60 the same runs
+  made four rounds in their share and left 140 to 195 open, 0.0.21 beside them 230.
+- What the passes cost after the negotiation, 15 s of `glasgow-revD1`'s first run at
+  0.86 million nodes a second on one thread: not touched.
+- `tinytapeout-demo`'s vias: made in its first dozen rounds, and no price tried late
+  takes them back.
+
 ## PCB differential pairs and lengths
 
 Differential pairs routed side by side, and nets meandered to their lengths, by `pcb::route`

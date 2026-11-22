@@ -174,7 +174,13 @@
 //! in an area array to get out on its layer, whose net's own via fits nowhere beside it,
 //! gets a dog-bone with [`RouteOptions::fanout_via`], on the side away from the array's
 //! middle, so that the vias of its four quarters leave the rows through the middle to
-//! the tracks of the other layers. Before those, each ball of the second ring of an
+//! the tracks of the other layers. In an array of twelve such balls and more, most of
+//! which have room for their nets' own via beside them, each ball of a net with no zone
+//! has that via planned the same way, in the middle of four balls on the side away from
+//! the array's middle, with the smaller one where a track of the net passes between two
+//! of those side by side and not between two of its own: found by each net's search for
+//! itself, a via is wherever that net's way was shortest, and the nets after it have no
+//! way between. Before those, each ball of the second ring of an
 //! array that one track passes between two balls of has its way out between two balls of
 //! the first ring as copper of its net: a track that runs along the first ring, the
 //! shortest way from one side of the array to the other, would close those ways for
@@ -661,7 +667,10 @@ pub struct RouteOptions {
     /// the smallest the board's maker drills, or `None`, the default, for none. A pad
     /// trapped in its footprint that its net's own via fits nowhere near, as between the
     /// balls of a BGA of 0.8 mm pitch, gets its dog-bone with this one, if it is smaller
-    /// and fits. Every other via of the net is its own, [`NetSpec::via`].
+    /// and fits; and so does a ball deep in an area array whose own via fits beside it,
+    /// in a run with a budget, where a track of its net passes between two of these side
+    /// by side and not between two of its own. Every other via of the net is its own,
+    /// [`NetSpec::via`].
     pub fanout_via: Option<ViaSize>,
     /// Whether a run with a [budget](RouteOptions::work_budget) or a deadline plans the
     /// ways out of rows of fine pitch a row at a time, before anything is routed. The
@@ -773,8 +782,12 @@ pub struct RouteOptions {
     /// of the connections has the same share of what is left then, once: it is near its
     /// end, and the passes have little to do after one that ends.
     pub whole_share: f64,
-    /// How many threads [`whole`](RouteOptions::whole) routes nets on, side by side where
-    /// their pads are apart. The default is 1; the routes are the same for any number.
+    /// How many threads [`whole`](RouteOptions::whole) routes nets on. The default is 1;
+    /// the routes are the same for any number. The nets of a round are routed a few at a
+    /// time, each against what the others claim before any of the few, and have their
+    /// turns one after another: what a net was routed as stands if it is in no claim
+    /// that it was not in when it was routed, and it is routed again at its turn if not.
+    /// The few are as many on one thread as on several.
     pub threads: usize,
     /// Whether cleanup looks for a shorter way for each run of a net's tracks from one
     /// pad or branch to the next, with every other route where it is. The default is

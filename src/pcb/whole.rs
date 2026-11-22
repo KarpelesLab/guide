@@ -162,6 +162,17 @@ const POCKET: usize = 20_000;
 /// are routed without a word of those just before them.
 const WAVE: usize = 8;
 
+/// How far round the box of its two ends a search looks late in a negotiation, from the
+/// price of [`NEAR_PRES`] on: this many cells at least, and this many hundredths of the
+/// box's longer side. A search that has to enter a claimed point looks first at every
+/// place that costs less than entering it, and at a price of a hundred steps and more
+/// that is the board: on `glasgow-revD1`, six layers, the rounds from the ninth on cost
+/// 9 to 12 million nodes each for some ninety nets and 2 to 3 million within the box,
+/// with fewer points shared for the same number of nodes (`docs/benchmarks.md`). With
+/// no way in the box, the whole board is looked at as before.
+const WINDOW: i32 = 16;
+const WINDOW_SHARE: i32 = 50;
+
 /// How many nodes at least a search may expand where nothing claimed is entered, once a
 /// negotiation is over, and how many times what its net took the last time it was routed
 /// across the claims: a net with no way left looks at every place that the board's own
@@ -1898,7 +1909,6 @@ impl Board {
         sc: &mut Scratch,
         task: Task,
         ctl: &Ctl<'_, '_>,
-        margin: Option<(i32, i32)>,
     ) -> Ahead {
         let mut net = task.net;
         let old = net.wires.clone();
@@ -1920,10 +1930,10 @@ impl Board {
             sc,
             &mut net,
             task.mode,
-            VIA,
+            task.via,
             ctl,
             task.keep.as_deref(),
-            margin,
+            task.margin,
         );
         if res.is_err() {
             net.wires = old;
@@ -2158,6 +2168,10 @@ struct Task {
     /// Its wires to route it from, if it keeps any.
     keep: Option<Vec<bool>>,
     mode: Mode,
+    /// What a via costs it.
+    via: f32,
+    /// How far round the ends of a connection its searches look, if not everywhere.
+    margin: Option<(i32, i32)>,
     /// The nodes that its searches may expand.
     limit: u64,
 }
@@ -2773,11 +2787,12 @@ pub(crate) fn route<'r>(
     // Fresh nodes of rejected nets, and what the waves would take on 2, 3, 4 and 6 threads, in nodes.
     let mut dbg_ideal = (0u64, [0u64; 4]);
     // How far round the ends of a connection its search looks, in cells at least and in
-    // hundredths of what the ends span.
-    let margin: Option<(i32, i32)> = {
-        let least = dbg_num("GUIDE_DBG_WIN", 0) as i32;
-        (least > 0).then(|| (least, dbg_num("GUIDE_DBG_WINF", 25) as i32))
-    };
+    // hundredths of what the ends span, from which price on.
+    let window: (i32, i32) = (
+        dbg_num("GUIDE_DBG_WIN", WINDOW as usize) as i32,
+        dbg_num("GUIDE_DBG_WINF", WINDOW_SHARE as usize) as i32,
+    );
+    let window_from = dbg_num("GUIDE_DBG_WINP", NEAR_PRES as usize) as f32;
     std::thread::scope(|scope| {
         for _ in 1..threads {
             let done_tx = done_tx.clone();
@@ -2811,7 +2826,7 @@ pub(crate) fn route<'r>(
                         limit: task.limit,
                     };
                     let at = task.at;
-                    let routed = board.route_task(&world, &mut sc, task, &ctl, margin);
+                    let routed = board.route_task(&world, &mut sc, task, &ctl);
                     if done_tx.send((at, routed)).is_err() {
                         break;
                     }
@@ -2826,6 +2841,7 @@ pub(crate) fn route<'r>(
         let mut extended = false;
         let mut it = 0;
         let mut round_began = began;
+        let mut last_shared = usize::MAX / 4;
         // Each time the pads cut off are told, the rounds have as many more for them.
         while it < ROUNDS + POUR_MORE * pour_rounds {
             it += 1;
@@ -2845,6 +2861,12 @@ pub(crate) fn route<'r>(
             // routed.
             let mode = Mode::Share(pres);
             let partial = it > 0;
+            let margin = (window.0 > 0 && pres >= window_from).then_some(window);
+            let via_now = if pres >= window_from && last_shared * 2 < connections {
+                dbg_num("GUIDE_DBG_VIALATE", VIA as usize) as f32
+            } else {
+                VIA
+            };
             let n = reroute.len();
             let mut head = 0;
             'turns: while head < n {
@@ -2861,6 +2883,8 @@ pub(crate) fn route<'r>(
                             keep: partial.then(|| board.clear_wires(net)),
                             net: net.clone(),
                             mode,
+                            via: via_now,
+                            margin,
                             limit: budget,
                         });
                     }
@@ -2884,7 +2908,7 @@ pub(crate) fn route<'r>(
                         };
                         let at = task.at;
                         routed[at - head] =
-                            Some(board.route_task(world, &mut sc, task, &ctl, margin));
+                            Some(board.route_task(world, &mut sc, task, &ctl));
                         left -= 1;
                         continue;
                     }
@@ -2942,9 +2966,11 @@ pub(crate) fn route<'r>(
                                 keep: partial.then(|| board.clear_wires(&nets[i])),
                                 net: nets[i].clone(),
                                 mode,
+                                via: via_now,
+                                margin,
                                 limit,
                             };
-                            let again = board.route_task(world, &mut sc, task, &ctl, margin);
+                            let again = board.route_task(world, &mut sc, task, &ctl);
                             spent += again.nodes;
                             dbg_ideal.0 += again.nodes;
                             stopped = again.stopped || spent > budget;
@@ -3026,6 +3052,7 @@ pub(crate) fn route<'r>(
                 points.extend(c.into_iter().map(|c| (c, i)));
             }
             let total: usize = net_conf.iter().sum();
+            last_shared = total;
             if dbg_on() {
                 let vias: usize = nets.iter().map(|n| board.measure(n).0).sum();
                 let len: f64 = nets.iter().map(|n| board.measure(n).1).sum();

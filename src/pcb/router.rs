@@ -1315,9 +1315,49 @@ fn route_all<'a>(
             &with_routes
         };
         let mut world = world_of(design)?;
+        // In a run that moves routes, a pad that a route of its net leaves is out
+        // already and has no escape planned again: the board is the one without the
+        // routes, so that a pad still shut in has its escape where it fits, across
+        // another net's route if it has to, and the pads are told as joined by the
+        // board with them. Planned for every pad as in a first run, the escapes of the
+        // pads that were out cut the routes that had taken their places since, some
+        // sixty nets of `cynthion`'s 334 in each such run, for nothing.
+        let with_given;
+        let pads_of = if taken_back.is_empty()
+            || options.rip_ups == 0
+            || std::env::var("GUIDE_DBG_ESCJOIN").is_ok_and(|v| v == "0")
+        {
+            design
+        } else {
+            let mut d = design.clone();
+            for (&net, (segs, vias)) in &taken_back {
+                let (tracks, vias) = route_copper(design, net, segs, vias);
+                d.board.tracks.extend(tracks);
+                d.board.vias.extend(vias);
+            }
+            with_given = d;
+            &with_given
+        };
         // In a run with a budget, for the balls deep in an area array too.
-        let mut escapes =
-            escape::plan(design, &mut world, pitch, options.fanout_via, run.bounded());
+        // The inner layers that a net plans on as a plane: no way out of an array is
+        // planned across those.
+        let last = LayerId((rules.layer_count().max(1) - 1) as u8);
+        let avoid = design
+            .zones
+            .zones
+            .iter()
+            .zip(&is_plane)
+            .filter(|(z, plane)| **plane && z.net.is_some())
+            .fold(LayerSet::EMPTY, |set, (z, _)| LayerSet(set.0 | z.layers.0));
+        let avoid = LayerSet(avoid.0 & !LayerSet::EMPTY.with(LayerId(0)).with(last).0);
+        let mut escapes = escape::plan(
+            pads_of,
+            &mut world,
+            pitch,
+            options.fanout_via,
+            run.bounded(),
+            avoid,
+        );
         // And in a run with a budget, the crossings of the rows of fine pitch, around the
         // escapes: fixed copper of their nets as those are, as a route that rip-up may
         // take out is gone before the nets beside it have settled.
@@ -1345,6 +1385,7 @@ fn route_all<'a>(
                         to: bottom,
                         net,
                     }),
+                    exit: 0,
                 });
                 crossings += usize::from(s.via.is_some());
             }
@@ -2705,10 +2746,46 @@ fn route_all<'a>(
     tell(&jobs, &copper, &missing, &apart, 0);
     // The escapes and pairs of nets routed are part of their routes.
     let kept = |net: Option<NetId>| net.is_some_and(|n| dropped.binary_search(&n).is_err());
+    // A way out of an array that no route of its net ends on is no copper of the net:
+    // it was a place kept for it.
+    let on_seg = |p: Point, s: &Seg| {
+        let (ax, ay, bx, by) = (
+            i128::from(s.a.x),
+            i128::from(s.a.y),
+            i128::from(s.b.x),
+            i128::from(s.b.y),
+        );
+        let (px, py) = (i128::from(p.x), i128::from(p.y));
+        (bx - ax) * (py - ay) == (by - ay) * (px - ax)
+            && px >= ax.min(bx)
+            && px <= ax.max(bx)
+            && py >= ay.min(by)
+            && py <= ay.max(by)
+    };
+    let escape_tracks = |e: &escape::Escape| -> Vec<Track> {
+        let used = e.exit == 0
+            || e.tracks.last().is_some_and(|end| {
+                jobs.iter().zip(&copper).any(|(job, c)| {
+                    job.ctx.net == e.net
+                        && c.as_ref().is_some_and(|c| {
+                            c.vias.contains(&end.end)
+                                || c.segs
+                                    .iter()
+                                    .any(|s| s.l == end.layer.0 && on_seg(end.end, s))
+                        })
+                })
+            });
+        let n = if used {
+            e.tracks.len()
+        } else {
+            e.tracks.len() - e.exit.min(e.tracks.len())
+        };
+        e.tracks[..n].to_vec()
+    };
     let mut tracks: Vec<Track> = escapes
         .iter()
         .filter(|e| kept(Some(e.net)))
-        .flat_map(|e| e.tracks.iter().cloned())
+        .flat_map(escape_tracks)
         .collect();
     let mut vias: Vec<Via> = escapes
         .iter()

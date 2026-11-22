@@ -227,6 +227,7 @@ mod control;
 mod cross;
 mod detail;
 pub mod eco;
+mod entry;
 mod escape;
 mod gates;
 mod geometry;
@@ -258,6 +259,7 @@ use crate::id::NetId;
 
 pub use crate::geom::drc::MaskOpening;
 pub use control::{Phase, Progress, Refill, RefillFn, RunControl, Stopped};
+pub use entry::{PadEntry, neck_at_pads, pad_entries};
 pub use measure::{coupling, net_length};
 pub use report::{Blocker, Cause, CopperKind, DesignItem, Endpoint, OpenConnection};
 #[cfg(feature = "kicad")]
@@ -774,7 +776,12 @@ pub struct RouteOptions {
     /// layers, and a track's width and its clearance on one of more, or where a board of
     /// two has no room for three rounds at the first in its share: a quarter of the
     /// points and a fifth of the cost of a round, with vias at twice the track they cost
-    /// at the first. On two layers a channel has to hold every track that fits it.
+    /// at the first. On two layers a channel has to hold every track that fits it. One
+    /// at the first pitch that ends with a few points still shared is begun again on
+    /// grids of two thirds, a half and a third of the pitch, in the order of the nets
+    /// given and in others, where its share has room for them, and the one that ends
+    /// with the fewest shared is kept: a board laid out for routing by hand has ways
+    /// between its parts that are off the lines of the pitch.
     pub whole: bool,
     /// The share of the time that a deadline leaves, and of the work that a budget
     /// leaves, that [`whole`](RouteOptions::whole) may spend. The default is 0.5. A

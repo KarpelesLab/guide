@@ -135,6 +135,16 @@ fn on_one_layer_what_cannot_cross_is_left_to_the_passes() {
     ));
     let routed = route_checked(&d, &whole());
     assert_eq!(routed.unrouted.len(), 1);
+    // Its negotiation ends with the crossing still shared at the pitch, so it is begun
+    // again on the finer grids and in other orders, none of which ends otherwise: the
+    // board is the same on any number of threads all the same, and the same twice over.
+    assert!(routed.stats.whole.1 > 0);
+    for threads in [1, 3] {
+        let options = RouteOptions { threads, ..whole() };
+        let again = route_checked(&d, &options);
+        assert_eq!(routed.tracks, again.tracks);
+        assert_eq!(routed.stats.work, again.stats.work);
+    }
 }
 
 #[test]

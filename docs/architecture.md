@@ -1213,6 +1213,61 @@ the next inner layer along the lines of the balls, the tracks are walls to every
 that is not theirs, and `glasgow-revD1` had 15 connections open for 5 at the same
 500 million nodes.
 
+**A negotiation at the first pitch that does not end is begun again on finer grids, and
+its price rises again while its rounds do not gain.** On a board of two layers the grid's
+pitch is half a track and its clearance, which holds the ways that lie on its lines.
+Between parts placed for routing by hand the passages are often narrower than a step and
+off those lines, and the rounds then go on with the same few nets in each other's way:
+`nrfmicro`, 85 connections, had 45 to 100 points shared from its tenth round on in every
+order, the nets of its USB receptacle and its supplies, and the passes after it left one
+connection of the receptacle open in seven orders of twelve. Two things, both of them
+what cadlab's router does for the same board:
+
+- *Finer grids.* A negotiation that ended on its own with no more than a hundred points
+  shared, or one for each net, is begun again at two thirds, a half and a third of the
+  pitch, in the order of the nets given and then in others, and the one with the fewest
+  shared is kept: the first that ends with none ends the tries. Which grid that is cannot
+  be told beforehand (in twelve orders, each of the three), hence several. A finer grid
+  has as many times the cells as the square of what it is finer by, and is begun only
+  with room for that in the negotiation's share; one with no room leaves the next its
+  turn. A via costs its ten steps there too, so less track than at the pitch: dearer, by
+  what the steps are shorter, fewer of the tries ended with nothing shared (5 connections
+  open over twelve orders for 2), and only the routing again for fewer vias has it
+  dearer.
+- *The price.* At the first pitch the price of a shared point stops at thirty steps
+  (`corne-cherry` had a tenth more vias and track at a thousand). On the finer grids it
+  rises to a thousand, as at twice the pitch: with thirty there too, two orders of
+  twelve ended every one of ten tries with something shared. Letting it rise at the
+  first pitch as well, once four rounds had gained nothing, was tried and not kept:
+  `nrfmicro` was the same, and `corne-cherry`, whose negotiation is ended by its share
+  with some forty points shared, had 535 vias and 7736 mm of track for 503 and 7411 at
+  150 million nodes over three orders, with as many connections open (7 for 7), and 541
+  and 7881 with 1 open where the price stopped at a hundred.
+
+At twice the pitch, on more than two layers, nothing of this applies: a board there is
+begun again in other orders as before.
+
+**A net with a plane pays half for a via at twice the pitch.** The steps of the grid at
+twice the pitch are twice as long, so a via's ten steps are twice the track that they
+are at the first pitch and in cadlab's router, which keeps the vias of the signals down.
+But a net with a plane then joined two of its pads by up to that much track where each
+could go to the plane by a via where it is: `glasgow-revC3`'s nine nets with zones had
+543 mm of track and 91 vias where cadlab's router has 485 mm and 120. With five steps
+for those nets they have 431 mm and 122, and the board's other nets the room.
+
+**A track is laid no wider than a pad of its net where it meets it, by a function the
+host calls.** `pcb::neck_at_pads` takes tracks that are routed and the pads with the
+widest a track may be at each ([`PadEntry`]: the host's own measure of a pad, or the
+shorter side of its box from `pcb::pad_entries`), and cuts every straight track where
+its middle line comes nearer to a narrower pad of its net than half its width and a
+margin, laying that part at the pad's width along the same line. What is laid is inside
+the copper that was there and every end is where it was, so no clearance and no
+connection changes. A function on a result and not a step of `route`: a host that runs
+several runs and hands routes back between them does it once at the end, and the routes
+it hands back are of one width. A net is still necked whole where its width leaves no
+pad of a row (`RouteOptions::neck_down`); this is for the pad that a track of the net's
+width reaches and covers.
+
 **`needless` leaves a track from pad to pad, and `needless_between` tells it.** What a
 fill makes needless was told of vias and of the tracks that led to them: with a track
 from pad to pad gone, another net's pour may take its room, and a pad that it reached

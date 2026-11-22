@@ -5880,6 +5880,31 @@ given on it.
   track and vias, and where the time leaves none for it the vias of every run stay:
   `cynthion` 446 at a minute for 423, by the medians of four orders.
 
+### As released
+
+0.0.21 from crates.io behind cadlab's adapter (cadlab's D117), which also refuses the
+fill that a run asks for at its end, ends its runs that move routes after two that say
+the board has no room, and fills its zones faster; beside cadlab's own router, which has
+that fill too, on 2026-11-18: four runs of each at 60 s, three threads each, two of each
+at a time.
+
+- Open, the twelve boards: 102 to 140 for `guide` against 178 to 268; ahead in every run
+  on `buspirate5-rev10`, `lumenpnp-mobo`, `cynthion` and `glasgow-revC3` (4 to 7 against
+  31 to 36), level on five, ranges that overlap on `corne-cherry`, `tinytapeout-demo`
+  (0, 6, 0 and 1 against 2 to 14) and `glasgow-revD1` (84 to 120 against 99 to 169, where
+  cadlab's router had 238 to 289 with a fill of 3 s), behind on none.
+- The run for shorter ways is begun in 28 runs of 48 for 23 with 0.0.20, and kept in 27:
+  on `lumenpnp-mobo` in every order (72 to 127 mm) and on `cynthion` in two, for none.
+  `cynthion`'s track is 14 % over cadlab's router's by the medians for 18 %, and at
+  150 million nodes 3449 and 3398 mm in two orders for 3558 and 3471.
+- At 40 million nodes, three orders, the nine boards a budget cuts: 620 open, board by
+  board what 0.0.20 had.
+- `tinytapeout-demo` and the two `glasgow` boards end their first run at its share of
+  the minute, in every order, and have what is left for everything after it:
+  `tinytapeout-demo` 372 to 427 vias against 243 to 290 and 20 % more track,
+  `glasgow-revC3` 30 % more. `glasgow-revD1` with three minutes has 23 connections open
+  and with five 14, all at its array of 256 balls.
+
 ### What this does not show
 
 - A run that moves routes without the nets cut as it begins: the escapes planned again

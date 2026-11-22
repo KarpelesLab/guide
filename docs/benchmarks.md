@@ -6076,6 +6076,29 @@ way, `buspirate5-rev10` and `lumenpnp-mobo` none.
   `glasgow-revC3` over four orders at 150 million nodes has 8, 7, 7 and 6 open for 8, 6,
   7 and 4.
 
+### As released
+
+0.0.22 from crates.io behind cadlab's adapter (cadlab's D118), which also ends each
+track where it is inside the pad of its net, so that the track is counted as cadlab's
+router's is; beside that router on 2026-11-22: four runs of each at 60 s, three threads
+each, one of each at a time, a load of 10 to 19.
+
+- Open, the twelve boards: 63 to 168 for `guide` (median 90.5) against 234 to 294 (253);
+  ahead in every run on `tinytapeout-demo` (none open in four orders, for 0, 6, 0 and 1
+  with 0.0.21), `buspirate5-rev10`, `lumenpnp-mobo`, `cynthion` and `glasgow-revC3` (4 to
+  10 against 32 to 40), level on four, ranges that overlap on `corne-cherry`,
+  `glasgow-revD1` (39, 150, 77 and 65 against 144 to 184) and `nrfmicro` (1, 1, 0 and 0
+  against 0, where 0.0.21 had none open), behind on none.
+- `glasgow-revD1` with three minutes has 2 connections open and with five 2, for 23 and
+  14. At a minute its first run still ends at its share, and the order with 150 had 40
+  and 120 when run alone afterwards, with 98 and 62 million nodes in that run.
+- Track by the medians within 2 % of cadlab's router's or under it on eight boards;
+  `buspirate-rs232` +7 %, `tinytapeout-demo` +6 % (for +20 %), `glasgow-revD1` +5 %,
+  `glasgow-revC3` +19 % (for +30 %). Vias: `tinytapeout-demo` 328.5 against 272.5, +21 %
+  for +46 %; `glasgow-revD1` 1160.5 against 1004.5.
+- Pads short of two spokes, by the host's new count: 36 to 51 over the four orders
+  against 90 to 101.
+
 ### What this does not show
 
 - A quiet machine for all of it: the times of the table with a deadline are from the

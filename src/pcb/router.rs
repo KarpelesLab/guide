@@ -2909,133 +2909,151 @@ fn route_all<'a>(
         // Before what the routes cut off the fills is joined to them again: a net laid
         // another way cuts them elsewhere, and the stubs are for the routes as they stay.
         // Not with less than [`AGAIN_LEAST`] to do it in, which is the joining's then.
-        if !cleaned
-            && options.cleanup
-            && (options.whole || options.shorten)
-            && hurried
-            && !run.poll()
-            && run
-                .part_left()
-                .is_none_or(|left| left.mul_f64(AGAIN_PART) >= AGAIN_LEAST)
-            && let Some(mut base) = make_with(&pairs_first)
-        {
-            run.phase(Phase::Cleanup);
-            for (tracks, vias) in &back_copper {
-                let _ = pairs::Undo::place(&mut base, tracks, vias);
-            }
-            let may: Vec<bool> = jobs
-                .iter()
-                .map(|job| {
-                    let net = job.ctx.net;
-                    !design
-                        .pairs
+        //
+        // In a run with a budget of nodes it comes after that joining, as it did: the
+        // joining makes connections where this makes none, and the work that this takes
+        // first is work that the joining ends without (`corne-cherry` at 40 million nodes:
+        // 48 connections open with this first, 38 with half of the work for it, 36 after).
+        let again_first = again_before_joining(run.work_left());
+        for step in 0..2 {
+            if (step == 0) == again_first {
+                if !cleaned
+                    && options.cleanup
+                    && (options.whole || options.shorten)
+                    && hurried
+                    && !run.poll()
+                    && run
+                        .part_left()
+                        .is_none_or(|left| left.mul_f64(AGAIN_PART) >= AGAIN_LEAST)
+                    && let Some(mut base) = make_with(&pairs_first)
+                {
+                    run.phase(Phase::Cleanup);
+                    for (tracks, vias) in &back_copper {
+                        let _ = pairs::Undo::place(&mut base, tracks, vias);
+                    }
+                    let may: Vec<bool> = jobs
                         .iter()
-                        .any(|p| p.positive == net || p.negative == net)
-                        && !design.lengths.iter().any(|l| l.nets.contains(&net))
-                })
-                .collect();
-            let until = run
-                .part_left()
-                .map(|left| std::time::Instant::now() + left.mul_f64(AGAIN_PART));
-            // On the negotiation's grid, twice the pitch on more than two layers, where
-            // the routes are its own; at the pitch in a run for shorter ways, whose routes
-            // are where they stay, and a way that only the finer grid has is one to take.
-            let coarse = rules.layer_count() > 2 && !options.shorten;
-            let again = whole::again(
-                design,
-                &base,
-                &mut world,
-                &jobs,
-                &mut copper,
-                &may,
-                options,
-                run,
-                (pitch, coarse),
-                bounds,
-                until,
-            );
-            stats.again.0 += again.tried;
-            stats.again.1 += again.kept;
-            stats.again.2 += again.vias;
-        }
-        if let Some(pours) = &pours {
-            for _ in 0..POUR_ROUNDS {
-                if run.poll() {
-                    break;
+                        .map(|job| {
+                            let net = job.ctx.net;
+                            !design
+                                .pairs
+                                .iter()
+                                .any(|p| p.positive == net || p.negative == net)
+                                && !design.lengths.iter().any(|l| l.nets.contains(&net))
+                        })
+                        .collect();
+                    let until = run
+                        .part_left()
+                        .map(|left| std::time::Instant::now() + left.mul_f64(AGAIN_PART));
+                    // On the negotiation's grid, twice the pitch on more than two layers, where
+                    // the routes are its own; at the pitch in a run for shorter ways, whose routes
+                    // are where they stay, and a way that only the finer grid has is one to take.
+                    let coarse = rules.layer_count() > 2 && !options.shorten;
+                    let again = whole::again(
+                        design,
+                        &base,
+                        &mut world,
+                        &jobs,
+                        &mut copper,
+                        &may,
+                        options,
+                        run,
+                        (pitch, coarse),
+                        bounds,
+                        until,
+                    );
+                    stats.again.0 += again.tried;
+                    stats.again.1 += again.kept;
+                    stats.again.2 += again.vias;
                 }
-                let mut joined = false;
-                // By the host's own fill around the routes as they are, if it gives one, on
-                // a board with pours that routes cut.
-                let real = pours
-                    .outer(design)
-                    .then(|| {
-                        pours.refill(
-                            run,
-                            design,
-                            &jobs,
-                            &copper,
-                            (&own_fixed.0, &own_fixed.1),
-                            false,
-                        )
-                    })
-                    .flatten();
-                stats.refills += usize::from(real.is_some());
-                for k in pours.jobs().collect::<Vec<usize>>() {
+                continue;
+            }
+            if let Some(pours) = &pours {
+                for _ in 0..POUR_ROUNDS {
                     if run.poll() {
                         break;
                     }
-                    let Some(c) = copper[k].as_ref() else {
-                        continue;
-                    };
-                    let Some(again) =
-                        pours.rejoin(&world, design, &jobs, &copper, k, pitch, real.as_ref(), &[])
-                    else {
-                        continue;
-                    };
-                    let ctx = completion(design, &again.ctx, c, pitch);
-                    jobs[k].ctx = pours::with_sites(&jobs[k].ctx, &again.sites, pitch);
-                    stats.pour_cuts += again.cut;
-                    let steps = StepCache::default();
-                    let stubs = Params {
-                        partial: true,
-                        stubs: true,
-                        forest: true,
-                        via_cost: if rules.layer_count() <= 2 {
-                            params.via_cost * POUR_VIA_TWO
-                        } else {
-                            params.via_cost
-                        },
-                        ..params
-                    };
-                    let found = detail::route_net(&world, &ctx, &steps, stubs, None, None);
-                    let tree = match found {
-                        Ok(tree) => tree,
-                        Err((_, expanded)) => {
-                            stats.expanded += expanded;
+                    let mut joined = false;
+                    // By the host's own fill around the routes as they are, if it gives one, on
+                    // a board with pours that routes cut.
+                    let real = pours
+                        .outer(design)
+                        .then(|| {
+                            pours.refill(
+                                run,
+                                design,
+                                &jobs,
+                                &copper,
+                                (&own_fixed.0, &own_fixed.1),
+                                false,
+                            )
+                        })
+                        .flatten();
+                    stats.refills += usize::from(real.is_some());
+                    for k in pours.jobs().collect::<Vec<usize>>() {
+                        if run.poll() {
+                            break;
+                        }
+                        let Some(c) = copper[k].as_ref() else {
+                            continue;
+                        };
+                        let Some(again) = pours.rejoin(
+                            &world,
+                            design,
+                            &jobs,
+                            &copper,
+                            k,
+                            pitch,
+                            real.as_ref(),
+                            &[],
+                        ) else {
+                            continue;
+                        };
+                        let ctx = completion(design, &again.ctx, c, pitch);
+                        jobs[k].ctx = pours::with_sites(&jobs[k].ctx, &again.sites, pitch);
+                        stats.pour_cuts += again.cut;
+                        let steps = StepCache::default();
+                        let stubs = Params {
+                            partial: true,
+                            stubs: true,
+                            forest: true,
+                            via_cost: if rules.layer_count() <= 2 {
+                                params.via_cost * POUR_VIA_TWO
+                            } else {
+                                params.via_cost
+                            },
+                            ..params
+                        };
+                        let found = detail::route_net(&world, &ctx, &steps, stubs, None, None);
+                        let tree = match found {
+                            Ok(tree) => tree,
+                            Err((_, expanded)) => {
+                                stats.expanded += expanded;
+                                continue;
+                            }
+                        };
+                        stats.expanded += tree.expanded;
+                        let more = NetCopper::from_tree(&ctx, &tree);
+                        if more.is_empty() {
                             continue;
                         }
-                    };
-                    stats.expanded += tree.expanded;
-                    let more = NetCopper::from_tree(&ctx, &tree);
-                    if more.is_empty() {
-                        continue;
-                    }
-                    if let Some(mut old) = copper[k].take() {
-                        old.unplace(&mut world);
-                        old.segs.extend(more.segs);
-                        for v in more.vias {
-                            if !old.vias.contains(&v) {
-                                old.vias.push(v);
+                        if let Some(mut old) = copper[k].take() {
+                            old.unplace(&mut world);
+                            old.segs.extend(more.segs);
+                            for v in more.vias {
+                                if !old.vias.contains(&v) {
+                                    old.vias.push(v);
+                                }
                             }
+                            old.merge(&jobs[k].ctx);
+                            old.place(&mut world, &jobs[k].ctx);
+                            copper[k] = Some(old);
+                            joined = true;
                         }
-                        old.merge(&jobs[k].ctx);
-                        old.place(&mut world, &jobs[k].ctx);
-                        copper[k] = Some(old);
-                        joined = true;
                     }
-                }
-                if !joined {
-                    break;
+                    if !joined {
+                        break;
+                    }
                 }
             }
         }
@@ -3307,6 +3325,15 @@ fn apart_on(bare: &World<'_>, ctx: &NetCtx, params: Params, finest: Params) -> (
 /// none in the next, with whatever this one made in the way as well.
 fn said_all(pass: usize, began: (usize, usize), ended: (usize, usize)) -> bool {
     pass > 0 && began == ended
+}
+
+/// Whether each net is routed again where the others are before what the routes cut off
+/// their fills is joined to them again, by the work that the run's budget leaves, if it
+/// has one: with a budget of nodes, after. The joining makes connections, and this makes
+/// none; of a time that is running out each has its half, and of nodes this took what
+/// the joining then ended without.
+fn again_before_joining(work_left: Option<u64>) -> bool {
+    work_left.is_none()
 }
 
 /// Whether a search that failed as `why` has said that a net has no way on the board,
@@ -3964,6 +3991,14 @@ mod tests {
             Err((Failure::NoPath, expanded)) => assert!(expanded < 500_000, "{expanded}"),
             other => panic!("{:?}", other.map(|t| t.expanded)),
         }
+    }
+
+    #[test]
+    fn a_run_with_a_budget_of_nodes_joins_its_fills_again_before_it_routes_each_net_again() {
+        use super::again_before_joining;
+        assert!(again_before_joining(None));
+        assert!(!again_before_joining(Some(40_000_000)));
+        assert!(!again_before_joining(Some(0)));
     }
 
     #[test]

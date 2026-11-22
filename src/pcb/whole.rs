@@ -161,12 +161,14 @@ const POCKET: usize = 20_000;
 /// With more of them the threads have fewer waits for the longest search, and more nets
 /// are routed without a word of those just before them.
 const WAVE: usize = 8;
-/// And how many at most, where one of them is expected to take long: the few are as many
-/// as it takes for the others to take [`WAVE_TIMES`] as long together as the longest, by
-/// what each took the last time it was routed, so that the threads have work while the
-/// longest search goes on.
-const WAVE_MOST: usize = 48;
-const WAVE_TIMES: u64 = 3;
+
+/// How many nodes at least a search may expand where nothing claimed is entered, once a
+/// negotiation is over, and how many times what its net took the last time it was routed
+/// across the claims: a net with no way left looks at every place that the board's own
+/// copper leaves it before it says so, which on `glasgow-revD1` is 600 thousand nodes
+/// for one net, and there are a hundred such.
+const HARD_NODES: u64 = 100_000;
+const HARD_TIMES: u64 = 8;
 
 /// A terminal with more places than this is a plane's: a connection uses those near its
 /// other end.
@@ -665,6 +667,21 @@ impl Board {
                 let mut bits = 0u16;
                 for (d, &(dx, dy)) in DIRS.iter().enumerate() {
                     let (nx, ny) = (x + dx, y + dy);
+                    // The step back from a cell of the block that was asked about before
+                    // this one is the same track.
+                    if nx >= x0 && nx < x1 && ny >= y0 && (ny < y || (ny == y && nx < x)) {
+                        let from = layer * cells + grid.cidx(nx, ny);
+                        let back = (d + 4) % 8;
+                        let c = (group.moves[from].load(Ordering::Relaxed) >> (2 * back)) & 3;
+                        if c == ONLY {
+                            let key = owner_key(0, from, back);
+                            if let Some(&(_, n)) = owners.iter().rev().find(|o| o.0 == key) {
+                                owners.push((owner_key(0, at, d), n));
+                            }
+                        }
+                        bits |= c << (2 * d);
+                        continue;
+                    }
                     let c = if nx < 0 || ny < 0 || nx >= grid.w || ny >= grid.h {
                         Class::Blocked
                     } else if empty {
@@ -2750,6 +2767,8 @@ pub(crate) fn route<'r>(
     let flag = run.flag();
     let (done_tx, done_rx) = mpsc::channel::<(usize, Ahead)>();
     let wave = dbg_num("GUIDE_DBG_WAVE", WAVE).max(1);
+    // By net, the nodes that it took the last time it was routed.
+    let mut taken: Vec<u64> = vec![0; nets.len()];
     let mut dbg_spec = (0u64, 0u64, 0u64, 0u64);
     // Fresh nodes of rejected nets, and what the waves would take on 2, 3, 4 and 6 threads, in nodes.
     let mut dbg_ideal = (0u64, [0u64; 4]);
@@ -2807,12 +2826,6 @@ pub(crate) fn route<'r>(
         let mut extended = false;
         let mut it = 0;
         let mut round_began = began;
-        // By net, the nodes that it took the last time it was routed: before the first,
-        // its length in cells.
-        let mut taken: Vec<u64> = nets
-            .iter()
-            .map(|n| (n.length / grid.g.max(1)).max(1) as u64)
-            .collect();
         // Each time the pads cut off are told, the rounds have as many more for them.
         while it < ROUNDS + POUR_MORE * pour_rounds {
             it += 1;
@@ -2835,20 +2848,7 @@ pub(crate) fn route<'r>(
             let n = reroute.len();
             let mut head = 0;
             'turns: while head < n {
-                let end = {
-                    let most = dbg_num("GUIDE_DBG_MOST", WAVE_MOST).max(wave);
-                    let (mut end, mut sum, mut max) = (head, 0u64, 0u64);
-                    while end < n
-                        && end - head < most
-                        && (end - head < wave || sum < (WAVE_TIMES + 1) * max)
-                    {
-                        let took = taken[reroute[end]];
-                        sum += took;
-                        max = max.max(took);
-                        end += 1;
-                    }
-                    end
-                };
+                let end = (head + wave).min(n);
                 let budget = run.limits(u64::MAX).max_expansions;
                 {
                     let mut q = queue
@@ -2916,7 +2916,7 @@ pub(crate) fn route<'r>(
                     };
                     let i = reroute[head];
                     let mut spent = r.nodes;
-                    taken[i] = r.nodes.max(1);
+                    taken[i] = r.nodes;
                     stopped = r.stopped || spent > budget;
                     dbg_spec.0 += 1;
                     dbg_spec.2 += r.nodes;
@@ -3288,13 +3288,17 @@ pub(crate) fn route<'r>(
         eprintln!("DBGTAIL taken_out={taken_out} cut={cut} rounds={rounds}");
     }
     out.sort_by_key(|&i| (nets[i].length, i));
-    fn ctl<'a, 'r>(run: &'a Run<'r>) -> Ctl<'a, 'r> {
-        Ctl {
-            run: Some(run),
-            flag: run.flag(),
-            limit: run.limits(u64::MAX).max_expansions,
-        }
-    }
+    let hard_cap = dbg_num("GUIDE_DBG_HARD", 1) != 0;
+    // The nodes that a search of a net may expand, and those that the run has left.
+    let nodes_for = |took: u64| -> (u64, u64) {
+        let most = if hard_cap {
+            HARD_NODES.max(HARD_TIMES.saturating_mul(took))
+        } else {
+            u64::MAX
+        };
+        let left = run.limits(u64::MAX).max_expansions;
+        (left.min(most), left)
+    };
     for i in out {
         if run.ending() {
             break;
@@ -3302,13 +3306,19 @@ pub(crate) fn route<'r>(
         let before = nets[i].wires.clone();
         let all = vec![true; before.len()];
         board.uncommit(&mut nets[i]);
+        let (limit, left) = nodes_for(taken[i]);
+        let ctl = Ctl {
+            run: Some(run),
+            flag: run.flag(),
+            limit,
+        };
         let (res, pops) = board.route_net(
             world,
             &mut sc,
             &mut nets[i],
             Mode::Hard,
             VIA,
-            &ctl(run),
+            &ctl,
             Some(&all),
             None,
         );
@@ -3317,7 +3327,8 @@ pub(crate) fn route<'r>(
         }
         board.commit(&mut nets[i]);
         run.charge(pops);
-        if run.poll() {
+        // Stopped by its own number of nodes, the net is left to the passes.
+        if run.poll() || (res.is_err() && pops >= left) {
             break;
         }
     }
@@ -3346,8 +3357,13 @@ pub(crate) fn route<'r>(
         let (vias, len) = board.measure(net);
         let old = net.wires.clone();
         board.uncommit(net);
+        let ctl = Ctl {
+            run: Some(run),
+            flag: run.flag(),
+            limit: nodes_for(taken[i]).0,
+        };
         let (res, pops) =
-            board.route_net(world, &mut sc, net, Mode::Hard, FEWER_VIA, &ctl(run), None, None);
+            board.route_net(world, &mut sc, net, Mode::Hard, FEWER_VIA, &ctl, None, None);
         let (nv, nl) = board.measure(net);
         let ok = res.is_ok()
             && net.wires.len() >= old.len()

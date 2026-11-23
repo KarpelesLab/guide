@@ -2333,6 +2333,10 @@ pub(crate) struct Whole {
     /// How many times the routes went back to what they were before nets were planned
     /// again for their pours, for having more connections open after it.
     pub(crate) pours_back: usize,
+    /// The rounds on the grid of the pitch for the connections that a negotiation at twice
+    /// the pitch left open: how many there were, how many connections were open on the
+    /// grid before them, and how many after.
+    pub(crate) finer: (usize, usize, usize),
     /// Whether the rounds ended on their own, and not with their share.
     pub(crate) ended: bool,
     /// Whether they ended at the most rounds that there are, with points still shared and
@@ -2762,6 +2766,239 @@ fn fewer_vias(
     vias_saved
 }
 
+/// How many rounds there are at most on the grid of the pitch for the connections that a
+/// negotiation at twice the pitch left open, how many of them may pass since the best,
+/// and the price of a claimed point in the first of them.
+const FINER_ROUNDS: usize = 16;
+const FINER_STALE: usize = 5;
+const FINER_PRES: f32 = 8.0;
+/// The share of what the run has left, in time and in work, that those rounds have at
+/// most.
+const FINER_SHARE: f64 = 0.1;
+
+/// What the rounds on a grid twice as fine ended with.
+struct Finer {
+    board: Board,
+    nets: Vec<WNet>,
+    /// How many rounds there were on it, how many connections the routes left open on
+    /// the grid before the first, and how many after the last.
+    rounds: usize,
+    before: usize,
+    after: usize,
+}
+
+/// How many connections a net's wires leave open on the grid.
+fn open_on_grid(net: &WNet) -> usize {
+    let n = net.terms.len();
+    let mut parent: Vec<usize> = (0..n).collect();
+    let all = vec![true; net.wires.len()];
+    for (terms, _) in kept_wires(n, net.wires.clone(), &all) {
+        for &t in &terms[1..] {
+            let (a, b) = (find(&mut parent, terms[0]), find(&mut parent, t));
+            if a != b {
+                parent[a.max(b)] = a.min(b);
+            }
+        }
+    }
+    (0..n)
+        .filter(|&t| find(&mut parent, t) == t)
+        .count()
+        .saturating_sub(1)
+}
+
+/// A wire of a grid on the grid twice as fine that has its origin: each of its nodes is
+/// one of that grid, and between two of a layer there is the one halfway.
+fn refined(from: &Board, to: &Board, w: &Wire) -> Wire {
+    let mut nodes = Vec::with_capacity(w.nodes.len() * 2);
+    let mut last: Option<(usize, i32, i32)> = None;
+    for &n in &w.nodes {
+        let (l, x, y) = from.unpack(n);
+        if let Some((pl, px, py)) = last
+            && pl == l
+        {
+            nodes.push(to.node(l, px + x, py + y));
+        }
+        nodes.push(to.node(l, 2 * x, 2 * y));
+        last = Some((l, x, y));
+    }
+    Wire {
+        nodes,
+        start: w.start,
+        end: w.end,
+        from: w.from,
+        to: w.to,
+    }
+}
+
+/// Completes what a negotiation at twice the pitch left open by rounds on the grid of
+/// the pitch, for the nets concerned alone.
+///
+/// The routes are legal by now: what was still shared was taken out and routed again
+/// where nothing is claimed, and a net with no way there has a connection open. Left to
+/// the passes, such a net is completed by taking others out for it, and each net taken
+/// out comes back with more vias. Here the nets stay as their routes left them, on a
+/// grid with a cell between every two of theirs. The nets with a connection open are
+/// routed across the others at a price, between the lines of the grid they were on if
+/// there is room, and through another net's claims if not; the nets whose claims they
+/// are in are routed again in the next round, with what is in no one's way kept, at a
+/// price that rises, until nothing is shared: the rounds of the negotiation, for a few
+/// nets, with every other net where it is. What is still shared when they end is taken
+/// out as before.
+///
+/// `plans` has, by net, what it was planned again as, if it was; `until` and `nodes`
+/// are what the rounds may take. `None` if the grid is not one to halve, or the run
+/// ended while it was made.
+#[allow(clippy::too_many_arguments)]
+fn finer_rounds(
+    design: &Design,
+    world: &World<'_>,
+    jobs: &[Job],
+    coarse: &Board,
+    old: &[WNet],
+    plans: &[Option<NetCtx>],
+    run: &Run<'_>,
+    (twice, seed): (bool, u64),
+    (until, nodes): (Option<std::time::Instant>, u64),
+    taken: &mut [u64],
+) -> Option<Finer> {
+    let g = coarse.grid;
+    if g.g % 2 != 0 || g.g / 2 < 1000 {
+        return None;
+    }
+    let grid = Grid {
+        ox: g.ox,
+        oy: g.oy,
+        g: g.g / 2,
+        w: g.dw(),
+        h: g.dh(),
+    };
+    let (mut board, mut nets, mut sc) =
+        setup_on(design, world, world, jobs, grid, (twice, 2), run).ok()?;
+    // A via costs what it did, in steps half as long.
+    board.via_scale = 2.0;
+    for (i, net) in nets.iter_mut().enumerate() {
+        net.via *= 2.0;
+        if let Some(ctx) = &plans[i] {
+            plan_again(&board, world, net, ctx, &mut sc);
+        }
+        net.wires = old[i]
+            .wires
+            .iter()
+            .map(|w| refined(coarse, &board, w))
+            .collect();
+        board.commit(net);
+    }
+    if run.poll() {
+        return None;
+    }
+    let before: usize = nets.iter().map(open_on_grid).sum();
+    let mut order: Vec<usize> = (0..nets.len()).collect();
+    order.sort_by_key(|&i| (nets[i].length, nets[i].net));
+    let mut rng = Rng(seed ^ 0xF1BE_5EED_CAD1_AB00);
+    let mut pres = FINER_PRES;
+    let (most, stale) = (FINER_ROUNDS, FINER_STALE);
+    // The routes after the round with the fewest points shared, and the fewest open.
+    type Round = ((usize, usize), Vec<Vec<Wire>>);
+    let mut best: Option<Round> = None;
+    let mut best_at = 0;
+    let mut rounds = 0;
+    let began = run.work();
+    let flag = run.flag();
+    let over = |run: &Run<'_>| {
+        run.work() - began >= nodes || until.is_some_and(|t| std::time::Instant::now() >= t)
+    };
+    for it in 0..=most {
+        let mut points: Vec<(Conflict, usize)> = Vec::new();
+        for (i, net) in nets.iter().enumerate() {
+            points.extend(board.conflicts(net).into_iter().map(|c| (c, i)));
+        }
+        let total = points.len();
+        let open: Vec<usize> = (0..nets.len())
+            .filter(|&i| open_on_grid(&nets[i]) > 0)
+            .collect();
+        let score = (total, open.len());
+        if it > 0 && best.as_ref().is_none_or(|b| score < b.0) {
+            best = Some((score, nets.iter().map(|n| n.wires.clone()).collect()));
+            best_at = it;
+        }
+        if (it > 0 && total == 0) || it == most || (it > 0 && it - best_at >= stale) || over(run) {
+            break;
+        }
+        for (c, _) in &points {
+            board.add_history(*c, HISTORY);
+        }
+        // The nets with something shared, and those with a connection open: the grid of
+        // twice the pitch had no way for it, and this one may.
+        let mut set: BTreeSet<usize> = points.iter().map(|&(_, i)| i).collect();
+        set.extend(open);
+        let mut reroute: Vec<usize> = order.iter().copied().filter(|i| set.contains(i)).collect();
+        for i in (1..reroute.len()).rev() {
+            if rng.next().is_multiple_of(4) {
+                let j = (rng.next() % (i as u64 + 1)) as usize;
+                reroute.swap(i, j);
+            }
+        }
+        rounds = it + 1;
+        let mode = Mode::Share(pres);
+        let margin = (pres >= NEAR_PRES).then_some((2 * WINDOW, WINDOW_SHARE));
+        let mut stopped = false;
+        for i in reroute {
+            let limit = run
+                .limits(u64::MAX)
+                .max_expansions
+                .min(nodes.saturating_sub(run.work() - began));
+            let ctl = Ctl {
+                run: Some(run),
+                flag,
+                limit,
+            };
+            let task = Task {
+                at: 0,
+                keep: Some(board.clear_wires(&nets[i])),
+                net: nets[i].clone(),
+                mode,
+                margin,
+                limit,
+            };
+            let routed = board.route_task(world, &mut sc, task, &ctl);
+            run.charge(routed.nodes.min(limit));
+            if routed.stopped || run.poll() || over(run) {
+                stopped = true;
+                break;
+            }
+            taken[i] = routed.nodes;
+            board.uncommit(&mut nets[i]);
+            nets[i] = routed.net;
+            board.commit(&mut nets[i]);
+        }
+        if stopped {
+            break;
+        }
+        pres = (pres * PRES_STEP).min(PRES_MAX);
+    }
+    // Back to the best round, and what is still shared there taken out.
+    let (_, wires) = best?;
+    for net in &mut nets {
+        board.uncommit(net);
+    }
+    for (net, w) in nets.iter_mut().zip(wires) {
+        net.wires = w;
+        board.commit(net);
+    }
+    if run.stopped().is_some() {
+        return None;
+    }
+    legalise(&board, world, &mut nets, &mut sc, run, taken);
+    let after: usize = nets.iter().map(open_on_grid).sum();
+    Some(Finer {
+        board,
+        nets,
+        rounds,
+        before,
+        after,
+    })
+}
+
 /// How many rounds a negotiation has at most: at twice the pitch, forty, as cadlab's
 /// router has; at the first, a hundred; and forty more each time the pads that the
 /// routes cut off their fills were told.
@@ -2810,7 +3047,6 @@ fn grid_pitch(
 /// a search's memory. `world` is the board that the grid's places are asked of, with no
 /// route of the nets on it; `tolls` is the world that says where the rooms of spokes
 /// are, which may be the same.
-#[allow(clippy::too_many_lines)]
 fn setup(
     design: &Design,
     world: &World<'_>,
@@ -2820,9 +3056,23 @@ fn setup(
     bounds: Rect,
     run: &Run<'_>,
 ) -> Result<(Board, Vec<WNet>, Scratch), NoWhole> {
+    let grid = make_grid(design, jobs, pitch, bounds);
+    setup_on(design, world, tolls, jobs, grid, (coarse, finer), run)
+}
+
+/// [`setup`] on a grid that is given.
+#[allow(clippy::too_many_lines)]
+fn setup_on(
+    design: &Design,
+    world: &World<'_>,
+    tolls: &World<'_>,
+    jobs: &[Job],
+    grid: Grid,
+    (coarse, finer): (bool, i64),
+    run: &Run<'_>,
+) -> Result<(Board, Vec<WNet>, Scratch), NoWhole> {
     let rules = &design.rules;
     let layers = rules.layer_count();
-    let grid = make_grid(design, jobs, pitch, bounds);
     let cells = grid.cells();
     if cells == 0 || (layers as u64) * (cells as u64) >= u64::from(u32::MAX) / 8 {
         return Err(NoWhole::Not);
@@ -3097,7 +3347,6 @@ pub(crate) fn route<'r>(
         bounds,
         run,
     )?;
-    let grid = board.grid;
     // The nets in order, the shortest first.
     let mut order: Vec<usize> = (0..nets.len()).collect();
     order.sort_by_key(|&i| (nets[i].length, nets[i].net));
@@ -3145,6 +3394,8 @@ pub(crate) fn route<'r>(
     // that plans no net on more pours than before has nothing more cut off for it.
     let mut mid_checked = !options.outer_pours;
     let mut sites: Vec<(usize, Vec<TermPad>)> = Vec::new();
+    // By net, what it was planned again as, if it was.
+    let mut planned_as: Vec<Option<NetCtx>> = vec![None; nets.len()];
     // What the first round took, in time and in nodes, once it has ended.
     let mut first_round: Option<(std::time::Duration, u64)> = None;
     let threads = options.threads.max(1);
@@ -3528,6 +3779,7 @@ pub(crate) fn route<'r>(
                             for (k, again) in plans {
                                 pour_cuts += again.cut;
                                 plan_again(board, world, &mut nets[k], &again.ctx, &mut sc);
+                                planned_as[k] = Some(again.ctx.clone());
                                 match sites.iter_mut().find(|(j, _)| *j == k) {
                                     Some((_, s)) => s.extend(again.sites),
                                     None => sites.push((k, again.sites)),
@@ -3575,6 +3827,7 @@ pub(crate) fn route<'r>(
                         };
                         pour_cuts += again.cut;
                         plan_again(board, world, &mut nets[k], &again.ctx, &mut sc);
+                        planned_as[k] = Some(again.ctx.clone());
                         match sites.iter_mut().find(|(j, _)| *j == k) {
                             Some((_, s)) => s.extend(again.sites),
                             None => sites.push((k, again.sites)),
@@ -3681,6 +3934,54 @@ pub(crate) fn route<'r>(
     }
     let taken_out = early_out + legalise(&board, world, &mut nets, &mut sc, run, &taken);
     let vias_saved = fewer_vias(&board, world, &mut nets, &mut sc, run, &taken, cut);
+    // With connections left open at twice the pitch, rounds on the grid of the pitch for
+    // their nets and the nets in their way, kept if fewer are open after them.
+    let mut finer_stats = (0, 0, 0);
+    let connections: usize = nets.iter().map(|n| n.conns.len()).sum();
+    let (board, nets) = if options.whole_finer
+        && coarse
+        && finer <= 2
+        && (!cut || shared * NEARLY < connections)
+        && run.stopped().is_none()
+        && nets.iter().any(|n| open_on_grid(n) > 0)
+    {
+        let least = FINER_SHARE;
+        let time = run.left().map(|left| left.mul_f64(least));
+        let work = run
+            .work_left()
+            .map_or(u64::MAX, |left| (left as f64 * least) as u64);
+        // A negotiation that its share ended has that much more for them.
+        if run.ending() {
+            run.allow(time.unwrap_or(std::time::Duration::MAX), work, was);
+        }
+        let until = time.map(|t| std::time::Instant::now() + t);
+        let seed = options.seed.unwrap_or(0);
+        match finer_rounds(
+            design,
+            world,
+            jobs,
+            &board,
+            &nets,
+            &planned_as,
+            run,
+            (coarse, seed),
+            (until, work),
+            &mut taken,
+        ) {
+            Some(f) => {
+                finer_stats = (f.rounds, f.before, f.after);
+                if f.after < f.before {
+                    (f.board, f.nets)
+                } else {
+                    (board, nets)
+                }
+            }
+            None => (board, nets),
+        }
+    } else {
+        (board, nets)
+    };
+    let grid = board.grid;
     // What each net ends with, as a tree.
     let mut trees: Vec<Option<Tree>> = vec![None; jobs.len()];
     for net in &nets {
@@ -3699,6 +4000,7 @@ pub(crate) fn route<'r>(
         pour_cuts,
         refills,
         pours_back,
+        finer: finer_stats,
         ended: !cut,
         capped,
     })
@@ -3948,8 +4250,9 @@ mod tests {
     use super::super::world::World;
     use super::super::{Design, RouteOptions, RunControl, router};
     use super::{
-        Conflict, FEWER_VIA, PLANE_VIA, PLANE_VIA_FIRST, POUR_MORE, Ranked, VIA, again, count, fp,
-        most_rounds, none_new, rank, setup,
+        Board, Conflict, Ctl, FEWER_VIA, Grid, Mode, PLANE_VIA, PLANE_VIA_FIRST, POUR_MORE, Ranked,
+        VIA, Wire, again, count, finer_rounds, fp, most_rounds, none_new, open_on_grid, rank,
+        refined, setup, setup_on,
     };
     use crate::geom::{Point, Rect};
 
@@ -4210,6 +4513,188 @@ mod tests {
         board.occupy(&keys, false);
         assert!(board.occ_t.iter().flatten().all(|a| count(a) == 0));
         assert!(board.occ_v.iter().flatten().all(|a| count(a) == 0));
+    }
+
+    /// Two nets across each other on a board of two layers, on the grid of twice the
+    /// pitch: the first routed where nothing is claimed, the second across it on its own
+    /// layer, at no price and with a via out of reach.
+    fn across() -> Design {
+        let pads = vec![
+            smd(0, 0, 1),
+            smd(8 * MM, 0, 1),
+            smd(4 * MM, -4 * MM, 2),
+            smd(4 * MM, 4 * MM, 2),
+        ];
+        design(2, pads, 3)
+    }
+
+    #[test]
+    fn a_wire_on_the_grid_twice_as_fine_is_the_same_copper() {
+        let d = across();
+        let options = RouteOptions::default();
+        let world = world_of(&d, &options);
+        let pitch = router::pitch(&d, &options);
+        let jobs = router::jobs(&d, &world, pitch, &[], &[]);
+        let control = RunControl::default();
+        let run = Run::new(&control, Some(10_000_000));
+        let bounds = Rect::new(Point::new(-6 * MM, -8 * MM), Point::new(14 * MM, 8 * MM));
+        let (board, mut nets, mut sc) =
+            setup(&d, &world, &world, &jobs, (pitch, true, 2), bounds, &run).unwrap();
+        let ctl = Ctl {
+            run: Some(&run),
+            flag: run.flag(),
+            limit: 1_000_000,
+        };
+        let via = nets[0].via;
+        let (res, _) = board.route_net(
+            &world,
+            &mut sc,
+            &mut nets[0],
+            Mode::Hard,
+            via,
+            &ctl,
+            None,
+            None,
+        );
+        assert!(res.is_ok() && !nets[0].wires.is_empty());
+        let g = board.grid;
+        let fine = Grid {
+            ox: g.ox,
+            oy: g.oy,
+            g: g.g / 2,
+            w: g.dw(),
+            h: g.dh(),
+        };
+        let (finer, _, _) = setup_on(&d, &world, &world, &jobs, fine, (true, 2), &run).unwrap();
+        let length = |b: &Board, w: &Wire| -> (i64, Vec<Point>) {
+            let (segs, vias) = b.geometry(w);
+            let len: f64 = segs
+                .iter()
+                .map(|(_, a, c)| ((c.x - a.x) as f64).hypot((c.y - a.y) as f64))
+                .sum();
+            (len.round() as i64, vias)
+        };
+        for w in &nets[0].wires {
+            let r = refined(&board, &finer, w);
+            assert_eq!(length(&board, w), length(&finer, &r));
+            assert_eq!((w.from, w.to), (r.from, r.to));
+            // Between two nodes of a layer there is the one halfway.
+            assert!(r.nodes.len() >= w.nodes.len());
+            assert_eq!(finer.node_point(r.nodes[0]), board.node_point(w.nodes[0]));
+        }
+    }
+
+    #[test]
+    fn two_nets_that_share_at_twice_the_pitch_part_on_the_grid_of_the_pitch() {
+        let d = across();
+        let options = RouteOptions::default();
+        let world = world_of(&d, &options);
+        let pitch = router::pitch(&d, &options);
+        let jobs = router::jobs(&d, &world, pitch, &[], &[]);
+        let control = RunControl::default();
+        let run = Run::new(&control, Some(50_000_000));
+        let bounds = Rect::new(Point::new(-6 * MM, -8 * MM), Point::new(14 * MM, 8 * MM));
+        let (board, mut nets, mut sc) =
+            setup(&d, &world, &world, &jobs, (pitch, true, 2), bounds, &run).unwrap();
+        let ctl = Ctl {
+            run: Some(&run),
+            flag: run.flag(),
+            limit: 1_000_000,
+        };
+        // The first where nothing is claimed; the second across it, on its layer: a
+        // claimed point costs it nothing, and a via more than the board is long.
+        let via = nets[0].via;
+        let (res, _) = board.route_net(
+            &world,
+            &mut sc,
+            &mut nets[0],
+            Mode::Hard,
+            via,
+            &ctl,
+            None,
+            None,
+        );
+        assert!(res.is_ok());
+        board.commit(&mut nets[0]);
+        let (res, _) = board.route_net(
+            &world,
+            &mut sc,
+            &mut nets[1],
+            Mode::Share(0.0),
+            10_000.0,
+            &ctl,
+            None,
+            None,
+        );
+        assert!(res.is_ok());
+        board.commit(&mut nets[1]);
+        let shared: usize = nets.iter().map(|n| board.conflicts(n).len()).sum();
+        assert!(shared > 0);
+        let plans = vec![None; nets.len()];
+        let mut taken = vec![0u64; nets.len()];
+        let all = (None, u64::MAX);
+        // On a grid with a cell between every two, the same routes share as they did, and
+        // the rounds on it part them: nothing is shared after, both nets are whole, and
+        // one of the two went under the other.
+        let f = finer_rounds(
+            &d,
+            &world,
+            &jobs,
+            &board,
+            &nets,
+            &plans,
+            &run,
+            (true, 0),
+            all,
+            &mut taken,
+        )
+        .expect("a grid to halve");
+        assert_eq!(f.board.grid.g * 2, board.grid.g);
+        assert!(f.rounds >= 1);
+        assert_eq!((f.before, f.after), (0, 0));
+        for net in &f.nets {
+            assert!(f.board.conflicts(net).is_empty());
+            assert_eq!(open_on_grid(net), 0);
+        }
+        let vias: usize = f.nets.iter().map(|n| f.board.measure(n).0).sum();
+        assert!(vias >= 2);
+        // What they are for: a net that was taken out and found no way where nothing is
+        // claimed has a connection open, and is routed across the others at a price.
+        let mut open = nets.clone();
+        board.uncommit(&mut open[1]);
+        open[1].wires.clear();
+        board.commit(&mut open[1]);
+        assert_eq!(open_on_grid(&open[1]), 1);
+        let f = finer_rounds(
+            &d,
+            &world,
+            &jobs,
+            &board,
+            &open,
+            &plans,
+            &run,
+            (true, 0),
+            all,
+            &mut taken,
+        )
+        .expect("a grid to halve");
+        assert!(f.rounds >= 1);
+        assert_eq!((f.before, f.after), (1, 0));
+        assert!(f.nets.iter().all(|n| f.board.conflicts(n).is_empty()));
+        // With no node to spend there is no round, and nothing to keep.
+        let none = finer_rounds(
+            &d,
+            &world,
+            &jobs,
+            &board,
+            &open,
+            &plans,
+            &run,
+            (true, 0),
+            (None, 0),
+            &mut taken,
+        );
+        assert!(none.is_none());
     }
 
     #[test]

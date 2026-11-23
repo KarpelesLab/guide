@@ -308,7 +308,11 @@ Each item is independently useful, and they can land in any order.
   negotiation can make its routes legal before the pours are filled, and a net with a
   plane can be planned on its outer pours too (`RouteOptions::legal_pours` and
   `outer_pours`, both off: built and measured, no gain,
-  [benchmarks](docs/benchmarks.md#pcb-routing-with-the-pours-filled-around-legal-routes)), and the connections of a board in two parts that
+  [benchmarks](docs/benchmarks.md#pcb-routing-with-the-pours-filled-around-legal-routes)), the
+  connections that the negotiation at twice the pitch leaves open can be negotiated for
+  on the grid of the pitch before the passes (`RouteOptions::whole_finer`, off: it halves
+  what the passes take out and the board ends as it did,
+  [benchmarks](docs/benchmarks.md#pcb-routing-with-the-open-connections-negotiated-on-the-finer-grid)), and the connections of a board in two parts that
   only the schematic joins are found once and told (`Cause::Apart`,
   [benchmarks](docs/benchmarks.md#pcb-routing-with-room-for-spokes)),
   and a host that fills its zones itself is asked for its fill around the routes,

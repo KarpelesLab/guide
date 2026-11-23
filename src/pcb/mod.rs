@@ -856,6 +856,24 @@ pub struct RouteOptions {
     /// of the connections has the same share of what is left then, once: it is near its
     /// end, and the passes have little to do after one that ends.
     pub whole_share: f64,
+    /// Whether the connections that a negotiation of [`whole`](RouteOptions::whole) at
+    /// twice the pitch leaves open are completed by rounds on the grid of the pitch,
+    /// before the passes. The default is `false`. When the rounds at twice the pitch
+    /// end, what is still shared is taken out and routed again where nothing is
+    /// claimed, and a net with no way there has a connection open. The passes complete
+    /// it by taking other nets out, and each net taken out comes back with more vias.
+    /// With this the nets stay as their routes left them, on a grid with a cell between
+    /// every two of theirs: the nets with a connection open are routed across the
+    /// others at a price, the nets whose claims they are in are routed again in the next
+    /// round with what is in no one's way kept, at a price that rises, and what is still
+    /// shared after sixteen rounds at most is taken out as before. The routes are those
+    /// of that grid only if fewer connections are open on it than before
+    /// ([`Stats::whole_finer`]); the rounds have a tenth of what the run has left, in
+    /// time and in work, at most. Measured through cadlab, it halves what the passes
+    /// are given and the nets they take out, and the board ends as it did within what
+    /// the same code moves from one order to the next (`docs/benchmarks.md`, "PCB
+    /// routing with the open connections negotiated on the finer grid").
+    pub whole_finer: bool,
     /// How many threads [`whole`](RouteOptions::whole) routes nets on. The default is 1;
     /// the routes are the same for any number. The nets of a round are routed a few at a
     /// time, each against what the others claim before any of the few, and have their
@@ -932,6 +950,7 @@ impl Default for RouteOptions {
             seed: None,
             whole: false,
             whole_share: 0.5,
+            whole_finer: false,
             threads: 1,
             shorten: false,
         }
@@ -1034,6 +1053,11 @@ pub struct Stats {
     /// The connections that those routes made, and the vias that routing each net again
     /// for fewer of them saved.
     pub whole_made: (usize, usize),
+    /// Of the rounds on the grid of the pitch for the connections that a negotiation at
+    /// twice the pitch left open ([`RouteOptions::whole_finer`]): how many there were,
+    /// and the connections open on the grid before them and after. The routes are
+    /// those of these rounds only if the last is less than the one before it.
+    pub whole_finer: (usize, usize, usize),
     /// Of the nets routed again where the others are, once every route is where it is
     /// ([`RouteOptions::whole`] in a run with a budget, and
     /// [`RouteOptions::shorten`]): those looked at, those kept as they were routed again,

@@ -1026,6 +1026,18 @@ does it:
   share looks at what its routes cut off, once, and ends those rounds for the pours
   if that is a piece of fill for every hundred connections, as cadlab's router does
   at 0.55 of its budget.
+- *The connections left open, negotiated on the grid of the pitch*
+  ([results](benchmarks.md#pcb-routing-with-the-open-connections-negotiated-on-the-finer-grid)).
+  At twice the pitch a few nets end the rounds in each other's way; they are taken out,
+  and one that finds no way where nothing is claimed has a connection open, which the
+  passes complete by taking other nets out. With `RouteOptions::whole_finer` the nets
+  are put as they are on a grid with a cell between every two of theirs
+  (`whole::refined`), and there are rounds on it for the nets with a connection open and,
+  from the next round on, the nets whose claims they are in (`whole::finer_rounds`):
+  sixteen at most, in a tenth of what the run has left, kept only if fewer connections
+  are open on the grid after them (`Stats::whole_finer`). It halves what the passes
+  are given and the nets they take out, and the board ends as it did: what the passes
+  add is taken out again by the end of the run either way. Off by default.
 - *What it ends with is copper of the nets.* Each net's route is given to the passes as
   the routes of an earlier run are: what the world does not allow of it beside the
   others is left out, a net left in pieces is completed from them, and the passes,

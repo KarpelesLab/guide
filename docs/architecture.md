@@ -917,6 +917,20 @@ them (`Zones::spokes`): a connection that differs by layer, a width fitted to th
 and directions of its own are the host's to know, and with any spoke given none is
 worked out here.
 
+**A pad's last spoke is kept as copper is**
+([results](benchmarks.md#pcb-routing-with-a-pads-last-spoke-kept)). A price leaves the
+last spoke of a pad to the route that has no other way, and to the one that is a little
+shorter through it. `RouteOptions::kept_spokes` is how many a pad keeps on a layer: the
+world counts, for each spoke that the host gave, what stands in its room, and once a
+route placed in it leaves a pad no more free rooms than that, each of those is in the
+world as copper of the pad's net, for as long as it is so (`World::keep_spokes`). No
+search and no step of the cleanup is told of it: they ask the world whether a track may
+be somewhere, as they do of any copper. A wall and no price, and only from when the
+nets are routed a net at a time: a negotiation counts no rooms, the routes of an earlier
+run are taken as they are, and a pad that those leave no free room has none to keep.
+The default is none; a host says in which of its runs it wants it, and cadlab has it in
+the runs that move routes that are otherwise final.
+
 **Every net can be routed against every other at once, on one grid, before the passes**
 ([results](benchmarks.md#pcb-routing-of-every-net-at-once)). The passes route a net and
 take others out for it, and what they leave open on a crowded board are nets that were

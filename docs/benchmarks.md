@@ -5911,6 +5911,140 @@ at a time.
   are what it has for the balls left shut in, and no other way to those was tried.
 - More than one thread, or a deadline: the comparison is by nodes.
 
+## PCB routing with a pour left whole
+
+What was changed after [the release below](#pcb-routing-with-a-pads-last-spoke-kept),
+0.0.30, with the same aim: level with cadlab's own router or ahead of it on every measure
+on every board of its corpus ([decisions](architecture.md#decisions)). It is still not
+met. Measured on 2026-11-23 through cadlab's adapter and its `route_bench`, with a
+checkout of this crate before it was released, and with prints and switches in both
+routers that are in no release, on a machine that another job kept busy (its load 5 to
+12): the times are of runs side by side in the same minutes, and what is at a budget of
+nodes is on one thread, which the load does not move. The table beside cadlab's router at
+60 s is in cadlab's `docs/ROUTER.md` and its decision D127.
+
+### The route that cut a pad off its pour
+
+`buspirate-flash-sop`, two layers and a ground poured on both, had five vias in three
+orders of four and six in the fourth, for the four of cadlab's router. The fifth is a
+via beside a capacitor's pad of the ground: the pad is on the top layer, in the pour, and
+the routes of four other nets close a ring round it, of tracks and of the pads of two
+connectors between whose pins they pass. cadlab's router leaves that pour in one piece by
+the way its routes happen to go; it has no rule for it either.
+
+In a run for shorter ways each such stub is now looked at
+([how](architecture.md#decisions)): `pcb::uncut`. Two things had to be found on the
+way. The fills that a host gives are around the routes as they were when it filled: the
+cells of the pour have no fill where a route is, whether that route is taken as not there
+or not, so a cell that the routes of the nets asked about took is given back where the
+world says that copper of the pour's least width has room there with those nets gone
+alone. And the nets routed again are pulled tight while the way of the fill is still
+kept: without it they are back on the straight line they had. One net was enough on this
+board in the three orders (a track of 72 mm, 1.3 mm longer for it); in the fourth the pad's
+piece of the pour holds a second pad with a via of its own, and the one way that the fill
+has costs the net that is in it two vias, for the one saved: not kept.
+
+| `buspirate-flash-sop`, four orders, 60 s | vias | track | outside the pads |
+|---|---|---|---|
+| 0.0.30 | 6, 5, 5, 5 | 439.7 to 440.4 mm | 428.4 to 428.8 mm |
+| with the pour left whole | 6, 4, 4, 4 | 438.9 to 441.8 mm | 428.1 to 430.9 mm |
+| cadlab's router, four seeds | 4, 4, 4, 4 | 460.2 to 461.7 mm | 430.6 to 432.0 mm |
+
+### A run's end at a pad, and the price of a via in a run searched for again
+
+`buspirate-rs232`, two layers, has 30 nets of two or three pads between two SOIC drivers,
+their capacitors and three headers. 0.0.30 routed it with 5 vias and 294 to 300 mm for
+the 10 (9 in one seed) and 281 to 283 mm of cadlab's router, 283 to 289 mm outside the
+pads for 272 to 274. Net by net, in the first order: 7.1 mm are in three nets that have
+no via where cadlab's router has one, and the rest in the runs of 2 to 5 mm from a
+driver's pad to the capacitor beside it, 0.2 to 0.4 mm each.
+
+*The short runs.* A search ends at a pad's centre. A capacitor's pad is 0.25 mm off the
+line of the driver's, and the run stepped aside for it outside the pad, where cadlab's
+router, which ends a track on the first cell of its grid that is on the pad, goes
+straight on. `cleanup::aim_at_pads` aims each run's end at a point of the pad's box on
+one of the eight directions from its centre, half a track's width from the box's edge at
+least, and from there to the centre, which is copper on the pad's own and which a host
+leaves out; kept where that leaves less of the run outside the pads and the world allows
+it. Outside the pads, over the four orders: 279.9, 281.3, 281.3 and 284.5 mm for 283.2,
+286.7, 284.8 and 289.4.
+
+*The three nets.* Each goes between two pads of a driver and round to its own from
+behind, 2.7 to 3.3 mm longer than the way with a via that cadlab's router has. They are
+made by the pass for fewer vias at the end of the negotiation, whose rule is that
+router's (a tenth longer and eight steps for each via less), and kept by the two after
+it, which allow 5 mm a via. Tried on the rules, at 40 million nodes over three orders:
+
+| the rules for a via less | `buspirate-rs232`: vias, track outside the pads (60 s, medians) | `buspirate5-rev10` vias | `lumenpnp-mobo` vias | `sweep-v2.2` vias | `tinytapeout-demo` open |
+|---|---|---|---|---|---|
+| as released | 5, 281.3 mm | 316, 317, 291 | 337, 335, 325 | 22, 18, 20 | 3, 7, 4 |
+| a tenth longer and no more, 1.5 mm a via in the passes after | 5, 276.1 mm | 321, 331, 333 | 367, 341, 347 | 25, 22, 23 | 4, 4, 10 |
+| a tenth longer and no more, a tenth of the net and 1 mm at least after | 6, 278.1 mm | 321, 325, 330 | 363, 335, 344 | 24, 24, 22 | 4, 5, 10 |
+
+Not kept: what the small board gains, the boards whose vias are level with cadlab's
+router's or over lose. What is kept is in the run for shorter ways alone, which takes
+each run of tracks out and searches for it again: a via cost it three times what it
+costs while routing, 3 mm, at which each of the three nets costs as much with its via as
+without; it costs twice now, 2 mm, which is what the negotiation pays for one at a pitch
+of 0.2 mm.
+
+| a via in a run searched for again | `buspirate-rs232` at 60 s, four orders: vias; track; outside the pads | `lumenpnp-mobo` | `buspirate5-rev10` | `tinytapeout-demo` |
+|---|---|---|---|---|
+| 3 mm | 5, 5, 5, 4; 288.8 to 293.4 mm; 279.9 to 284.5 mm | 333 vias, 5334 mm | 308 vias, 2985 mm | 279 vias, 5066 mm |
+| 2 mm, as released | 6, 8, 8, 8; 282.5 to 285.7 mm; 273.6 to 276.8 mm | 334 vias, 5326 mm | 306.5 vias, 2977 mm | 284.5 vias, 5038 mm |
+
+The three larger boards are four orders of each at 60 s, one run of each price at a time
+side by side, medians; the connections open are the same (none, none, and one in one
+order of `tinytapeout-demo`). At 40 million nodes over three orders: `lumenpnp-mobo` 343,
+337 and 328 vias for 337, 335 and 325, `buspirate5-rev10` 317, 315 and 297 for 316, 317
+and 291, `sweep-v2.2` 23, 20 and 20 for 22, 18 and 20, and no connection more or less on
+any of the five boards measured. `tinytapeout-demo`'s vias are worse for it, 5.5 in the
+median, on a board whose vias were over those of cadlab's router already.
+
+### Where the time of a run that has every connection goes
+
+`buspirate5-rev10`, four layers, has every connection after 3 s of its first run and
+ends after 25 s; `tinytapeout-demo` after 24 s and 53 s. By the clock of each stage
+(prints that are in no release), in one order of each:
+
+| stage | `buspirate5-rev10` | `tinytapeout-demo` |
+|---|---|---|
+| the negotiation and the passes | 2.5 s | 22.9 s |
+| the first run's cleanup: each net again, the pads cut off joined again, the searches for fewer vias | 0.5, 1.6 and 3.0 s (398 vias to 385) | 1.5, 2.4 and 6.3 s (350 vias to 331) |
+| the run for shorter ways: each net again, the shorter runs | 1.1 and 2.6 s | 2.9 and 5.0 s |
+| the host's fills measured again, in every call | 4.3 s over six calls | 3.4 s over three |
+| the host between the calls: its check, its fills, the pads' necks | 3.7 s | 3.9 s |
+| the step for the spokes, three tries and one | 7 s | 4.5 s |
+
+The fills were the one stage that makes nothing. `Zones::fills` are measured against the
+board's copper each time a board is given, and of the 4.3 s, 3.6 s went on making the
+parts that a fill of a hundred thousand edges is measured by. `Zones::fills_clear_of` is
+the host's word for what its fills were made around; a fill is measured against the rest
+alone, and has no parts made if nothing is near it to measure. With it, and the routes
+of an earlier run and the fills that are fixed copper counted as what the host filled
+around: 1.6 s and 0.2 s, the same tracks and vias to the nanometre on both boards, and
+`buspirate-flash-sop` in 0.6 s for 1.1.
+
+### corne-cherry's time, and what was tried on it and not kept
+
+Its first run's negotiation is 150 rounds and 24 s. The first sixteen are 9.7 s and
+58 million nodes; cadlab's router's first fourteen are 7.7 s and 56 million: a round
+costs the two the same. What differs is that cadlab's router has 18 points shared after
+its fourteenth round and ends after 33, at a price for a shared point that rises to a
+thousand steps, and this one has some 300 after as many at a price stopped at thirty,
+and 135 rounds more of 0.1 s each for the last hundred points. The passes then begin
+with 141 of the 152 nets whole and leave 128 to 136 so, and the settling has 3 s for
+each of five negotiations for a connection, to the run's deadline.
+
+- *The price rising again once the rounds have not gained for three*: 100 rounds for
+  150, 500 vias and 8515 mm for 419 and 7466 mm in the first order, four connections
+  open for one.
+- *What a round adds to the history of a shared point growing with the rounds*, by a
+  tenth and by three tenths of itself a round: 107 and 73 rounds, 18 s both, 458 and
+  454 vias.
+- *Forty rounds at the first pitch, as at twice the pitch*: 14, 2, 1 and 7 connections
+  open over four orders for 1, 0, 1 and 1, in 55 s each for 55, 34, 53 and 55.
+
 ## PCB routing with a pad's last spoke kept
 
 What was changed after [the release below](#pcb-routing-with-the-nets-of-a-row-as-narrow-as-its-pitch-asks),

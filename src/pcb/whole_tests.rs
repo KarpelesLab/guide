@@ -222,3 +222,49 @@ fn a_plane_of_another_net_costs_a_track_nothing_in_the_negotiation() {
     assert!(!tracks.is_empty());
     assert!(tracks.iter().all(|t| t.layer == LayerId(1)), "{tracks:?}");
 }
+
+#[test]
+fn with_the_open_connections_negotiated_on_the_finer_grid_the_board_is_legal_and_the_same() {
+    // Nets across each other on four layers, where the grid is of twice the pitch. The
+    // rounds on the grid of the pitch are for what the negotiation leaves open: without
+    // them asked for there are none.
+    let mut d = crossed(24);
+    d.rules = super::tests::rules(4);
+    let off = route_checked(&d, &whole());
+    assert_eq!(off.stats.whole_finer, (0, 0, 0));
+    let finer = RouteOptions {
+        whole_finer: true,
+        ..whole()
+    };
+    let on = route_checked(&d, &finer);
+    assert!(on.unrouted.len() <= off.unrouted.len());
+    // They are begun only with a connection open, and where nothing is open after a
+    // negotiation that ended the routes are those without them.
+    let (rounds, before, after) = on.stats.whole_finer;
+    assert!(rounds == 0 || before > 0);
+    assert!(after <= before || rounds > 0);
+    if before == 0 {
+        assert_eq!(on.tracks, off.tracks);
+        assert_eq!(on.vias, off.vias);
+    }
+    // Whatever a budget stops the negotiation in, the board is legal, and the same twice
+    // over and on any number of threads.
+    for part in [8, 64, 512, 4096] {
+        let options = RouteOptions {
+            work_budget: Some(off.stats.work * part / 8192 + 1),
+            ..finer
+        };
+        let routed = route_checked(&d, &options);
+        let again = route(
+            &d,
+            &RouteOptions {
+                threads: 3,
+                ..options
+            },
+        )
+        .unwrap();
+        assert_eq!(routed.tracks, again.tracks);
+        assert_eq!(routed.vias, again.vias);
+        assert_eq!(routed.stats.whole_finer, again.stats.whole_finer);
+    }
+}

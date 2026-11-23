@@ -5911,6 +5911,130 @@ at a time.
   are what it has for the balls left shut in, and no other way to those was tried.
 - More than one thread, or a deadline: the comparison is by nodes.
 
+## PCB routing with the open connections negotiated on the finer grid
+
+What was built after 0.0.32, for what
+[the release before](#pcb-routing-with-the-pours-filled-around-legal-routes) measured and
+left: the nets without a plane are given to the passes with 174 to 245 vias and have 258
+to 326 after them, for 10 to 17 connections completed by 44 to 219 nets taken out. So
+those connections are negotiated for instead, on the grid of the pitch, by the nets
+concerned: `RouteOptions::whole_finer`. **It is off by default, and cadlab leaves it off:
+it halves what the passes are given and the nets they take out, and the board ends as it
+did.** Measured on 2026-11-23 through cadlab's adapter and its `route_bench`, with a
+checkout of this crate in place of the release and prints that are in no release; 60 s
+runs two orders of each of two builds at a time, three threads each, the load 4.3 to
+8.9; budgets of nodes on one thread.
+
+### What it is
+
+When the rounds at twice the pitch end, what is still shared is taken out and routed
+again where nothing is claimed (`whole::legalise`), and each net is routed once more
+for fewer vias. A net that was taken out and found no way has a connection open on the
+grid. With `whole_finer` the nets are then put as they are on a grid with a cell between
+every two of theirs (`whole::refined`: the same copper, a node between every two of a
+layer), and there are rounds on it (`whole::finer_rounds`): the nets with a connection
+open are routed across the others at eight steps a claimed point; the nets whose claims
+they are in are routed again in the next round, with their wires that are in no one's
+way kept, at a price that rises by 1.6 a round; sixteen rounds at most, five since the
+best, within a tenth of the time and of the nodes that the run has left. The routes go
+back to the round with the fewest points shared, what is still shared there is taken
+out as before, and the routes of that grid are the negotiation's only if fewer
+connections are open on it than before the rounds (`Stats::whole_finer`).
+
+### Stage by stage
+
+The default order at 150 million nodes, one thread; vias and mm of track of the routes
+as they stand.
+
+| stage | `tinytapeout-demo`, 0.0.32 | with `whole_finer` | `buspirate5-rev10`, 0.0.32 | with `whole_finer` |
+|---|---|---|---|---|
+| after the first round | 248, 4994 | the same | 269, 3191 | the same |
+| the rounds end: rounds, points shared, nets taken out | 109, 20, 5 | the same | 40, 2, 1 | the same |
+| legal, after the pass for fewer vias; connections open on the grid | 350, 5564; 12 | the same | 410, 3603; 4 | the same |
+| the rounds on the grid of the pitch: rounds, open before and after; nodes | | 10, 12 and 8; 7.5 million, their tenth | | 8, 4 and 3; 0.5 million |
+| given to the passes: vias; connections apart | 339; 10 | 350; 10 | 402; 1 | 403; 0 |
+| after the passes: vias, track; nets taken out | 365, 5774; 44 | 361, 5793; 0 | 407, 3626; 1 | 406, 3628; 0 |
+| after each net again and the stubs to the fills | 337, 5631 | 324, 5651 | 400, 3512 | 399, 3523 |
+| the first run ends | 326, 5559 | 317, 5597 | 387, 3495 | 387, 3499 |
+| the board, after the later runs | 280, 4886 mm, none open | 277, 4885 mm, none open | 317, 2963 mm, none open | 314, 2948 mm, none open |
+
+`tinytapeout-demo` in eight orders at 150 million nodes: the connections open on the grid
+go from 11 to 21 to 3 to 9 in 5 to 14 rounds, the passes are given 2 to 10 apart for 8
+to 15 and take 406 nets out over the eight orders for 852; the boards have 298 vias and
+4998 mm with none open in any order, for 296.5 and 5024 mm with one open in one (medians).
+Halving what the passes take out does not move the board: what a net taken out comes back
+with is taken out again by the end of the first run and by the runs after it, with the
+rounds or without.
+
+### What it ends with
+
+At 60 s, 0.0.32 beside `whole_finer`, four orders and `tinytapeout-demo` eight; medians of
+the vias and the track, connections open by order:
+
+| board | 0.0.32: open; vias; track | with `whole_finer` |
+|---|---|---|
+| `tinytapeout-demo` | 0/1/0/0/0/0/2/4; 287.5; 5044 | 0/0/2/0/0/0/2/4; 280; 5003 |
+| `buspirate5-rev10` | 0/0/0/0; 306.5; 2977 | 0/0/0/0; 309.5; 2976 |
+| `lumenpnp-mobo` | 0/0/0/0; 334; 5326 | 0/0/0/0; 335; 5369 |
+| `cynthion` | 8/8/8/8; 417; 3032 | 8/8/8/8; 419.5; 3026 |
+| `glasgow-revC3` | 9/6/9/7; 403.5; 3635 | 8/5/7/5; 413.5; 3732 |
+| `glasgow-revD1` | 15/30/7/8; 1182; 10615 | 16/23/7/8; 1196.5; 10577 |
+
+No pad with no spoke in either, in any order. The connections open on the grid go from
+11 to 19 to 3 to 11 on `tinytapeout-demo`, from 20 to 23 to 11 to 13 on `glasgow-revC3`
+and from 11 to 8 on `lumenpnp-mobo`; `glasgow-revD1`, whose rounds its share ends, has
+none or one round of them. `glasgow-revC3` has 25 connections open over the four orders
+for 31, with 2.5 % more vias and 2.7 % more track, of which the connections made are a
+part; `tinytapeout-demo` 2.6 % fewer vias and 0.8 % less track with 8 open for 7. Against
+cadlab's router that moves no measure of any board from worse to equal, and
+`glasgow-revC3`'s vias from better to equal, so cadlab leaves it off.
+
+Budgets of nodes, one thread, connections open over the boards and orders: 150 million,
+seven boards and two orders, 43 without and 39 with (`tinytapeout-demo` none and none for
+none and 1, with 277 and 307 vias for 280 and 332; `glasgow-revC3` 5 and 4 for 7 and 5,
+with 403 and 399 vias for 409 and 385; the others as they were, within seven vias);
+40 million, nine boards and three orders, 583 and 586 (`tinytapeout-demo` 3, 9 and 8
+for 3, 7 and 4; `glasgow-revC3` 12, 15 and 9 for 12, 15 and 12; the others as they
+were). Without it the 41 runs have the connections, vias and track of 0.0.32. No pad
+with no spoke in any of the 82 runs.
+
+### What was tried and not kept
+
+- *The rounds on the grid of the pitch before anything is taken out*, from the routes of
+  the best round with their points shared, and the pass for fewer vias on that grid
+  after them: `tinytapeout-demo` at 150 million nodes over eight orders 288 vias and
+  4996 mm with none open at eight steps a claimed point and 294 and 5015 mm at thirty,
+  for 296.5 and 5024 mm with one open; at 60 s 279 vias for 287.5 with 13 connections
+  open over the eight orders for 7 and a pad with no spoke in two of them, the rounds
+  24 million nodes and 10 s in one order with 58 points shared before them and 19 at
+  best; `buspirate5-rev10` 323.5 vias for 306.5, the pass for fewer vias on the finer
+  grid keeping 19 where it kept 56 (its slack is in steps, which are half as long, and
+  its nodes those of the coarser grid); `glasgow-revC3` 19 open over four orders for
+  32 with 3.5 % more track.
+- *A first price of fifty steps and twenty-four rounds*: `tinytapeout-demo` at 150 million
+  nodes 292 vias and 4968 mm with one open in one order, for 298 and 4998 mm with none.
+- *The same rounds after a negotiation at the first pitch*, on two layers, from the pitch
+  to half of it: `corne-cherry` at 60 s over eight orders 9 connections open for 9, 432.5
+  vias for 430.5, 34 to 55 s for 34 to 56 s.
+- *The first pitch on more than two layers where the first round says there is room*,
+  and twice the pitch only where not: `tinytapeout-demo` at 60 s over eight orders 321
+  vias for 287.5, 21 connections open for 5 and a pad with no spoke, its rounds ended by
+  their share at the eighteenth to the sixty-third with 23 to 126 points shared;
+  `buspirate5-rev10` 3136 mm for 2977 and 50 to 57 s for 23 to 33 s.
+- *`legal_pours` with a look at the pours late in the share on a board with no inner
+  plane*, which had `corne-cherry` at no connection open in four orders in the release
+  before: over eight orders at 60 s 12 open for 9 and 450 vias for 426.5.
+
+### What this does not show
+
+- A gain. The rounds do what they were built for, and the measure they were built to
+  move does not move.
+- More than four orders at 60 s on the boards other than `tinytapeout-demo`, and more
+  than one period.
+- Why the board ends as it did: by the stages above the first run's own end, each net
+  routed again and cleanup, takes out of both what the passes added, and the later runs
+  take the boards to the same vias. Where the later runs get them was not looked at.
+
 ## PCB routing with the pours filled around legal routes
 
 What was built beside [the change below](#pcb-routing-with-a-pour-left-whole), after 0.0.30,

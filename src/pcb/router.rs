@@ -2022,6 +2022,7 @@ fn route_all<'a>(
             stats.pour_cuts += w.pour_cuts;
             stats.refills += w.refills;
             stats.pours_back += w.pours_back;
+            stats.whole_finer = w.finer;
             for (k, sites) in &w.sites {
                 jobs[*k].ctx = pours::with_sites(&jobs[*k].ctx, sites, pitch);
             }

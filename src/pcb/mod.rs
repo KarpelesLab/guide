@@ -244,6 +244,7 @@ pub mod place;
 mod planes;
 mod pours;
 mod report;
+mod rounds;
 mod router;
 mod rows;
 mod settle;
@@ -372,6 +373,11 @@ pub struct Design {
     /// Copper zones, which are filled after routing, and which their nets connect to
     /// rather than routing tracks between all their pads: see [`RouteOptions::planes`].
     pub zones: Zones,
+    /// By pad of [`board`](Design::board), the part that it is a pad of, as any number that
+    /// the pads of one part share; empty if the parts are not told. Only the rounds of
+    /// [`Rounds::Native`] read it: they tell a row of pads of fine pitch, and an array of
+    /// them, by the pads of one part, and with no parts told they find no rows.
+    pub parts: Vec<u32>,
 }
 
 impl Design {
@@ -436,6 +442,7 @@ impl Design {
             edge_clearance: board.routing.edge_clearance,
             nets,
             obstacles: board.routing.text.clone(),
+            parts: Vec::new(),
             pairs,
             lengths: Vec::new(),
             zones: board.routing.zones.clone(),
@@ -504,6 +511,7 @@ impl Design {
             edge_clearance: spec.clearance,
             nets,
             obstacles: Vec::new(),
+            parts: Vec::new(),
             pairs: Vec::new(),
             lengths: Vec::new(),
             zones: Zones {
@@ -549,6 +557,22 @@ pub fn edges(rings: &[&[crate::geom::Point]]) -> Vec<Shape> {
         }
     }
     outline
+}
+
+/// Which negotiation a run with [`RouteOptions::whole`] has for every net at once.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Rounds {
+    /// This crate's own: each place asked of the board exactly, on a grid of twice the pitch
+    /// on more than two layers.
+    #[default]
+    Own,
+    /// The negotiation of cadlab's own router, with its own view of the board: its grid, half
+    /// a track and its clearance, snapped to the rows of fine pitch; the pads that a fill
+    /// joins as one, and a connection that may end on a fill near its end; the nets in the
+    /// order of their length, forty rounds at most or twelve with none better, and what is
+    /// still shared then taken out and routed again where nothing is claimed. The passes go
+    /// on from its routes.
+    Native,
 }
 
 /// What [`route`] may do.
@@ -874,6 +898,14 @@ pub struct RouteOptions {
     /// the same code moves from one order to the next (`docs/benchmarks.md`, "PCB
     /// routing with the open connections negotiated on the finer grid").
     pub whole_finer: bool,
+    /// Which negotiation [`whole`](RouteOptions::whole) is. The default is
+    /// [`Rounds::Own`].
+    pub rounds: Rounds,
+    /// Whether the rounds of [`Rounds::Native`] plan ways out of the rows and arrays of
+    /// fine pitch before they route, dog-bones and escapes, as cadlab's own router does. The
+    /// default is `true`; the run's own escapes are then not planned. It needs the parts of
+    /// the pads ([`Design::parts`]).
+    pub rounds_fanout: bool,
     /// How many threads [`whole`](RouteOptions::whole) routes nets on. The default is 1;
     /// the routes are the same for any number. The nets of a round are routed a few at a
     /// time, each against what the others claim before any of the few, and have their
@@ -951,6 +983,8 @@ impl Default for RouteOptions {
             whole: false,
             whole_share: 0.5,
             whole_finer: false,
+            rounds: Rounds::Own,
+            rounds_fanout: true,
             threads: 1,
             shorten: false,
         }
@@ -1053,6 +1087,12 @@ pub struct Stats {
     /// The connections that those routes made, and the vias that routing each net again
     /// for fewer of them saved.
     pub whole_made: (usize, usize),
+    /// Whether the rounds of [`Rounds::Native`] were asked for and gave the board up after
+    /// their first round, which said that their share of the run had no room for them or
+    /// that their grid did not reach the board's pads: the run then began again with this
+    /// crate's own, [`Rounds::Own`], its necks and its escapes with them. A host that
+    /// routes the board again from this run's routes asks for those then.
+    pub rounds_given_up: bool,
     /// Of the rounds on the grid of the pitch for the connections that a negotiation at
     /// twice the pitch left open ([`RouteOptions::whole_finer`]): how many there were,
     /// and the connections open on the grid before them and after. The routes are
@@ -1215,6 +1255,7 @@ impl std::error::Error for RouteError {
 ///     outline: Vec::new(),
 ///     edge_clearance: 0,
 ///     obstacles: Vec::new(),
+///     parts: Vec::new(),
 ///     pairs: Vec::new(),
 ///     lengths: Vec::new(),
 ///     zones: Default::default(),
@@ -1271,6 +1312,7 @@ pub fn route(design: &Design, options: &RouteOptions) -> Result<Routed, RouteErr
 ///     outline: Vec::new(),
 ///     edge_clearance: 0,
 ///     obstacles: Vec::new(),
+///     parts: Vec::new(),
 ///     pairs: Vec::new(),
 ///     lengths: Vec::new(),
 ///     zones: Default::default(),
@@ -1485,6 +1527,8 @@ mod control_tests;
 mod model_tests;
 #[cfg(test)]
 mod pair_tests;
+#[cfg(test)]
+mod rounds_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

@@ -385,6 +385,7 @@ mod tests {
             edge_clearance: 0,
             nets: vec![super::super::NetSpec::new(250_000, None)],
             obstacles: Vec::new(),
+            parts: Vec::new(),
             pairs: Vec::new(),
             lengths: Vec::new(),
             zones: Default::default(),

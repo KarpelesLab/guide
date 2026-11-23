@@ -609,7 +609,27 @@ pub(crate) fn run_from(
     run.phase(Phase::Prepare);
     run.poll();
     let (mut routed, mut failed, mut counted, narrow, apart) =
-        route_all(design, earlier, options, &run)?;
+        match route_all(design, earlier, options, &run) {
+            Ok(outcome) => outcome,
+            Err(Halt::Error(e)) => return Err(e),
+            // The same run from its start, with this crate's own rounds: its necks, its
+            // escapes and its negotiation, in what the first round of the others left of
+            // the time and the work.
+            Err(Halt::Again) => {
+                let own = RouteOptions {
+                    rounds: super::Rounds::Own,
+                    ..*options
+                };
+                match route_all(design, earlier, &own, &run) {
+                    Ok(mut outcome) => {
+                        outcome.0.stats.rounds_given_up = true;
+                        outcome
+                    }
+                    Err(Halt::Error(e)) => return Err(e),
+                    Err(Halt::Again) => unreachable!("only the rounds asked for give a board up"),
+                }
+            }
+        };
     if options.tune_lengths && !design.lengths.is_empty() && !run.poll() {
         run.phase(Phase::Lengths);
         tune::run(design, &mut routed, options).map_err(RouteError::Geometry)?;
@@ -937,6 +957,18 @@ fn planned_fills(design: &Design, fills: &[Fill], is_plane: &[bool], outer: bool
         .collect()
 }
 
+/// Of a host's fills, those that count for the rounds of cadlab's own router: the fills
+/// that nets are planned on ([`planned_fills`]), and those of the zones that are no planes.
+fn counted_fills(design: &Design, fills: Vec<Fill>, is_plane: &[bool], outer: bool) -> Vec<Fill> {
+    let mut out = planned_fills(design, &fills, is_plane, outer);
+    out.extend(
+        fills
+            .into_iter()
+            .filter(|f| !is_plane.get(f.zone).copied().unwrap_or(true)),
+    );
+    out
+}
+
 /// By zone, whether its net plans on it as a plane: as the zone [says](super::CopperZone::plane),
 /// or if it is no pour, of a net of [`POUR_PADS`] pads or fewer and [`POUR_WIDTH`] pitches
 /// wide or less, and its net's fills cover enough of the box of the net's pads,
@@ -1125,6 +1157,20 @@ const FINER_SHARED: usize = 100;
 /// if it was made, by net the width it was routed at where that is narrower than its
 /// own, and by net how many of its connections the board with no route on it has no way
 /// for.
+/// Why [`route_all`] has no outcome: an error, or the rounds of cadlab's own router gave the
+/// board up after their first round ([`Rounds::Native`](super::Rounds)), and the run is to
+/// begin again with this crate's own.
+enum Halt {
+    Error(RouteError),
+    Again,
+}
+
+impl From<RouteError> for Halt {
+    fn from(e: RouteError) -> Halt {
+        Halt::Error(e)
+    }
+}
+
 type Outcome = (
     Routed,
     BTreeMap<NetId, Failure>,
@@ -1264,7 +1310,7 @@ fn route_all<'a>(
     earlier: Option<&Earlier>,
     options: &RouteOptions,
     run: &'a Run<'a>,
-) -> Result<Outcome, RouteError> {
+) -> Result<Outcome, Halt> {
     let original = design;
     let rules = &design.rules;
     let world_of = |design: &Design| {
@@ -1284,9 +1330,24 @@ fn route_all<'a>(
     let pitch = pitch(design, options);
     // Nets too wide to leave their pads are routed narrower, from here on.
     let (narrow, row_pitch) = if options.neck_down && !run.poll() {
-        let world = world_of(design)?;
-        // Beside their neighbours too in a run with a budget.
-        neck::plan(design, &world, run.bounded())
+        if options.rounds == super::Rounds::Native {
+            // By the rule of the rounds that route them, in every run of a board that has
+            // them in its first: the routes of one run are laid again in the next.
+            let narrow = super::rounds::necks(design);
+            let row = narrow
+                .iter()
+                .enumerate()
+                .filter_map(|(i, w)| {
+                    let clearance = rules.clearance(Some(NetId(i as u32)), LayerId(0));
+                    w.map(|w| (w + clearance) / 2)
+                })
+                .min();
+            (narrow, row)
+        } else {
+            let world = world_of(design)?;
+            // Beside their neighbours too in a run with a budget.
+            neck::plan(design, &world, run.bounded())
+        }
     } else {
         (Vec::new(), None)
     };
@@ -1394,13 +1455,42 @@ fn route_all<'a>(
             &with_routes
         };
         let mut world = world_of(design)?;
+        // The rounds of cadlab's own router plan their own ways out, on their own grid.
+        let own_fanout = options.whole
+            && options.rounds == super::Rounds::Native
+            && options.rounds_fanout
+            && run.bounded()
+            && taken_back.is_empty();
         // In a run with a budget, for the balls deep in an area array too.
-        let mut escapes =
-            escape::plan(design, &mut world, pitch, options.fanout_via, run.bounded());
+        let mut escapes: Vec<escape::Escape> = if own_fanout {
+            let fills = counted_fills(
+                design,
+                design.zones.fills.clone(),
+                &is_plane,
+                options.outer_pours,
+            );
+            let counted = |fills: Vec<Fill>| fills;
+            let pours = super::rounds::Pours {
+                fills: &fills,
+                own_zones: original.board.zones.len(),
+                is_plane: &is_plane,
+                counted: &counted,
+            };
+            super::rounds::fanout(design, &pours)
+                .into_iter()
+                .map(|f| escape::Escape {
+                    net: f.net,
+                    tracks: f.tracks,
+                    via: f.via,
+                })
+                .collect()
+        } else {
+            escape::plan(design, &mut world, pitch, options.fanout_via, run.bounded())
+        };
         // And in a run with a budget, the crossings of the rows of fine pitch, around the
         // escapes: fixed copper of their nets as those are, as a route that rip-up may
         // take out is gone before the nets beside it have settled.
-        if run.bounded() && options.crossings && !run.poll() {
+        if run.bounded() && options.crossings && !own_fanout && !run.poll() {
             let jobs = jobs(design, &world, pitch, &[], &[]);
             let bottom = LayerId((rules.layer_count() - 1) as u8);
             for s in cross::plan(design, &mut world, &jobs) {
@@ -1895,7 +1985,29 @@ fn route_all<'a>(
         let share = options.whole_share.clamp(0.0, 1.0);
         run.part(share, share);
         let make = || make_with(&pairs_first);
+        let native = options.rounds == super::Rounds::Native;
+        let counted = |fills: Vec<Fill>| -> Vec<Fill> {
+            counted_fills(design, fills, &is_plane, options.outer_pours)
+        };
         let attempt = |options: &RouteOptions, coarse: bool, finer: i64| {
+            if native {
+                let fills = counted(first_fills.clone());
+                let pours = super::rounds::Pours {
+                    fills: &fills,
+                    own_zones: original.board.zones.len(),
+                    is_plane: &is_plane,
+                    counted: &counted,
+                };
+                return super::rounds::route(
+                    design,
+                    &jobs,
+                    &pours,
+                    (&own_fixed.0, &own_fixed.1),
+                    (share, was),
+                    options,
+                    run,
+                );
+            }
             whole::route(
                 design,
                 &world,
@@ -1915,8 +2027,16 @@ fn route_all<'a>(
         // two where the first round says that the share has no room for it at the first:
         // with two layers a channel has to hold every track that fits it, and with more
         // the rounds that the coarser grid has the time for count for more.
-        let mut coarse = rules.layer_count() > 2;
-        let mut whole = match attempt(options, coarse, 2) {
+        let mut coarse = rules.layer_count() > 2 && !native;
+        // The rounds of cadlab's own router, where they are asked for: if their first round
+        // says that the share has no room for them, or that their grid does not reach the
+        // board's pads, the run begins again as one of this crate's own.
+        let first = attempt(options, coarse, 2);
+        if native && matches!(first, Err(whole::NoWhole::NoRoom)) && !run.poll() {
+            run.resume(was);
+            return Err(Halt::Again);
+        }
+        let mut whole = match first {
             Err(whole::NoWhole::NoRoom) if !coarse && !run.poll() => {
                 coarse = true;
                 run.part(share, share);
@@ -1953,9 +2073,10 @@ fn route_all<'a>(
         };
         let (mut longest, mut most) = first;
         for (again, &(finer, order)) in (1u32..).zip(tries) {
-            if whole
-                .as_ref()
-                .is_none_or(|w| !w.ended || w.shared == 0 || w.capped)
+            if native
+                || whole
+                    .as_ref()
+                    .is_none_or(|w| !w.ended || w.shared == 0 || w.capped)
             {
                 break;
             }

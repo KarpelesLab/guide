@@ -62,6 +62,7 @@ pub(super) fn design(layers: usize, pads: Vec<Pad>, nets: usize) -> Design {
         edge_clearance: 0,
         nets: vec![spec; nets],
         obstacles: Vec::new(),
+        parts: Vec::new(),
         pairs: Vec::new(),
         lengths: Vec::new(),
         zones: Default::default(),

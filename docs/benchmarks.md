@@ -5911,6 +5911,169 @@ at a time.
   are what it has for the balls left shut in, and no other way to those was tried.
 - More than one thread, or a deadline: the comparison is by nodes.
 
+## PCB routing with the rounds of cadlab's own router
+
+What was built after 0.0.33. Six releases took from cadlab's router what it does better,
+a piece at a time, and each explained a part of what its negotiation ends with and this
+crate's does not: its first round has a fifth fewer vias and a tenth less track, and its
+rounds end where this crate's go on. So its negotiation itself is here now, whole, as a
+first stage that a host can ask for: `RouteOptions::rounds`, `Rounds::Native`. **It ends
+its rounds as cadlab's router ends them, round for round on two boards of four and within
+a few vias in a hundred on the others. It is off by default, and cadlab leaves it off:
+with the passes after it a board has some 5 % fewer vias and 6 % less track where its
+rounds end in their share, and more connections open.** Measured on 2026-11-23 and
+2026-11-24 through cadlab's adapter and its `route_bench`, with a checkout of this crate
+in place of the release and prints in both routers that are in no release; three threads
+a run, the load that `uptime` gives 3.4 to 7.7 with two to four runs at a time.
+
+### What it is
+
+The stage is cadlab's `router::{engine, grid, index, pours, fanout, components, scoped}`
+as they are, MIT as this crate is and of the same authors, with its own view of the board
+made from a [`Design`](../src/pcb/mod.rs) in place of cadlab's project (`pcb::rounds`):
+
+- *The grid*: half a track and its clearance of the narrowest net routed, snapped to the
+  pitch that the most pads of rows of fine pitch share where that is within 6 %, and
+  placed so that the most of those pads are on its lines.
+- *The board*: for each class of net by width, clearance and via, what the board's copper,
+  holes, keepouts and edge leave free of the grid, on the points of a grid of half the
+  pitch for tracks and on the cells for vias; a point that only one net's copper is in
+  the way of is that net's. A rule area's clearance is between two pieces of copper that
+  both touch it and a pad's own replaces the nets', as [`geom::drc`](../src/geom/drc.rs)
+  has them.
+- *The nets*: the copper that touches is one island, the pads that a fill joins among it,
+  and the islands are joined in a tree from the first, each to the nearest by the distance
+  between pads as the crow flies. A connection may end on any cell of a fill of the island
+  that it joins, within 4 mm of its end.
+- *The widths*: a net is no wider than leaves each pad of its between the other pads of
+  the pad's part, and than two tracks out of two pads of a row clear each other at as the
+  grid has them (`rounds::necks`), in every run of a board whose first run has these
+  rounds: the routes of one run are laid again in the next.
+- *The ways out*: a dog-bone for a ball inside an array, with the smallest via of the
+  rules where the net's own does not fit, and an escape for a pad of a row that no line
+  of the grid leaves (`rounds::fanout`), fixed copper of their nets before anything is
+  routed, in place of this crate's own escapes. Both need the parts of the pads, which a
+  design now has (`Design::parts`).
+- *The rounds*: every net once, the shortest first, in batches of nets whose boxes do not
+  meet, on as many threads as there are with the same routes on any number; then the nets
+  with a point shared and those near one, a net of 64 connections or more keeping its
+  wires away from them; a shared point costs 0.6 of a step at first and 1.6 times that
+  each round up to a thousand, and half a step more for each round it was shared in;
+  forty rounds, or twelve with none better. What is still shared is taken out, the net
+  with the most shared first, and routed again where nothing is claimed.
+- *The pours*: with a host that fills its zones around the routes
+  (`RunControl::refill`), the nets whose pads the legal routes cut off their fills are
+  planned again from what the fills still join and negotiated for, three times at most,
+  and the routes go back where that leaves more open. A first negotiation still going at
+  two thirds of the stage looks at what it cuts off, once.
+- *After them*: a connection that found no way has the nets in its way taken out with
+  it, and all are routed again, kept with fewer open (six rounds); and each net with a
+  via is routed again where the others are with a via at four times its price, kept with
+  fewer vias and a tenth more track at most.
+- *What it gives*: each net's route as a tree, as the negotiation of this crate gives its
+  own, and the places where its routes end that are no pad's centre: on a pad's copper,
+  on a fill, on fixed copper of the net.
+
+Three things are not cadlab's, where this crate's passes have other rules and what was
+handed over would be taken out again: a via does not touch a pad of its own net (cadlab's
+router has them a tolerance apart), an area's clearance holds a via only where the area
+is on every layer, and the fills of the zones that are no planes are copper to the other
+nets, as they are to the passes, where cadlab's router lets a route through a pour and
+has it filled again. And a pad is at the centre of its shape here, and at its footprint's
+place there.
+
+### The rounds beside cadlab's
+
+Both routers print each round: the nets routed again in it, the points shared after it,
+the vias and the track of the routes as they stand. One run of each at a time, cadlab's
+with seed 1 at 60 s and the stage with the same seed in a run of 120 s, its share 42 s
+where cadlab's router has 45 s for its rounds; the nets planned on every fill, as
+cadlab's are (`RouteOptions::outer_pours`).
+
+*With the three rules above as cadlab has them* (a build before they were changed):
+`corne-cherry` and `buspirate5-rev10` are the same in every round, to the via and the
+tenth of a millimetre, and through the rounds for the pours.
+
+| round | `corne-cherry`, cadlab: nets, shared, vias, mm | the stage | `buspirate5-rev10`, cadlab | the stage |
+|---|---|---|---|---|
+| 1 | 152, 4792, 238, 7150.6 | 152, 4792, 238, 7150.6 | 183, 2645, 115, 2812.3 | 183, 2645, 115, 2812.3 |
+| 2 | 137, 2220, 292, 7244.4 | 137, 2220, 292, 7244.4 | 155, 1151, 166, 2829.2 | 155, 1151, 166, 2829.2 |
+| 5 | 112, 712, 401, 7359.6 | 112, 712, 401, 7359.6 | 88, 153, 250, 2860.8 | 88, 153, 250, 2860.8 |
+| 12 | 68, 60, 478, 7966.5 | 68, 60, 478, 7966.5 | 26, 51, 254, 2889.2 | 26, 51, 254, 2889.2 |
+| the rounds end | after 33: 492 vias, 8007.2 mm, 1 open | after 33: 492, 8007.2, 1 | after 29: 257, 2869.0, 3 | after 29: 257, 2869.0, 3 |
+| after the rounds for the pours | after 38: 496, 8089.8, 1 | after 38: 496, 8089.8, 1 | after 68: 312, 3085.0, 3 | after 68: 312, 3085.0, 3 |
+
+`tinytapeout-demo`, whose rule areas this crate's rules have as one clearance each where
+cadlab has the rules themselves, and `glasgow-revD1`, some of whose pads are not at the
+centre of their shape, which moves the grid by 72 µm:
+
+| round | `tinytapeout-demo`, cadlab | the stage | `glasgow-revD1`, cadlab | the stage |
+|---|---|---|---|---|
+| 1 | 137, 2007, 184, 4494.2 | 137, 2284, 185, 4494.0 | 561, 8013, 743, 8778.1 | 561, 7741, 722, 8688.0 |
+| 2 | 104, 895, 206, 4519.1 | 108, 948, 210, 4537.5 | 359, 3803, 824, 8900.5 | 354, 3813, 805, 8797.7 |
+| 5 | 85, 178, 238, 4572.7 | 79, 215, 237, 4580.4 | 245, 918, 939, 9123.1 | 264, 1111, 927, 9024.3 |
+| 9 | 55, 57, 248, 4637.7 | 63, 50, 246, 4639.0 | 188, 387, 998, 9400.5 | 204, 500, 972, 9336.2 |
+| the rounds end | after 40: 251, 4615.3, 2 open | after 33: 261, 4743.0, none | after 9, at their share: 956, 8984.0, 92 | after 9: 941, 9033.9, 93 |
+
+*As released*:
+
+| board | cadlab: rounds; vias, mm, open as they end | the stage | first round, cadlab | the stage |
+|---|---|---|---|---|
+| `tinytapeout-demo` | 40; 251, 4615.3, 2 | 40; 250, 4552.7, 3 | 184, 4494.2 | 185, 4503.2 |
+| `corne-cherry` | 33; 492, 8007.2, 1 | 40; 550, 8494.4, 3 | 238, 7150.6 | 238, 7165.8 |
+| `buspirate5-rev10` | 29; 257, 2869.0, 3 | 27; 255, 2901.4, 4 | 115, 2812.3 | 113, 2814.9 |
+| `glasgow-revD1` | 9; 956, 8984.0, 92 | 9; 967, 9080.3, 76 | 743, 8778.1 | 723, 8678.7 |
+
+`corne-cherry` is the board that the fills as copper cost: its teardrops are zones of two
+pads, which the routes of cadlab's router cross and the stage's go round, and its rounds
+then have 191 points shared after the twelfth for 60.
+
+### With the passes after it
+
+The nets planned as this crate plans them (a net with a plane on its planes alone, each
+pad with its own stub), which leaves fewer connections open than cadlab's plan: with that
+`tinytapeout-demo` had 6 open in one order and 15 without the rounds for the pours, pads
+of the supplies that the routes shut in, for 1. At 60 s over four orders, the stage beside this crate's own rounds, the same
+build, two orders of each at a time; open by order, medians of the vias and the track:
+
+| board | own rounds: open; vias; track; time | `Rounds::Native` |
+|---|---|---|
+| `tinytapeout-demo` | 0/1/0/0; 284.5; 5038 mm; 53 to 56 s | 5/5/4/7; 271.5; 4723 mm; 55 to 57 s |
+| `buspirate5-rev10` | 0/0/1/2; 307.5; 3056 mm; 20 to 33 s | 2/1/3/1; 293; 2871 mm; 34 to 40 s |
+| `lumenpnp-mobo` | 0/0/0/0; 334; 5300 mm; 50 to 54 s | 1/0/0/0; 339; 5467 mm; 57 to 58 s |
+
+Two of the twelve runs with the stage have a pad with no spoke. With this crate's own
+escapes in place of the stage's ways out (`RouteOptions::rounds_fanout` off),
+`tinytapeout-demo` has 1/0/3/2 open, 281.5 vias and 4741 mm, and `buspirate5-rev10`
+294.5 vias and 2883 mm. At 120 s, one order, the nets planned on every fill:
+`tinytapeout-demo` none open, 261 to 264 vias and 4689 to 4751 mm in 86 to 90 s, where
+cadlab's router has 273 and 4894 mm with four open at 60 s; `buspirate5-rev10` none open,
+288 to 303 vias and 2755 to 2799 mm.
+
+What stays open are pads that the stage's routes shut in: of the 458 connections of
+`tinytapeout-demo` it hands over all but three to eight, and the passes complete those
+on a board that has no room left by the pads, where this crate's own rounds, at twice
+the pitch, leave it. And its rounds take the time: 30 to 40 of them are 18 to 28 s of the
+42 s that the first run has.
+
+*Which boards it is begun on.* The stage gives a board up after its first round, and the
+run begins again with this crate's own rounds, necks and escapes
+(`Stats::rounds_given_up`), if eight times what that round took is more than its share,
+or if more than one connection in fifty has no way on its grid whatever the other nets
+do: `cynthion` (2.6 s of 19 s, 32 of 868), `glasgow-revC3` (40 of 753) and
+`glasgow-revD1` (4.2 s of 20 s, 52 of 1914) are given up, at 5 s of the minute, and end as
+with the own rounds but for that time (`glasgow-revD1` 25 open for 13 in one order). On
+two layers this crate's own rounds are at the pitch already: `corne-cherry` 2 to 8 open
+and 434 to 498 vias with the stage for 1 and 437, `nrfmicro` 51 vias for 42.5.
+
+### What this does not show
+
+- The twelve boards beside cadlab's router with the stage: it is not what cadlab runs.
+- A budget of nodes with the stage: its nodes are those of its searches, and the grid's
+  maps are not counted.
+- A host with no parts told: the stage then finds no rows, plans no way out and narrows
+  no net.
+
 ## PCB routing with the open connections negotiated on the finer grid
 
 What was built after 0.0.32, for what

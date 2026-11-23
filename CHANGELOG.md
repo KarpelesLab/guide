@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.36](https://github.com/KarpelesLab/guide/compare/v0.0.35...v0.0.36) - 2026-11-23
+
+### Added
+
+- *(pcb)* the rounds of cadlab's router look at a board before the run begins, and a board given up is the run without them ([#65](https://github.com/KarpelesLab/guide/pull/65))
+
 ## [0.0.35](https://github.com/KarpelesLab/guide/compare/v0.0.34...v0.0.35) - 2026-11-23
 
 ### Added

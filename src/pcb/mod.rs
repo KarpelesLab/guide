@@ -572,6 +572,19 @@ pub enum Rounds {
     /// order of their length, forty rounds at most or twelve with none better, and what is
     /// still shared then taken out and routed again where nothing is claimed. The passes go
     /// on from its routes.
+    ///
+    /// Where they are not that router's: what is still shared is taken out a wire at a
+    /// time, the wire that shares the most first, and a connection that then finds no way
+    /// has the wires in its way taken out for it, where that router takes whole nets, the
+    /// one with the most connections first; the room of a spoke of a pad in a pour has
+    /// the price of [`RouteOptions::spoke_cost`] for every other net, and the last spoke
+    /// of a pad is kept ([`RouteOptions::kept_spokes`]) from the routes of the rounds as
+    /// from any other; on more than two layers a net is planned on its fills of the inner
+    /// layers alone, unless [`RouteOptions::outer_pours`]; the nets whose pads the routes
+    /// cut off their fills are negotiated for again only with
+    /// [`RouteOptions::rounds_pours`]; and a board on whose grid more than one connection
+    /// in fifty has no way is given up before the first round
+    /// ([`Stats::rounds_given_up`]).
     Native,
 }
 
@@ -906,6 +919,16 @@ pub struct RouteOptions {
     /// default is `true`; the run's own escapes are then not planned. It needs the parts of
     /// the pads ([`Design::parts`]).
     pub rounds_fanout: bool,
+    /// Whether the rounds of [`Rounds::Native`] have, once their routes are legal, the
+    /// nets whose pads those routes cut off their fills planned again from what the fills
+    /// still join and negotiated for again, three times at most, as cadlab's own router
+    /// does. The default is `false`: each such net is routed again whole at the price of a
+    /// shared point that the rounds ended with, the routes of the others move for it, and
+    /// measured through cadlab the board ends with as many connections open, more vias
+    /// and more track, later (`docs/benchmarks.md`, "The rounds of cadlab's router made
+    /// legal a wire at a time"); the passes join such pads as they do after this crate's
+    /// own rounds.
+    pub rounds_pours: bool,
     /// How many threads [`whole`](RouteOptions::whole) routes nets on. The default is 1;
     /// the routes are the same for any number. The nets of a round are routed a few at a
     /// time, each against what the others claim before any of the few, and have their
@@ -985,6 +1008,7 @@ impl Default for RouteOptions {
             whole_finer: false,
             rounds: Rounds::Own,
             rounds_fanout: true,
+            rounds_pours: false,
             threads: 1,
             shorten: false,
         }

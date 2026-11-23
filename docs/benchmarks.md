@@ -5911,6 +5911,125 @@ at a time.
   are what it has for the balls left shut in, and no other way to those was tried.
 - More than one thread, or a deadline: the comparison is by nodes.
 
+## PCB routing with the rounds of cadlab's router made legal a wire at a time
+
+0.0.34 has the negotiation of cadlab's own router as a first stage (`Rounds::Native`, the
+section below), which ended its rounds as that router does and, with this crate's passes
+after it, left `tinytapeout-demo` with four to seven connections open where this crate's own
+rounds leave none or one. This round looked at where those come from, stage by stage, and
+changed five things in the stage. **With them `tinytapeout-demo` has eleven connections open
+in sixteen runs, as with its own rounds, 5 % less track, 3 % more vias and no pad without a
+spoke; `buspirate5-rev10` has 4 % fewer vias and 3 % less track in 30 to 37 s for 22 to 34 s;
+and a board that the stage gives up costs 4 to 5 s of the minute, which `glasgow-revC3` and
+`glasgow-revD1` pay for in vias and in connections. cadlab leaves the stage off.**
+
+All of it measured through cadlab's adapter (its route_bench, 60 s, three threads a run, four
+runs at a time, the load 4 to 7 on a machine of 64 threads; a run ends by the clock, and two
+runs of one order differ by as much as two orders do).
+
+### Where the open connections came from
+
+- *The net with the most connections taken out whole.* The rounds end with a few points
+  still shared (`tinytapeout-demo`: 4 to 20 after 33 to 40 rounds), and cadlab's router then
+  takes out the net that shares the most, whole, and routes it again where nothing is
+  claimed: that is the supply or the ground, whose other seventy wires were in no one's way
+  and find their room taken. Five runs ended the stage with 7, 8, 13, 15 and 15 connections
+  failed. **Now the wire that shares the most is taken out, of two that share as many the
+  longer, and each net that lost one is routed again with the wires it kept; a connection
+  that then finds no way has the wires in its way taken out for it, a wire at a time
+  (`legalise_wires`, `retry_wires`).** The same rounds then end with 1, 1 and 3 failed.
+- *The rounds for the pours.* Once legal, the nets whose pads the routes cut off their fills
+  were planned again and negotiated for from nothing at the price of a shared point that the
+  rounds ended with, a thousand times a step. On `tinytapeout-demo` each such round left
+  more failed than the one before (12, 13 and 25; 8 and 22; 6 and 12) and the routes went
+  back; on `buspirate5-rev10` they are 38 rounds of 68. **They are an option now,
+  `RouteOptions::rounds_pours`, off by default**; the passes join such pads as they do after
+  this crate's own rounds. Without them `buspirate5-rev10` ends in 28 to 39 s for 34 to 41 s
+  with 291 vias for 293, and `lumenpnp-mobo` with 331.5 vias and 5309 mm for the 339 and
+  5467 mm of 0.0.34.
+- *A net planned on a pour of an outer layer.* With these two the stage handed over all but
+  one to three connections, and the board still ended with two to nine open: every one a pad
+  of the supply at the package of 0.4 mm pitch. That net has no plane, and a pour under the
+  package; the stage planned its pads there as joined by the pour, or joined them to it by
+  a stub of two cells, the routes of the signals went through the pour as through a plane,
+  and the board filled again had the pads apart and shut in. **On more than two layers a
+  net is now planned on its fills of the inner layers alone (`rounds_fills`)**, so that the
+  supply's pads are routed as any net's, with their way out negotiated for. Eight orders
+  then: 0/0/0/0/0/0/0/0 open.
+- *A pad with no spoke.* Two to four of those eight runs, in three sets of eight, left a pad
+  of the ground with no spoke: a through-hole pad with room for two, both rooms with a route
+  of the stage in them, which the step for the spokes moved at the cost of two connections,
+  and so did not keep. This crate's own rounds price a spoke's room; the stage did not.
+  **Now it does, at `RouteOptions::spoke_cost` as they do, and the last spoke of a pad is
+  kept (`kept_spokes`) from the stage's routes as from any other: the walls go up before
+  its routes are laid in the world.** Four sets of eight orders with the price: no pad
+  without a spoke in 32 runs. With the price for the spokes that are held alone, four runs
+  of eight had such a pad, and with the walls alone two of eight.
+- *A board given up after its first round.* That round said whether the grid reaches the
+  pads; `Engine::no_way` now says it before anything is routed, of each connection by its
+  own two islands (41 of 868 on `cynthion` for the 32 that the round found, 42 of 753 on
+  `glasgow-revC3` for 40, 56 of 1914 on `glasgow-revD1` for 52, 8 of 721 on `lumenpnp-mobo`
+  for 8 and none on the other two), 1.2 s into the stage.
+
+### The boards of more than two layers, the stage beside this crate's own rounds
+
+Open by order; medians of the vias and the track; the time of the fastest and the slowest.
+
+| board | own rounds: open; vias; track; time | `Rounds::Native` as it is now |
+|---|---|---|
+| `tinytapeout-demo`, eight orders | 0/1/0/0/0/0/0/4; 288; 5079 mm; 53 to 57 s | 5/1/0/0/0/1/0/0; 297; 4809 mm; 53 to 58 s |
+| the same, another set (its own rounds: the round before) | 0/1/0/0/0/0/1/4; 287.5; 5034 mm | 0/2/0/0/0/0/0/2; 293; 4792 mm; 55 to 58 s |
+| the same, with the ways out planned on the fills as the stage counts them | | 3/1/0/0/3/0/2/2; 306; 4811 mm; 54 to 59 s |
+| `buspirate5-rev10` | 0/0/0/0; 306.5; 2977 mm; 22 to 34 s | 0/0/0/0; 294; 2890 mm; 30 to 37 s |
+| `lumenpnp-mobo` | 0/0/0/0; 334; 5326 mm; 52 to 55 s | 0/0/0/0; 332; 5208 mm; 54 to 58 s |
+| `cynthion`, given up | 8/8/8/8; 417; 3032 mm; 36 to 42 s | 8/8/8/8; 417; 2903 mm; 40 to 49 s |
+| `glasgow-revC3`, given up | 9/6/9/8; 403.5; 3643 mm; 59 s | 5/8/8/6; 443; 3681 mm; 59 s |
+| `glasgow-revD1`, given up | 9/14/6/12 (the round before) | 10/35/30/30; 1171.5; 9898 mm; 55 to 57 s |
+
+No run of either has a pad without a spoke, a DRC error other than unrouted, or a solder pad
+made solid by a track.
+
+- *The time.* On `tinytapeout-demo` the stage's rounds end by its share, not by themselves:
+  0.7 to 0.9 s a round, some four million nodes whatever the number of nets routed again (57
+  nets of which 14 share a point, late), because the searches of the nets that share, at a
+  thousand times a step, visit the board. The first run then ends at its deadline, 42 s,
+  where with this crate's own rounds it ends by itself after 22 to 33 s, and the runs after
+  it have 15 s for 25 to 35.
+- *A board given up* begins its run again, escapes and planes first: 4 to 5 s of the minute
+  (`cynthion`: the first run over at 28 s for 20 s), of which the stage's own part is 1.2 s.
+
+### Tried and not kept
+
+Each on `tinytapeout-demo` at 60 s, four or eight orders, beside the stage as it was.
+
+- *The rounds ended where the price of a shared point is at its most*, round 19, or at
+  round 12, so that the passes have the time: 2/3/6/9/4/6/4/0 and 4/2/7/10/3/2/9/4 open
+  for 2/5/4/8.
+- *A wire kept wherever it is far from a shared point*, for every net and not only those of
+  64 connections: the rounds cost the same nodes (22 million after five rounds for 24,
+  71 for 79 after seventeen), since it is the searches of the nets that share that cost.
+- *The pads cut off their fills told early*, after rounds 2, 5, 9 and 14, on the routes as
+  they are: the ground was planned again each time with its 124 connections, and the board
+  ended with 7/10/3/12 open.
+- *The pads cut off joined by wires at the stage's end*, each net planned again keeping its
+  wires and the new connections searched for where nothing is claimed, with the wires in
+  their way taken out: the pads are shut in by then (10 and 12 failed for 6 and 6), and it
+  took 2 to 10 s.
+- *This crate's own escapes* in place of the stage's ways out, with the rounds ended at
+  round 19: 3/3/1/5/3/2/0/1 open, 272.5 vias, and a pad with no spoke in three runs of
+  eight.
+
+### What this does not show
+
+- The stage at a budget of nodes: every figure here is of runs that the clock ends.
+- The boards of two layers, where a net is still planned on its pours and the fills that
+  are no planes are copper to every other net: not looked at this round.
+- Whether the ways out planned on the fills as the stage counts them cost `tinytapeout-demo`
+  the vias and the connections of the third line: it is one set of eight runs beside two,
+  and the release plans them on the fills as 0.0.34 did.
+- The 72 cells beside cadlab's own router: not measured with the stage, which cadlab
+  leaves off.
+
 ## PCB routing with the rounds of cadlab's own router
 
 What was built after 0.0.33. Six releases took from cadlab's router what it does better,

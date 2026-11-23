@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.33](https://github.com/KarpelesLab/guide/compare/v0.0.32...v0.0.33) - 2026-11-23
+
+### Added
+
+- *(pcb)* the connections that the negotiation at twice the pitch leaves open can be negotiated for on the grid of the pitch ([#58](https://github.com/KarpelesLab/guide/pull/58))
+
 ## [0.0.32](https://github.com/KarpelesLab/guide/compare/v0.0.31...v0.0.32) - 2026-11-23
 
 ### Added

@@ -1032,8 +1032,9 @@ fn a_host_s_fill_of_few_edges_is_cut_only_where_copper_is_too_close() {
 fn tracks_out_of_pads_side_by_side_are_narrow_enough_for_both() {
     // The same row with a clearance of 0.19 mm: a track of 0.22 mm clears the pads on
     // either side of its own, 0.3 mm from its middle, and two such tracks out of two pads
-    // side by side are 0.18 mm apart. At 0.21 mm they are 0.19 mm apart: the width of a
-    // run with a budget.
+    // side by side are 0.18 mm apart. At 0.21 mm they are 0.19 mm apart, to the nanometre,
+    // and on a grid they are looked at where its points are: 0.195 mm is the width of a
+    // run with a budget, as cadlab's router has it.
     let mut d = fine_row();
     d.rules = Rules::new(crate::geom::RuleSpec::new(&["F.Cu"], 100_000, 190_000)).unwrap();
     let options = RouteOptions {
@@ -1042,7 +1043,8 @@ fn tracks_out_of_pads_side_by_side_are_narrow_enough_for_both() {
     };
     let routed = route_checked(&d, &options);
     assert_eq!(routed.stats.necked, 8);
-    assert!(routed.tracks.iter().all(|t| t.width == 210_000));
+    assert!(routed.tracks.iter().all(|t| t.width == 195_000));
+    assert!(routed.unrouted.is_empty(), "{:?}", routed.unrouted);
     // With no budget, the width that leaves each pad alone, as before.
     let plain = route_checked(&d, &RouteOptions::default());
     assert_eq!(plain.stats.necked, 8);
@@ -1061,12 +1063,13 @@ fn tracks_out_of_pads_side_by_side_are_narrow_enough_for_both() {
 }
 
 #[test]
-fn tracks_side_by_side_in_an_area_are_necked_to_the_area_s_clearance() {
+fn tracks_out_of_a_row_in_an_area_are_as_narrow_as_the_board_s_clearance_asks() {
     // The row on a board with a clearance of 0.25 mm, in an area whose own is 0.18 mm, as
     // the courtyard of a QFN is given. A track of 0.24 mm clears the pads on either side
-    // of its own by the area's 0.18 mm, and two tracks out of two pads side by side are
-    // both in the area: at 0.22 mm they are 0.18 mm apart. By the board's clearance they
-    // would have to be 0.15 mm wide.
+    // of its own by the area's 0.18 mm, and two tracks of 0.22 mm out of two pads side by
+    // side are 0.18 mm apart, which the area allows. They leave the area side by side, and
+    // from there on the board's clearance is between them: by that they are 0.135 mm wide,
+    // which is a pitch of 0.4 mm less 0.25 mm and what a grid's points miss between them.
     let mut d = fine_row();
     let mut spec = crate::geom::RuleSpec::new(&["F.Cu"], 100_000, 250_000);
     spec.areas.push(RuleArea {
@@ -1088,8 +1091,11 @@ fn tracks_side_by_side_in_an_area_are_necked_to_the_area_s_clearance() {
     };
     let routed = route_checked(&d, &options);
     assert_eq!(routed.stats.necked, 8);
-    assert!(routed.tracks.iter().all(|t| t.width == 220_000));
+    assert!(routed.tracks.iter().all(|t| t.width == 135_000));
     assert!(routed.unrouted.is_empty(), "{:?}", routed.unrouted);
+    // With no budget, the width that leaves each pad alone in the area, as before.
+    let plain = route_checked(&d, &RouteOptions::default());
+    assert!(plain.tracks.iter().all(|t| t.width == 240_000));
 }
 
 #[test]

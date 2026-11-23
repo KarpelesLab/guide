@@ -754,6 +754,16 @@ pub(crate) fn pitch(design: &Design, options: &RouteOptions) -> i64 {
     })
 }
 
+/// The lattice's pitch given that of the nets' own widths and that of the nets that a row
+/// of pads made narrower ([`neck::plan`]): the tighter of the two, unless the options set
+/// a pitch or the run has a budget of nodes.
+fn lattice_pitch(pitch: i64, row_pitch: Option<i64>, options: &RouteOptions) -> i64 {
+    match (options.pitch, row_pitch, options.work_budget) {
+        (None, Some(row), None) => pitch.min(row),
+        _ => pitch,
+    }
+}
+
 /// Where routes may go: the board's edge's box, or failing that, the pads' grown by 5 mm.
 fn bounds_of(design: &Design) -> Rect {
     let pad_bounds = design
@@ -1270,13 +1280,23 @@ fn route_all<'a>(
 
     let pitch = pitch(design, options);
     // Nets too wide to leave their pads are routed narrower, from here on.
-    let narrow = if options.neck_down && !run.poll() {
+    let (narrow, row_pitch) = if options.neck_down && !run.poll() {
         let world = world_of(design)?;
         // Beside their neighbours too in a run with a budget.
         neck::plan(design, &world, run.bounded())
     } else {
-        Vec::new()
+        (Vec::new(), None)
     };
+    // The lattice's pitch is that of the tracks as they are routed, where the rows of a
+    // package made its nets narrower: at the pitch of the wider tracks, two of the
+    // narrower ones side by side are two steps apart with room to spare, which a board
+    // that needed them narrower has not got (`tinytapeout-demo`, 53 nets at 0.185 mm:
+    // 296 vias and 5140 mm over four orders on the lattice of 0.2 mm, 268.5 and 4961 mm
+    // on that of 0.1925 mm; `docs/benchmarks.md`).
+    // Not in a run with a budget of nodes, where a finer lattice is more nodes for the
+    // same way: `corne-cherry`, 0.195 mm for 0.22 mm, had 110 connections open over three
+    // orders at 40 million nodes for 86.
+    let pitch = lattice_pitch(pitch, row_pitch, options);
     let necked_nets = narrow.iter().flatten().count();
     let with_necks;
     let design = if necked_nets == 0 {
@@ -4222,5 +4242,29 @@ mod tests {
             assert!(loses_branches(1, 584, false, hurried, BRANCH_CUTS - 1));
             assert!(!loses_branches(1, 584, false, hurried, BRANCH_CUTS));
         }
+    }
+    #[test]
+    fn the_lattice_has_the_pitch_of_the_tracks_that_a_row_made_narrower() {
+        use super::super::RouteOptions;
+        use super::lattice_pitch;
+        let plain = RouteOptions::default();
+        // Tracks of 0.185 mm with a clearance of 0.2 mm, where the widths before were
+        // 0.2 mm at least: two of them side by side are two steps of 0.1925 mm apart.
+        assert_eq!(lattice_pitch(200_000, Some(192_500), &plain), 192_500);
+        // No row made a net narrower, or the row's tracks are no tighter: as it was.
+        assert_eq!(lattice_pitch(200_000, None, &plain), 200_000);
+        assert_eq!(lattice_pitch(176_600, Some(193_700), &plain), 176_600);
+        // A pitch that the options set stays, and so does that of a run with a budget of
+        // nodes, which a finer lattice costs more of for the same way.
+        let set = RouteOptions {
+            pitch: Some(250_000),
+            ..RouteOptions::default()
+        };
+        assert_eq!(lattice_pitch(250_000, Some(192_500), &set), 250_000);
+        let nodes = RouteOptions {
+            work_budget: Some(40_000_000),
+            ..RouteOptions::default()
+        };
+        assert_eq!(lattice_pitch(200_000, Some(192_500), &nodes), 200_000);
     }
 }

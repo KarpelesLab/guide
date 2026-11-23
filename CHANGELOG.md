@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.30](https://github.com/KarpelesLab/guide/compare/v0.0.29...v0.0.30) - 2026-11-23
+
+### Added
+
+- *(pcb)* a pad's last spoke is kept from other nets as copper is, and a net routed again is kept only if every track of it is free ([#52](https://github.com/KarpelesLab/guide/pull/52))
+
 ## [0.0.29](https://github.com/KarpelesLab/guide/compare/v0.0.28...v0.0.29) - 2026-11-23
 
 ### Fixed

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.35](https://github.com/KarpelesLab/guide/compare/v0.0.34...v0.0.35) - 2026-11-23
+
+### Added
+
+- *(pcb)* the rounds of cadlab's router made legal a wire at a time, with the price of a spoke's room ([#63](https://github.com/KarpelesLab/guide/pull/63))
+
 ## [0.0.34](https://github.com/KarpelesLab/guide/compare/v0.0.33...v0.0.34) - 2026-11-23
 
 ### Added

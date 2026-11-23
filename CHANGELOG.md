@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.29](https://github.com/KarpelesLab/guide/compare/v0.0.28...v0.0.29) - 2026-11-23
+
+### Fixed
+
+- *(pcb)* a row of pads makes its nets narrower by the board's clearance only in a rule area with a clearance of its own, as before 0.0.28 elsewhere ([#50](https://github.com/KarpelesLab/guide/pull/50))
+
 ## [0.0.28](https://github.com/KarpelesLab/guide/compare/v0.0.27...v0.0.28) - 2026-11-23
 
 ### Added

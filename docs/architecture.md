@@ -997,6 +997,35 @@ does it:
   its fill by the spokes that nothing crosses and by nothing else, the spare ones
   among them (`Zones::spare_spokes`); the ring of cells round a pad that stood for its
   relief told a pad joined that the host's fill then left on its own.
+- *Pours, with the routes made legal first*
+  ([results](benchmarks.md#pcb-routing-with-the-pours-filled-around-legal-routes)).
+  The rounds end with points still shared more often than not, and the pads cut off
+  are then told by routes that lie across each other. With `RouteOptions::legal_pours`
+  the order is that of cadlab's own router: the routes of the best round are made
+  legal, what is shared taken out and routed again where nothing is claimed
+  (`whole::legalise`); the host's fill around those is what the board would get, and
+  the connections open on it are counted, the pads cut off among them
+  (`whole::open_on_fills`); the nets with pads cut off are planned again, and the
+  rounds go on for them. They go on from the routes of the best round as they were,
+  not from the legal ones: a net that was taken out and found no way where nothing is
+  claimed would otherwise have no round again, and was left to the passes, which took
+  other nets out for it (`tinytapeout-demo`: 16 connections apart as the passes begin
+  for 10, and 202 nets taken out by them for 44). When those rounds end the routes are
+  made legal and the pours filled again, and with more connections open than on the
+  legal routes that the nets were planned again from, the routes go back to those
+  (`Stats::pours_back`). Off by default: over the boards measured it is neither a gain
+  nor a loss.
+- *A net with a plane on its outer pours too.* `RouteOptions::outer_pours` plans a net
+  with a plane as one with none is planned, on every fill of its zones: the pads that a
+  pour of an outer layer joins are one terminal, as cadlab's router has them. Such a
+  net has a third to a half of the stubs after the first round, and the routes of the
+  other nets then cut its pours where they had stubs to go round: what the run ends
+  with has as many vias, more track, more pads short of their spokes, and on a board
+  whose rounds end with their share more connections open. Off by default, and cadlab
+  does not set it. With it, a negotiation still at its first rounds at 0.73 of its
+  share looks at what its routes cut off, once, and ends those rounds for the pours
+  if that is a piece of fill for every hundred connections, as cadlab's router does
+  at 0.55 of its budget.
 - *What it ends with is copper of the nets.* Each net's route is given to the passes as
   the routes of an earlier run are: what the world does not allow of it beside the
   others is left out, a net left in pieces is completed from them, and the passes,

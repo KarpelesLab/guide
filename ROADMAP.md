@@ -304,7 +304,11 @@ Each item is independently useful, and they can land in any order.
   as short, for the via that joined the pad again, and ends each run on a pad where it
   comes to it (`Stats::uncut`,
   [benchmarks](docs/benchmarks.md#pcb-routing-with-a-pour-left-whole)), a host that
-  fills its zones itself says what its fills are clear of (`Zones::fills_clear_of`), and the connections of a board in two parts that
+  fills its zones itself says what its fills are clear of (`Zones::fills_clear_of`), the
+  negotiation can make its routes legal before the pours are filled, and a net with a
+  plane can be planned on its outer pours too (`RouteOptions::legal_pours` and
+  `outer_pours`, both off: built and measured, no gain,
+  [benchmarks](docs/benchmarks.md#pcb-routing-with-the-pours-filled-around-legal-routes)), and the connections of a board in two parts that
   only the schematic joins are found once and told (`Cause::Apart`,
   [benchmarks](docs/benchmarks.md#pcb-routing-with-room-for-spokes)),
   and a host that fills its zones itself is asked for its fill around the routes,

@@ -3629,8 +3629,7 @@ pub(crate) fn again(
                 }
                 let mut c = NetCopper::from_tree(ctx, &tree_of(&board, &nets[i]));
                 c.prune(ctx);
-                let free = c.free_in(world, ctx, pitch);
-                if free.segs.len() != c.segs.len() || free.vias.len() != c.vias.len() {
+                if !c.all_free(world, ctx) {
                     continue;
                 }
                 super::cleanup::tighten_net(world, ctx, &mut c);
@@ -3845,6 +3844,38 @@ mod tests {
                 c.place(&mut world, &job.ctx);
             }
         }
+    }
+
+    #[test]
+    fn copper_across_another_net_is_not_free_whatever_the_count_of_its_tracks() {
+        // The first net with a track across the third's, and its way back up the board
+        // in two tracks that are in line: cut where the third net is and joined where it
+        // is in line, it is three tracks as it was, and it is not free.
+        let (d, _) = hops(0);
+        let options = RouteOptions::default();
+        let mut world = world_of(&d, &options);
+        let pitch = router::pitch(&d, &options);
+        let jobs = router::jobs(&d, &world, pitch, &[], &[]);
+        let seg = |a: (i64, i64), b: (i64, i64)| Seg {
+            a: Point::new(a.0, a.1),
+            b: Point::new(b.0, b.1),
+            l: 0,
+        };
+        let mut wall = NetCopper::default();
+        wall.segs = vec![seg((2 * MM, 20 * MM), (2 * MM, 60 * MM))];
+        wall.place(&mut world, &jobs[2].ctx);
+        let mut c = NetCopper::default();
+        c.segs = vec![
+            seg((0, 30 * MM), (4 * MM, 30 * MM)),
+            seg((0, 0), (0, 15 * MM)),
+            seg((0, 15 * MM), (0, 30 * MM)),
+        ];
+        let free = c.free_in(&world, &jobs[0].ctx, pitch);
+        assert_eq!(free.segs.len(), c.segs.len(), "{free:?}");
+        assert!(!c.all_free(&world, &jobs[0].ctx));
+        // And without the track across, all of it is.
+        c.segs.remove(0);
+        assert!(c.all_free(&world, &jobs[0].ctx));
     }
 
     #[test]

@@ -5911,6 +5911,109 @@ at a time.
   are what it has for the balls left shut in, and no other way to those was tried.
 - More than one thread, or a deadline: the comparison is by nodes.
 
+## PCB routing with a pad's last spoke kept
+
+What was changed after [the release below](#pcb-routing-with-the-nets-of-a-row-as-narrow-as-its-pitch-asks),
+0.0.29, with the same aim: level with cadlab's own router or ahead of it on every measure
+on every board of its corpus ([decisions](architecture.md#decisions)). It is still not
+met. Measured on 2026-11-23 through cadlab's adapter and its `route_bench`, with a
+checkout of this crate before it was released, and with prints and switches in both
+routers that are in no release. What is below is at budgets of nodes, on one thread, which
+the load of the machine does not move; the table beside cadlab's router at 60 s, with the
+crate from crates.io, is in cadlab's `docs/ROUTER.md` and its decision D126.
+
+### A net routed again was kept across another net's track
+
+0.0.25 routes each net again where the others are, by the negotiation's search, and keeps
+what it finds if the world says that all of it is free. It asked that by counting: the
+tracks that `NetCopper::free_in` keeps of the new route, against the tracks the route has.
+`free_in` cuts a track where something is in its way and keeps the free steps on either
+side, and joins what is in line: a track cut in two beside two joined into one is as many
+tracks as before. `tinytapeout-demo`, at 150 million nodes in the eighth of eight orders:
+a track of `ui_in7`, 3.4 mm straight down to its pad of the QFN, across a track of the
+ground and one of +3V3, in this crate's own result. cadlab's check then takes out every
+piece of copper that touches such a track: 120, 107 and 323 tracks and vias in three of
+the eight orders, pieces of the ground and of +3V3 among them, which the runs after the
+first join up again. At 60 s, 23 to 228 in two orders of eight. Now every track and every
+via of the route is asked of the world (`NetCopper::all_free`), and the check takes
+nothing out in any of the eight orders.
+
+### The last spoke of a pad
+
+`RouteOptions::spoke_cost` is a price, and 0.0.29, whose nets of a header are narrow
+enough to pass between its pins, left one pad of `tinytapeout-demo` with no spoke in one
+order of sixteen at 60 s: pin 5 of J14, of the ground, in a row of pins along which a
+track of `ui_in1` ran on one side and one of `ui_in0` on the other. Two things made it,
+both found by counting the pad's necks after each of cadlab's runs: its run for shorter
+ways, which takes the routes back and looks for a shorter way for each, laid the second
+of the two tracks (the pad had two necks before it and none after), and its step that
+moves routes out of the rooms of spokes took the pad's last for the second of another
+pad's and was kept by the count of the pads short of two. With the fix above alone, the
+pad has no spoke at 150 million nodes in the fourth of eight orders, the same way.
+
+`RouteOptions::kept_spokes` keeps a pad's last. Of the spokes that the host's fill makes
+for a pad on a layer, those with nothing of another net in their room are free: the
+room is the spoke's own copper from where it leaves the pad's box and a clearance on, and
+a track or a via stands in it if it is closer to that than the clearance between the two
+nets. The board's own copper, the routes of an earlier run that stay where they are among
+it, takes a room for good. When a route placed in the world leaves a pad no more free
+rooms than it keeps, each of those is put into the world as copper of the pad's net,
+which the spoke will be: every search and every step that asks the world then keeps the
+clearance from it, and the pad's own net goes through. A route taken out of another room
+frees the pad, and the wall goes. The directions that the fill falls back to
+(`Zones::spare_spokes`) count for a pad that the board leaves none of the first, and for
+no other: a track along the row takes the spoke beside it and both spare ones on its side
+at once, and J14's pin, counted with those, had three rooms free and then none.
+
+Three things about when, each measured (below): there is no wall until the nets are
+routed a net at a time, so that what a negotiation ends with and what an earlier run left
+are put into the world as they are; a room that a route is taken out of is walled only
+once something is placed again, so that a route lifted for a search has its way back; and
+cadlab has it in its run for shorter ways and in its step for the spokes, and in no run
+that routes.
+
+`tinytapeout-demo` at 150 million nodes, eight orders, cadlab's adapter of D126 behind
+each but the first:
+
+| | open | vias, median | track, median | pads short of two spokes | pads with none | orders in which the check took copper out |
+|---|---|---|---|---|---|---|
+| 0.0.29 | 0 in each | 288.5 | 5016 mm | 7, 8, 6, 10, 5, 5, 4, 4 | 0 | 3 (120, 107 and 323 items) |
+| the fix of the routes kept across a track alone | 0, 1, 0, 0, 0, 0, 0, 0 | 292.5 | 5042 mm | 7, 9, 6, 7, 5, 5, 5, 5 | 1 in the fourth order | 0 |
+| with a pad's last spoke kept, as released | 0, 1, 0, 0, 0, 0, 0, 0 | 292.5 | 5050 mm | 6, 8, 7, 7, 5, 5, 5, 4 | 0 | 0 |
+
+The connection open in the second order is of a run that the budget cut at 150 million,
+where 0.0.29 ended at 148.7 million with none. The nine boards that 40 million nodes cut,
+three orders, and the seven at 150 million, two orders, are in cadlab's D126: the
+connections open are those of 0.0.29 on every board but `tinytapeout-demo`.
+
+### What was tried and not kept
+
+Each on `tinytapeout-demo` at 150 million nodes over the eight orders unless said.
+
+- *The walls from the start of every run, the first among them*, moved as the routes
+  are placed: 0, 0, 0, 0, 0, 5, 0 and 0 connections open, 303.5 vias and 5029 mm, 36 pads
+  short in all for 49. A negotiation prices the rooms and counts none, and each of two
+  nets takes one of a pad's two: the second is cut where it is handed to the passes, and
+  the first run of the first order had 343 rip-ups and 38 nets moved aside for 44 and 6.
+- *The choice made before anything is routed, for a pad with two free rooms*: the room
+  nearer a pad of another net given up, the other walled from the start. No connection
+  open, 23 pads short in all, and 316 vias and 5235 mm for 292.5 and 5042 mm.
+- *The walls put up once the negotiation's routes are in the world, in every run*: no
+  connection open, 298.5 vias, 5032 mm, 39 pads short. `glasgow-revD1` at 40 million
+  nodes over three orders: 178, 136 and 151 connections open for 145, 136 and 130.
+- *In the runs after the first, those that route among them*: 289 vias and 5051 mm, 46
+  pads short. `lumenpnp-mobo` at 150 million nodes: 341 vias for 331 in one order of two,
+  a run that moves routes with three nets fewer whole, and the run for shorter ways
+  83.8 mm and 5 vias less after it for 142.2 mm and 11.
+- *The walls where the board's own copper puts them, from when the world is made*: in a
+  run that is given routes, the routes that are not its to move are the board's copper,
+  and a route that it is given in the last room such copper leaves a pad was cut as it
+  was taken back. `lumenpnp-mobo`'s run for shorter ways came back with a net open and
+  was not kept: 351 vias for 331.
+- *The room that a route leaves walled at once*: a route lifted for a search and laid
+  back where it was is put back by what the world says is free of it, and was cut at the
+  room it had stood in.
+
 ## PCB routing with the nets of a row as narrow as its pitch asks
 
 What was changed after [the release below](#pcb-routing-with-a-net-that-has-no-way-told-once),

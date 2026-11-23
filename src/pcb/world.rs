@@ -89,6 +89,81 @@ struct Meta {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Placed {
     entries: Vec<(u8, EntryId)>,
+    /// The rooms of kept spokes that it stands in ([`World::keep_spokes`]).
+    rooms: Vec<u32>,
+}
+
+/// How many millimetres, in nanometres, a bucket of the rooms of kept spokes is wide.
+const ROOM_BUCKET: i64 = 2_000_000;
+
+/// The room of one spoke of a pad on a layer: the spoke's own copper past the pad, which a
+/// track or a via of another net stands in when it comes closer to it than its clearance.
+#[derive(Clone, Debug)]
+struct Room {
+    /// Which pad on which layer, among [`Kept::groups`].
+    group: u32,
+    layer: LayerId,
+    net: NetId,
+    shape: Shape,
+    /// Whether copper of the board that is no route stands in it: no router frees it.
+    fixed: bool,
+    /// How many routed tracks and vias of other nets stand in it.
+    occupants: u32,
+}
+
+/// A pad on a layer: its rooms, and those of them that are walled now with the entries of
+/// their walls.
+type Group = (Vec<u32>, Vec<(u32, Placed)>);
+
+/// The spokes of the pads that thermal reliefs join to zones of their nets, of which each
+/// pad keeps its last ([`World::keep_spokes`]).
+#[derive(Clone, Debug, Default)]
+struct Kept {
+    /// How many free rooms a pad on a layer has at most when they are walled.
+    keep: usize,
+    /// Whether the walls are up and follow the routes ([`World::arm_spokes`]): until then
+    /// there is none.
+    armed: bool,
+    /// The pads on a layer that a route was taken out of a room of since anything was
+    /// placed: a room that a route leaves is walled, if it is the pad's last by then,
+    /// when the next thing is placed and not before.
+    left: Vec<u32>,
+    rooms: Vec<Room>,
+    /// By pad on a layer, its rooms and its walls.
+    groups: Vec<Group>,
+    origin: Point,
+    cols: usize,
+    rows: usize,
+    /// By layer and then bucket, the rooms whose boxes, grown by the world's reach, share
+    /// a point with the bucket.
+    buckets: Vec<Vec<u32>>,
+}
+
+impl Kept {
+    /// The rooms on `layer` that may be within reach of something in `rect`, each once,
+    /// in order.
+    fn near(&self, layer: usize, rect: &Rect, out: &mut Vec<u32>) {
+        out.clear();
+        if self.cols == 0 || self.rows == 0 {
+            return;
+        }
+        let col = |x: i64| {
+            ((x - self.origin.x).div_euclid(ROOM_BUCKET)).clamp(0, self.cols as i64 - 1) as usize
+        };
+        let row = |y: i64| {
+            ((y - self.origin.y).div_euclid(ROOM_BUCKET)).clamp(0, self.rows as i64 - 1) as usize
+        };
+        let per = self.cols * self.rows;
+        for r in row(rect.min().y)..=row(rect.max().y) {
+            for c in col(rect.min().x)..=col(rect.max().x) {
+                if let Some(b) = self.buckets.get(layer * per + r * self.cols + c) {
+                    out.extend_from_slice(b);
+                }
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+    }
 }
 
 /// The answer to "may this go here?".
@@ -135,6 +210,8 @@ pub(crate) struct World<'r> {
     planes: Option<Planes>,
     /// Where the spokes of pads in pours will be, which other nets pay to be in.
     spokes: Option<super::spokes::Spokes>,
+    /// The spokes of which each pad keeps its last, [`World::keep_spokes`].
+    kept: Option<Kept>,
     /// Whether a via may touch a pad with no hole.
     vias_in_pads: bool,
     /// The nets that keepouts except, by the number in [`Kind::Keepout`] less one.
@@ -200,6 +277,7 @@ impl<'r> World<'r> {
             clearances: Vec::new(),
             planes: None,
             spokes: None,
+            kept: None,
             via_pads: Vec::new(),
             vias_in_pads: true,
             excepts: Vec::new(),
@@ -471,6 +549,7 @@ impl<'r> World<'r> {
             .collect();
         self.restricted =
             self.run_layers & all != all || self.track_layers.iter().any(|&mask| mask & all != all);
+        self.keep_spokes(design, options.kept_spokes);
     }
 
     /// Whether tracks of `net` may be on a layer.
@@ -594,7 +673,11 @@ impl<'r> World<'r> {
             smd: false,
             tie: 0,
         };
-        self.add(LayerSet::EMPTY.with(layer), shape, meta)
+        let on = LayerSet::EMPTY.with(layer);
+        let rooms = self.stands_in(net, on, &shape);
+        let mut placed = self.add(on, shape, meta);
+        self.occupy(&mut placed, rooms);
+        placed
     }
 
     /// Adds a keepout of tracks and vias, as the design's are, for a while.
@@ -634,12 +717,14 @@ impl<'r> World<'r> {
                 kind: Kind::Hole,
                 ..copper_meta
             };
+            let rooms = self.stands_in(net, all, &copper);
             placed
                 .entries
                 .extend(self.add(all, copper, copper_meta).entries);
             placed
                 .entries
                 .extend(self.add(all, hole, hole_meta).entries);
+            self.occupy(&mut placed, rooms);
         }
         placed
     }
@@ -649,6 +734,347 @@ impl<'r> World<'r> {
     pub(crate) fn remove(&mut self, placed: &Placed) {
         for &(l, id) in &placed.entries {
             self.layers[usize::from(l)].remove(id);
+        }
+        if placed.rooms.is_empty() {
+            return;
+        }
+        let Some(kept) = self.kept.as_mut() else {
+            return;
+        };
+        let mut groups: Vec<u32> = Vec::new();
+        for &r in &placed.rooms {
+            let room = &mut kept.rooms[r as usize];
+            room.occupants = room.occupants.saturating_sub(1);
+            groups.push(room.group);
+        }
+        if !kept.armed {
+            return;
+        }
+        groups.sort_unstable();
+        groups.dedup();
+        // A route taken out is often put back as it was: lifted for a search for a better
+        // way, and laid again when there is none. The room it leaves is not walled behind
+        // it, which would shut its own way back; the walls that its leaving makes
+        // needless go now, and what is the pad's last once something is placed again is
+        // walled then.
+        for g in groups {
+            self.rewall(g, false);
+            if let Some(kept) = self.kept.as_mut()
+                && !kept.left.contains(&g)
+            {
+                kept.left.push(g);
+            }
+        }
+    }
+
+    /// Keeps the last spokes of the pads that thermal reliefs join to zones of their nets.
+    /// Of the spokes that the host's fill makes for a pad on a layer
+    /// ([`Zones::spokes`](super::Zones::spokes)), those in whose room nothing of another
+    /// net stands are free; the directions that the fill falls back to
+    /// ([`Zones::spare_spokes`](super::Zones::spare_spokes)) count for a pad that the
+    /// board's own copper leaves none of the first, and for no other: a track along a row
+    /// of pins takes the spoke beside it and both of the spare ones on its side at once,
+    /// and a pad counted with those had three rooms free and then none. Once a pad has no
+    /// more than `keep` free, each of those is in the world as copper of the pad's net,
+    /// which the spoke will be: no track and no via of another net comes closer to it
+    /// than their clearance, in any search and in any step that asks the world. A route
+    /// that leaves a room frees it, and the walls go when the pad has more than `keep`
+    /// free again. The room of a spoke is its copper past the pad's box by the clearance
+    /// of its net, where a track of another net may be at all.
+    ///
+    /// There is no wall until [`arm_spokes`](World::arm_spokes), and the walls follow the
+    /// routes after it.
+    pub(crate) fn keep_spokes(&mut self, design: &super::Design, keep: u8) {
+        self.kept = None;
+        let spokes = design
+            .zones
+            .spokes
+            .iter()
+            .map(|s| (s, false))
+            .chain(design.zones.spare_spokes.iter().map(|s| (s, true)));
+        if keep == 0 || spokes.clone().next().is_none() {
+            return;
+        }
+        // The spokes that the fill falls back to count for a pad that the board leaves
+        // none of the first: those come after them, and are left out for a pad that has
+        // one of the first by then.
+        let mut has_first: std::collections::BTreeSet<(usize, u8)> =
+            std::collections::BTreeSet::new();
+        let mut kept = Kept {
+            keep: usize::from(keep),
+            ..Kept::default()
+        };
+        let mut group_of: std::collections::BTreeMap<(usize, u8), u32> =
+            std::collections::BTreeMap::new();
+        let mut near: Vec<EntryId> = Vec::new();
+        for (spoke, spare) in spokes {
+            if spare && has_first.contains(&(spoke.pad, spoke.layer.0)) {
+                continue;
+            }
+            let Some(pad) = design.board.pads.get(spoke.pad) else {
+                continue;
+            };
+            let (Some(net), Some(index)) = (pad.net, self.layers.get(usize::from(spoke.layer.0)))
+            else {
+                continue;
+            };
+            // From where the spoke leaves the pad's box, and the clearance on: nearer the
+            // pad nothing of another net may be, and the pads beside it in its footprint
+            // are often nearer its edge than a clearance.
+            let (dx, dy) = (
+                (spoke.to.x - spoke.from.x) as f64,
+                (spoke.to.y - spoke.from.y) as f64,
+            );
+            let len = (dx * dx + dy * dy).sqrt();
+            if len <= 0.0 || spoke.width <= 0 {
+                continue;
+            }
+            let b = pad.shape.bbox();
+            let inside = |t: f64| {
+                let (x, y) = (spoke.from.x as f64 + dx * t, spoke.from.y as f64 + dy * t);
+                x >= b.min().x as f64
+                    && x <= b.max().x as f64
+                    && y >= b.min().y as f64
+                    && y <= b.max().y as f64
+            };
+            let mut out = 0.0f64;
+            for k in 1..=64 {
+                let t = f64::from(k) / 64.0;
+                if !inside(t) {
+                    break;
+                }
+                out = t;
+            }
+            let clear = self.clearance(Some(net), spoke.layer).max(0) as f64;
+            let start = (out + clear / len).min(0.5);
+            let from = Point::new(
+                spoke.from.x + (dx * start).round() as i64,
+                spoke.from.y + (dy * start).round() as i64,
+            );
+            let Ok(shape) = Shape::track(from, spoke.to, spoke.width) else {
+                continue;
+            };
+            // What is fixed and in its room: nothing a route can free.
+            index.query(&shape.bbox().expand(self.reach), &mut near);
+            let fixed = match self.track_class(net, spoke.layer, &shape, &near) {
+                Class::Free => false,
+                Class::Only(n) => n != net,
+                Class::Blocked => true,
+            };
+            if !spare && !fixed {
+                has_first.insert((spoke.pad, spoke.layer.0));
+            }
+            let next = kept.groups.len() as u32;
+            let group = *group_of.entry((spoke.pad, spoke.layer.0)).or_insert(next);
+            if group == next {
+                kept.groups.push((Vec::new(), Vec::new()));
+            }
+            kept.groups[group as usize].0.push(kept.rooms.len() as u32);
+            kept.rooms.push(Room {
+                group,
+                layer: spoke.layer,
+                net,
+                shape,
+                fixed,
+                occupants: 0,
+            });
+        }
+        if kept.rooms.is_empty() {
+            return;
+        }
+        // The buckets.
+        let boxes: Vec<Rect> = kept
+            .rooms
+            .iter()
+            .map(|r| r.shape.bbox().expand(self.reach))
+            .collect();
+        let (mut x0, mut y0, mut x1, mut y1) = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
+        for b in &boxes {
+            x0 = x0.min(b.min().x);
+            y0 = y0.min(b.min().y);
+            x1 = x1.max(b.max().x);
+            y1 = y1.max(b.max().y);
+        }
+        kept.origin = Point::new(x0, y0);
+        kept.cols = ((x1 - x0) / ROOM_BUCKET + 1).max(1) as usize;
+        kept.rows = ((y1 - y0) / ROOM_BUCKET + 1).max(1) as usize;
+        let per = kept.cols * kept.rows;
+        kept.buckets = vec![Vec::new(); self.layers.len() * per];
+        for (i, (room, b)) in kept.rooms.iter().zip(&boxes).enumerate() {
+            let l = usize::from(room.layer.0);
+            let c0 = ((b.min().x - x0) / ROOM_BUCKET) as usize;
+            let c1 = (((b.max().x - x0) / ROOM_BUCKET) as usize).min(kept.cols - 1);
+            let r0 = ((b.min().y - y0) / ROOM_BUCKET) as usize;
+            let r1 = (((b.max().y - y0) / ROOM_BUCKET) as usize).min(kept.rows - 1);
+            for r in r0..=r1 {
+                for c in c0..=c1 {
+                    kept.buckets[l * per + r * kept.cols + c].push(i as u32);
+                }
+            }
+        }
+        self.kept = Some(kept);
+    }
+
+    /// Puts the walls of the kept spokes up, to follow the routes from here on: a pad whose
+    /// free rooms the board's copper and the routes that are in the world leave no more
+    /// than it keeps has those walled now, and each route placed after this moves the
+    /// walls with it. Until it is called there is no wall, and routes are counted and
+    /// judged without: what a negotiation that prices the rooms and counts none of them
+    /// ended with, and the routes of an earlier run, are put into the world as they are,
+    /// and what they took is told once, here. A pad that they left no free room has none
+    /// to keep. A route that is taken out leaves its room unwalled until something is
+    /// placed again: lifted for a search and laid back where it was, it has its own way
+    /// back.
+    pub(crate) fn arm_spokes(&mut self) {
+        let Some(kept) = self.kept.as_mut() else {
+            return;
+        };
+        if kept.armed {
+            return;
+        }
+        kept.armed = true;
+        kept.left.clear();
+        for g in 0..kept.groups.len() as u32 {
+            self.rewall(g, true);
+        }
+    }
+
+    /// How many pads on a layer have their last spokes walled now, and how many spokes
+    /// that is: for tests and reports.
+    #[cfg(test)]
+    pub(crate) fn walled(&self) -> (usize, usize) {
+        self.kept.as_ref().map_or((0, 0), |k| {
+            (
+                k.groups.iter().filter(|g| !g.1.is_empty()).count(),
+                k.groups.iter().map(|g| g.1.len()).sum(),
+            )
+        })
+    }
+
+    /// The rooms of kept spokes that copper `shape` of `net` on `layers` stands in: those
+    /// of other nets' pads that it is closer to than the clearance between the two.
+    fn stands_in(&self, net: NetId, layers: LayerSet, shape: &Shape) -> Vec<u32> {
+        let Some(kept) = &self.kept else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        let mut near = Vec::new();
+        let rect = shape.bbox();
+        for layer in layers.iter() {
+            let l = usize::from(layer.0);
+            if l >= self.layers.len() {
+                continue;
+            }
+            kept.near(l, &rect, &mut near);
+            if near.is_empty() {
+                continue;
+            }
+            let ours = self.clearance(Some(net), layer);
+            for &r in &near {
+                let room = &kept.rooms[r as usize];
+                if room.net == net {
+                    continue;
+                }
+                let meta = Meta {
+                    kind: Kind::Copper,
+                    net: Some(room.net),
+                    own: None,
+                    owner: Owner::Fixed,
+                    clearance: self.clearance(Some(room.net), layer),
+                    smd: false,
+                    tie: 0,
+                };
+                if self.copper_hit(shape, &room.shape, (net, ours), meta, layer) {
+                    out.push(r);
+                }
+            }
+        }
+        out
+    }
+
+    /// Counts what was placed in the rooms `rooms`, and walls what that leaves as a pad's
+    /// last.
+    fn occupy(&mut self, placed: &mut Placed, rooms: Vec<u32>) {
+        let Some(kept) = self.kept.as_mut() else {
+            return;
+        };
+        if rooms.is_empty() && kept.left.is_empty() {
+            return;
+        }
+        // With the pads that routes were taken out of since the last thing was placed.
+        let mut groups: Vec<u32> = std::mem::take(&mut kept.left);
+        for &r in &rooms {
+            kept.rooms[r as usize].occupants += 1;
+            groups.push(kept.rooms[r as usize].group);
+        }
+        placed.rooms = rooms;
+        if !kept.armed {
+            return;
+        }
+        groups.sort_unstable();
+        groups.dedup();
+        for g in groups {
+            self.rewall(g, true);
+        }
+    }
+
+    /// Walls the free rooms of a pad on a layer if they are no more than it keeps, and
+    /// takes the walls out of those that are no longer so; with `more` off it takes walls
+    /// out and puts none in.
+    fn rewall(&mut self, group: u32, more: bool) {
+        let Some(kept) = self.kept.as_mut() else {
+            return;
+        };
+        let (rooms, walls) = &mut kept.groups[group as usize];
+        let mut free: Vec<u32> = rooms
+            .iter()
+            .copied()
+            .filter(|&r| {
+                let room = &kept.rooms[r as usize];
+                !room.fixed && room.occupants == 0
+            })
+            .collect();
+        if free.len() > kept.keep {
+            free.clear();
+        }
+        if walls.iter().map(|w| w.0).eq(free.iter().copied()) {
+            return;
+        }
+        let old = std::mem::take(walls);
+        let new: Vec<(u32, LayerId, NetId, Shape)> = free
+            .iter()
+            .filter(|r| more && !old.iter().any(|w| w.0 == **r))
+            .map(|&r| {
+                let room = &kept.rooms[r as usize];
+                (r, room.layer, room.net, room.shape.clone())
+            })
+            .collect();
+        let mut now: Vec<(u32, Placed)> = Vec::new();
+        for (r, placed) in old {
+            if free.contains(&r) {
+                now.push((r, placed));
+            } else {
+                for &(l, id) in &placed.entries {
+                    self.layers[usize::from(l)].remove(id);
+                }
+            }
+        }
+        for (r, layer, net, shape) in new {
+            let meta = Meta {
+                kind: Kind::Copper,
+                net: Some(net),
+                own: None,
+                owner: Owner::Fixed,
+                clearance: 0,
+                smd: false,
+                tie: 0,
+            };
+            let placed = self.add(LayerSet::EMPTY.with(layer), shape, meta);
+            now.push((r, placed));
+        }
+        now.sort_by_key(|w| w.0);
+        if let Some(kept) = self.kept.as_mut() {
+            kept.groups[group as usize].1 = now;
         }
     }
 
@@ -1249,6 +1675,201 @@ mod tests {
     use super::{Verdict, World};
     use crate::geom::{LayerId, Point, Rect, Shape};
     use crate::id::NetId;
+
+    /// A pad of net 1 at 10 mm, 10 mm with spokes to the north and the south, and a
+    /// world of its board that keeps `keep` of them.
+    fn relieved(keep: u8) -> (super::super::Design, super::super::RouteOptions) {
+        let mut d = design(
+            2,
+            vec![smd(10 * MM, 10 * MM, 1), smd(20 * MM, 10 * MM, 2)],
+            3,
+        );
+        let spoke = |dy: i64| super::super::Spoke {
+            pad: 0,
+            layer: LayerId(0),
+            from: Point::new(10 * MM, 10 * MM),
+            to: Point::new(10 * MM, 10 * MM + dy * 1_300_000),
+            width: 300_000,
+        };
+        d.zones.spokes = vec![spoke(-1), spoke(1)];
+        let options = super::super::RouteOptions {
+            kept_spokes: keep,
+            ..Default::default()
+        };
+        (d, options)
+    }
+
+    #[test]
+    fn the_last_spoke_of_a_pad_is_kept_from_other_nets_as_copper_is() {
+        let (d, options) = relieved(1);
+        let mut world = World::new(&d.board, &d.rules, &[], 0, &[]).unwrap();
+        world.configure(&d, &options);
+        let across =
+            |y: i64| Shape::track(Point::new(8 * MM, y), Point::new(12 * MM, y), 200_000).unwrap();
+        // Until the walls follow the routes, a route is put into the world as it is, as
+        // what a negotiation ended with is: one in each room, and nothing to keep.
+        let both = [
+            world.add_track(NetId(2), LayerId(0), across(9 * MM)),
+            world.add_track(NetId(2), LayerId(0), across(11 * MM)),
+        ];
+        assert_eq!(world.walled(), (0, 0));
+        world.arm_spokes();
+        assert_eq!(world.walled(), (0, 0));
+        // One of them taken out, the room it leaves is not walled behind it: a route
+        // lifted for a search has its own way back. It is the pad's last, and walled,
+        // once something is placed again.
+        world.remove(&both[1]);
+        assert_eq!(world.walled(), (0, 0));
+        assert_eq!(
+            world.track(NetId(2), LayerId(0), &across(11 * MM), None),
+            Verdict::Free
+        );
+        let far = Shape::track(
+            Point::new(30 * MM, 30 * MM),
+            Point::new(31 * MM, 30 * MM),
+            200_000,
+        );
+        let far = world.add_track(NetId(2), LayerId(0), far.unwrap());
+        assert_eq!(world.walled(), (1, 1));
+        assert_eq!(
+            world.track(NetId(2), LayerId(0), &across(11 * MM), None),
+            Verdict::Blocked
+        );
+        world.remove(&far);
+        world.remove(&both[0]);
+        assert_eq!(world.walled(), (0, 0));
+        let across =
+            |y: i64| Shape::track(Point::new(8 * MM, y), Point::new(12 * MM, y), 200_000).unwrap();
+        let (north, south) = (across(9 * MM), across(11 * MM));
+        // With both rooms free, either is a way for another net: the board may need it.
+        assert_eq!(world.walled(), (0, 0));
+        assert_eq!(
+            world.track(NetId(2), LayerId(0), &north, None),
+            Verdict::Free
+        );
+        assert_eq!(
+            world.track(NetId(2), LayerId(0), &south, None),
+            Verdict::Free
+        );
+        // A track in the room of one makes the other the last: no other net's track or
+        // via may be there, on the spoke's layer, and the pad's own net may.
+        let placed = world.add_track(NetId(2), LayerId(0), north.clone());
+        assert_eq!(world.walled(), (1, 1));
+        assert_eq!(
+            world.track(NetId(2), LayerId(0), &south, None),
+            Verdict::Blocked
+        );
+        assert_eq!(
+            world.via(
+                NetId(2),
+                Point::new(10 * MM, 11 * MM),
+                600_000,
+                300_000,
+                None
+            ),
+            Verdict::Blocked
+        );
+        assert_eq!(
+            world.track(NetId(1), LayerId(0), &south, None),
+            Verdict::Free
+        );
+        assert_eq!(
+            world.track(NetId(2), LayerId(1), &south, None),
+            Verdict::Free
+        );
+        // And a second track through the room that is taken already is as before.
+        assert_eq!(
+            world.track(NetId(2), LayerId(0), &north, None),
+            Verdict::Free
+        );
+        // The route moved out of the room, both are free again.
+        world.remove(&placed);
+        assert_eq!(world.walled(), (0, 0));
+        assert_eq!(
+            world.track(NetId(2), LayerId(0), &south, None),
+            Verdict::Free
+        );
+        // A via in a room takes it as a track does.
+        let via = world.add_via(NetId(2), Point::new(10 * MM, 11 * MM), 600_000, 300_000);
+        assert_eq!(world.walled(), (1, 1));
+        assert_eq!(
+            world.track(NetId(2), LayerId(0), &north, None),
+            Verdict::Blocked
+        );
+        world.remove(&via);
+        // With none kept, which is the default, nothing is walled whatever is routed.
+        let (d, options) = relieved(0);
+        let mut world = World::new(&d.board, &d.rules, &[], 0, &[]).unwrap();
+        world.configure(&d, &options);
+        world.arm_spokes();
+        world.add_track(NetId(2), LayerId(0), north);
+        assert_eq!(world.walled(), (0, 0));
+        assert_eq!(
+            world.track(NetId(2), LayerId(0), &south, None),
+            Verdict::Free
+        );
+    }
+
+    #[test]
+    fn a_spoke_with_copper_of_the_board_in_its_room_is_not_counted() {
+        // A track of another net that the board came with, across the north room: the
+        // south spoke is the pad's last from the start.
+        let (mut d, options) = relieved(1);
+        d.board.tracks.push(crate::geom::drc::Track {
+            start: Point::new(8 * MM, 9 * MM),
+            end: Point::new(12 * MM, 9 * MM),
+            mid: None,
+            width: 200_000,
+            layer: LayerId(0),
+            net: Some(NetId(2)),
+        });
+        let mut world = World::new(&d.board, &d.rules, &[], 0, &[]).unwrap();
+        world.configure(&d, &options);
+        assert_eq!(world.walled(), (0, 0));
+        world.arm_spokes();
+        assert_eq!(world.walled(), (1, 1));
+        let south = Shape::track(
+            Point::new(8 * MM, 11 * MM),
+            Point::new(12 * MM, 11 * MM),
+            200_000,
+        )
+        .unwrap();
+        assert_eq!(
+            world.track(NetId(2), LayerId(0), &south, None),
+            Verdict::Blocked
+        );
+        // The directions that the fill falls back to count for a pad with none of the
+        // first: with both of those taken by the board, a spare one is the last.
+        d.board.tracks.push(crate::geom::drc::Track {
+            start: Point::new(8 * MM, 11 * MM),
+            end: Point::new(12 * MM, 11 * MM),
+            mid: None,
+            width: 200_000,
+            layer: LayerId(0),
+            net: Some(NetId(2)),
+        });
+        d.zones.spare_spokes = vec![super::super::Spoke {
+            pad: 0,
+            layer: LayerId(0),
+            from: Point::new(10 * MM, 10 * MM),
+            to: Point::new(8_700_000, 10 * MM),
+            width: 300_000,
+        }];
+        let mut world = World::new(&d.board, &d.rules, &[], 0, &[]).unwrap();
+        world.configure(&d, &options);
+        world.arm_spokes();
+        assert_eq!(world.walled(), (1, 1));
+        let west = Shape::track(
+            Point::new(9 * MM, 9_500_000),
+            Point::new(9 * MM, 10_500_000),
+            200_000,
+        )
+        .unwrap();
+        assert_eq!(
+            world.track(NetId(2), LayerId(0), &west, None),
+            Verdict::Blocked
+        );
+    }
 
     #[test]
     fn the_corners_round_a_pad_are_as_far_from_it_as_a_track_has_to_stay() {

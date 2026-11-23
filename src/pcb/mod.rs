@@ -205,7 +205,8 @@
 //!
 //! A host whose fill makes thermal reliefs can have the room of their spokes kept: tracks
 //! of other nets then pay to be where a pad's spoke will be
-//! ([`RouteOptions::spoke_cost`]).
+//! ([`RouteOptions::spoke_cost`]), and the last free spoke of a pad is closed to them as
+//! copper of the pad's net is ([`RouteOptions::kept_spokes`]).
 //!
 //! [`Routed::failed`] has the nets left open whose own search found no way: the others
 //! were tried and lost their routes to another net's, and a host that routes again on the
@@ -769,6 +770,25 @@ pub struct RouteOptions {
     /// routes its boards with (`docs/benchmarks.md`, "Room for the spokes of thermal
     /// reliefs").
     pub spoke_cost: f64,
+    /// How many spokes of a pad's thermal relief on a layer are kept from other nets'
+    /// routes as from copper. [`spoke_cost`](RouteOptions::spoke_cost) is a price, and
+    /// where a board has no other way a route is made through the room of a spoke: the
+    /// last of a pad's can go so, and a pad with none is not relieved but cut off its
+    /// zone, or joined to it by what a fill leaves. With this at 1, of the spokes that
+    /// the host's fill makes for a pad on a layer ([`Zones::spokes`] and
+    /// [`Zones::spare_spokes`]), counted without those that copper of the board stands in
+    /// the room of, the last that no route of another net stands in the room of is as
+    /// copper of the pad's net to every other net: no track and no via comes closer to it
+    /// than their clearance, in any search and any step, for as long as it is the last.
+    /// A route that leaves another spoke's room frees it again. With 2 a pad's last two
+    /// are kept so, and so on. A net with no other way is then left open and reported.
+    /// From when the nets are routed a net at a time: what the negotiation of
+    /// [`whole`](RouteOptions::whole) ends with, and the routes that a run
+    /// [from routes](route_from) is given, are taken as they are, and a pad that those
+    /// leave no free spoke has none to keep.
+    /// The default is 0, which keeps none; cadlab routes its boards with 1
+    /// (`docs/benchmarks.md`, "The last spoke of a pad").
+    pub kept_spokes: u8,
     /// Whether every net is routed against every other at once before the passes that
     /// route a net at a time. The default is `false`. On one grid over the board, each
     /// net is routed across the others at a price for every point where its copper would
@@ -870,6 +890,7 @@ impl Default for RouteOptions {
             negotiate_places: false,
             crossings: true,
             spoke_cost: 0.0,
+            kept_spokes: 0,
             seed: None,
             whole: false,
             whole_share: 0.5,

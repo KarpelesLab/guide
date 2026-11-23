@@ -652,9 +652,9 @@ pub struct RouteOptions {
     /// [`Stats::necked`] counts such nets. In a run with a budget or a deadline, the
     /// width is also one at which the pads beside such a pad are left the same way, side
     /// by side: a little narrower again, where one track fits a pad and two do not fit
-    /// two. And no wider than the pitch of a row of pads has room for two of by the
-    /// net's own clearance, the board's and not a rule area's: the tracks of a row leave
-    /// the area side by side. The lattice then has the pitch of those tracks, unless
+    /// two. And, in a rule area with a clearance of its own under the net's, no wider than
+    /// the pitch of a row of pads has room for two of by the net's own clearance, the
+    /// board's and not the area's: the tracks of a row leave the area side by side. The lattice then has the pitch of those tracks, unless
     /// [`pitch`](RouteOptions::pitch) sets one or the run has a
     /// [budget of nodes](RouteOptions::work_budget).
     pub neck_down: bool,

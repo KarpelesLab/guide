@@ -15,9 +15,9 @@
 //! no rip-up settles: whichever of two pads is routed shuts the other in. So a pad's track
 //! has to leave it *beside* those of the pads next to it: the same way as a track of the
 //! same width leaves each neighbour of another net, and clear of it, by the clearance of
-//! the rule area that both are in if there is one with its own. And no wider than the
-//! pitch of the row has room for two of by the board's clearance ([`row_width`]): the
-//! tracks of a row leave the area side by side. In a run with a
+//! the rule area that both are in if there is one with its own. And in such an area no
+//! wider than the pitch of the row has room for two of by the board's clearance
+//! ([`row_width`]): the tracks of a row leave the area side by side. In a run with a
 //! budget: with none, the narrower tracks of two curated boards found other ways, a
 //! connection fewer on one of them.
 
@@ -114,8 +114,13 @@ const SLACK: i64 = 5_000;
 /// (`tinytapeout-demo`: 300 vias and 5376 mm over four orders at the class's width, 270
 /// and 4967 mm at this one, which is the width cadlab's router routes the same nets at;
 /// `docs/benchmarks.md`). Only for a pad on one layer with no room for a track of `width`
-/// between it and the nearest pad of another net beside it; `width` where that does not
-/// hold, and never under `least`.
+/// between it and the nearest pad of another net beside it, and only where an area that
+/// both pads are in gives them a clearance of its own under the net's: with none, what
+/// the pads beside a pad leave it is told by the board's clearance already, and the
+/// narrower width and its finer lattice cost a board of two layers connections
+/// (`corne-cherry`, 90 nets at 0.2 mm for 0.21 mm on a lattice of 0.195 mm for 0.22 mm:
+/// 1, 0, 4 and 4 connections open over four orders at 60 s for 1, 0, 1 and 1). `width`
+/// where that does not hold, and never under `least`.
 #[allow(clippy::too_many_arguments)]
 fn row_width(
     rules: &crate::geom::Rules,
@@ -144,6 +149,12 @@ fn row_width(
     let b = shape.bbox();
     let lat = (b.max().x - b.min().x).min(b.max().y - b.min().y);
     let clearance = rules.clearance(Some(net), l);
+    if rules
+        .area_clearance(l, shape, next.shape)
+        .is_none_or(|area| area >= clearance)
+    {
+        return width;
+    }
     let margin = sampling(pitch);
     let between = pitch - (lat as f64) < (width + 2 * clearance) as f64;
     let crowded = (width + clearance + SLACK) as f64 + margin > pitch;
@@ -295,7 +306,7 @@ pub(crate) fn plan(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::geom::{Rect, RuleSpec, Rules};
+    use crate::geom::{Overrides, Rect, RuleArea, RuleSpec, Rules};
 
     /// A pad 0.2 mm or `wide` across and 0.8 mm long at the origin, and the one beside it
     /// `pitch` away, of another net.
@@ -311,7 +322,34 @@ mod tests {
     }
 
     fn width_of(clearance: i64, wide: i64, pitch: i64, width: i64, layers: LayerSet) -> i64 {
-        let rules = Rules::new(RuleSpec::new(&["F.Cu", "B.Cu"], 100_000, clearance)).unwrap();
+        width_in(Some(160_000), clearance, wide, pitch, width, layers)
+    }
+
+    /// As [`width_of`], in an area round both pads with a clearance of its own, or in none.
+    fn width_in(
+        area: Option<i64>,
+        clearance: i64,
+        wide: i64,
+        pitch: i64,
+        width: i64,
+        layers: LayerSet,
+    ) -> i64 {
+        let mut spec = RuleSpec::new(&["F.Cu", "B.Cu"], 100_000, clearance);
+        if let Some(own) = area {
+            spec.areas.push(RuleArea {
+                shape: Shape::rect(Rect::new(
+                    Point::new(-1_000_000, -1_000_000),
+                    Point::new(2_000_000, 1_000_000),
+                ))
+                .unwrap(),
+                layers: LayerSet::first(2),
+                overrides: Overrides {
+                    track_width: None,
+                    clearance: Some(own),
+                },
+            });
+        }
+        let rules = Rules::new(spec).unwrap();
         let (own, next) = row(wide, pitch);
         let beside = [Beside {
             net: NetId(1),
@@ -332,7 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn a_track_out_of_a_row_is_no_wider_than_the_pitch_has_room_for_two_of() {
+    fn a_track_out_of_a_row_in_an_area_is_no_wider_than_the_pitch_has_room_for_two_of() {
         let top = LayerSet::first(1);
         // A QFN of 0.4 mm with a clearance of 0.2 mm: 0.185 mm, where cadlab's router
         // has the same net.
@@ -349,6 +387,16 @@ mod tests {
         // Nor is a pad on two layers, which a track may leave on the other.
         assert_eq!(
             width_of(200_000, 200_000, 400_000, 220_000, LayerSet::first(2)),
+            220_000
+        );
+        // With no area round the two pads, or one whose clearance is no less than the
+        // net's, the board's clearance is what the pads beside a pad were told by.
+        assert_eq!(
+            width_in(None, 200_000, 200_000, 400_000, 220_000, top),
+            220_000
+        );
+        assert_eq!(
+            width_in(Some(200_000), 200_000, 200_000, 400_000, 220_000, top),
             220_000
         );
     }

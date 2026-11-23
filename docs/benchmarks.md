@@ -5990,7 +5990,8 @@ it has over cadlab's router on that board's track is there after its first round
 
 ### What was changed
 
-1. *A net of a row is no wider than the row's pitch has room for two of*
+1. *In a rule area with a clearance of its own, a net of a row is no wider than the
+   row's pitch has room for two of*
    (`pcb::neck`, in a run with a budget or a deadline, as the rule it is added to): the
    pitch of the pad and the nearest pad of another net beside it, less the net's own
    clearance, the board's and not an area's, less what a grid's points miss between two
@@ -5998,8 +5999,8 @@ it has over cadlab's router on that board's track is there after its first round
    never under the least width. For a pad on one layer with no room for a track of the
    net's width between it and that pad. It is cadlab's rule (`fanout::necks`), and gives
    its widths on `tinytapeout-demo`: 53 nets at 0.185 mm, 22 at 0.235 mm, 9 at 0.16 mm.
-   `corne-cherry` has its 90 nets at 0.2 mm for 0.21 mm, `buspirate5-rev10` one net at
-   0.235 mm for 0.244 mm, and the other nine boards the widths they had.
+   The other eleven boards have the widths they had. 0.0.28 had the rule for every row,
+   in an area or not, and 0.0.29 has it for the rows in an area alone (below).
 2. *The lattice has the pitch of the tracks that a row made narrower*, half their
    width and their clearance, where that is tighter than the pitch of the nets' own
    widths. `tinytapeout-demo`: 0.1925 mm for 0.2 mm. Not in a run with a budget of nodes.
@@ -6018,11 +6019,26 @@ cadlab's router has 273 vias, 4894 mm and 4672 mm outside the pads over eight se
 this crate's own pitch the rounds settle sooner with the narrower nets: 41 points shared
 after the twelfth round for 123, with 368 vias for 370 and 5481 mm for 5658.
 
-Budgets of nodes, one thread: at 40 million over three orders `corne-cherry` has 27, 21
-and 44 connections open for 36, 28 and 22, and `tinytapeout-demo` 3, 7 and 10 for 8, 4 and
-13, the seven other boards that a budget cuts as they were; at 150 million over two
-orders `corne-cherry` 1 and 0 for 8 and 0, and `tinytapeout-demo` none with 269 and 331
-vias for none with 300 and 298.
+Budgets of nodes, one thread, 0.0.29: at 40 million over three orders `tinytapeout-demo`
+has 3, 7 and 10 connections open for 8, 4 and 13, and the eight other boards that a
+budget cuts what they had, to the via (`corne-cherry` 36, 28 and 22); at 150 million
+over two orders `tinytapeout-demo` none with 269 and 331 vias for none with 300 and 298,
+and `corne-cherry` 8 and 0 as it had.
+
+### Only in an area: 0.0.29
+
+0.0.28 had the rule for every row. Without an area this crate's own rule for the pads
+beside a pad is told by the board's clearance already, and cadlab's rule differs from it
+by what a grid's points miss: `corne-cherry`, two layers, had its 90 nets at 0.2 mm for
+0.21 mm on a lattice of 0.195 mm for 0.22 mm, and `buspirate5-rev10` one net at
+0.235 mm for 0.244 mm. `corne-cherry` at 60 s, four orders, four measurements of 0.0.28
+before and after it was released: 1, 0, 4 and 4 connections open, the same again, 0, 0, 4
+and 8, and 1, 0, 4 and 4 beside cadlab's router, where 0.0.27 had 1, 0, 1 and 1 beside it
+and cadlab's router has 2 to 4. At 40 million nodes it had 27, 21 and 44 open for 36, 28
+and 22, and at 150 million 1 and 0 for 8 and 0. So the rule is for the rows in an area
+with a clearance of its own under the net's, which is where the two rules part by more
+than a grid's points: with 0.0.29 `corne-cherry` and `buspirate5-rev10` are routed as by
+0.0.27, to the via at a budget of nodes, and `tinytapeout-demo` as by 0.0.28.
 
 ### Tried and not kept
 

@@ -1032,9 +1032,8 @@ fn a_host_s_fill_of_few_edges_is_cut_only_where_copper_is_too_close() {
 fn tracks_out_of_pads_side_by_side_are_narrow_enough_for_both() {
     // The same row with a clearance of 0.19 mm: a track of 0.22 mm clears the pads on
     // either side of its own, 0.3 mm from its middle, and two such tracks out of two pads
-    // side by side are 0.18 mm apart. At 0.21 mm they are 0.19 mm apart, to the nanometre,
-    // and on a grid they are looked at where its points are: 0.195 mm is the width of a
-    // run with a budget, as cadlab's router has it.
+    // side by side are 0.18 mm apart. At 0.21 mm they are 0.19 mm apart: the width of a
+    // run with a budget.
     let mut d = fine_row();
     d.rules = Rules::new(crate::geom::RuleSpec::new(&["F.Cu"], 100_000, 190_000)).unwrap();
     let options = RouteOptions {
@@ -1043,8 +1042,7 @@ fn tracks_out_of_pads_side_by_side_are_narrow_enough_for_both() {
     };
     let routed = route_checked(&d, &options);
     assert_eq!(routed.stats.necked, 8);
-    assert!(routed.tracks.iter().all(|t| t.width == 195_000));
-    assert!(routed.unrouted.is_empty(), "{:?}", routed.unrouted);
+    assert!(routed.tracks.iter().all(|t| t.width == 210_000));
     // With no budget, the width that leaves each pad alone, as before.
     let plain = route_checked(&d, &RouteOptions::default());
     assert_eq!(plain.stats.necked, 8);

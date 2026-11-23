@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.34](https://github.com/KarpelesLab/guide/compare/v0.0.33...v0.0.34) - 2026-11-23
+
+### Added
+
+- *(pcb)* the negotiation for every net at once can be that of cadlab's own router ([#60](https://github.com/KarpelesLab/guide/pull/60))
+
+### Other
+
+- *(benchmarks)* the connections open with the rounds of cadlab's router, as the router reports them ([#62](https://github.com/KarpelesLab/guide/pull/62))
+
 ## [0.0.33](https://github.com/KarpelesLab/guide/compare/v0.0.32...v0.0.33) - 2026-11-23
 
 ### Added

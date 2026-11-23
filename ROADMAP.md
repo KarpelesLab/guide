@@ -297,7 +297,9 @@ Each item is independently useful, and they can land in any order.
   planned on another layer as fixed copper (`RouteOptions::crossings`,
   [benchmarks](docs/benchmarks.md#pcb-routing-of-two-nets-that-cross-in-a-row));
   the room that the spokes of a pad in a pour of its net need can cost other nets'
-  tracks (`RouteOptions::spoke_cost`), and the connections of a board in two parts that
+  tracks (`RouteOptions::spoke_cost`) and the last free spoke of a pad is closed to
+  them as copper is (`RouteOptions::kept_spokes`,
+  [benchmarks](docs/benchmarks.md#pcb-routing-with-a-pads-last-spoke-kept)), and the connections of a board in two parts that
   only the schematic joins are found once and told (`Cause::Apart`,
   [benchmarks](docs/benchmarks.md#pcb-routing-with-room-for-spokes)),
   and a host that fills its zones itself is asked for its fill around the routes,

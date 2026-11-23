@@ -256,6 +256,25 @@ impl NetCopper {
         }
     }
 
+    /// Whether all of this copper, which is not in the world, may be put into it as it is
+    /// now: every track and every via with nothing there in its way. Not told by counting
+    /// what [`free_in`](NetCopper::free_in) keeps: that cuts a track where something is in
+    /// its way and joins what is in line, and a track cut in two beside two joined into
+    /// one is as many tracks as before.
+    pub(crate) fn all_free(&self, world: &World<'_>, ctx: &NetCtx) -> bool {
+        self.segs.iter().all(|s| {
+            s.a == s.b
+                || Shape::track(s.a, s.b, ctx.widths[usize::from(s.l)])
+                    .is_ok_and(|t| world.track(ctx.net, LayerId(s.l), &t, None) == Verdict::Free)
+        }) && match ctx.via {
+            Some((d, drill)) => self
+                .vias
+                .iter()
+                .all(|&v| world.via(ctx.net, v, d, drill, None) == Verdict::Free),
+            None => self.vias.is_empty(),
+        }
+    }
+
     /// What of this copper, which is not in the world, may be put back into it as it is
     /// now: the tracks and vias that nothing there is in the way of. A track with
     /// something in its way is looked at in steps of `pitch`, and keeps those that are

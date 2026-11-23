@@ -2080,6 +2080,9 @@ fn route_all<'a>(
     let mut spent = vec![0u8; jobs.len()];
     // Whether the pass before, on the finer lattice, took no net out and moved none aside.
     let mut idle_pass = false;
+    // From here on a pad's last spoke is kept as the routes move ([`World::keep_spokes`]):
+    // what a negotiation ended with and what an earlier run left are in the world by now.
+    world.arm_spokes();
     'passes: for pass in 0..=FINE_PASSES {
         if run.poll() {
             break;

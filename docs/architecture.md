@@ -1038,6 +1038,21 @@ does it:
   are open on the grid after them (`Stats::whole_finer`). It halves what the passes
   are given and the nets they take out, and the board ends as it did: what the passes
   add is taken out again by the end of the run either way. Off by default.
+- *The rounds of cadlab's own router*
+  ([results](benchmarks.md#pcb-routing-with-the-rounds-of-cadlabs-own-router)). With
+  `RouteOptions::rounds` at `Rounds::Native` the negotiation is that router's own
+  (`pcb::rounds`), with its own view of the board made from the design: its grid at the
+  pitch, snapped to the rows of fine pitch; what the board leaves free of it as maps by
+  class of net; the pads that a fill joins as one island, and a connection that may end
+  on a fill near its end; the nets narrowed and the ways out of the rows and arrays
+  planned by its rules, by the parts of the pads (`Design::parts`); the shortest net
+  first, forty rounds or twelve with none better; what is still shared taken out, the
+  nets cut off their pours planned again, the nets in an open connection's way routed
+  again with it, and each net once more for fewer vias. Its first round says whether its
+  share has room for it and whether its grid reaches the pads; if not, the run begins
+  again with this crate's own (`Stats::rounds_given_up`). It ends its rounds as that
+  router does, and with the passes after it a board has fewer vias and less track and
+  more connections open. Off by default.
 - *What it ends with is copper of the nets.* Each net's route is given to the passes as
   the routes of an earlier run are: what the world does not allow of it beside the
   others is left out, a net left in pieces is completed from them, and the passes,

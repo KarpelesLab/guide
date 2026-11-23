@@ -312,7 +312,12 @@ Each item is independently useful, and they can land in any order.
   connections that the negotiation at twice the pitch leaves open can be negotiated for
   on the grid of the pitch before the passes (`RouteOptions::whole_finer`, off: it halves
   what the passes take out and the board ends as it did,
-  [benchmarks](docs/benchmarks.md#pcb-routing-with-the-open-connections-negotiated-on-the-finer-grid)), and the connections of a board in two parts that
+  [benchmarks](docs/benchmarks.md#pcb-routing-with-the-open-connections-negotiated-on-the-finer-grid)), the
+  negotiation can be that of cadlab's own router, whole, with its grid, its plan of the
+  nets, its widths and its ways out (`RouteOptions::rounds`, `Rounds::Native`, off: it ends
+  its rounds as that router does, and with the passes after it a board has fewer vias,
+  less track and more connections open,
+  [benchmarks](docs/benchmarks.md#pcb-routing-with-the-rounds-of-cadlabs-own-router)), and the connections of a board in two parts that
   only the schematic joins are found once and told (`Cause::Apart`,
   [benchmarks](docs/benchmarks.md#pcb-routing-with-room-for-spokes)),
   and a host that fills its zones itself is asked for its fill around the routes,

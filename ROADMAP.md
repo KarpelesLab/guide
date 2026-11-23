@@ -299,7 +299,12 @@ Each item is independently useful, and they can land in any order.
   the room that the spokes of a pad in a pour of its net need can cost other nets'
   tracks (`RouteOptions::spoke_cost`) and the last free spoke of a pad is closed to
   them as copper is (`RouteOptions::kept_spokes`,
-  [benchmarks](docs/benchmarks.md#pcb-routing-with-a-pads-last-spoke-kept)), and the connections of a board in two parts that
+  [benchmarks](docs/benchmarks.md#pcb-routing-with-a-pads-last-spoke-kept)), a run for
+  shorter ways lays the route that cut a pad off its pour another way where it has one
+  as short, for the via that joined the pad again, and ends each run on a pad where it
+  comes to it (`Stats::uncut`,
+  [benchmarks](docs/benchmarks.md#pcb-routing-with-a-pour-left-whole)), a host that
+  fills its zones itself says what its fills are clear of (`Zones::fills_clear_of`), and the connections of a board in two parts that
   only the schematic joins are found once and told (`Cause::Apart`,
   [benchmarks](docs/benchmarks.md#pcb-routing-with-room-for-spokes)),
   and a host that fills its zones itself is asked for its fill around the routes,

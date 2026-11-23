@@ -22,6 +22,7 @@ use super::rows;
 use super::settle::{Routes, Settle};
 use super::spokes;
 use super::tune;
+use super::uncut;
 use super::whole;
 use super::world::{Placed, Planes, Verdict, World};
 use super::zones::{self, Fill};
@@ -1333,6 +1334,14 @@ fn route_all<'a>(
         design
     } else {
         let mut d = design.clone();
+        // They were on the host's board when it made its fills, as the rest was.
+        if let Some(clear) = d.zones.fills_clear_of.as_mut()
+            && clear[0] == d.board.tracks.len()
+            && clear[1] == d.board.vias.len()
+        {
+            clear[0] += kept_fixed.0.len();
+            clear[1] += kept_fixed.1.len();
+        }
         d.board.tracks.extend(kept_fixed.0);
         d.board.vias.extend(kept_fixed.1);
         with_earlier = d;
@@ -1343,7 +1352,14 @@ fn route_all<'a>(
         design
     } else {
         let mut d = design.clone();
-        d.board.zones.extend(fixed_fills(design, &is_plane, &stop)?);
+        let fixed = fixed_fills(design, &is_plane, &stop)?;
+        // The host's fills are clear of each other, and what is cut of one is less of it.
+        if let Some(clear) = d.zones.fills_clear_of.as_mut()
+            && clear[2] == d.board.zones.len()
+        {
+            clear[2] += fixed.len();
+        }
+        d.board.zones.extend(fixed);
         with_fixed = d;
         &with_fixed
     };
@@ -3093,6 +3109,39 @@ fn route_all<'a>(
             options,
             &still,
         );
+    }
+    // A pour left whole, where the route that cut a pad off it has another way: in a run
+    // for shorter ways, whose routes are where they stay.
+    if let Some(pours) = &pours
+        && options.cleanup
+        && options.shorten
+        && pours.outer(design)
+        && !run.poll()
+    {
+        run.phase(Phase::Cleanup);
+        let may: Vec<bool> = jobs
+            .iter()
+            .map(|job| {
+                let net = job.ctx.net;
+                !design
+                    .pairs
+                    .iter()
+                    .any(|p| p.positive == net || p.negative == net)
+                    && !design.lengths.iter().any(|l| l.nets.contains(&net))
+            })
+            .collect();
+        let done = uncut::run(
+            &mut world,
+            design,
+            &jobs,
+            &mut copper,
+            pours,
+            params,
+            options,
+            &may,
+        );
+        stats.expanded += done.expanded;
+        stats.uncut = (done.tried, done.kept, done.vias);
     }
     // Pairs side by side, in place of the routes they were given as two nets.
     let mut paired = (0, 0.0);

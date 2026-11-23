@@ -246,6 +246,45 @@ fn a_host_s_fill_is_the_plane_that_routing_plans_on() {
 }
 
 #[test]
+fn a_host_s_fill_is_not_measured_against_what_the_host_says_it_is_clear_of() {
+    // A square of fill and a track of another net across it, which the host says was on
+    // its board when it filled: the fill is as it was given. A second track, which routing
+    // added, cuts it as any does.
+    let mut d = design(2, vec![smd(20 * MM, 20 * MM, 2)], 3);
+    let mut z = zone(1, 0, 15 * MM);
+    z.islands = Islands::Keep;
+    d.zones.zones.push(z);
+    let host = Shape::region(&[&ring(0, 0, 10 * MM, 10 * MM)]).unwrap();
+    d.zones.fills.push(Fill {
+        zone: 0,
+        layer: LayerId(0),
+        shape: host[0].clone(),
+    });
+    let track = |x: i64| Track {
+        start: Point::new(x, -MM),
+        end: Point::new(x, 11 * MM),
+        mid: None,
+        width: 200_000,
+        layer: LayerId(0),
+        net: Some(NetId(2)),
+    };
+    d.board.tracks.push(track(3 * MM));
+    assert_ne!(fill_zones(&d.board, &d).unwrap(), d.zones.fills);
+    d.zones.fills_clear_of = Some([1, 0, 0]);
+    assert_eq!(fill_zones(&d.board, &d).unwrap(), d.zones.fills);
+    let mut board = d.board.clone();
+    board.tracks.push(track(7 * MM));
+    let fills = fill_zones(&board, &d).unwrap();
+    assert_eq!(fills.len(), 2);
+    assert!(
+        filled(&fills, 3 * MM, 5 * MM),
+        "the host's own track is in its fill"
+    );
+    assert!(!filled(&fills, 7 * MM, 5 * MM));
+    assert!(filled(&fills, 9 * MM, 5 * MM));
+}
+
+#[test]
 fn a_host_s_fill_is_cut_around_copper_it_does_not_clear() {
     // Two squares joined by a neck of 0.15 mm, narrower than the zone's minimum width, as a
     // host's spoke may be.

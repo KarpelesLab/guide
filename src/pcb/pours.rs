@@ -436,6 +436,12 @@ impl Pours {
 
     /// Clears the cells whose centres are within `reach` of the segment from `a` to `b`.
     fn cut(&self, cells: &mut [bool], a: Point, b: Point, reach: i64) {
+        self.each_near(a, b, reach, |k| cells[k] = false);
+    }
+
+    /// Calls `f` with each cell whose centre is within `reach` of the segment from `a` to
+    /// `b`.
+    fn each_near(&self, a: Point, b: Point, reach: i64, mut f: impl FnMut(usize)) {
         let r = Rect::new(a, b).expand(reach);
         let (ux, uy) = ((b.x - a.x) as i128, (b.y - a.y) as i128);
         let len2 = ux * ux + uy * uy;
@@ -456,9 +462,394 @@ impl Pours {
                 cross * cross <= reach2 * len2
             };
             if near {
-                cells[k] = false;
+                f(k);
             }
         });
+    }
+
+    /// The cells of each layer of `net`'s fill that the copper of the other jobs leaves it,
+    /// those of the jobs `skip` taken as not there; and with `owners`, by layer and cell, which
+    /// job's copper is too near a cell for the fill to have it: its number plus one, or
+    /// `u32::MAX` for more than one, or zero for none.
+    fn left_open(
+        &self,
+        net: &Net,
+        jobs: &[Job],
+        copper: &[Option<NetCopper>],
+        skip: &[usize],
+        mut owners: Option<&mut Vec<Vec<u32>>>,
+        frees: Option<&dyn Fn(usize, usize) -> bool>,
+    ) -> Vec<Vec<bool>> {
+        let mut open: Vec<Vec<bool>> = net.layers.iter().map(|l| l.fill.clone()).collect();
+        // The fill that a host gave is around the routes as they were when it made it:
+        // the cells that those of `skip` took of it then are the fill's again where
+        // `frees` says that nothing else has them.
+        if let Some(frees) = frees {
+            for (at, layer) in net.layers.iter().enumerate() {
+                let l = usize::from(layer.layer.0);
+                for &k in skip {
+                    let (Some(other), Some(c)) =
+                        (jobs.get(k), copper.get(k).and_then(Option::as_ref))
+                    else {
+                        continue;
+                    };
+                    let width = other.ctx.widths.get(l).copied().unwrap_or(0);
+                    let segs = c.segs.iter().filter(|s| usize::from(s.l) == l);
+                    let cuts = segs.map(|s| (s.a, s.b, width / 2 + layer.cut));
+                    let vias = other.ctx.via.map(|(d, _)| d / 2 + layer.cut);
+                    let vias = c.vias.iter().filter_map(|&v| vias.map(|r| (v, v, r)));
+                    for (a, b, reach) in cuts.chain(vias) {
+                        self.each_near(a, b, reach, |c| {
+                            if !open[at][c] && frees(at, c) {
+                                open[at][c] = true;
+                            }
+                        });
+                    }
+                }
+            }
+        }
+        if let Some(owners) = owners.as_deref_mut() {
+            *owners = vec![vec![0; self.cols * self.rows]; net.layers.len()];
+        }
+        for (at, layer) in net.layers.iter().enumerate() {
+            let l = usize::from(layer.layer.0);
+            for (k, other) in jobs.iter().enumerate() {
+                let Some(c) = copper
+                    .get(k)
+                    .and_then(Option::as_ref)
+                    .filter(|_| k != net.job && !skip.contains(&k))
+                else {
+                    continue;
+                };
+                let width = other.ctx.widths.get(l).copied().unwrap_or(0);
+                let segs = c.segs.iter().filter(|s| usize::from(s.l) == l);
+                let cuts = segs.map(|s| (s.a, s.b, width / 2 + layer.cut));
+                let vias = other.ctx.via.map(|(d, _)| d / 2 + layer.cut);
+                let vias = c.vias.iter().filter_map(|&v| vias.map(|r| (v, v, r)));
+                for (a, b, reach) in cuts.chain(vias) {
+                    let Some(owners) = owners.as_deref_mut() else {
+                        self.cut(&mut open[at], a, b, reach);
+                        continue;
+                    };
+                    // The cells that this track or via takes, of those the fill has.
+                    self.each_near(a, b, reach, |c| {
+                        // A host's fill is around the routes already: a cell near one
+                        // is that route's whether the fill had it or not.
+                        open[at][c] = false;
+                        let mine = k as u32 + 1;
+                        owners[at][c] = match owners[at][c] {
+                            0 => mine,
+                            o if o == mine => mine,
+                            _ => u32::MAX,
+                        };
+                    });
+                }
+            }
+        }
+        open
+    }
+
+    /// Whether the fill of `net` on its layer `at` would have the cell `c`, which it has
+    /// not, were the routes of the nets `but` not there: the cell's centre is in a zone of
+    /// the net on that layer, and copper of the fill's least width there keeps its
+    /// clearance from everything else in the world.
+    fn would_fill(
+        &self,
+        world: &World<'_>,
+        design: &Design,
+        net: &Net,
+        at: usize,
+        c: usize,
+        but: &[NetId],
+    ) -> bool {
+        let layer = &net.layers[at];
+        let q = self.center(c);
+        let inside = |ring: &[Point]| {
+            let mut odd = false;
+            for i in 0..ring.len() {
+                let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
+                if (a.y <= q.y) != (b.y <= q.y) {
+                    let x = a.x as i128
+                        + (b.x - a.x) as i128 * (q.y - a.y) as i128 / (b.y - a.y) as i128;
+                    if (q.x as i128) < x {
+                        odd = !odd;
+                    }
+                }
+            }
+            odd
+        };
+        let zoned = design.zones.zones.iter().any(|z| {
+            z.net == Some(net.net)
+                && z.layers.contains(layer.layer)
+                && inside(&z.outline)
+                && !z.holes.iter().any(|h| inside(h))
+        });
+        if !zoned {
+            return false;
+        }
+        // As a track's end of the fill's net: the world keeps that net's clearance from
+        // it, and the fill's own may be more.
+        let own = design.rules.clearance(Some(net.net), layer.layer);
+        let across = (2 * (layer.cut - own)).max(1000);
+        let Ok(disc) = Shape::circle(q, across) else {
+            return false;
+        };
+        let mut routed = Vec::new();
+        match world.track(net.net, layer.layer, &disc, Some(&mut routed)) {
+            Verdict::Free => true,
+            Verdict::Routed => routed.iter().all(|n| but.contains(n)),
+            Verdict::Blocked => false,
+        }
+    }
+
+    /// The cells on layer `at` of `net`'s fill that a pad of the net is joined to the fill
+    /// at, of those in `open`: the ends of its spokes that have every cell, where the host
+    /// gave its spokes, and the cells at the pad where it gave none.
+    fn joined_at(&self, net: &Net, pad: &TermPad, at: usize, open: &[bool]) -> Vec<usize> {
+        let mut out = Vec::new();
+        let mut spoked = false;
+        for (_, _, cells) in net
+            .spokes
+            .iter()
+            .filter(|(b, l, _)| *b == pad.bbox && *l == at)
+        {
+            spoked = true;
+            if let Some(&last) = cells.last()
+                && cells.iter().all(|&c| open[c])
+            {
+                out.push(last);
+            }
+        }
+        if !spoked {
+            self.each_cell(&pad.bbox.expand(self.cell), |k| {
+                if open[k] {
+                    out.push(k);
+                }
+            });
+        }
+        out
+    }
+
+    /// The cells of `open` in one piece with those of `from`, by the four cells beside
+    /// each: by cell, whether it is.
+    fn piece_of(&self, open: &[bool], from: &[usize]) -> Vec<bool> {
+        let mut seen = vec![false; open.len()];
+        let mut queue: VecDeque<usize> = VecDeque::new();
+        for &k in from {
+            if open[k] && !seen[k] {
+                seen[k] = true;
+                queue.push_back(k);
+            }
+        }
+        while let Some(k) = queue.pop_front() {
+            for n in self.beside(k) {
+                if open[n] && !seen[n] {
+                    seen[n] = true;
+                    queue.push_back(n);
+                }
+            }
+        }
+        seen
+    }
+
+    /// The four cells beside a cell, those that the grid has.
+    fn beside(&self, k: usize) -> impl Iterator<Item = usize> {
+        let (x, y) = (k % self.cols, k / self.cols);
+        [
+            (x > 0).then(|| k - 1),
+            (x + 1 < self.cols).then(|| k + 1),
+            (y > 0).then(|| k - self.cols),
+            (y + 1 < self.rows).then(|| k + self.cols),
+        ]
+        .into_iter()
+        .flatten()
+    }
+
+    /// The largest piece of `open`, by cell whether it is of it.
+    fn largest(&self, open: &[bool]) -> Vec<bool> {
+        let mut label = vec![0u32; open.len()];
+        let mut best = (0usize, 0u32, 0usize);
+        let mut queue: VecDeque<usize> = VecDeque::new();
+        let mut id = 0;
+        for start in 0..open.len() {
+            if !open[start] || label[start] != 0 {
+                continue;
+            }
+            id += 1;
+            label[start] = id;
+            queue.push_back(start);
+            let mut size = 0;
+            while let Some(k) = queue.pop_front() {
+                size += 1;
+                for n in self.beside(k) {
+                    if open[n] && label[n] == 0 {
+                        label[n] = id;
+                        queue.push_back(n);
+                    }
+                }
+            }
+            if size > best.0 {
+                best = (size, id, start);
+            }
+        }
+        label.iter().map(|&l| l != 0 && l == best.1).collect()
+    }
+
+    /// The jobs whose routes are around the piece of fill that `pad`, a pad of job `job`'s
+    /// net off the largest piece of its fill on its layers, is left on, with the routes
+    /// of the jobs `skip` taken as not there: those that took
+    /// the cells beside that piece, alone, the one with the most such cells first. The
+    /// routes that one of these would have to go another way for the pad to be on its
+    /// fill again ([`bridge`](Pours::bridge)).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn cutters(
+        &self,
+        world: &World<'_>,
+        design: &Design,
+        jobs: &[Job],
+        copper: &[Option<NetCopper>],
+        job: usize,
+        pad: &TermPad,
+        skip: &[usize],
+    ) -> Vec<usize> {
+        let Some(net) = self.nets.iter().find(|n| n.job == job) else {
+            return Vec::new();
+        };
+        let mut owners = Vec::new();
+        let but: Vec<NetId> = skip
+            .iter()
+            .filter_map(|&k| jobs.get(k))
+            .map(|j| j.ctx.net)
+            .collect();
+        let frees = |at: usize, c: usize| self.would_fill(world, design, net, at, c, &but);
+        let open = self.left_open(net, jobs, copper, skip, Some(&mut owners), Some(&frees));
+        let mut count: std::collections::BTreeMap<usize, usize> = Default::default();
+        for (at, layer) in net.layers.iter().enumerate() {
+            if !pad.layers.contains(layer.layer) {
+                continue;
+            }
+            // The pad's own cells are of its piece: a pad with every spoke crossed is
+            // on none, and the routes around it are those that crossed them.
+            let mut from = self.joined_at(net, pad, at, &open[at]);
+            let mut around: Vec<usize> = Vec::new();
+            if from.is_empty() {
+                self.each_cell(&pad.bbox.expand(self.cell), |k| around.push(k));
+                for (_, _, cells) in net
+                    .spokes
+                    .iter()
+                    .filter(|(b, l, _)| *b == pad.bbox && *l == at)
+                {
+                    around.extend(cells.iter().copied());
+                }
+                from = around.iter().copied().filter(|&k| open[at][k]).collect();
+            }
+            let piece = self.piece_of(&open[at], &from);
+            let edge = (0..piece.len())
+                .filter(|&k| piece[k])
+                .flat_map(|k| self.beside(k))
+                .chain(around);
+            let mut seen: Vec<usize> = edge.filter(|&n| !open[at][n]).collect();
+            seen.sort_unstable();
+            seen.dedup();
+            for n in seen {
+                let o = owners[at][n];
+                if o != 0 && o != u32::MAX {
+                    *count.entry(o as usize - 1).or_default() += 1;
+                }
+            }
+        }
+        let mut out: Vec<(usize, usize)> = count.into_iter().collect();
+        out.sort_by_key(|&(k, n)| (core::cmp::Reverse(n), k));
+        out.into_iter().map(|(k, _)| k).collect()
+    }
+
+    /// Where the fill of job `job`'s net would join `pad`, a pad of the net that the routes
+    /// leave off the largest piece of its fill, to that piece on a layer of the pad, were
+    /// the routes of the jobs `other` not there: the layer, the centres of the cells from one
+    /// that the pad is joined at, through those that `other` take, to the first of the
+    /// largest piece, and how far from them the copper of another net has to stay for
+    /// the fill to go that way. `None` if the fill would not join it so.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn bridge(
+        &self,
+        world: &World<'_>,
+        design: &Design,
+        jobs: &[Job],
+        copper: &[Option<NetCopper>],
+        job: usize,
+        pad: &TermPad,
+        other: &[usize],
+    ) -> Option<(LayerId, Vec<Point>, i64)> {
+        let net = self.nets.iter().find(|n| n.job == job)?;
+        let but: Vec<NetId> = other
+            .iter()
+            .filter_map(|&k| jobs.get(k))
+            .map(|j| j.ctx.net)
+            .collect();
+        let frees = |at: usize, c: usize| self.would_fill(world, design, net, at, c, &but);
+        let with = self.left_open(net, jobs, copper, &[], None, None);
+        let without = self.left_open(net, jobs, copper, other, None, Some(&frees));
+        let mut best: Option<(LayerId, Vec<Point>, i64)> = None;
+        for (at, layer) in net.layers.iter().enumerate() {
+            if !pad.layers.contains(layer.layer) {
+                continue;
+            }
+            let from = self.joined_at(net, pad, at, &without[at]);
+            if from.is_empty() {
+                continue;
+            }
+            let main = self.largest(&with[at]);
+            // The pad is on the largest piece here as the routes are.
+            let joined = self.joined_at(net, pad, at, &with[at]);
+            if joined.iter().any(|&k| main[k]) {
+                return None;
+            }
+            // The shortest way from the pad's cells to the largest piece, through the
+            // cells that the fill has without the other net's routes.
+            let mut prev: Vec<u32> = vec![u32::MAX; without[at].len()];
+            let mut queue: VecDeque<usize> = VecDeque::new();
+            for &k in &from {
+                if prev[k] == u32::MAX {
+                    prev[k] = k as u32;
+                    queue.push_back(k);
+                }
+            }
+            let mut end = None;
+            while let Some(k) = queue.pop_front() {
+                if main[k] {
+                    end = Some(k);
+                    break;
+                }
+                for n in self.beside(k) {
+                    if without[at][n] && prev[n] == u32::MAX {
+                        prev[n] = k as u32;
+                        queue.push_back(n);
+                    }
+                }
+            }
+            let Some(mut k) = end else { continue };
+            let mut path = vec![self.center(k)];
+            while prev[k] as usize != k {
+                k = prev[k] as usize;
+                path.push(self.center(k));
+            }
+            path.reverse();
+            // And the spoke that took the pad there, if it is one of the host's.
+            if let Some((_, _, cells)) = net
+                .spokes
+                .iter()
+                .find(|(b, l, cells)| *b == pad.bbox && *l == at && cells.last() == Some(&k))
+            {
+                let mut spoke: Vec<Point> = cells.iter().map(|&c| self.center(c)).collect();
+                spoke.pop();
+                spoke.extend(path);
+                path = spoke;
+            }
+            if best.as_ref().is_none_or(|(_, p, _)| path.len() < p.len()) {
+                best = Some((layer.layer, path, layer.cut + self.cell / 2));
+            }
+        }
+        best
     }
 
     /// The net of job `job` as one to join up again, if routes have cut pads off its
@@ -500,31 +891,11 @@ impl Pours {
                 .map_or(&[][..], |(_, list)| list.as_slice())
         });
         // The fill that other nets' copper leaves, by layer.
-        let mut open: Vec<Vec<bool>> = if real.is_some() {
+        let open: Vec<Vec<bool>> = if real.is_some() {
             Vec::new()
         } else {
-            net.layers.iter().map(|l| l.fill.clone()).collect()
+            self.left_open(net, jobs, copper, &[], None, None)
         };
-        for (at, layer) in net.layers.iter().enumerate() {
-            if real.is_some() {
-                break;
-            }
-            let l = usize::from(layer.layer.0);
-            for (k, other) in jobs.iter().enumerate() {
-                let Some(c) = copper.get(k).and_then(Option::as_ref).filter(|_| k != job) else {
-                    continue;
-                };
-                let width = other.ctx.widths.get(l).copied().unwrap_or(0);
-                for s in c.segs.iter().filter(|s| usize::from(s.l) == l) {
-                    self.cut(&mut open[at], s.a, s.b, width / 2 + layer.cut);
-                }
-                if let Some((d, _)) = other.ctx.via {
-                    for &v in &c.vias {
-                        self.cut(&mut open[at], v, v, d / 2 + layer.cut);
-                    }
-                }
-            }
-        }
         // The pieces of each layer's fill, numbered over all layers from 1.
         let mut piece: Vec<Vec<u32>> = if real.is_some() {
             Vec::new()
@@ -1207,6 +1578,72 @@ mod tests {
         d.zones.zones.push(z);
         d.nets[2].via = None;
         d
+    }
+
+    #[test]
+    fn the_route_that_cuts_a_pad_off_is_told_and_the_way_that_the_fill_has_without_it() {
+        let d = strip();
+        let options = RouteOptions::default();
+        let fills = fill_zones(&d.board, &d).unwrap();
+        let mut grouped = d.clone();
+        grouped
+            .board
+            .zones
+            .extend(fills.iter().map(|f| f.to_zone(&d)));
+        let pieces = planes::pieces_by_net(&d, &fills);
+        let mut world = World::new(
+            &d.board,
+            &d.rules,
+            &d.outline,
+            d.edge_clearance,
+            &d.obstacles,
+        )
+        .unwrap();
+        world.configure(&d, &options);
+        let pitch = router::pitch(&d, &options);
+        let jobs = router::jobs(&grouped, &world, pitch, &pieces, &[]);
+        let ground = jobs.iter().position(|j| j.ctx.net == NetId(1)).unwrap();
+        let other = jobs.iter().position(|j| j.ctx.net == NetId(2)).unwrap();
+        let bounds = Rect::new(Point::new(-5 * MM, -5 * MM), Point::new(25 * MM, 12 * MM));
+        let pours = Pours::plan(&d, &world, &fills, &jobs, bounds, pitch);
+        // A track of the other net across the strip, between the two pads on it.
+        let mut copper: Vec<Option<NetCopper>> = vec![None; jobs.len()];
+        let mut across = NetCopper::default();
+        across.segs.push(Seg {
+            a: Point::new(12 * MM, -3 * MM),
+            b: Point::new(12 * MM, 7 * MM),
+            l: 0,
+        });
+        copper[other] = Some(across);
+        let cut = pours
+            .rejoin(&world, &d, &jobs, &copper, ground, pitch, None, &[])
+            .expect("a pad is cut off");
+        let pad = cut
+            .ctx
+            .pads
+            .iter()
+            .find(|p| p.terminal >= jobs[ground].ctx.terminals && p.bbox.min() != p.bbox.max())
+            .expect("the pad cut off");
+        assert_eq!(pad.center, Point::new(14_500_000, 2 * MM));
+        assert_eq!(
+            pours.cutters(&world, &d, &jobs, &copper, ground, pad, &[]),
+            [other]
+        );
+        // With nothing taken as not there, the fill has no way; without the track, it
+        // goes from the pad's side of it to the other, on the pad's layer.
+        assert!(
+            pours
+                .bridge(&world, &d, &jobs, &copper, ground, pad, &[])
+                .is_none()
+        );
+        let (layer, path, reach) = pours
+            .bridge(&world, &d, &jobs, &copper, ground, pad, &[other])
+            .expect("a way through where the track is");
+        assert_eq!(layer, crate::geom::LayerId(0));
+        assert!(reach >= 300_000 + 100_000, "{reach}");
+        let (first, last) = (path[0], path[path.len() - 1]);
+        assert!(first.x > 12 * MM && last.x < 12 * MM, "{path:?}");
+        assert!(path.iter().all(|p| p.y > 0 && p.y < 4 * MM), "{path:?}");
     }
 
     #[test]

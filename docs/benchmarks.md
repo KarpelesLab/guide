@@ -5940,7 +5940,7 @@ or not, so a cell that the routes of the nets asked about took is given back whe
 world says that copper of the pour's least width has room there with those nets gone
 alone. And the nets routed again are pulled tight while the way of the fill is still
 kept: without it they are back on the straight line they had. One net was enough on this
-board in the three orders (a track of 72 mm, 1.3 mm longer for it); in the fourth the pad's
+board in the three orders (`VCC_CHIP`, 68.4 mm for 66.3); in the fourth the pad's
 piece of the pour holds a second pad with a via of its own, and the one way that the fill
 has costs the net that is in it two vias, for the one saved: not kept.
 

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.28](https://github.com/KarpelesLab/guide/compare/v0.0.27...v0.0.28) - 2026-11-23
+
+### Added
+
+- *(pcb)* the nets of a row of pads are no wider than its pitch has room for two of by the board's clearance, on a lattice of their pitch ([#48](https://github.com/KarpelesLab/guide/pull/48))
+
 ## [0.0.27](https://github.com/KarpelesLab/guide/compare/v0.0.26...v0.0.27) - 2026-11-22
 
 ### Fixed

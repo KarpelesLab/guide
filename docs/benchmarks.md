@@ -5911,6 +5911,161 @@ at a time.
   are what it has for the balls left shut in, and no other way to those was tried.
 - More than one thread, or a deadline: the comparison is by nodes.
 
+## PCB routing with the nets of a row as narrow as its pitch asks
+
+What was changed after [the release below](#pcb-routing-with-a-net-that-has-no-way-told-once),
+0.0.27, with the same aim: level with cadlab's own router or ahead of it on every measure
+on every board of its corpus ([decisions](architecture.md#decisions)). It is still not
+met. Measured on 2026-11-23 through cadlab's adapter and its `route_bench`, three threads
+for the negotiation, four runs at a time on a machine of 64 threads, with a checkout of
+this crate before it was released, and with prints and switches in both routers that are
+in no release. The table beside cadlab's router with the crate from crates.io is in
+cadlab's `docs/ROUTER.md` and its decision D125.
+
+### The first round of both routers, connection by connection
+
+Both routers were made to print each connection of their first round, in which every net
+is routed once with next to nothing priced: its net, the two pads, the layers, the vias
+and the length. Joined by net and pair of pads, `tinytapeout-demo`, four layers, with
+this crate's negotiation at cadlab's pitch of 0.2 mm (it has twice that by default):
+458 connections, 240 vias, 5055 mm and 3514 points shared here, 366 connections, 184
+vias, 4494 mm and 2007 points there.
+
+| | connections | vias, here against cadlab's | track, mm |
+|---|---|---|---|
+| nets with a plane or a pour, whose connections are not the same | 200 against 108 | 27 against 11 | 769 against 419 |
+| other nets whose pairs of pads differ | 32 | 23 against 16 | 434 against 399 |
+| the same pair, no via in either | 84 | 0 | 631 against 553 |
+| the same pair, as many vias | 89 | 113 | 1915 against 1874 |
+| the same pair, more vias here | 37 | 66 against 15 | 893 against 867 |
+| the same pair, fewer vias here | 16 | 11 against 29 | 413 against 383 |
+
+- *The ground*, planned here on its inner planes alone: 124 connections, 27 vias and
+  324 mm, where cadlab's router takes the pads that the pour of their own layer joins as
+  joined and has 32 connections, no via and 32 mm. Planned on every pour, as there, the
+  first round has 108 connections of such nets with 15 vias and 465 mm; the board ends
+  worse for it (below).
+- *The room of a spoke*, which costs a track here and nothing there: with no price for
+  it the connections with more vias here are 27 with 45 for 11, where they were 37 with
+  66 for 15. The board ends with more pads short of their spokes without it (below).
+- *The order*, strides through the nets here and the shortest first there: 32 with 55
+  for 12.
+- *The pairs of pads*, a spanning tree by the distance along the axes here and as the
+  crow flies there: 8 nets, 7 vias and 35 mm.
+- *The ends*: a route here ends at the middle of a pad, by a track from the grid's point
+  to it, and there on the first point of the grid that is on the pad's copper. The 84
+  connections with no via in either are 78 mm longer here, of which 67 mm are those
+  tracks; cadlab's routes end 116 mm short of the pads' middles in all.
+- With all of those taken away (no price for the room of a spoke, the shortest first,
+  every pour planned on, a via of a net with a plane at ten steps): 194 vias, 4746 mm and
+  2765 points shared, against 184, 4494 mm and 2007. The connections with more vias here
+  less those with fewer are then four vias.
+- *The widths.* What was left was looked at a connection at a time: `uio3` from one pin
+  of a header to another, 11.4 mm here round the header and 6.7 mm there between two
+  rows of its pins. A track of 0.22 mm there is 0.245 mm from a pin of the ground, whose
+  class asks 0.25 mm. cadlab's router routes that net at 0.185 mm: 100 of the board's 137
+  nets at 0.185 mm for 0.22 mm, 22 at 0.235 mm for 0.25 mm and 9 at 0.16 mm, where this
+  crate routed 95 of them at 0.22 mm. Both routers make a net narrower for a row of pads
+  of fine pitch, by one rule each: there the pitch of two pads less the net's clearance
+  and what a grid's points miss between them; here the widest at which two tracks out of
+  two pads side by side clear each other by the clearance of the area that both are in,
+  which in the courtyard of this board's QFN is 0.16 mm for the board's 0.2 mm. So 80
+  tracks of 0.22 mm left that courtyard 0.18 mm apart and had to part at its edge.
+
+The same join on the other boards, at this crate's own pitch (twice cadlab's on more
+than two layers): `buspirate5-rev10` 269 vias and 3191 mm for 115 and 2812 mm, of which
+its nets with pours 130 vias for 17 (the ground 168 connections and 97 vias for 7 and
+none) and 22 connections of the same pair with 44 vias for 1; `glasgow-revC3` 284 vias
+and 3874 mm for 313 and 3528 mm, its nets with pours 183 vias for 166 and 897 mm for
+715; `glasgow-revD1` 1040 vias and 10 347 mm for 743 and 8778 mm, of which its nets with
+pours 378 vias for 133 and 1015 mm for 615 (the ground 583 connections and 339 vias for
+225 and 100), 484 connections of nets whose pairs differ 3974 mm for 3516, 16
+connections that cadlab's router does not make at all 338 mm, 482 of the same pair with
+no via 1024 mm for 839 and 185 with as many vias 2696 mm for 2557.
+
+And the rounds after the first, on `glasgow-revD1`: cadlab's router has five in its share
+of a minute, and goes from 743 vias and 8778 mm to 939 and 9123 mm with 918 points shared;
+this crate has 28, and goes from 1040 and 10 347 mm to 1264 and 11 842 mm with 190. What
+it has over cadlab's router on that board's track is there after its first round.
+
+### What was changed
+
+1. *A net of a row is no wider than the row's pitch has room for two of*
+   (`pcb::neck`, in a run with a budget or a deadline, as the rule it is added to): the
+   pitch of the pad and the nearest pad of another net beside it, less the net's own
+   clearance, the board's and not an area's, less what a grid's points miss between two
+   tracks a pitch apart and the rounding of the rules' distances, in steps of 5 µm and
+   never under the least width. For a pad on one layer with no room for a track of the
+   net's width between it and that pad. It is cadlab's rule (`fanout::necks`), and gives
+   its widths on `tinytapeout-demo`: 53 nets at 0.185 mm, 22 at 0.235 mm, 9 at 0.16 mm.
+   `corne-cherry` has its 90 nets at 0.2 mm for 0.21 mm, `buspirate5-rev10` one net at
+   0.235 mm for 0.244 mm, and the other nine boards the widths they had.
+2. *The lattice has the pitch of the tracks that a row made narrower*, half their
+   width and their clearance, where that is tighter than the pitch of the nets' own
+   widths. `tinytapeout-demo`: 0.1925 mm for 0.2 mm. Not in a run with a budget of nodes.
+
+`tinytapeout-demo`, four orders at 60 s, medians:
+
+| | open | vias | track, mm | track outside the pads, mm |
+|---|---|---|---|---|
+| 0.0.27 | 0, 1, 1, 0 | 300 | 5376 | 5272 |
+| the nets at the widths of cadlab's router, given as their classes' | 0, 1, 0, 0 | 270 | 4967 | 4889 |
+| 1 alone | 0, 3, 0, 0 | 296 | 5140 | 5061 |
+| 1 and 2 | 0, 1, 0, 0 | 268.5 | 4961 | 4882 |
+| 1 and 2, four other orders | 0, 2, 1, 4 | 295 | 5162 | 5087 |
+
+cadlab's router has 273 vias, 4894 mm and 4672 mm outside the pads over eight seeds. At
+this crate's own pitch the rounds settle sooner with the narrower nets: 41 points shared
+after the twelfth round for 123, with 368 vias for 370 and 5481 mm for 5658.
+
+Budgets of nodes, one thread: at 40 million over three orders `corne-cherry` has 27, 21
+and 44 connections open for 36, 28 and 22, and `tinytapeout-demo` 3, 7 and 10 for 8, 4 and
+13, the seven other boards that a budget cuts as they were; at 150 million over two
+orders `corne-cherry` 1 and 0 for 8 and 0, and `tinytapeout-demo` none with 269 and 331
+vias for none with 300 and 298.
+
+### Tried and not kept
+
+- *The lattice at the pitch of every net made narrower*, not those of rows alone:
+  `glasgow-revD1`, whose 160 nets are narrower for the balls of its array, 12, 24, 23 and
+  28 connections open over four orders at 60 s for 11, 28, 7 and 9, and 18 to 24 pads
+  short of two spokes for 8 to 22.
+- *The finer lattice in a run with a budget of nodes*: 40 million, three orders,
+  `corne-cherry` 110 open for 86 and `tinytapeout-demo` 36 for 25.
+- *A net with a plane planned on its pours of the outer layers too, with the pads cut
+  off told again when the rounds end at their most*: the release before the last tried
+  the first half. `tinytapeout-demo` 281 vias and 5210 mm over four orders for 281.5 and
+  5043 mm; `glasgow-revD1` 81, 66, 66 and 77 connections open for 7 to 36.
+- *No price for the room of a spoke in the rounds*: `buspirate5-rev10` 307.5 vias as with
+  it and 16, 16, 17 and 11 pads short of two spokes for 6 to 12; `tinytapeout-demo` 281
+  vias and 5105 mm for 281.5 and 5043 mm.
+- *The shortest nets first in the first round*, *the spanning tree as the crow flies*
+  and *a route's end on any point of its pad's copper, at no cost*: `tinytapeout-demo`
+  281, 290 and 297.5 vias for 268.5 in the same four orders. The second on
+  `glasgow-revD1`'s first round: 10 324 mm for 10 347.
+- *A via of a net planned on outer pours at twenty steps of twice the pitch*, as a board
+  of two layers has it, and *eight times a via's price in the stubs that take its pads
+  back to their fills*: `buspirate5-rev10` 302.5 and 306.5 vias for 307.5.
+- *One time of telling the pads cut off their fills, or none*, for three:
+  `tinytapeout-demo` 7, 1, 10 and 1 connections open, and 13, 1, 10 and 2, for 0, 1, 0
+  and 0.
+- *The rounds ended when the fewest points shared are no fewer than three quarters of
+  what they were eight rounds before* (and half, twelve rounds before, at the first
+  pitch): `tinytapeout-demo` 274.5 vias and 4999 mm for 281.5 and 5043 mm with 2
+  connections open over four orders for 1, `corne-cherry` 2, 1, 2 and 2 open in 54, 35,
+  54 and 55 s for 0, 0, 4 and 8 in 54, 54, 54 and 59 s. Within what the same code moves
+  from one measurement to the next.
+
+### What this does not show
+
+More than four runs of anything but `tinytapeout-demo`. Where `buspirate5-rev10`'s nets
+with pours on its outer layers get their vias: 43 to 45 for cadlab's router's 12 to 14 on
+one of them, with as much track; not in the rounds and not in the stubs to the fills, by
+the two prices tried. `glasgow-revD1`'s track, which is there after its first round on a
+grid of twice the pitch. `corne-cherry`'s time: its first run's rounds are 24 s, of which
+the fifty before the pads cut off are told for the first time are 17 s, and the runs go
+on for as long as a connection is open.
+
 ## PCB routing with a net that has no way told once
 
 What was changed after [the release below](#pcb-routing-with-each-net-routed-again-where-the-others-are),

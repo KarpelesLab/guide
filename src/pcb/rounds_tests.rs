@@ -175,3 +175,176 @@ fn a_row_of_fine_pitch_is_routed_with_its_ways_out() {
     assert!(rounds >= 1);
     assert_eq!((shared, nets), (0, 8));
 }
+
+/// On one layer, a net of six pads in a line from one edge of the board to the other, and two
+/// nets that each have a pad on either side of it: no board has all three.
+fn line_and_two_across() -> Design {
+    let mut pads: Vec<Pad> = (0..6).map(|i| smd(i * 2 * MM, 0, 1)).collect();
+    for (k, x) in [(2u32, 3 * MM), (3, 7 * MM)] {
+        // At the board's edges, with no room for a track behind them: the line cannot go
+        // round a pad of theirs either.
+        pads.push(smd(x, -5_500_000, k));
+        pads.push(smd(x, 5_500_000, k));
+    }
+    let mut d = design(1, pads, 4);
+    d.outline = outline(Rect::new(
+        Point::new(-2 * MM, -6 * MM),
+        Point::new(12 * MM, 6 * MM),
+    ));
+    // No way round its ends: from each to the board's edge is something that no net is
+    // routed over.
+    for (from, to) in [(-2 * MM, -600_000), (10_600_000, 12 * MM)] {
+        d.obstacles.push((
+            Shape::rect(Rect::new(
+                Point::new(from, -300_000),
+                Point::new(to, 300_000),
+            ))
+            .unwrap(),
+            LayerId(0),
+        ));
+    }
+    d
+}
+
+#[test]
+fn routes_that_still_share_a_point_are_made_legal_a_wire_at_a_time() {
+    let d = line_and_two_across();
+    let routed = route_checked(&d, &native());
+    // The two nets across have to cross the line, and the rounds end with points shared:
+    // by one wire of the line, between two of its pads, and the two wires across it. That
+    // wire shares the most and is the one taken out: one wire, and the nets across are
+    // whole.
+    let (_, shared, taken_out, nets) = routed.stats.whole;
+    assert!(shared >= 2, "{:?}", routed.stats.whole);
+    assert_eq!((taken_out, nets), (1, 3));
+    assert_eq!(routed.unrouted, [NetId(1)]);
+    // The same on any number of threads.
+    let more = route_checked(
+        &d,
+        &RouteOptions {
+            threads: 3,
+            ..native()
+        },
+    );
+    assert_eq!(routed.tracks, more.tracks);
+    assert_eq!(routed.stats.work, more.stats.work);
+}
+
+/// On one layer, a net of two pads, one of them walled in by pads of eight other nets that
+/// no track passes between.
+fn walled_in() -> Design {
+    let mut pads = vec![smd(0, 0, 1), smd(10 * MM, 0, 1)];
+    let mut net = 2;
+    for dx in [-900_000, 0, 900_000] {
+        for dy in [-900_000, 0, 900_000] {
+            if (dx, dy) != (0, 0) {
+                pads.push(smd(10 * MM + dx, dy, net));
+                net += 1;
+            }
+        }
+    }
+    let mut d = design(1, pads, 10);
+    d.outline = outline(Rect::new(
+        Point::new(-2 * MM, -4 * MM),
+        Point::new(14 * MM, 4 * MM),
+    ));
+    d
+}
+
+#[test]
+fn a_board_whose_connections_have_no_way_on_the_grid_is_given_up_before_a_round() {
+    let d = walled_in();
+    let routed = route_checked(&d, &native());
+    // Its one connection has no way whatever the other nets do: the rounds say so before
+    // they route anything, and the run is one of this crate's own.
+    assert!(routed.stats.rounds_given_up, "{:?}", routed.stats);
+    assert_eq!(routed.unrouted, [NetId(1)]);
+    // Told before the first round, it has cost the run no search.
+    let own = route_checked(
+        &d,
+        &RouteOptions {
+            rounds: Rounds::Own,
+            ..native()
+        },
+    );
+    assert!(!own.stats.rounds_given_up);
+    assert_eq!(routed.stats.work, own.stats.work);
+}
+
+/// On one layer, a pad of net 1 in a pour of its net with spokes along the axes, and a net
+/// of two pads whose straight way passes the pad through the room of its right spoke.
+fn past_a_spoke() -> Design {
+    let mut d = design(
+        1,
+        vec![
+            smd(5 * MM, 5 * MM, 1),
+            smd(5_600_000, 2 * MM, 2),
+            smd(5_600_000, 8 * MM, 2),
+        ],
+        3,
+    );
+    d.zones.zones.push(super::CopperZone {
+        outline: vec![
+            Point::new(0, 0),
+            Point::new(10 * MM, 0),
+            Point::new(10 * MM, 10 * MM),
+            Point::new(0, 10 * MM),
+        ],
+        layers: LayerSet::EMPTY.with(LayerId(0)),
+        net: Some(NetId(1)),
+        connection: super::ZoneConnection::Thermal,
+        thermal_gap: 300_000,
+        spoke_width: 300_000,
+        min_width: 200_000,
+        ..super::CopperZone::default()
+    });
+    d.outline = outline(Rect::new(
+        Point::new(-MM, -MM),
+        Point::new(11 * MM, 11 * MM),
+    ));
+    d
+}
+
+/// How many points along the tracks of `net`, a tenth of a millimetre apart, are in the
+/// room of a spoke of another net's pad.
+fn in_a_spoke_s_room(d: &Design, routed: &super::Routed, net: NetId) -> usize {
+    let bounds = Rect::new(Point::new(-MM, -MM), Point::new(11 * MM, 11 * MM));
+    let spokes = super::spokes::Spokes::plan(d, bounds, 100_000, 300_000, 4.0).unwrap();
+    let mut n = 0;
+    for t in routed.tracks.iter().filter(|t| t.net == Some(net)) {
+        let (a, b) = (t.start, t.end);
+        let steps = (((b.x - a.x).abs() + (b.y - a.y).abs()) / 100_000).max(1);
+        for i in 0..=steps {
+            let p = Point::new(a.x + (b.x - a.x) * i / steps, a.y + (b.y - a.y) * i / steps);
+            n += usize::from(spokes.factor(net, 0, p) > 1.0);
+        }
+    }
+    n
+}
+
+#[test]
+fn the_room_of_a_spoke_has_its_price_in_these_rounds_too() {
+    let d = past_a_spoke();
+    // With no price for it the straight way is through the room of the pad's right spoke.
+    // (The routes are looked at as the rounds leave them, with no cleanup after.)
+    let rounds = RouteOptions {
+        cleanup: false,
+        ..native()
+    };
+    let free = route_checked(&d, &rounds);
+    assert!(free.unrouted.is_empty());
+    assert!(in_a_spoke_s_room(&d, &free, NetId(2)) > 0);
+    // With the price the net goes round it, and the route is the one of the rounds: no
+    // pass took it out or laid it again.
+    let priced = route_checked(
+        &d,
+        &RouteOptions {
+            spoke_cost: 4.0,
+            ..rounds
+        },
+    );
+    assert!(priced.unrouted.is_empty());
+    assert_eq!(in_a_spoke_s_room(&d, &priced, NetId(2)), 0);
+    assert_eq!(priced.stats.whole_made.0, 1);
+    assert_eq!(priced.stats.rip_ups, 0);
+}

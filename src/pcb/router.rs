@@ -969,6 +969,26 @@ fn counted_fills(design: &Design, fills: Vec<Fill>, is_plane: &[bool], outer: bo
     out
 }
 
+/// The fills that count for the rounds of cadlab's own router as this crate has them
+/// ([`Rounds::Native`](super::Rounds)): [`counted_fills`], less, on a board of more than
+/// two layers and unless `outer`, the fills on its outer layers that a net with no fill on
+/// an inner one is planned on. A net is planned on such a pour by its pads being joined
+/// before anything is routed, and the routes of the other nets, which are on that layer,
+/// then cut it between them: the pads end joined on the board of the rounds and apart on
+/// the board filled again, shut in by the routes that were laid as if they had no need of
+/// a way out (`tinytapeout-demo`: the supply's pads on a package of 0.4 mm pitch, joined
+/// by a pour under it, four to seven connections open in each order).
+fn rounds_fills(design: &Design, fills: Vec<Fill>, is_plane: &[bool], outer: bool) -> Vec<Fill> {
+    let layers = design.rules.layer_count();
+    let mut out = counted_fills(design, fills, is_plane, outer);
+    if layers > 2 && !outer {
+        out.retain(|f| {
+            planes::inner(f.layer, layers) || !is_plane.get(f.zone).copied().unwrap_or(true)
+        });
+    }
+    out
+}
+
 /// By zone, whether its net plans on it as a plane: as the zone [says](super::CopperZone::plane),
 /// or if it is no pour, of a net of [`POUR_PADS`] pads or fewer and [`POUR_WIDTH`] pitches
 /// wide or less, and its net's fills cover enough of the box of the net's pads,
@@ -1463,6 +1483,10 @@ fn route_all<'a>(
             && taken_back.is_empty();
         // In a run with a budget, for the balls deep in an area array too.
         let mut escapes: Vec<escape::Escape> = if own_fanout {
+            // The ways out are planned on every fill that a net of this crate's own rounds
+            // is planned on: a pad in a pour of its net on its own layer has no way out
+            // of its own planned for it (with the fills as the rounds count them,
+            // `tinytapeout-demo` ends with 306 vias for 293).
             let fills = counted_fills(
                 design,
                 design.zones.fills.clone(),
@@ -1475,6 +1499,7 @@ fn route_all<'a>(
                 own_zones: original.board.zones.len(),
                 is_plane: &is_plane,
                 counted: &counted,
+                spoke: &|_, _| (0, 0.0),
             };
             super::rounds::fanout(design, &pours)
                 .into_iter()
@@ -1987,7 +2012,11 @@ fn route_all<'a>(
         let make = || make_with(&pairs_first);
         let native = options.rounds == super::Rounds::Native;
         let counted = |fills: Vec<Fill>| -> Vec<Fill> {
-            counted_fills(design, fills, &is_plane, options.outer_pours)
+            if native {
+                rounds_fills(design, fills, &is_plane, options.outer_pours)
+            } else {
+                counted_fills(design, fills, &is_plane, options.outer_pours)
+            }
         };
         let attempt = |options: &RouteOptions, coarse: bool, finer: i64| {
             if native {
@@ -1997,6 +2026,7 @@ fn route_all<'a>(
                     own_zones: original.board.zones.len(),
                     is_plane: &is_plane,
                     counted: &counted,
+                    spoke: &|l, at| world.spoke_toll(l, at),
                 };
                 return super::rounds::route(
                     design,
@@ -2146,6 +2176,12 @@ fn route_all<'a>(
             stats.whole_finer = w.finer;
             for (k, sites) in &w.sites {
                 jobs[*k].ctx = pours::with_sites(&jobs[*k].ctx, sites, pitch);
+            }
+            // The rounds of cadlab's own router count no spoke's room: the last spoke of a pad
+            // is kept from here on, and the net whose route of those rounds stands in the
+            // room of it begins the passes without that route.
+            if native {
+                world.arm_spokes();
             }
             for (j, tree) in w.trees.iter().enumerate() {
                 let Some(tree) = tree else { continue };
@@ -4070,6 +4106,58 @@ mod tests {
     use super::{BRANCH_CUTS, BRANCH_TERMINALS, loses_branches, row_origins, said_all};
     use crate::geom::drc::Pad;
     use crate::geom::{Point, Rect, Shape};
+
+    #[test]
+    fn the_rounds_of_cadlab_s_router_plan_no_net_on_a_pour_of_an_outer_layer() {
+        use super::super::{CopperZone, Fill};
+        use super::{counted_fills, rounds_fills};
+        use crate::geom::{LayerId, LayerSet};
+        use crate::id::NetId;
+        let square =
+            || Shape::rect(Rect::new(Point::new(0, 0), Point::new(5 * MM, 5 * MM))).unwrap();
+        // Net 1 has a zone on the top layer alone; net 2 one on the top and one inside.
+        let zones = [(1, 0u8), (2, 1), (2, 0)];
+        let with = |layers: usize| {
+            let mut d = design(layers, vec![smd(MM, MM, 1), smd(2 * MM, 2 * MM, 2)], 3);
+            for (net, layer) in zones {
+                d.zones.zones.push(CopperZone {
+                    layers: LayerSet::EMPTY.with(LayerId(layer)),
+                    net: Some(NetId(net)),
+                    ..CopperZone::default()
+                });
+            }
+            d
+        };
+        let fills = || -> Vec<Fill> {
+            zones
+                .iter()
+                .enumerate()
+                .map(|(zone, &(_, layer))| Fill {
+                    zone,
+                    layer: LayerId(layer),
+                    shape: square(),
+                })
+                .collect()
+        };
+        let which = |fills: Vec<Fill>| fills.iter().map(|f| f.zone).collect::<Vec<_>>();
+        let planes = [true; 3];
+        let d = with(4);
+        // As planes, a net with a fill inside is planned on that, and one with none on what
+        // it has; these rounds plan the second on none.
+        assert_eq!(which(counted_fills(&d, fills(), &planes, false)), [0, 1]);
+        assert_eq!(which(rounds_fills(&d, fills(), &planes, false)), [1]);
+        // Asked for every fill, they have every fill.
+        assert_eq!(which(rounds_fills(&d, fills(), &planes, true)), [0, 1, 2]);
+        // A zone that is no plane is copper of its net as it is filled, wherever it is.
+        let pour = [false, true, true];
+        assert_eq!(which(rounds_fills(&d, fills(), &pour, false)), [1, 0]);
+        // On two layers every fill is on an outer layer, and the nets are planned on them.
+        let two = with(2);
+        assert_eq!(
+            which(rounds_fills(&two, fills(), &planes, false)),
+            which(counted_fills(&two, fills(), &planes, false))
+        );
+    }
 
     #[test]
     fn a_net_of_two_pads_with_no_way_across_every_route_has_no_more_turns() {

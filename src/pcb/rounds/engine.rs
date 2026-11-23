@@ -266,6 +266,13 @@ pub(crate) struct Engine<'a> {
     pub comps: super::components::Components,
     /// Zone fills as cells a connection of their net may end on (`pours`).
     pub pours: Vec<super::pours::Pour>,
+    /// By slot and cell, the net whose pad has a spoke of its thermal relief there, as its
+    /// number plus one (with the bit of a spoke that is held), or zero; empty with no price
+    /// for a spoke's room.
+    pub spoke: Vec<Vec<u32>>,
+    /// What a step of a track of another net into the room of a spoke costs over its
+    /// length, as a part of it.
+    pub spoke_cost: f32,
 }
 
 /// Per-search working memory (one per thread).
@@ -442,6 +449,8 @@ impl<'a> Engine<'a> {
             offgrid: Vec::new(),
             comps: super::components::Components::new(rb.profiles.len()),
             pours: Vec::new(),
+            spoke: Vec::new(),
+            spoke_cost: 0.0,
         }
     }
 
@@ -798,6 +807,31 @@ impl<'a> Engine<'a> {
         nr.bbox = bbox;
     }
 
+    /// The occupancy keys that the wire `w` of `net` claims when its net is committed: what
+    /// [`commit`](Engine::commit) adds for it, sorted.
+    pub fn wire_keys(&self, net: u32, w: &Wire) -> Vec<u64> {
+        let mut keys = Vec::new();
+        let (segs, vias) = self.wire_geometry(w);
+        let n_start = w.start.as_ref().map_or(0, Vec::len);
+        let n_end = w.end.as_ref().map_or(0, Vec::len);
+        let geo = w.geo.is_some();
+        for (k, (s, a, b)) in segs.iter().enumerate() {
+            let off = geo || k < n_start || k + n_end >= segs.len();
+            self.raster_seg(net, *s, *a, *b, off, &mut keys);
+        }
+        for at in vias {
+            self.raster_via(net, at, geo, &mut keys);
+        }
+        if w.nodes.len() == 1 {
+            let p = self.node_pos(w.nodes[0]);
+            let (s, _, _) = self.unpack(w.nodes[0]);
+            self.raster_seg(net, s, p, p, false, &mut keys);
+        }
+        keys.sort_unstable();
+        keys.dedup();
+        keys
+    }
+
     /// Records whether item `id` of `dynamic` is off the grid.
     fn mark(&mut self, id: u32, off: bool) {
         let i = id as usize;
@@ -828,12 +862,23 @@ impl<'a> Engine<'a> {
     /// Points where a committed net overlaps another net's halo: (slot or `None` for via
     /// cells, index).
     pub fn conflicts(&self, nr: &NetRoute) -> Vec<Conflict> {
-        let ai = self.act[nr.prof];
         let mut out = Vec::new();
         for w in &nr.wires {
+            self.wire_conflicts(nr, w, &mut out);
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// The points of [`conflicts`](Engine::conflicts) that are the wire `w`'s, of the
+    /// committed net `nr`, added to `out` as they are found.
+    pub fn wire_conflicts(&self, nr: &NetRoute, w: &Wire, out: &mut Vec<Conflict>) {
+        let ai = self.act[nr.prof];
+        {
             if w.geo.is_some() {
-                self.geo_conflicts(nr.net, w, &mut out);
-                continue;
+                self.geo_conflicts(nr.net, w, out);
+                return;
             }
             // Stubs are off the grid: the halos see them only at the grid's samples, so a stub
             // can come too close to another net's stub (or gridless wire) between samples.
@@ -879,9 +924,6 @@ impl<'a> Engine<'a> {
                 }
             }
         }
-        out.sort_unstable();
-        out.dedup();
-        out
     }
 
     /// Exact conflicts of a gridless wire with the committed routing of other nets: the
@@ -1283,6 +1325,8 @@ impl<'a> Engine<'a> {
             }
             let du = sc.dir[ui];
             let tmap = &self.st.track[prof][s][..];
+            let spoke_s = self.spoke.get(s).map_or(&[][..], |v| &v[..]);
+            let cell0 = self.grid.cidx(x, y) as isize;
             let occ_s = &self.occ_t[ai][s][..];
             let hist_s = &self.hist_t[s][..];
             let k0 = self.grid.didx(2 * x, 2 * y) as isize;
@@ -1316,7 +1360,21 @@ impl<'a> Engine<'a> {
                         Mode::Negotiate(_) => {}
                     }
                 }
-                let base = base_cost[s][nd];
+                let mut base = base_cost[s][nd];
+                // The room of a spoke of another net's pad costs more, as in this crate's
+                // own rounds: a pad whose spokes' rooms all hold routes is not relieved.
+                if let Some(&p) = spoke_s.get((cell0 + cell_off[nd]) as usize)
+                    && p != 0
+                    && p & !super::super::spokes::HELD != net + 1
+                {
+                    base *= 1.0
+                        + self.spoke_cost
+                            * if p & super::super::spokes::HELD != 0 {
+                                super::super::spokes::HELD_TIMES as f32
+                            } else {
+                                1.0
+                            };
+                }
                 let hist = hist_s[km] + hist_s[kq];
                 let bend = bend_cost[t as usize];
                 let c = gu + (base + hist) * (1.0 + pres * occ) + bend + pen;
@@ -1629,6 +1687,26 @@ impl<'a> Engine<'a> {
         Ok(keys)
     }
 
+    /// Whether the connection `ci` of `nr` has no way on this grid whatever the other nets
+    /// do: an end with no access, or ends that what is fixed on the board keeps apart for the
+    /// net. Told before anything is routed, by each connection's own two islands.
+    pub fn no_way(&self, nr: &NetRoute, ci: usize) -> bool {
+        let c = &nr.conns[ci];
+        let (a, b) = (&nr.islands[c.a], &nr.islands[c.b]);
+        let sources: Vec<(u32, f32)> = a.access.iter().map(|x| (x.node, x.cost)).collect();
+        let mut targets: Vec<u32> = b.access.iter().map(|x| x.node).collect();
+        self.pour_targets(nr, &b.pours, c.from_at, &mut targets);
+        if !a.pours.is_empty() {
+            // An end on a fill may be anywhere on it: not told here.
+            return false;
+        }
+        sources.is_empty()
+            || targets.is_empty()
+            || !self
+                .comps
+                .may_reach(&self.grid, &self.st, nr.prof, nr.net, &sources, &targets)
+    }
+
     /// Adds to `targets` the cells of the fills `pours` within [`POUR_REACH`] of `near` that the
     /// net `nr` may use.
     fn pour_targets(&self, nr: &NetRoute, pours: &[u32], near: P, targets: &mut Vec<u32>) {
@@ -1680,7 +1758,7 @@ impl<'a> Engine<'a> {
         // The fills each joined group holds.
         let mut pours: Vec<Vec<u32>> = nr.islands.iter().map(|i| i.pours.clone()).collect();
         // Kept wires (partial rip-up): their islands start joined, their nodes in the trees.
-        if keep.len() == old.len() && matches!(mode, Mode::Negotiate(_)) {
+        if keep.len() == old.len() && !old.is_empty() {
             let kept = kept_wires(nr, old, &keep);
             let cells = self.cells() as u32;
             for (isls, w) in kept {

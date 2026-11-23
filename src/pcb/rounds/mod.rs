@@ -290,6 +290,192 @@ fn minimize_vias(
     saved
 }
 
+/// The routes made legal a wire at a time: while any wire shares a point with another net's,
+/// the one that shares the most is taken out (of two that share as many, the longer, which
+/// has more other ways), and then each net that lost one is routed again where nothing is
+/// claimed, with the wires it kept. cadlab's own router takes the whole net out that shares
+/// the most, and that is the net with the most connections, whose other wires were in no
+/// one's way and find theirs taken when they are searched for again (`tinytapeout-demo`:
+/// eight connections of one net open for two nets taken out). Returns how many wires were
+/// taken out, and whether every search ended.
+fn legalise_wires(
+    eng: &mut Engine<'_>,
+    sc: &mut Scratch,
+    routes: &mut [NetRoute],
+) -> (usize, bool) {
+    let mut lost: BTreeSet<usize> = BTreeSet::new();
+    let mut taken = 0;
+    // The nets with a shared point: only their wires are looked at, and a net is looked at
+    // again when a wire is taken out.
+    let mut hot: Vec<usize> = (0..routes.len())
+        .filter(|&ri| !eng.conflicts(&routes[ri]).is_empty())
+        .collect();
+    let mut at: Vec<engine::Conflict> = Vec::new();
+    while !hot.is_empty() {
+        let mut worst: Option<(usize, usize, usize, usize)> = None;
+        for &ri in &hot {
+            let r = &routes[ri];
+            for (wi, w) in r.wires.iter().enumerate() {
+                at.clear();
+                eng.wire_conflicts(r, w, &mut at);
+                at.sort_unstable();
+                at.dedup();
+                if at.is_empty() {
+                    continue;
+                }
+                let key = (at.len(), w.nodes.len());
+                if worst.is_none_or(|b| key > (b.0, b.1)) {
+                    worst = Some((key.0, key.1, ri, wi));
+                }
+            }
+        }
+        let Some((_, _, ri, wi)) = worst else { break };
+        let r = &mut routes[ri];
+        eng.uncommit(r);
+        r.wires.remove(wi);
+        eng.commit(r);
+        lost.insert(ri);
+        taken += 1;
+        hot.retain(|&ri| !eng.conflicts(&routes[ri]).is_empty());
+    }
+    let mut order: Vec<usize> = lost.into_iter().collect();
+    order.sort_by(|a, b| {
+        routes[*a]
+            .length
+            .total_cmp(&routes[*b].length)
+            .then(a.cmp(b))
+    });
+    let mut ended = true;
+    for ri in order {
+        ended &= route_kept(eng, sc, &mut routes[ri]);
+    }
+    (taken, ended)
+}
+
+/// Routes again, where nothing is claimed, the connections of `r` that its wires do not
+/// make, the wires staying as they are. Whether the search ended.
+fn route_kept(eng: &mut Engine<'_>, sc: &mut Scratch, r: &mut NetRoute) -> bool {
+    eng.uncommit(r);
+    r.keep = vec![true; r.wires.len()];
+    let res = eng.route_net(sc, r, Mode::Hard);
+    r.keep.clear();
+    eng.commit(r);
+    if res.is_err() {
+        for (ci, f) in r.failed.iter_mut().enumerate() {
+            if f.is_none() && !r.wires.iter().any(|w| w.conn == ci) {
+                *f = Some(FailKind::Budget);
+            }
+        }
+    }
+    res.is_ok()
+}
+
+/// A connection that found no way where nothing is claimed takes the room of the wires in
+/// its way, a wire at a time: those are taken out, it is routed, and their nets are routed
+/// again around it with the wires they kept; kept when fewer connections fail, or, a few
+/// times, when as many do and the failure moved to another net. Returns how many were kept.
+fn retry_wires(
+    eng: &mut Engine<'_>,
+    sc: &mut Scratch,
+    routes: &mut [NetRoute],
+    stop: &dyn Fn() -> bool,
+) -> usize {
+    let mut kept = 0;
+    let mut sideways = SIDEWAYS;
+    for _ in 0..RETRY_ROUNDS {
+        let mut improved = false;
+        let failing: Vec<usize> = (0..routes.len())
+            .filter(|&ri| routes[ri].failed.contains(&Some(FailKind::Congestion)))
+            .collect();
+        for fi in failing {
+            let cis: Vec<usize> = (0..routes[fi].conns.len())
+                .filter(|&ci| routes[fi].failed[ci] == Some(FailKind::Congestion))
+                .collect();
+            for ci in cis {
+                if stop() {
+                    return kept;
+                }
+                if routes[fi].failed[ci] != Some(FailKind::Congestion) {
+                    continue;
+                }
+                let Ok(keys) = eng.blocking_keys(sc, &routes[fi], ci) else {
+                    return kept;
+                };
+                // The wires in the way, by net.
+                let mut blockers: Vec<(usize, Vec<usize>)> = Vec::new();
+                for (j, r) in routes.iter().enumerate() {
+                    if j == fi || !keys.iter().any(|k| r.keys.binary_search(k).is_ok()) {
+                        continue;
+                    }
+                    let wires: Vec<usize> = r
+                        .wires
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, w)| {
+                            let wk = eng.wire_keys(r.net, w);
+                            keys.iter().any(|k| wk.binary_search(k).is_ok())
+                        })
+                        .map(|(wi, _)| wi)
+                        .collect();
+                    if !wires.is_empty() {
+                        blockers.push((j, wires));
+                    }
+                }
+                if blockers.is_empty() || blockers.len() > 8 {
+                    continue;
+                }
+                let group: Vec<usize> = std::iter::once(fi)
+                    .chain(blockers.iter().map(|b| b.0))
+                    .collect();
+                let fails = |routes: &[NetRoute]| -> usize {
+                    group
+                        .iter()
+                        .map(|&j| routes[j].failed.iter().filter(|f| f.is_some()).count())
+                        .sum()
+                };
+                let before = fails(routes);
+                let saved: Vec<(Vec<Wire>, Vec<Option<FailKind>>)> = group
+                    .iter()
+                    .map(|&j| (routes[j].wires.clone(), routes[j].failed.clone()))
+                    .collect();
+                for (j, wires) in &blockers {
+                    let r = &mut routes[*j];
+                    eng.uncommit(r);
+                    for &wi in wires.iter().rev() {
+                        r.wires.remove(wi);
+                    }
+                    eng.commit(r);
+                }
+                let mut ok = true;
+                for &j in &group {
+                    ok &= route_kept(eng, sc, &mut routes[j]);
+                }
+                let after = fails(routes);
+                let moved = after == before && routes[fi].failed[ci].is_none() && sideways > 0;
+                if ok && (after < before || moved) {
+                    sideways -= usize::from(moved);
+                    improved = true;
+                    kept += 1;
+                    continue;
+                }
+                for (&j, (w, f)) in group.iter().zip(saved) {
+                    eng.uncommit(&mut routes[j]);
+                    routes[j].wires = w;
+                    routes[j].failed = f;
+                    eng.commit(&mut routes[j]);
+                }
+                if !ok {
+                    return kept;
+                }
+            }
+        }
+        if !improved {
+            break;
+        }
+    }
+    kept
+}
+
 /// Vias and track length (nm) of wires.
 fn wire_stats(eng: &Engine<'_>, wires: &[Wire]) -> (usize, f64) {
     let mut vias = 0;
@@ -638,6 +824,10 @@ pub(crate) struct Pours<'a> {
     pub(crate) is_plane: &'a [bool],
     /// Of a host's fills around the routes, those that count, by the same rule.
     pub(crate) counted: &'a dyn Fn(Vec<Fill>) -> Vec<Fill>,
+    /// The net whose pad has a spoke of its thermal relief at a place of a layer, as its
+    /// number plus one, or zero, and what a track of another net costs there
+    /// ([`World::spoke_toll`](super::world::World::spoke_toll)).
+    pub(crate) spoke: &'a dyn Fn(u8, Point) -> (u32, f64),
 }
 
 /// A planned fanout or escape: the copper to add for it.
@@ -1170,6 +1360,7 @@ pub(crate) fn route(
         own_zones,
         is_plane,
         counted,
+        spoke,
     } = *pours;
     let layers = design.rules.layer_count();
     if jobs.is_empty() || layers == 0 || design.outline.is_empty() {
@@ -1237,6 +1428,26 @@ pub(crate) fn route(
     let pitch = grid.g;
     let mut eng = Engine::new(rb, grid, slots.clone(), &active, costs(), &stop);
     eng.work = meter.clone();
+    // The rooms of the spokes of pads in pours, at a price to every other net.
+    {
+        let mut any = false;
+        let mut by_slot = Vec::with_capacity(slots.len());
+        for &l in &slots {
+            let mut cells = Vec::with_capacity(eng.grid.cells());
+            for y in 0..eng.grid.h {
+                for x in 0..eng.grid.w {
+                    let (n, cost) = spoke(l as u8, eng.grid.cell(x, y).to_point());
+                    any |= n != 0;
+                    eng.spoke_cost = cost as f32;
+                    cells.push(n);
+                }
+            }
+            by_slot.push(cells);
+        }
+        if any {
+            eng.spoke = by_slot;
+        }
+    }
     let mut scratch = eng.scratch();
     let pool: Mutex<Vec<Scratch>> = Mutex::new(Vec::new());
     // Fills: each island's connections may end on the fills that are part of it.
@@ -1273,6 +1484,17 @@ pub(crate) fn route(
     }
     let total_conns: usize = routes.iter().map(|r| r.conns.len()).sum();
     let threads = options.threads.max(1);
+    // The connections that have no way on this grid whatever the other nets do, told before
+    // anything is routed: with too many of them the rounds are given up here, and the first
+    // round's time is not spent to find it out.
+    let no_way: usize = routes
+        .iter()
+        .map(|r| (0..r.conns.len()).filter(|&ci| eng.no_way(r, ci)).count())
+        .sum();
+    if no_way * NO_WAY > total_conns {
+        charge(&meter);
+        return Err(NoWhole::NoRoom);
+    }
 
     // ---- negotiated congestion ----
     let mut rng = Rng(options.seed.unwrap_or(0) ^ 0x5EED_CAD1_AB00_0000);
@@ -1281,7 +1503,7 @@ pub(crate) fn route(
     let mut order: Vec<usize> = (0..routes.len()).collect();
     let mut reroute: Vec<usize> = order.clone();
     let mut pour_rounds = 0;
-    let pours_ok = poured;
+    let pours_ok = poured && options.rounds_pours;
     let mut pending: Option<PourSnapshot> = None;
     let mut mid_check = false;
     let mut iterations = 0;
@@ -1491,45 +1713,9 @@ pub(crate) fn route(
         }
         // ---- legalization: rip what still conflicts, reroute without sharing ----
         *phase_end.lock().expect("deadline") = stage_end.clone();
-        let mut ripped: Vec<usize> = Vec::new();
-        loop {
-            let conf: Vec<usize> = routes.iter().map(|r| eng.conflicts(r).len()).collect();
-            let Some((worst, _)) =
-                conf.iter()
-                    .enumerate()
-                    .filter(|(_, c)| **c > 0)
-                    .max_by(|a, b| {
-                        a.1.cmp(b.1)
-                            .then(routes[a.0].length.total_cmp(&routes[b.0].length))
-                    })
-            else {
-                break;
-            };
-            let r = &mut routes[worst];
-            eng.uncommit(r);
-            r.wires.clear();
-            ripped.push(worst);
-        }
-        ripped.sort_by(|a, b| {
-            routes[*a]
-                .length
-                .total_cmp(&routes[*b].length)
-                .then(a.cmp(b))
-        });
-        taken_out = ripped.len();
-        for ri in ripped {
-            let r = &mut routes[ri];
-            let res = eng.route_net(&mut scratch, r, Mode::Hard);
-            eng.commit(r);
-            if res.is_err() {
-                ended = false;
-                for (ci, f) in r.failed.iter_mut().enumerate() {
-                    if f.is_none() && !r.wires.iter().any(|w| w.conn == ci) {
-                        *f = Some(FailKind::Budget);
-                    }
-                }
-            }
-        }
+        let (taken, all) = legalise_wires(&mut eng, &mut scratch, &mut routes);
+        taken_out = taken;
+        ended &= all;
         // Pours: the routing is legal now, so it is what the board would get. Nets whose fills
         // it cut apart are planned again from what the fills still join and negotiate again, the
         // other nets making room for them.
@@ -1571,83 +1757,11 @@ pub(crate) fn route(
                 }
             }
         }
-        // ---- rip-up and retry: a net that still fails takes the room of the nets in its way,
-        // which are routed again around it; kept only when fewer connections fail overall ----
-        let mut sideways = SIDEWAYS;
-        for _ in 0..RETRY_ROUNDS {
-            let mut improved = false;
-            let failing: Vec<usize> = (0..routes.len())
-                .filter(|&ri| routes[ri].failed.contains(&Some(FailKind::Congestion)))
-                .collect();
-            for fi in failing {
-                if run.poll() || stop() {
-                    break;
-                }
-                let Some(ci) = routes[fi]
-                    .failed
-                    .iter()
-                    .position(|f| *f == Some(FailKind::Congestion))
-                else {
-                    continue;
-                };
-                let Ok(keys) = eng.blocking_keys(&mut scratch, &routes[fi], ci) else {
-                    break;
-                };
-                let blockers: Vec<usize> = (0..routes.len())
-                    .filter(|&j| {
-                        j != fi && keys.iter().any(|k| routes[j].keys.binary_search(k).is_ok())
-                    })
-                    .collect();
-                if blockers.is_empty() || blockers.len() > 8 {
-                    continue;
-                }
-                let group: Vec<usize> = std::iter::once(fi)
-                    .chain(blockers.iter().copied())
-                    .collect();
-                let fails = |routes: &[NetRoute]| -> usize {
-                    group
-                        .iter()
-                        .map(|&j| routes[j].failed.iter().filter(|f| f.is_some()).count())
-                        .sum()
-                };
-                let before = fails(&routes);
-                let saved: Vec<(Vec<Wire>, Vec<Option<FailKind>>)> = group
-                    .iter()
-                    .map(|&j| (routes[j].wires.clone(), routes[j].failed.clone()))
-                    .collect();
-                for &j in &group {
-                    eng.uncommit(&mut routes[j]);
-                }
-                let mut ok = true;
-                for &j in &group {
-                    ok &= eng
-                        .route_net(&mut scratch, &mut routes[j], Mode::Hard)
-                        .is_ok();
-                    eng.commit(&mut routes[j]);
-                }
-                // Kept when fewer connections fail, or (a few times) when as many fail but the
-                // failure moved to another net, which gets its own retry next.
-                let after = fails(&routes);
-                let moved = after == before && routes[fi].failed[ci].is_none() && sideways > 0;
-                if ok && (after < before || moved) {
-                    sideways -= usize::from(moved);
-                    improved = true;
-                    continue;
-                }
-                for (&j, (w, f)) in group.iter().zip(saved) {
-                    eng.uncommit(&mut routes[j]);
-                    routes[j].wires = w;
-                    routes[j].failed = f;
-                    eng.commit(&mut routes[j]);
-                }
-                if !ok {
-                    break;
-                }
-            }
-            if !improved {
-                break;
-            }
-        }
+        // ---- rip-up and retry: a connection that still fails takes the room of the wires in
+        // its way, whose nets are routed again around it; kept only when fewer fail overall ----
+        retry_wires(&mut eng, &mut scratch, &mut routes, &|| {
+            run.poll() || stop()
+        });
         // ---- fewer vias: each net again where the others are, with vias four times as dear ----
         if !(run.poll() || stop()) {
             vias_saved = minimize_vias(&mut eng, &mut scratch, &mut routes, &|| {

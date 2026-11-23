@@ -308,6 +308,8 @@ fn the_look_at_a_board_counts_its_connections_and_those_with_no_way() {
     let look = rounds::look(&d, &no_pours(&d, &counted)).expect("a board to route");
     assert_eq!((look.conns, look.no_way), (1, 1));
     assert!(look.gives_up(None, None, 1));
+    // And nothing is searched for on a board that is given up for that.
+    assert_eq!((look.work, look.secs), (0.0, 0.0));
 }
 
 #[test]

@@ -1119,6 +1119,15 @@ pub(crate) fn look(design: &Design, pours: &Pours<'_>) -> Option<Look> {
             }
         }
     }
+    // A board given up for those has no first round to tell.
+    if no_way * NO_WAY > conns {
+        return Some(Look {
+            conns,
+            no_way,
+            work: 0.0,
+            secs: 0.0,
+        });
+    }
     // One for each step of the whole length divided by the sample, from half a step in:
     // a connection is searched for as often as its length is of the whole, and what it took
     // for each unit of its length stands for a step of the whole.

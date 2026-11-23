@@ -250,6 +250,7 @@ mod settle;
 mod spokes;
 pub mod swap;
 mod tune;
+mod uncut;
 mod verify;
 mod whole;
 mod world;
@@ -514,6 +515,7 @@ impl Design {
                 spare_spokes: Vec::new(),
                 min_spokes: 0,
                 via_pads: Vec::new(),
+                fills_clear_of: None,
             },
         }
     }
@@ -851,7 +853,13 @@ pub struct RouteOptions {
     /// after a negotiation ([`whole`](RouteOptions::whole)), at the pitch; and once the
     /// runs are as short as the searches make them, each is laid round the corners of
     /// what is beside it, off the lattice, where that is shorter: a track then passes a
-    /// pad or another net's track as near as the rules let it.
+    /// pad or another net's track as near as the rules let it. Each run's end at a pad
+    /// is then aimed at where on the pad the run comes to it, in place of the pad's
+    /// centre, where that leaves less of it outside the pad; and a pad that the routes
+    /// cut off a pour of its net on its own layer, and that a stub with a via joined to
+    /// it again, has the routes round its piece of the pour laid another way, if they
+    /// have one with no more vias that is not much longer, and loses the stub
+    /// ([`Stats::uncut`]).
     pub shorten: bool,
 }
 
@@ -997,6 +1005,10 @@ pub struct Stats {
     /// [`RouteOptions::shorten`]): those looked at, those kept as they were routed again,
     /// and the vias that these have fewer.
     pub again: (usize, usize, usize),
+    /// Of the stubs with a via that join a pad to a pour which routes cut it off, in a run
+    /// for shorter ways ([`RouteOptions::shorten`]): those looked at, those taken out with
+    /// the route that cut the pour laid another way, and the vias that these were.
+    pub uncut: (usize, usize, usize),
 }
 
 /// The result of [`route`].

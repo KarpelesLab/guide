@@ -931,6 +931,35 @@ run are taken as they are, and a pad that those leave no free room has none to k
 The default is none; a host says in which of its runs it wants it, and cadlab has it in
 the runs that move routes that are otherwise final.
 
+**A pour is left whole where the route that cut it has another way, and a run ends on a pad where it comes to it**
+([results](benchmarks.md#pcb-routing-with-a-pour-left-whole)). Both are of a run for shorter
+ways (`RouteOptions::shorten`), whose routes are where they stay. A pad of a net with a
+pour on its own layer needs no copper but the pour, until a route of another net closes
+a ring of tracks and pads round it; the pad is then joined again by a stub, a via to the
+pour on the other side, and the route that closed the ring was the cheapest for its net
+and knew nothing of that via. For each such stub the cells that tell the pads cut off
+(`pcb::pours`) say whose routes are round the pad's piece of fill, and where the fill
+would join the pad to its largest piece without the routes of one, two or three of those
+nets; that way is kept free, as copper of the pour's net as wide as the fill needs there,
+and the nets are routed again round it, at the price of a via that the search for fewer
+vias has. If they then have no more vias than they had, are no longer by more than the
+stub and half that price, and no pad of any pour is cut off that was not, the stub goes
+(`pcb::uncut`, `Stats::uncut`). And a run that the searches made goes to a pad's
+centre: to a pad beside its line it comes by a step aside that is outside the pad, where
+a track straight on would end on the pad's copper as well. Each run's end at a pad is
+aimed at a point of the pad's box on one of the eight directions from its centre, no
+nearer the box's edge than half the track, and goes on from there to the centre, where
+that leaves less of the run outside the pads and the world allows it.
+
+**A host says what its fills are clear of.** `Zones::fills` are measured against the
+board each time it is given, so that a route through a fill cuts it; a fill of a plane has
+a hundred thousand edges, and the parts that make it measurable took as long to make as
+all that was measured against them, a second a call on a board of four layers.
+`Zones::fills_clear_of` is the host's word that its fills were made around the board as
+it gives it: its pads, holes and obstacles, the first so many of its tracks, vias and
+copper zones, and the routes of an earlier run. A fill is then measured against what
+routing adds alone, and one with nothing near it to measure has no parts made.
+
 **Every net can be routed against every other at once, on one grid, before the passes**
 ([results](benchmarks.md#pcb-routing-of-every-net-at-once)). The passes route a net and
 take others out for it, and what they leave open on a crowded board are nets that were

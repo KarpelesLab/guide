@@ -179,6 +179,17 @@ pub struct Zones {
     /// via whose copper is all inside the pad's box, and only in a pad that is shut in
     /// so. One that a track leaves is joined by tracks, as before.
     pub via_pads: Vec<usize>,
+    /// What of the board the host says its [`fills`](Zones::fills) keep their clearances
+    /// from, having filled its zones around it: every pad and hole of the board and
+    /// every obstacle, and the first so many of [`Board::tracks`], of [`Board::vias`] and
+    /// of [`Board::zones`], and with those the routes of an earlier run that the design is
+    /// routed on from ([`route_from`](super::route_from)), which were on its board when
+    /// it filled. A fill is then not measured against those: a host that gives
+    /// the fill of the board as it gives the board has it measured against what routing
+    /// adds alone, where a fill of a hundred thousand edges took a second to measure
+    /// against every pad and track of the board, each time the board was given. `None`,
+    /// the default, has every fill measured against everything.
+    pub fills_clear_of: Option<[usize; 3]>,
 }
 
 /// One spoke of a thermal relief that the host's fill will make: a strip of copper from a
@@ -269,12 +280,16 @@ struct Copper {
     net: Option<NetId>,
     own: Option<i64>,
     kind: Kind,
+    /// Whether the host's fills are known to keep clear of it ([`Zones::fills_clear_of`]).
+    clear: bool,
 }
 
 struct Hole {
     shape: Shape,
     net: Option<NetId>,
     own: Option<i64>,
+    /// As [`Copper::clear`].
+    clear: bool,
 }
 
 fn same_net(a: Option<NetId>, b: Option<NetId>) -> bool {
@@ -334,7 +349,9 @@ fn fill_all(
     let stack = rules.layers();
     let mut copper: Vec<Copper> = Vec::new();
     let mut holes: Vec<Hole> = Vec::new();
-    for t in &board.tracks {
+    let clear_of = design.zones.fills_clear_of;
+    let clear = |kind: usize, i: usize| clear_of.is_some_and(|n| i < n[kind]);
+    for (i, t) in board.tracks.iter().enumerate() {
         let shape = match t.mid {
             None => Shape::track(t.start, t.end, t.width)?,
             Some(m) => Shape::arc_track(t.start, m, t.end, t.width, board.arc_tolerance)?,
@@ -345,20 +362,23 @@ fn fill_all(
             net: t.net,
             own: None,
             kind: Kind::Other,
+            clear: clear(0, i),
         });
     }
-    for v in &board.vias {
+    for (i, v) in board.vias.iter().enumerate() {
         copper.push(Copper {
             shape: Shape::circle(v.at, v.diameter)?,
             layers: LayerSet::span(v.from, v.to),
             net: v.net,
             own: None,
             kind: Kind::Other,
+            clear: clear(1, i),
         });
         holes.push(Hole {
             shape: Shape::circle(v.at, v.drill)?,
             net: v.net,
             own: None,
+            clear: clear(1, i),
         });
     }
     for (i, p) in board.pads.iter().enumerate() {
@@ -369,6 +389,7 @@ fn fill_all(
                 net: p.net,
                 own: p.clearance,
                 kind: Kind::Pad(i),
+                clear: clear_of.is_some(),
             });
         }
         if let Some(h) = &p.hole {
@@ -376,16 +397,18 @@ fn fill_all(
                 shape: h.clone(),
                 net: p.net,
                 own: p.clearance,
+                clear: clear_of.is_some(),
             });
         }
     }
-    for z in &board.zones {
+    for (i, z) in board.zones.iter().enumerate() {
         copper.push(Copper {
             shape: z.shape.clone(),
             layers: LayerSet::EMPTY.with(z.layer),
             net: z.net,
             own: z.clearance,
             kind: Kind::Other,
+            clear: clear(2, i),
         });
     }
     for (shape, layer) in &design.obstacles {
@@ -395,6 +418,7 @@ fn fill_all(
             net: None,
             own: None,
             kind: Kind::Other,
+            clear: clear_of.is_some(),
         });
     }
     let by_layer: Vec<(Vec<usize>, SpatialIndex)> = (0..rules.layer_count())
@@ -876,6 +900,24 @@ impl Ctx<'_> {
         let mut near = Vec::new();
         for g in given {
             let near_box = g.bbox().expand(reach);
+            // The parts of a fill of a hundred thousand edges take as long to make as all
+            // that is measured against them: not for a fill with nothing to measure, as
+            // the fill of a host that says what it is clear of has
+            // ([`Zones::fills_clear_of`]).
+            index.query(&near_box, &mut near);
+            let any = near.iter().any(|id| {
+                let c = &self.copper[on[id.slot() as usize]];
+                !(c.clear || same_net(zone.net, c.net))
+            }) || {
+                self.hole_index.query(&near_box, &mut near);
+                near.iter().any(|id| {
+                    let h = &self.holes[id.slot() as usize];
+                    !(h.clear || same_net(zone.net, h.net))
+                })
+            };
+            if !any {
+                continue;
+            }
             let parts = Parts::of(g);
             // A fill of many edges is measured to by its parts, which cover it and reach a
             // nanometre past it at most: what is closer to a part than two nanometres less
@@ -889,7 +931,7 @@ impl Ctx<'_> {
             for id in &near {
                 let i = on[id.slot() as usize];
                 let c = &self.copper[i];
-                if same_net(zone.net, c.net) {
+                if c.clear || same_net(zone.net, c.net) {
                     continue;
                 }
                 let clearance = drc::clearance(rules, (zone.net, None), (c.net, c.own), layer)
@@ -902,7 +944,7 @@ impl Ctx<'_> {
             for id in &near {
                 let i = id.slot() as usize;
                 let h = &self.holes[i];
-                if same_net(zone.net, h.net) {
+                if h.clear || same_net(zone.net, h.net) {
                     continue;
                 }
                 let floor = spec.hole_clearance;

@@ -28,7 +28,7 @@ const FEW: u64 = 4;
 const CONNECTIONS: u64 = 16;
 
 /// The nodes the search for a route with fewer vias has for a net of `connections`.
-fn node_budget(connections: u64) -> u64 {
+pub(crate) fn node_budget(connections: u64) -> u64 {
     let c = connections.max(1);
     (NODES_PER_CONNECTION * c.min(CONNECTIONS)).max(NODES_PER_CONNECTION_OF_FEW * c.min(FEW))
 }
@@ -139,6 +139,26 @@ pub(crate) fn run(
             }
         }
     }
+    if options.shorten {
+        // And the end of each run at a pad to where on the pad the run comes to it, now
+        // that nothing looks for another way: last, as what pulls a net tight takes it
+        // to the pad's centre again.
+        for (job, slot) in jobs.iter().zip(copper.iter_mut()) {
+            let Some(c) = slot else { continue };
+            if stopped(world) {
+                return expanded;
+            }
+            let net = job.ctx.net;
+            let held = design
+                .pairs
+                .iter()
+                .any(|p| p.positive == net || p.negative == net)
+                || design.lengths.iter().any(|l| l.nets.contains(&net));
+            if !held && aim_at_pads(world, &job.ctx, c) {
+                c.place(world, &job.ctx);
+            }
+        }
+    }
     if bounded {
         return expanded;
     }
@@ -153,6 +173,133 @@ pub(crate) fn run(
     }
     expanded
 }
+
+/// How many points along each of the eight directions from a pad's centre a run's end may
+/// be aimed at, how many of the run's last points it may leave from, how much less of
+/// the run must then be outside the pads, and how much further than half a track's width
+/// from the edge of the pad's box the point is, in nanometres.
+const AIM_STEPS: i64 = 6;
+const AIM_BACK: usize = 4;
+const AIM_GAIN: f64 = 20_000.0;
+const AIM_MARGIN: i64 = 2_000;
+
+/// Aims the end of each run of a net's tracks at a pad of the net at the pad's copper
+/// where the run comes to it, in place of the pad's centre: a run that the searches made
+/// goes to the centre, and comes to a pad that is beside its line by a step aside that is
+/// outside the pad, where a track straight on ends on the pad's copper as well, the way
+/// cadlab's router ends its tracks at the first copper of a pad. The run then goes to a
+/// point in the pad's box on one of the eight directions from its centre, and from there
+/// to the centre, which is copper on the pad's own; of the ways that the world allows,
+/// the one with the least outside the pads of the net, if that is less than the run has.
+/// Returns whether any run changed.
+pub(crate) fn aim_at_pads(world: &World<'_>, ctx: &NetCtx, c: &mut NetCopper) -> bool {
+    let mut changed = false;
+    each_run(ctx, c, |l, run| {
+        let mut run = run.to_vec();
+        for _ in 0..2 {
+            if let Some(better) = aim(world, ctx, l, &run) {
+                run = better;
+                changed = true;
+            }
+            run.reverse();
+        }
+        run
+    });
+    changed
+}
+
+/// A run with its last point, the centre of a pad of the net, come to by way of another
+/// point of the pad's box, if that leaves less of it outside the pads ([`aim_at_pads`]).
+fn aim(world: &World<'_>, ctx: &NetCtx, l: u8, run: &[Point]) -> Option<Vec<Point>> {
+    let n = run.len().checked_sub(1).filter(|&n| n >= 1)?;
+    let center = run[n];
+    let pad = ctx.pads.iter().find(|p| {
+        p.center == center && p.layers.contains(LayerId(l)) && p.bbox.min() != p.bbox.max()
+    })?;
+    // A run from the pad to itself, or one that is all inside it, stays.
+    let now = outside(ctx, l, run[0], &run[1..]);
+    if now < AIM_GAIN {
+        return None;
+    }
+    // No nearer the box's edge than a track's end stays inside it: a host that ends its
+    // tracks where they are on the pad's copper from side to side ends this one there.
+    let inset = ctx.widths[usize::from(l)] / 2 + AIM_MARGIN;
+    let (lo, hi) = (pad.bbox.min(), pad.bbox.max());
+    let (lo, hi) = (
+        Point::new(lo.x + inset, lo.y + inset),
+        Point::new(hi.x - inset, hi.y - inset),
+    );
+    if lo.x > center.x || lo.y > center.y || hi.x < center.x || hi.y < center.y {
+        return None;
+    }
+    let mut targets: Vec<Point> = Vec::new();
+    for (dx, dy) in [
+        (1, 0),
+        (-1, 0),
+        (0, 1),
+        (0, -1),
+        (1, 1),
+        (1, -1),
+        (-1, 1),
+        (-1, -1),
+    ] {
+        // As far as the box goes that way.
+        let room = |d: i64, c: i64, lo: i64, hi: i64| match d {
+            1 => hi - c,
+            -1 => c - lo,
+            _ => i64::MAX,
+        };
+        let reach = room(dx, center.x, lo.x, hi.x).min(room(dy, center.y, lo.y, hi.y));
+        for k in 1..=AIM_STEPS {
+            let t = reach * k / AIM_STEPS;
+            if t > 0 {
+                targets.push(Point::new(center.x + dx * t, center.y + dy * t));
+            }
+        }
+    }
+    let first = n.saturating_sub(AIM_BACK);
+    // Every way, by what it leaves outside the pads, and then by its length.
+    let mut tries: Vec<(f64, f64, usize, Vec<Point>)> = Vec::new();
+    for &q in &targets {
+        for i in first..n {
+            if run[i] == q {
+                continue;
+            }
+            for mut way in ways(run[i], q) {
+                way.push(center);
+                let mut all = run[..=i].to_vec();
+                all.extend(way.iter().copied());
+                let out = outside(ctx, l, all[0], &all[1..]);
+                if out + AIM_GAIN <= now {
+                    let length: f64 = all.windows(2).map(|w| dist(w[0], w[1])).sum();
+                    tries.push((out, length, i, way));
+                }
+            }
+        }
+    }
+    tries.sort_by(|a, b| {
+        a.0.total_cmp(&b.0)
+            .then(a.1.total_cmp(&b.1))
+            .then(a.2.cmp(&b.2))
+    });
+    for (_, _, i, way) in tries.into_iter().take(AIM_TRIES) {
+        let mut from = run[i];
+        let free = way.iter().all(|&to| {
+            let ok = legal(world, ctx, from, to, l);
+            from = to;
+            ok
+        });
+        if free {
+            let mut all = run[..=i].to_vec();
+            all.extend(way);
+            return Some(all);
+        }
+    }
+    None
+}
+
+/// How many of the ways to a pad are asked of the world, the best first.
+const AIM_TRIES: usize = 24;
 
 /// How much less than a run of tracks a way between its two ends must cost at least for
 /// the run to be searched for again, in pitches and as a share of what it costs: a run
@@ -281,8 +428,13 @@ fn cost(length: f64, vias: usize, options: &RouteOptions) -> f64 {
 /// How many times what a via costs while routing it costs a run that is searched for
 /// again: with nothing to move, a dearer via costs no connection, as it does while nets
 /// are routed (`docs/benchmarks.md`), and a run that went under another net for a
-/// millimetre saved is one via pair more.
-const SHORTER_VIA: f64 = 3.0;
+/// millimetre saved is one via pair more. Twice, which is 2 mm of track and what a via
+/// costs the negotiation at a pitch of 0.2 mm, ten steps: at three times, a net that the
+/// searches for fewer vias had taken round a row of pads for 3 mm more, with no via,
+/// kept that way, as the same net with a via and 3 mm less cost as much
+/// (`buspirate-rs232`: two nets of 16 and 18 mm, and the board's track 3 % over that of
+/// cadlab's router with five vias for its ten, where it is 1 % over with eight).
+const SHORTER_VIA: f64 = 2.0;
 
 /// How much a run costs more than the straight way between its ends, if that is enough
 /// for it to be searched for again.
@@ -524,7 +676,7 @@ pub(crate) fn tighten_net(world: &World<'_>, ctx: &NetCtx, c: &mut NetCopper) {
 
 /// A net's copper without the vias that join nothing, and with its runs pulled tight, in
 /// the world.
-fn tidy(world: &mut World<'_>, ctx: &NetCtx, c: &mut NetCopper) {
+pub(crate) fn tidy(world: &mut World<'_>, ctx: &NetCtx, c: &mut NetCopper) {
     drop_idle_vias(c, ctx);
     pull_tight(world, ctx, c);
     c.place(world, ctx);
@@ -1145,8 +1297,59 @@ mod tests {
     use super::super::tests::{MM, design, smd};
     use super::super::world::World;
     use super::super::{RouteOptions, router};
-    use super::{fewer_hops, shorter};
+    use super::{aim_at_pads, fewer_hops, outside, shorter};
     use crate::geom::Point;
+
+    #[test]
+    fn a_run_that_comes_to_a_pad_beside_its_middle_ends_on_the_pad_where_it_comes() {
+        // Two pads, the second 0.15 mm above the line of the first: the run goes along
+        // that line and steps up to the second pad's middle before it is at the pad.
+        let pads = vec![smd(0, 0, 1), smd(10 * MM, 150_000, 1)];
+        let d = design(1, pads, 2);
+        let options = RouteOptions::default();
+        let mut world = World::new(
+            &d.board,
+            &d.rules,
+            &d.outline,
+            d.edge_clearance,
+            &d.obstacles,
+        )
+        .unwrap();
+        world.configure(&d, &options);
+        let pitch = router::pitch(&d, &options);
+        let jobs = router::jobs(&d, &world, pitch, &[], &[]);
+        let ctx = &jobs[0].ctx;
+        let seg = |a: (i64, i64), b: (i64, i64)| Seg {
+            a: Point::new(a.0, a.1),
+            b: Point::new(b.0, b.1),
+            l: 0,
+        };
+        let mut c = NetCopper::default();
+        c.segs = vec![
+            seg((0, 0), (9_400_000, 0)),
+            seg((9_400_000, 0), (9_550_000, 150_000)),
+            seg((9_550_000, 150_000), (10 * MM, 150_000)),
+        ];
+        let out =
+            |c: &NetCopper| -> f64 { c.segs.iter().map(|s| outside(ctx, 0, s.a, &[s.b])).sum() };
+        let before = out(&c);
+        assert!(aim_at_pads(&world, ctx, &mut c));
+        // Straight on to the pad, less the step aside that was outside it, and still
+        // joined at the pad's middle.
+        assert!(
+            out(&c) < before - 40_000.0,
+            "{} for {before}: {c:?}",
+            out(&c)
+        );
+        assert_eq!(c.pieces(ctx).apart(), 0, "{c:?}");
+        assert!(c.pieces(ctx).missing().is_empty(), "{c:?}");
+        let middle = Point::new(10 * MM, 150_000);
+        assert!(c.segs.iter().any(|s| s.a == middle || s.b == middle));
+        // What is aimed stays as it is.
+        let again = c.segs.clone();
+        assert!(!aim_at_pads(&world, ctx, &mut c));
+        assert_eq!(c.segs, again);
+    }
 
     #[test]
     fn a_hop_under_nothing_is_taken_out_and_one_under_a_track_is_kept() {

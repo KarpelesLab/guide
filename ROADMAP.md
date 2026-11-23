@@ -285,7 +285,7 @@ Each item is independently useful, and they can land in any order.
   other nets' routes; once routing is over the run joins the pads that its routes cut
   off the fills its nets were planned on to them again, told on a grid with no fill made
   (`RouteOptions::pour_cuts`); two tracks out of two pads side by side in a rule area
-  are necked by the area's clearance, and the nets of a row of pads are no wider than
+  are necked by the area's clearance, and in such an area the nets of a row of pads are no wider than
   its pitch has room for two of by the board's clearance, on a lattice of their pitch
   ([benchmarks](docs/benchmarks.md#pcb-routing-with-the-nets-of-a-row-as-narrow-as-its-pitch-asks)); and if asked it plans the ways out of a row of
   fine pitch for the whole row, a straight stub out of either end of each pad and a via

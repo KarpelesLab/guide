@@ -269,6 +269,100 @@ fn a_board_whose_connections_have_no_way_on_the_grid_is_given_up_before_a_round(
     );
     assert!(!own.stats.rounds_given_up);
     assert_eq!(routed.stats.work, own.stats.work);
+    // And it is that run, to the track.
+    assert_eq!(routed.tracks, own.tracks);
+    assert_eq!(routed.vias, own.vias);
+}
+
+/// What the look at a board is given of its fills and its spokes, on a board with none.
+fn no_pours<'a>(
+    d: &Design,
+    counted: &'a dyn Fn(Vec<super::Fill>) -> Vec<super::Fill>,
+) -> rounds::Pours<'a> {
+    rounds::Pours {
+        fills: &[],
+        own_zones: d.board.zones.len(),
+        is_plane: &[],
+        counted,
+        spoke: &|_, _| (0, 0.0),
+    }
+}
+
+#[test]
+fn the_look_at_a_board_counts_its_connections_and_those_with_no_way() {
+    let counted = |fills: Vec<super::Fill>| fills;
+    // Four nets across each other all have a way, and a first round takes some work.
+    let d = crossed(4);
+    let look = rounds::look(&d, &no_pours(&d, &counted)).expect("a board to route");
+    assert_eq!((look.conns, look.no_way), (4, 0));
+    assert!(look.work > 0.0 && look.secs >= 0.0, "{look:?}");
+    assert!(!look.gives_up(None, None, 1));
+    // The look is the same each time: it has no order of its own, and no clock in its count.
+    let again = rounds::look(&d, &no_pours(&d, &counted)).expect("a board to route");
+    assert_eq!(
+        (look.conns, look.no_way, look.work),
+        (again.conns, again.no_way, again.work)
+    );
+    // A pad walled in has no way, and that is the board's one connection.
+    let d = walled_in();
+    let look = rounds::look(&d, &no_pours(&d, &counted)).expect("a board to route");
+    assert_eq!((look.conns, look.no_way), (1, 1));
+    assert!(look.gives_up(None, None, 1));
+}
+
+#[test]
+fn a_board_is_given_up_for_its_connections_with_no_way_or_for_the_room_of_eight_first_rounds() {
+    let look = rounds::Look {
+        conns: 100,
+        no_way: 2,
+        work: 10.0,
+        secs: 1.0,
+    };
+    // One connection in fifty with no way is not too many; more is.
+    assert!(!look.gives_up(None, None, 1));
+    assert!(rounds::Look { no_way: 3, ..look }.gives_up(None, None, 1));
+    // Eight first rounds are to fit what the rounds have of the work,
+    assert!(look.gives_up(Some(79.0), None, 1));
+    assert!(!look.gives_up(Some(80.0), None, 1));
+    // and of the time, where three threads do the work of two.
+    assert!(look.gives_up(None, Some(7.9), 1));
+    assert!(!look.gives_up(None, Some(8.0), 1));
+    assert!(look.gives_up(None, Some(3.9), 3));
+    assert!(!look.gives_up(None, Some(4.0), 3));
+}
+
+#[test]
+fn a_run_of_this_crate_s_own_rounds_is_the_run_of_the_board_without_the_zones_told_for_the_others()
+{
+    let plain = crossed(3);
+    let mut told = plain.clone();
+    // A pour of net 1 that the host's fill left with no copper, told after the others.
+    told.zones.unfilled_from = Some(told.zones.zones.len());
+    told.zones.zones.push(super::CopperZone {
+        outline: vec![
+            Point::new(-MM, -MM),
+            Point::new(3 * MM, -MM),
+            Point::new(3 * MM, MM),
+            Point::new(-MM, MM),
+        ],
+        layers: LayerSet::EMPTY.with(LayerId(0)),
+        net: Some(NetId(1)),
+        ..super::CopperZone::default()
+    });
+    let own = RouteOptions {
+        rounds: Rounds::Own,
+        fills: true,
+        ..native()
+    };
+    let (a, b) = (route_checked(&plain, &own), route_checked(&told, &own));
+    assert_eq!(a.tracks, b.tracks);
+    assert_eq!(a.vias, b.vias);
+    assert_eq!(a.stats.work, b.stats.work);
+    assert!(b.fills.is_empty());
+    // Told as a zone like the others, it is one that the run plans on and fills.
+    told.zones.unfilled_from = None;
+    let c = route_checked(&told, &own);
+    assert!(!c.fills.is_empty());
 }
 
 /// On one layer, a pad of net 1 in a pour of its net with spokes along the axes, and a net

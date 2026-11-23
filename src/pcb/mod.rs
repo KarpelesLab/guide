@@ -524,6 +524,7 @@ impl Design {
                 min_spokes: 0,
                 via_pads: Vec::new(),
                 fills_clear_of: None,
+                unfilled_from: None,
             },
         }
     }
@@ -582,9 +583,19 @@ pub enum Rounds {
     /// from any other; on more than two layers a net is planned on its fills of the inner
     /// layers alone, unless [`RouteOptions::outer_pours`]; the nets whose pads the routes
     /// cut off their fills are negotiated for again only with
-    /// [`RouteOptions::rounds_pours`]; and a board on whose grid more than one connection
-    /// in fifty has no way is given up before the first round
-    /// ([`Stats::rounds_given_up`]).
+    /// [`RouteOptions::rounds_pours`]; the rounds end once the price of a shared point is at
+    /// its most and no more than one point for every 32 connections is shared; and a unit
+    /// of the run's work ([`RouteOptions::work_budget`]) is six nodes of their search, which
+    /// visits six times the nodes in the time.
+    ///
+    /// A board is looked at before anything of the run is routed or planned for these rounds
+    /// but their ways out, and given up if more than one connection in fifty has no way on
+    /// their grid whatever the other nets do, or if eight first rounds, as some of the
+    /// connections searched for on the board with no route on it say what one takes, have
+    /// no room in the rounds' share of the run ([`RouteOptions::whole_share`]). The look
+    /// costs the run none of its work, and a board given up is routed as one that these
+    /// rounds were never asked for, to the track ([`Stats::rounds_given_up`]), on the design
+    /// without the zones that only they plan on ([`Zones::unfilled_from`]).
     Native,
 }
 
@@ -1111,11 +1122,12 @@ pub struct Stats {
     /// The connections that those routes made, and the vias that routing each net again
     /// for fewer of them saved.
     pub whole_made: (usize, usize),
-    /// Whether the rounds of [`Rounds::Native`] were asked for and gave the board up after
-    /// their first round, which said that their share of the run had no room for them or
-    /// that their grid did not reach the board's pads: the run then began again with this
-    /// crate's own, [`Rounds::Own`], its necks and its escapes with them. A host that
-    /// routes the board again from this run's routes asks for those then.
+    /// Whether the rounds of [`Rounds::Native`] were asked for and gave the board up at
+    /// their look at it, before anything was routed: their share of the run had no room
+    /// for them, or their grid did not reach the board's pads. The run is then the run
+    /// with this crate's own, [`Rounds::Own`], its necks and its escapes with them, as if
+    /// those had been asked for. A host that routes the board again from this run's routes
+    /// asks for those then.
     pub rounds_given_up: bool,
     /// Of the rounds on the grid of the pitch for the connections that a negotiation at
     /// twice the pitch left open ([`RouteOptions::whole_finer`]): how many there were,

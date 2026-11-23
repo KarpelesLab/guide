@@ -24,6 +24,12 @@
 //!
 //! What comes out is each net's route as a tree ([`Whole`]), for the passes, and with it the
 //! places on fills and fixed copper where its routes end.
+//!
+//! Before any of it, and before the run plans anything for it but the ways out, the board
+//! is looked at ([`look`]): how many of its connections have no way on this grid whatever
+//! the other nets do, and what a first round would take, by a sample of the connections
+//! searched for alone. A board that the rounds would not end on is given up there, for none
+//! of the run's work, and is then routed as one that they were never asked for.
 
 mod components;
 mod engine;
@@ -75,12 +81,34 @@ const SIDEWAYS: usize = 4;
 /// `buspirate5-rev10` 29), in six to eleven times what the first took. One whose share ends
 /// before that has routes still all over each other (`glasgow-revD1`, six layers: five
 /// rounds in its 20 s, with 1100 points shared), which cost the passes more than they give
-/// them: such a board is given up when the first round has said so.
+/// them: such a board is given up before anything of it is routed ([`look`]).
 const ROOM: f64 = 8.0;
+
+/// How many connections [`look`] searches for to say what a first round takes.
+const LOOK_SAMPLE: usize = 48;
+
+/// And how many times what those searches take alone, on a board with no route on it, a
+/// first round takes, in which each is among the routes of the nets before it: 1.1 to 2.5
+/// times on six boards of two layers, 2.0 to 4.8 on six of four and six
+/// (`docs/benchmarks.md`).
+const CROWD: f64 = 4.0;
+
+/// The nodes of this stage's search that are a unit of the run's work. A unit is to take
+/// about as long in every phase of a run: this search, on maps made before it, visits five
+/// to six million nodes a second on a thread (`buspirate5-rev10` 5.1, `tinytapeout-demo`
+/// 4.8, `lumenpnp-mobo` 4.7, `corne-cherry` 6.5), and the passes, which ask the board
+/// about each place, 0.5 to 0.9 million units.
+const NODES_A_UNIT: u64 = 6;
 
 /// Rounds that their share ends with fewer points shared than one for every this many
 /// connections are near their end.
 const NEARLY: usize = 4;
+
+/// And rounds with no more points shared than one for every this many connections, once the
+/// price of a shared point is at its most, have ended: `lumenpnp-mobo` had 11 points shared
+/// after 17 rounds and 9 after 40, in 12.7 s and in 24.7 s, and `buspirate5-rev10` 10 after
+/// 17 and 4 after 40, in 5.9 s and in 8.7 s.
+const FEW: usize = 32;
 
 /// And how many connections there are to be for each that has no way on the grid whatever
 /// the other nets do, a pad that no cell of the grid reaches or that the board's own copper
@@ -960,6 +988,184 @@ pub(crate) fn fanout(design: &Design, pours: &Pours<'_>) -> Vec<FanItem> {
     fanout_items(&first.rb, &routes, &slots)
 }
 
+/// The island and the terminal of a net whose copper a route's end is on, where `is_on` says
+/// of a terminal whether it is: of the island that the route's connection names, `named`,
+/// before the others, and that island with no terminal if the end is on none. A connection
+/// is searched for from every island that the wires before it joined to its own, and may
+/// begin on a pad of any of them: taken for a place of the island named, such an end joined
+/// two pads in the count of the passes that no copper joins, the track that did join them was
+/// one too many, and the board ended with a pad apart that was reported joined
+/// (`buspirate5-rev10`, seven connections after the first run in one order).
+fn copper_at(
+    islands: &[Island],
+    named: usize,
+    is_on: impl Fn(usize) -> bool,
+) -> (usize, Option<usize>) {
+    let of = |i: usize| islands[i].terms.iter().copied().find(|&t| is_on(t));
+    of(named)
+        .map(|t| (named, Some(t)))
+        .or_else(|| (0..islands.len()).find_map(|i| of(i).map(|t| (i, Some(t)))))
+        .unwrap_or((named, None))
+}
+
+/// The index of what is fixed on the board, for the stubs of the pads and the exact checks.
+fn static_index(rb: &RouterBoard, pitch: f64) -> Index {
+    let mut index = Index::new(
+        rb.bbox.expand(pitch * 4.0),
+        (pitch * 8.0).max(500_000.0),
+        reach(rb),
+    );
+    for (i, ob) in rb.obstacles.iter().enumerate() {
+        index.insert(Item::Static(i as u32), ob.bbox);
+    }
+    index
+}
+
+/// Gives each island of `routes` the cells where its pads are reached.
+fn give_access(eng: &Engine<'_>, ck: &Checker<'_>, routes: &mut [NetRoute]) {
+    let mut cache: BTreeMap<usize, Vec<Access>> = BTreeMap::new();
+    for r in routes {
+        for island in &mut r.islands {
+            for &t in &island.terms {
+                let acc = cache.entry(t).or_insert_with(|| eng.access(t, ck));
+                island.access.extend(acc.iter().cloned());
+            }
+        }
+    }
+}
+
+/// What [`look`] says of a board.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Look {
+    /// The connections that the rounds would have to make.
+    pub conns: usize,
+    /// Those of them that have no way on the grid whatever the other nets do.
+    pub no_way: usize,
+    /// What the first round would take, in units of the run's work, by the connections
+    /// searched for.
+    pub work: f64,
+    /// And in seconds, on one thread.
+    pub secs: f64,
+}
+
+impl Look {
+    /// Whether the rounds are not to be begun on the board: more than one connection in
+    /// [`NO_WAY`] has no way on their grid, or [`ROOM`] times their first round is more than
+    /// the `work` or the `time` that they would have, on `threads` threads.
+    pub(crate) fn gives_up(&self, work: Option<f64>, time: Option<f64>, threads: usize) -> bool {
+        // Two threads do the work of one and a half, and so on: the batches of a round are
+        // not all as wide as the threads.
+        let wide = 1.0 + (threads.max(1) - 1) as f64 * 0.5;
+        self.no_way * NO_WAY > self.conns
+            || work.is_some_and(|w| ROOM * self.work > w)
+            || time.is_some_and(|t| ROOM * self.secs / wide > t)
+    }
+}
+
+/// Whether the rounds have a board that they can end on, told before anything of the run
+/// is routed and for none of its work: how many of its connections have no way on their grid
+/// whatever the other nets do, an end with no cell or ends that the board's own copper
+/// keeps apart (each by its own two islands), and what a first round takes, by
+/// [`LOOK_SAMPLE`] of the connections searched for on the board with no route on it, each
+/// for as many as its length is of the whole. `design` has the ways out on it ([`fanout`]).
+/// `None` on a board that the rounds have nothing to route on.
+pub(crate) fn look(design: &Design, pours: &Pours<'_>) -> Option<Look> {
+    let Pours {
+        fills,
+        own_zones,
+        is_plane,
+        ..
+    } = *pours;
+    let layers = design.rules.layer_count();
+    if layers == 0 || design.outline.is_empty() {
+        return None;
+    }
+    let slots: Vec<usize> = (0..layers).collect();
+    let wanted: BTreeSet<u32> = (0..design.nets.len())
+        .filter(|&i| design.nets[i].route)
+        .map(|i| i as u32)
+        .collect();
+    let (base, fills) = base_of(design, fills, own_zones);
+    let sc = scene(design, base, &fills, is_plane);
+    let rb = &sc.rb;
+    let mut routes = plan(rb, &wanted);
+    if routes.is_empty() {
+        return None;
+    }
+    let mut active = vec![false; rb.profiles.len()];
+    for r in &routes {
+        active[r.prof] = true;
+    }
+    let grid = make_grid(rb, &routes);
+    let pitch = grid.g;
+    let never = || false;
+    let mut eng = Engine::new(rb, grid, slots.clone(), &active, costs(), &never);
+    let term_island: Vec<usize> = rb.terminals.iter().map(|t| t.island).collect();
+    eng.pours = pours::build(&rb.fills, rb, &eng.grid, &slots);
+    assign_pours(&eng, &mut routes, &term_island);
+    let index = static_index(rb, pitch);
+    give_access(&eng, &Checker { rb, index: &index }, &mut routes);
+    // The connections that have a way, each with its length and a step more.
+    let mut conns = 0;
+    let mut no_way = 0;
+    let mut with_way: Vec<(usize, usize, f64)> = Vec::new();
+    for (ri, r) in routes.iter().enumerate() {
+        for (ci, c) in r.conns.iter().enumerate() {
+            conns += 1;
+            if eng.no_way(r, ci) {
+                no_way += 1;
+            } else {
+                with_way.push((ri, ci, c.from_at.dist(c.to_at) + pitch));
+            }
+        }
+    }
+    // One for each step of the whole length divided by the sample, from half a step in:
+    // a connection is searched for as often as its length is of the whole, and what it took
+    // for each unit of its length stands for a step of the whole.
+    let whole: f64 = with_way.iter().map(|w| w.2).sum();
+    let step = whole / LOOK_SAMPLE.min(with_way.len()).max(1) as f64;
+    let began = Instant::now();
+    let mut scratch = eng.scratch();
+    let mut nodes = 0.0;
+    let (mut at, mut next) = (0.0, step / 2.0);
+    for &(ri, ci, len) in &with_way {
+        at += len;
+        if at < next {
+            continue;
+        }
+        let r = &routes[ri];
+        let mut one = NetRoute {
+            conns: vec![r.conns[ci].clone()],
+            failed: vec![None],
+            wires: Vec::new(),
+            keys: Vec::new(),
+            dyn_ids: Vec::new(),
+            keep: Vec::new(),
+            ..r.clone()
+        };
+        let before = eng.work.used();
+        let _ = eng.route_net(&mut scratch, &mut one, Mode::Negotiate(0.6));
+        let took = (eng.work.used() - before) as f64;
+        while at >= next {
+            nodes += took / len * step;
+            next += step;
+        }
+    }
+    let secs = began.elapsed().as_secs_f64();
+    let searched = eng.work.used() as f64;
+    let nodes = nodes * CROWD;
+    Some(Look {
+        conns,
+        no_way,
+        work: nodes / NODES_A_UNIT as f64,
+        secs: if searched > 0.0 {
+            secs * nodes / searched
+        } else {
+            0.0
+        },
+    })
+}
+
 /// The board of `design` without the fills that it took as copper (its zones from
 /// `own_zones` on, which are among the fills that count), and the fills that count, each with
 /// its net.
@@ -1376,7 +1582,7 @@ pub(crate) fn route(
     let meter = if work_limit == u64::MAX {
         WorkMeter::default()
     } else {
-        WorkMeter::limited(work_limit)
+        WorkMeter::limited(work_limit.saturating_mul(NODES_A_UNIT))
     };
     let wall = run.part_left();
     let mut stage_end = Limit::share(wall, start, &meter, 0, 1.0);
@@ -1386,7 +1592,7 @@ pub(crate) fn route(
     let phase_end = Mutex::new(negotiate_limit.clone());
     let stop = || flag.load(Ordering::Relaxed) || phase_end.lock().expect("deadline").passed();
     let charge = |meter: &WorkMeter| {
-        run.charge(meter.used());
+        run.charge(meter.used() / NODES_A_UNIT);
     };
 
     // The fills are those of the board with the run's own copper on it, its ways out of the
@@ -1458,44 +1664,14 @@ pub(crate) fn route(
 
     // Static index for access stubs and exact checks.
     let reach = reach(rb);
-    let mut index = Index::new(
-        rb.bbox.expand(pitch * 4.0),
-        (pitch * 8.0).max(500_000.0),
-        reach,
-    );
-    for (i, ob) in rb.obstacles.iter().enumerate() {
-        index.insert(Item::Static(i as u32), ob.bbox);
-    }
-    {
-        let ck = Checker { rb, index: &index };
-        let mut cache: BTreeMap<usize, Vec<Access>> = BTreeMap::new();
-        for r in &mut routes {
-            for island in &mut r.islands {
-                for &t in &island.terms {
-                    let acc = cache.entry(t).or_insert_with(|| eng.access(t, &ck));
-                    island.access.extend(acc.iter().cloned());
-                }
-            }
-        }
-    }
+    let index = static_index(rb, pitch);
+    give_access(&eng, &Checker { rb, index: &index }, &mut routes);
     if run.poll() || stop() {
         charge(&meter);
         return Err(NoWhole::Not);
     }
     let total_conns: usize = routes.iter().map(|r| r.conns.len()).sum();
     let threads = options.threads.max(1);
-    // The connections that have no way on this grid whatever the other nets do, told before
-    // anything is routed: with too many of them the rounds are given up here, and the first
-    // round's time is not spent to find it out.
-    let no_way: usize = routes
-        .iter()
-        .map(|r| (0..r.conns.len()).filter(|&ci| eng.no_way(r, ci)).count())
-        .sum();
-    if no_way * NO_WAY > total_conns {
-        charge(&meter);
-        return Err(NoWhole::NoRoom);
-    }
-
     // ---- negotiated congestion ----
     let mut rng = Rng(options.seed.unwrap_or(0) ^ 0x5EED_CAD1_AB00_0000);
     let mut pres = 0.6f32;
@@ -1558,29 +1734,6 @@ pub(crate) fn route(
             }
             let total: usize = net_conf.iter().sum();
             any_round |= !cut;
-            // The first round says what the rounds take, and what of the board this grid
-            // reaches: with less than that in the stage's share, or with too many connections
-            // that have no way on the grid whatever the other nets do, the rounds are given up
-            // here, for a negotiation that has room.
-            if iterations == 1 && !cut {
-                let took = start.elapsed().as_secs_f64();
-                let nodes = meter.used() as f64;
-                let no_way: usize = routes
-                    .iter()
-                    .map(|r| {
-                        r.failed
-                            .iter()
-                            .filter(|f| matches!(f, Some(FailKind::Static | FailKind::NoAccess)))
-                            .count()
-                    })
-                    .sum();
-                let short = wall.is_some_and(|w| ROOM * took > w.as_secs_f64())
-                    || meter.limit().is_some_and(|l| ROOM * nodes > l as f64);
-                if short || no_way * NO_WAY > total_conns {
-                    charge(&meter);
-                    return Err(NoWhole::NoRoom);
-                }
-            }
             if best.as_ref().is_none_or(|b| total < b.0) {
                 best = Some((
                     total,
@@ -1609,7 +1762,11 @@ pub(crate) fn route(
                     pause = n > 0 && n * POUR_PAUSE >= total_conns;
                 }
             }
-            let stale = it - best_it >= STAGNATION;
+            // Or the price of a shared point is at its most and few are left: the rounds after
+            // that move the same few nets round each other, and what they share is taken out
+            // a wire at a time when the rounds end, here or there.
+            let stale =
+                it - best_it >= STAGNATION || (pres >= PRES_MAX && total * FEW <= total_conns);
             // Rounds that their share ends with few points still shared are near their end:
             // they have as much again of what the run has left, once.
             if (cut || stop())
@@ -1856,7 +2013,7 @@ pub(crate) fn route(
                 // A place of the terminal whose copper the end is on, a pad's or fixed copper
                 // of the net away from its ends; on a fill, of the plane where the net has
                 // one, else of the island's terminal.
-                let on = r.islands[island].terms.iter().copied().find(|&t| {
+                let (on_island, on) = copper_at(&r.islands, island, |t| {
                     let term = &rb.terminals[t];
                     term.layers >> eng.slots[s] & 1 == 1
                         && (term.shape.contains(P::of(at))
@@ -1875,7 +2032,8 @@ pub(crate) fn route(
                 let terminal = match of_pad {
                     Some(t) => Some(t),
                     None if on.is_none() && jobs[j].plane => Some(0),
-                    None => terminal_of(island),
+                    // Of the island whose copper it is on, if that is another's.
+                    None => terminal_of(on_island),
                 };
                 if let Some(terminal) = terminal
                     && !found
@@ -1911,4 +2069,31 @@ pub(crate) fn route(
         ended,
         capped,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Island, copper_at};
+
+    fn island(terms: &[usize]) -> Island {
+        Island {
+            terms: terms.to_vec(),
+            ..Island::default()
+        }
+    }
+
+    #[test]
+    fn a_route_s_end_is_of_the_island_whose_copper_it_is_on() {
+        let islands = [island(&[0, 1]), island(&[2]), island(&[3])];
+        // On a pad of the island that its connection names: that island's.
+        assert_eq!(copper_at(&islands, 0, |t| t == 1), (0, Some(1)));
+        // On a pad of another island, which the wires before joined to the one named: the
+        // other's, not the one named.
+        assert_eq!(copper_at(&islands, 0, |t| t == 2), (1, Some(2)));
+        assert_eq!(copper_at(&islands, 2, |t| t == 0), (0, Some(0)));
+        // On copper of both, the island named comes first.
+        assert_eq!(copper_at(&islands, 1, |t| t == 0 || t == 2), (1, Some(2)));
+        // On none: a place of the island named, with no terminal.
+        assert_eq!(copper_at(&islands, 1, |_| false), (1, None));
+    }
 }

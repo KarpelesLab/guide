@@ -608,28 +608,50 @@ pub(crate) fn run_from(
     let run = Run::new(control, options.work_budget);
     run.phase(Phase::Prepare);
     run.poll();
-    let (mut routed, mut failed, mut counted, narrow, apart) =
+    // The run with the rounds of cadlab's own router, if it is asked for and they take the
+    // board; or the run with this crate's own, its necks, its escapes and its negotiation,
+    // from its start: on the design without the zones that only the others plan on
+    // ([`Zones::unfilled_from`](super::Zones)), so that a board given up is routed as one
+    // that the others were never asked for.
+    let first = if options.rounds == super::Rounds::Native {
         match route_all(design, earlier, options, &run) {
-            Ok(outcome) => outcome,
+            Ok(outcome) => Some(outcome),
             Err(Halt::Error(e)) => return Err(e),
-            // The same run from its start, with this crate's own rounds: its necks, its
-            // escapes and its negotiation, in what the first round of the others left of
-            // the time and the work.
-            Err(Halt::Again) => {
-                let own = RouteOptions {
-                    rounds: super::Rounds::Own,
-                    ..*options
-                };
-                match route_all(design, earlier, &own, &run) {
-                    Ok(mut outcome) => {
-                        outcome.0.stats.rounds_given_up = true;
-                        outcome
-                    }
-                    Err(Halt::Error(e)) => return Err(e),
-                    Err(Halt::Again) => unreachable!("only the rounds asked for give a board up"),
+            Err(Halt::Again) => None,
+        }
+    } else {
+        None
+    };
+    let own_options = RouteOptions {
+        rounds: super::Rounds::Own,
+        ..*options
+    };
+    let own_design;
+    let (design, options, outcome) = match first {
+        Some(outcome) => (design, options, outcome),
+        None => {
+            let design = if design.zones.filled() < design.zones.zones.len() {
+                let mut d = design.clone();
+                let kept = d.zones.filled();
+                d.zones.zones.truncate(kept);
+                d.zones.fills.retain(|f| f.zone < kept);
+                d.zones.unfilled_from = None;
+                own_design = d;
+                &own_design
+            } else {
+                design
+            };
+            match route_all(design, earlier, &own_options, &run) {
+                Ok(mut outcome) => {
+                    outcome.0.stats.rounds_given_up = options.rounds == super::Rounds::Native;
+                    (design, &own_options, outcome)
                 }
+                Err(Halt::Error(e)) => return Err(e),
+                Err(Halt::Again) => unreachable!("only the rounds asked for give a board up"),
             }
-        };
+        }
+    };
+    let (mut routed, mut failed, mut counted, narrow, apart) = outcome;
     if options.tune_lengths && !design.lengths.is_empty() && !run.poll() {
         run.phase(Phase::Lengths);
         tune::run(design, &mut routed, options).map_err(RouteError::Geometry)?;
@@ -1557,6 +1579,37 @@ fn route_all<'a>(
         with_escapes = d;
         &with_escapes
     };
+    // The rounds of cadlab's own router, where they are asked for, are given up here, before
+    // anything of the run is planned for them but their own ways out: on a board that they
+    // have no room for in their share, or whose pads their grid does not reach, the run
+    // begins again as one of this crate's own, and is that run from then on.
+    if options.whole
+        && options.rounds == super::Rounds::Native
+        && taken_back.is_empty()
+        && !run.poll()
+    {
+        let fills = rounds_fills(
+            design,
+            design.zones.fills.clone(),
+            &is_plane,
+            options.outer_pours,
+        );
+        let counted = |fills: Vec<Fill>| fills;
+        let pours = super::rounds::Pours {
+            fills: &fills,
+            own_zones: original.board.zones.len(),
+            is_plane: &is_plane,
+            counted: &counted,
+            spoke: &|_, _| (0, 0.0),
+        };
+        let look = super::rounds::look(design, &pours);
+        let share = options.whole_share.clamp(0.0, 1.0);
+        let work = run.work_left().map(|w| w as f64 * share);
+        let time = run.left().map(|t| t.as_secs_f64() * share);
+        if look.is_none_or(|l| l.gives_up(work, time, options.threads)) {
+            return Err(Halt::Again);
+        }
+    }
     // Pairs first, if asked, side by side on the board as it is before anything else is
     // routed, as copper of their nets that the rest completes, and that only the passes on
     // the finer lattice may move.
@@ -2058,14 +2111,9 @@ fn route_all<'a>(
         // with two layers a channel has to hold every track that fits it, and with more
         // the rounds that the coarser grid has the time for count for more.
         let mut coarse = rules.layer_count() > 2 && !native;
-        // The rounds of cadlab's own router, where they are asked for: if their first round
-        // says that the share has no room for them, or that their grid does not reach the
-        // board's pads, the run begins again as one of this crate's own.
+        // The rounds of cadlab's own router, where they are asked for and the look at the
+        // board before its escapes did not give them up.
         let first = attempt(options, coarse, 2);
-        if native && matches!(first, Err(whole::NoWhole::NoRoom)) && !run.poll() {
-            run.resume(was);
-            return Err(Halt::Again);
-        }
         let mut whole = match first {
             Err(whole::NoWhole::NoRoom) if !coarse && !run.poll() => {
                 coarse = true;

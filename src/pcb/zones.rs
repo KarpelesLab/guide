@@ -190,6 +190,25 @@ pub struct Zones {
     /// against every pad and track of the board, each time the board was given. `None`,
     /// the default, has every fill measured against everything.
     pub fills_clear_of: Option<[usize; 3]>,
+    /// From which of [`zones`](Zones::zones) on the host's fill left the zones with no
+    /// copper on the board as it is given, a pour that reaches no pad of its net yet: a
+    /// host that fills its zones itself tells them here, after the others, so that its
+    /// fill around the routes ([`RunControl::refill`](super::RunControl)) can name them
+    /// once a via of the run has joined one. Only the rounds of
+    /// [`Rounds::Native`](super::Rounds) plan on those: a run with this crate's own
+    /// rounds, from its start or because the others gave the board up, is the run of the
+    /// design without them, to the track. `None`, the default: every zone is a zone to
+    /// every run.
+    pub unfilled_from: Option<usize>,
+}
+
+impl Zones {
+    /// How many of the zones a run with this crate's own rounds has
+    /// ([`Zones::unfilled_from`]).
+    pub(crate) fn filled(&self) -> usize {
+        self.unfilled_from
+            .map_or(self.zones.len(), |n| n.min(self.zones.len()))
+    }
 }
 
 /// One spoke of a thermal relief that the host's fill will make: a strip of copper from a

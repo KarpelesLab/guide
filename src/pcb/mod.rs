@@ -712,6 +712,34 @@ pub struct RouteOptions {
     /// none. A host that fills its zones itself can give its own fill around the routes
     /// to tell them by ([`RunControl::refill`]).
     pub pour_cuts: bool,
+    /// Whether a net with a plane is planned on its pours of the outer layers too. The
+    /// default is `false`: a net with a fill on an inner layer is planned on its fills of
+    /// inner layers alone, and each of its pads that no plane reaches has a stub to one.
+    /// With this, the pads that a pour of an outer layer joins before anything is routed
+    /// are joined, as they are for a net with no plane, and need one stub for all of
+    /// them, or none where a pad with a hole is among them. Routes of other nets cut
+    /// such a pour: it is for a run that [tells the pads cut off](RouteOptions::pour_cuts)
+    /// and has the routes [made legal first](RouteOptions::legal_pours).
+    pub outer_pours: bool,
+    /// Whether the negotiation of [`whole`](RouteOptions::whole) makes its routes legal
+    /// before it tells the pads that they cut off their fills. The default is `false`:
+    /// the pads cut off are told by the routes of the round that the rounds end with,
+    /// whatever is still shared in them. With this, in the order of cadlab's own router:
+    /// when the rounds end, at nothing shared, at twelve rounds with none better or at
+    /// their most, the routes of the best round are made legal, what is still shared
+    /// taken out and routed again where nothing is claimed; the pours are filled around
+    /// that ([`RunControl::refill`]), and the nets whose pads the fill no longer joins
+    /// are planned again with them. The rounds then go on for those, the other nets
+    /// making room, from the routes of the best round as they were: a net that was
+    /// taken out and found no way where nothing is claimed is still in them. When those
+    /// rounds end the routes are made legal and the pours filled again: with more
+    /// connections open on that board than on the legal one that the nets were planned
+    /// again from, the routes go back to that one ([`Stats::pours_back`]), and what is
+    /// cut off is left to the passes. With [`outer_pours`](RouteOptions::outer_pours),
+    /// a negotiation that is still at its first rounds late in its share looks at what
+    /// its routes cut off, once, and ends those rounds there if that is a piece of fill
+    /// for every hundred connections or more.
+    pub legal_pours: bool,
     /// Whether a run with a [budget](RouteOptions::work_budget) or a deadline settles what
     /// its passes of rip-up leave open. The default is `true`. Rip-up takes a net out for
     /// another and routes it again later, on a board that has changed by then, and a pass
@@ -893,6 +921,8 @@ impl Default for RouteOptions {
             fanout_via: None,
             row_fanout: false,
             pour_cuts: true,
+            outer_pours: false,
+            legal_pours: false,
             settle: true,
             negotiate: true,
             negotiate_places: false,
@@ -969,6 +999,10 @@ pub struct Stats {
     /// How many times the host gave its own fill of the zones around the routes, to tell
     /// those pieces by ([`RunControl::refill`]).
     pub refills: usize,
+    /// How many times a negotiation's routes went back to what they were before nets were
+    /// planned again for their pours, for having more connections open after it
+    /// ([`RouteOptions::legal_pours`]).
+    pub pours_back: usize,
     /// The vias that the host's own fill around the routes made needless, and that were
     /// taken out again with the tracks that led to them ([`RunControl::refill`],
     /// [`needless`]).

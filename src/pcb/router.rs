@@ -912,8 +912,9 @@ fn join_planes(
 }
 
 /// The fills of a net that its stubs and grouping take as connected before routing: its
-/// fills on inner layers, its planes, or if it has none, all of them.
-fn planned_fills(design: &Design, fills: &[Fill], is_plane: &[bool]) -> Vec<Fill> {
+/// fills on inner layers, its planes, or if it has none, or with `outer`
+/// ([`RouteOptions::outer_pours`]), all of them.
+fn planned_fills(design: &Design, fills: &[Fill], is_plane: &[bool], outer: bool) -> Vec<Fill> {
     let layers = design.rules.layer_count();
     let net_of = |f: &Fill| design.zones.zones.get(f.zone).and_then(|z| z.net);
     let fills: Vec<&Fill> = fills
@@ -926,7 +927,8 @@ fn planned_fills(design: &Design, fills: &[Fill], is_plane: &[bool]) -> Vec<Fill
         .filter(|f| {
             let net = net_of(f);
             net.is_some()
-                && (planes::inner(f.layer, layers)
+                && (outer
+                    || planes::inner(f.layer, layers)
                     || !fills
                         .iter()
                         .any(|g| net_of(g) == net && planes::inner(g.layer, layers)))
@@ -1506,7 +1508,7 @@ fn route_all<'a>(
                 fills
             }
         };
-        planned = planned_fills(design, &fills, &is_plane);
+        planned = planned_fills(design, &fills, &is_plane, options.outer_pours);
         first_fills = fills;
     }
     let plane_pieces = planes::pieces_by_net(design, &planned);
@@ -2019,6 +2021,7 @@ fn route_all<'a>(
             stats.whole_made.1 = w.vias_saved;
             stats.pour_cuts += w.pour_cuts;
             stats.refills += w.refills;
+            stats.pours_back += w.pours_back;
             for (k, sites) in &w.sites {
                 jobs[*k].ctx = pours::with_sites(&jobs[*k].ctx, sites, pitch);
             }

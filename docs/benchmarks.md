@@ -5911,6 +5911,137 @@ at a time.
   are what it has for the balls left shut in, and no other way to those was tried.
 - More than one thread, or a deadline: the comparison is by nodes.
 
+## PCB routing with the pours filled around legal routes
+
+What was built beside [the change below](#pcb-routing-with-a-pour-left-whole), after 0.0.30,
+for the largest difference that the first round of the two routers has
+([below](#the-first-round-of-both-routers-connection-by-connection)): cadlab's router takes
+the pads that a pour of an outer layer joins as joined, and this crate plans a net with a
+plane on its inner planes alone. Planned on every pour it lost twice, and the reading was
+that the pads cut off are told on routes that are not legal. So the order of cadlab's
+router was built, `RouteOptions::legal_pours`, and the planning,
+`RouteOptions::outer_pours`. **Both are off by default, and cadlab sets neither: with the
+order built, planning on outer pours still loses, and the order alone gains nothing.**
+Measured on 2026-11-23 through cadlab's adapter and its `route_bench`, with a checkout of
+this crate and switches and prints that are in no release; with both off the nine boards at
+40 million nodes and the seven at 150 million route to the same connections open and the
+same vias as 0.0.30, in every order.
+
+### Stage by stage
+
+`tinytapeout-demo`, the default order, 150 million nodes, one thread; vias and mm of track
+of the routes as they stand. cadlab's router beside them, one run at 60 s (its decision
+D122): 255 vias and 4686 mm as its rounds end, 251 and 4615 made legal, 287 and 4899 after
+its rounds for the pours, 248 and 5013 after its pass for fewer vias, 244 and 4947 at the
+end, with 19 connections open.
+
+| stage | 0.0.30 | `legal_pours` | `legal_pours` and `outer_pours` |
+|---|---|---|---|
+| connections planned, vias and track after the first round | 458; 248, 4994 | 458; 248, 4994 | 366; 178, 4843 |
+| first time the rounds end: round, points shared, connections open on the fill of the legal routes, pieces cut off | 31, 32, not counted | 31, 32, 28, 8 | 40, 30, 61, 35 |
+| second | | 60, 27, 14, 1 | 64, 65, 22, 6 |
+| third | | 73, 35, 14, 1 | 98, 31, 24 for 22: back to the second |
+| fourth | | 96, 31, 19 for 14: back to the third | |
+| the negotiation's routes, after its pass for fewer vias | 109 rounds; 350, 5564 | 96 rounds; 310, 5429 | 98 rounds; 250, 5307 |
+| given to the passes: vias, of them on nets with planes; connections apart | 339, 110; 10 | 299, 109; 12 | 245, 59; 14 |
+| after the passes: vias, track; rip-ups | 365, 5774; 44 | 372, 5868; 82 | 298, 5695; 59 |
+| after each net again and the stubs to the fills; pieces cut off told in the run | 337, 5631; 26 | 351, 5688; 14 | 293, 5668; 66 |
+| the first run ends | 326, 5559 | 330, 5584 | 285, 5571 |
+| the board, after cadlab's later runs | 270, 4918 mm, none open | 290, 5128 mm, none open | 282, 5193 mm, none open |
+
+Planned on outer pours the nets with planes begin with 59 vias for 110, and the board is
+ahead by 41 vias as the first run ends. cadlab's run for shorter ways then finds 204 mm
+and 13 vias on the board of the first column and 7.5 mm and no via on that of the third,
+102 nets left as they were, and the fill of the routed board makes 44 of the first
+column's stub vias needless and 12 of the third's. What the planning saves in stubs the
+end of the run takes out anyway, and what it costs in track stays. `buspirate5-rev10` the
+same way: 169 vias after the first round for 269, 62 vias on nets with planes given to
+the passes for 165, of which the fill makes 12 needless for 69; 307 vias and 3028 mm at
+the end for 317 and 2996 mm, and 19 pads short of two spokes for 6.
+
+### What it ends with
+
+At budgets of nodes, one thread (connections open by order):
+
+| | 0.0.30 | `legal_pours` | both |
+|---|---|---|---|
+| nine boards, three orders, 40 million | 583 | 582 | 606 |
+| `tinytapeout-demo` | 3, 7, 4 | 5, 7, 4 | 8, 23, 23 |
+| `corne-cherry` | 36, 28, 22 | 36, 28, 22 | 31, 29, 20 |
+| `lumenpnp-mobo` | 0, 0, 0 | 0, 0, 0 | 0, 6, 0 |
+| `cynthion` | 8, 8, 8 | 8, 8, 8 | 9, 8, 8 |
+| `glasgow-revC3` | 12, 15, 12 | 12, 15, 9 | 13, 11, 9 |
+| `glasgow-revD1` | 145, 136, 130 | 145, 136, 130 | 150, 119, 130 |
+| seven boards, two orders, 150 million | 43 | 39 | not measured |
+
+`legal_pours` at 150 million: `tinytapeout-demo` none and none open for none and 1, with
+290 and 272 vias for 270 and 332; `glasgow-revC3` 4 and 5 for 7 and 5, with 413 and 407
+vias for 409 and 384; `lumenpnp-mobo` 343 and 336 vias for 334 and 336; `cynthion` 422
+and 418 for 426 and 410; `buspirate5-rev10` 317 and 319 for 316 and 317; the others as
+they were. `tinytapeout-demo` over eight orders at 150 million, on a build with the
+switches: none open in any for one in one, 289.5 vias and 5016 mm for 292.5 and 5050
+(medians), 38 pads short of two spokes in all for 47.
+
+At 60 s on three threads, one run of each side by side, four orders, `tinytapeout-demo`
+eight (the load 4.3 to 10.7, median 6.0); medians of the vias and the track:
+
+| board | 0.0.30: open; vias; track, mm; pads short of two spokes | `legal_pours` |
+|---|---|---|
+| `corne-cherry` | 7, 0, 1, 1; 434; 7565; 6 | 5, 0, 1, 2; 429; 7565; 6 |
+| `tinytapeout-demo` | 0, 1, 0, 0, 0, 0, 0, 4; 285.5; 5054; 46 | 0, 0, 0, 1, 1, 0, 0, 0; 293; 5179; 39 |
+| `buspirate5-rev10` | 0, 0, 0, 0; 308.5; 3018; 33 | 0, 0, 0, 0; 309; 3027; 37 |
+| `glasgow-revC3` | 9, 6, 9, 8; 403.5; 3663; 0 | 7, 8, 8, 6; 411.5; 3756; 0 |
+| `glasgow-revD1` | 17, 14, 12, 12; 1169; 10756; 50 | 17, 16, 7, 10; 1182; 10747; 50 |
+| `lumenpnp-mobo` | 0, 0, 0, 0; 335; 5407; 0 | 1, 0, 0, 0; 335; 5407; 0 |
+| `cynthion` | 8, 8, 8, 8; 417; 3069; 4, in 40 to 45 s | 8, 8, 8, 8; 410.5; 3055; 4, in 50 to 53 s |
+
+So at 60 s `legal_pours` has 2.6 % more vias and 2.5 % more track on `tinytapeout-demo`,
+2.5 % more track on `glasgow-revC3`, a connection open in one order of `lumenpnp-mobo`
+and 8 to 10 s more on `cynthion`, for a few connections on the two glasgows and
+`tinytapeout-demo` that the same code moves from one measurement to the next. No pad of
+any board has no spoke with it.
+
+Both, beside cadlab's router in the period after (the load 5.5 to 11.6, median 7.4):
+`glasgow-revD1` 42, 49, 71 and 54 connections open, where 0.0.30 has 12 to 17, with 1131
+vias and 10187 mm; in the one run looked at its rounds are at their eleventh at 0.75 of
+their share with 551 points shared and 64 pieces of fill cut off, and making those
+routes legal takes what is left of the share. `lumenpnp-mobo` 0, 6, 0 and 0 open;
+`cynthion` 10, 8, 10 and 8; `tinytapeout-demo` none open in eight orders with 296.5 vias
+and 5221 mm; `buspirate5-rev10` 305 vias and 3074 mm with 51 pads short of two spokes;
+`glasgow-revC3` 419 vias and 3840 mm; **and pads with no spoke**: `cynthion` 2 in one
+order, `glasgow-revD1` 1 in each of three, where 0.0.30 has none on any board.
+
+### What was tried and not kept
+
+`tinytapeout-demo` at 150 million nodes over eight orders unless said, on builds with a
+switch for each.
+
+- *The rounds going on from the legal routes*, as cadlab's router has it: a net taken out
+  that found no way where nothing is claimed has no round again; 16 connections apart as
+  the passes begin for 10 and 202 rip-ups for 44 in the default order, 291 vias for 270.
+  Over the eight orders 292.5 vias and 5047 mm with 36 pads short, none open. With
+  `outer_pours`: 308.5 vias, 5310 mm, 57 pads short, one open.
+- *The nets that making the routes legal left open routed in the rounds for the pours
+  too*: with `outer_pours` 285 vias, 5238 mm, 4 open over the eight and a pad with no
+  spoke; without, 292 vias and 5027 mm.
+- *The pass for fewer vias before each fill*, as cadlab's router has its own before its
+  last rounds for the pours: with `outer_pours` 295.5 vias, 5186 mm and 70 pads short.
+- *`outer_pours` with the pads cut off told on the routes as they are*, 0.0.30's order:
+  304.5 vias, 5177 mm, 2 open, 63 pads short; `buspirate5-rev10` 319.5 vias over four
+  orders for 309.5, one connection open.
+- *No look at the pours late in the share*: with `outer_pours` and the rounds going on
+  from the legal routes, `tinytapeout-demo` at 40 million nodes 27, 24 and 33 open; with
+  the look 26, 15 and 10, and as released 8, 23 and 23.
+
+### What this does not show
+
+Why the routes of the other nets are longer once the pours are terminals: 4434 mm for the
+nets with no zone on the board of the first column and 4653 mm on one planned on outer
+pours, with 205 and 216 vias (one order each). cadlab's router lays those nets through
+the same pours and ends with less track; its rounds are at half the pitch, and its pours
+are cells that a route may end on anywhere near, where a net here has eight places beside
+each pad cut off. Neither was changed. `outer_pours` at 150 million nodes as released,
+the generated boards, and more than one period at 60 s were not measured.
 ## PCB routing with a pour left whole
 
 What was changed after [the release below](#pcb-routing-with-a-pads-last-spoke-kept),

@@ -1717,6 +1717,143 @@ mod tests {
     }
 
     #[test]
+    fn the_connections_open_on_the_fills_count_the_pads_cut_off() {
+        let d = strip();
+        let options = RouteOptions::default();
+        let fills = fill_zones(&d.board, &d).unwrap();
+        let mut grouped = d.clone();
+        grouped
+            .board
+            .zones
+            .extend(fills.iter().map(|f| f.to_zone(&d)));
+        let pieces = planes::pieces_by_net(&d, &fills);
+        let mut world = World::new(
+            &d.board,
+            &d.rules,
+            &d.outline,
+            d.edge_clearance,
+            &d.obstacles,
+        )
+        .unwrap();
+        world.configure(&d, &options);
+        let pitch = router::pitch(&d, &options);
+        let jobs = router::jobs(&grouped, &world, pitch, &pieces, &[]);
+        let ground = jobs.iter().position(|j| j.ctx.net == NetId(1)).unwrap();
+        let other = jobs.iter().position(|j| j.ctx.net == NetId(2)).unwrap();
+        let bounds = Rect::new(Point::new(-5 * MM, -5 * MM), Point::new(25 * MM, 12 * MM));
+        let pours = Pours::plan(&d, &world, &fills, &jobs, bounds, pitch);
+        let open = |copper: &[Option<NetCopper>]| {
+            super::super::whole::open_on_fills(&world, &d, &jobs, &pours, copper, None, &[], pitch)
+        };
+        // Nothing routed: the pad off the strip is to be joined to it, and the two pads
+        // of the other net to each other; the strip joins its own two.
+        let mut copper: Vec<Option<NetCopper>> = vec![None; jobs.len()];
+        let (opens, plans) = open(&copper);
+        assert_eq!((opens[ground], opens[other]), (1, 1));
+        assert!(plans.is_empty());
+        // The other net routed across the strip: it has nothing open, and the strip's
+        // net one more, the pad behind the track, with the net planned again for it.
+        let mut c = NetCopper::default();
+        c.segs.push(Seg {
+            a: Point::new(12 * MM, -3 * MM),
+            b: Point::new(12 * MM, 7 * MM),
+            l: 0,
+        });
+        copper[other] = Some(c);
+        let (opens, plans) = open(&copper);
+        assert_eq!((opens[ground], opens[other]), (2, 0));
+        assert_eq!(plans.len(), 1);
+        assert_eq!((plans[0].0, plans[0].1.cut), (ground, 1));
+        // On the other layer the strip is whole, and the track joins no pad.
+        copper[other].as_mut().unwrap().segs[0].l = 1;
+        let (opens, plans) = open(&copper);
+        assert_eq!((opens[ground], opens[other]), (1, 1));
+        assert!(plans.is_empty());
+    }
+
+    #[test]
+    fn a_negotiation_that_makes_its_routes_legal_first_joins_the_pad_cut_off() {
+        let d = strip();
+        // Every net against every other at once, and the pads cut off told on the routes
+        // made legal.
+        let options = RouteOptions {
+            work_budget: Some(50_000_000),
+            join: false,
+            whole: true,
+            legal_pours: true,
+            ..RouteOptions::default()
+        };
+        let routed = route_checked(&d, &options);
+        assert!(routed.stats.pour_cuts >= 1, "{:?}", routed.stats);
+        assert_eq!(routed.stats.pours_back, 0);
+        assert!(routed.unrouted.is_empty(), "{:?}", routed.unrouted);
+        // The same on any number of threads.
+        let three = route_checked(
+            &d,
+            &RouteOptions {
+                threads: 3,
+                ..options
+            },
+        );
+        assert_eq!((three.tracks, three.vias), (routed.tracks, routed.vias));
+    }
+
+    #[test]
+    fn a_net_with_a_plane_is_planned_on_its_outer_pours_if_asked() {
+        use super::super::tests::design;
+        use super::super::{RunControl, Zones, route_with};
+        // Four layers. Net 1 has a plane on the second and a pour on the first, which
+        // joins two of its pads there; the third is beside the pour.
+        let pads = vec![
+            smd(3 * MM, 2 * MM, 1),
+            smd(8 * MM, 2 * MM, 1),
+            smd(6 * MM, 8 * MM, 1),
+        ];
+        let mut d = design(4, pads, 2);
+        let mut plane = zone(1, 1, 4 * MM);
+        plane.outline[1].x = 12 * MM;
+        plane.outline[2].x = 12 * MM;
+        plane.connection = super::super::ZoneConnection::Solid;
+        plane.plane = Some(true);
+        let mut pour = plane.clone();
+        pour.layers = crate::geom::LayerSet::EMPTY.with(crate::geom::LayerId(0));
+        d.zones = Zones {
+            zones: vec![plane, pour],
+            fills: vec![
+                piece(0, 1, (0, 12 * MM), (0, 4 * MM)),
+                piece(1, 0, (0, 12 * MM), (0, 4 * MM)),
+            ],
+            ..Zones::default()
+        };
+        let options = RouteOptions {
+            work_budget: Some(50_000_000),
+            join: false,
+            fills: false,
+            ..RouteOptions::default()
+        };
+        // Planned on the plane alone, each pad has its stub to it.
+        let inner = route_with(&d, &options, &RunControl::default()).unwrap();
+        assert_eq!(inner.vias.len(), 3, "{:?}", inner.stats);
+        assert!(inner.unrouted.is_empty(), "{:?}", inner.unrouted);
+        // On the pour too, the two pads in it are joined, and the third has a track to
+        // the pour on its own layer.
+        let outer = RouteOptions {
+            outer_pours: true,
+            ..options
+        };
+        let routed = route_with(&d, &outer, &RunControl::default()).unwrap();
+        assert_eq!(routed.vias.len(), 0, "{:?}", routed.stats);
+        assert!(!routed.tracks.is_empty());
+        assert!(
+            routed
+                .tracks
+                .iter()
+                .all(|t| t.layer == crate::geom::LayerId(0))
+        );
+        assert!(routed.unrouted.is_empty(), "{:?}", routed.unrouted);
+    }
+
+    #[test]
     fn a_pad_is_joined_by_the_spokes_that_its_host_gives_and_by_nothing_else() {
         // The strip's pad at 3 mm, with the two spokes that a host's fill makes for it,
         // to the left and to the right, and a spare one upwards.

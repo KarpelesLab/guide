@@ -141,6 +141,14 @@ const NEARLY: usize = 4;
 const POUR_ROUNDS: usize = 3;
 /// How many more rounds there may be for each of those times.
 const POUR_MORE: usize = 40;
+/// With the routes made legal before the pours are filled
+/// ([`RouteOptions::legal_pours`]): the share of its part at which a negotiation that is
+/// still going looks at what its routes cut off the pours, once, and ends its rounds
+/// there for the rounds that plan those again if that is a piece of fill for every this
+/// many connections or more. cadlab's router looks at 0.55 of its budget, where its
+/// rounds end at 0.75.
+const POUR_FIRST: f64 = 0.73;
+const POUR_PAUSE: usize = 100;
 
 /// What a via costs when the nets are routed again for fewer of them, and what a net may
 /// be longer for each one less: a tenth, and eight steps for each.
@@ -2322,6 +2330,9 @@ pub(crate) struct Whole {
     pub(crate) pour_cuts: usize,
     /// How many times the host gave its own fill for that.
     pub(crate) refills: usize,
+    /// How many times the routes went back to what they were before nets were planned
+    /// again for their pours, for having more connections open after it.
+    pub(crate) pours_back: usize,
     /// Whether the rounds ended on their own, and not with their share.
     pub(crate) ended: bool,
     /// Whether they ended at the most rounds that there are, with points still shared and
@@ -2487,6 +2498,268 @@ fn spanning(ctx: &NetCtx) -> (Vec<(usize, usize)>, i64) {
         last = t;
     }
     (conns, length)
+}
+
+/// Gives a net the terminals of `ctx`, the net planned again with the pads that are cut
+/// off its fill: where its routes may end, its connections, and the terminals that its
+/// wires end at now.
+fn plan_again(board: &Board, world: &World<'_>, net: &mut WNet, ctx: &NetCtx, sc: &mut Scratch) {
+    let layers = board.layers;
+    net.terms = vec![Vec::new(); ctx.terminals];
+    net.boxes = vec![Rect::default(); ctx.terminals];
+    let mut any = vec![false; ctx.terminals];
+    for pad in &ctx.pads {
+        let r = Rect::new(pad.center, pad.center);
+        net.boxes[pad.terminal] = if any[pad.terminal] {
+            net.boxes[pad.terminal].union(&r)
+        } else {
+            r
+        };
+        any[pad.terminal] = true;
+        for l in pad.layers.iter() {
+            let li = usize::from(l.0);
+            if li >= layers {
+                continue;
+            }
+            let found = board.access(
+                world,
+                net,
+                pad.center,
+                pad.bbox,
+                l,
+                ctx.widths[li],
+                &mut sc.near,
+            );
+            net.terms[pad.terminal].extend(found);
+        }
+    }
+    let (conns, length) = spanning(ctx);
+    net.dead = vec![false; conns.len()];
+    net.looked = vec![false; conns.len()];
+    net.conns = conns;
+    net.length = length;
+    // Its wires end at the terminals that their pads are of now.
+    let cells = board.grid.cells();
+    let at = |p: Point, l: usize| {
+        ctx.pads
+            .iter()
+            .find(|q| q.center == p && q.layers.contains(LayerId(l as u8)))
+            .map(|q| q.terminal)
+    };
+    for w in &mut net.wires {
+        if let (Some(_), Some(&n)) = (w.from, w.nodes.first()) {
+            let p = w.start.map_or_else(|| board.node_point(n), |s| s.0);
+            w.from = at(p, n as usize / cells);
+        }
+        if let (Some(_), Some(&n)) = (w.to, w.nodes.last()) {
+            let p = w.end.map_or_else(|| board.node_point(n), |s| s.0);
+            w.to = at(p, n as usize / cells);
+        }
+    }
+}
+
+/// The nodes that a search of a net may expand that routes it where nothing is claimed,
+/// by those that it took the last time it was routed, and those that the run has left.
+fn hard_nodes(run: &Run<'_>, took: u64) -> (u64, u64) {
+    let most = HARD_NODES.max(HARD_TIMES.saturating_mul(took));
+    let left = run.limits(u64::MAX).max_expansions;
+    (left.min(most), left)
+}
+
+/// Makes the routes legal on the grid: what is still shared is taken out, the net with
+/// the most first, and routed again where nothing is claimed, the shortest net first. A
+/// net with no way there keeps what it had that is in no other's way. Returns how many
+/// nets were taken out.
+fn legalise(
+    board: &Board,
+    world: &World<'_>,
+    nets: &mut [WNet],
+    sc: &mut Scratch,
+    run: &Run<'_>,
+    taken: &[u64],
+) -> usize {
+    let mut out: Vec<usize> = Vec::new();
+    loop {
+        let conf: Vec<usize> = nets.iter().map(|n| board.conflicts(n).len()).collect();
+        let Some(worst) = (0..nets.len())
+            .filter(|&i| conf[i] > 0)
+            .max_by_key(|&i| (conf[i], nets[i].length, core::cmp::Reverse(i)))
+        else {
+            break;
+        };
+        // Its wires that are in another's way go, and those that hung on them.
+        let keep: Vec<bool> = nets[worst]
+            .wires
+            .iter()
+            .map(|w| {
+                let mut c = Vec::new();
+                board.wire_conflicts(&nets[worst], w, &mut c);
+                c.is_empty()
+            })
+            .collect();
+        board.uncommit(&mut nets[worst]);
+        let old = core::mem::take(&mut nets[worst].wires);
+        nets[worst].wires = kept_wires(nets[worst].terms.len(), old, &keep)
+            .into_iter()
+            .map(|(_, w)| w)
+            .collect();
+        board.commit(&mut nets[worst]);
+        if !out.contains(&worst) {
+            out.push(worst);
+        }
+    }
+    let taken_out = out.len();
+    out.sort_by_key(|&i| (nets[i].length, i));
+    for i in out {
+        if run.ending() {
+            break;
+        }
+        let before = nets[i].wires.clone();
+        let all = vec![true; before.len()];
+        board.uncommit(&mut nets[i]);
+        let (limit, left) = hard_nodes(run, taken[i]);
+        let ctl = Ctl {
+            run: Some(run),
+            flag: run.flag(),
+            limit,
+        };
+        let via = nets[i].via;
+        let (res, pops) = board.route_net(
+            world,
+            sc,
+            &mut nets[i],
+            Mode::Hard,
+            via,
+            &ctl,
+            Some(&all),
+            None,
+        );
+        if res.is_err() {
+            nets[i].wires = before;
+        }
+        board.commit(&mut nets[i]);
+        run.charge(pops);
+        // Stopped by its own number of nodes, the net is left to the passes.
+        if run.poll() || (res.is_err() && pops >= left) {
+            break;
+        }
+    }
+    taken_out
+}
+
+/// How many connections the nets have open with their routes as they are and the pours
+/// filled around them, and by job with a fill, the net planned again if pads are cut off
+/// it: what the host's fill `real` joins is joined, and a route that ends on a piece of
+/// fill that is cut off joins nothing but that piece.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn open_on_fills(
+    world: &World<'_>,
+    design: &Design,
+    jobs: &[Job],
+    pours: &Pours,
+    copper: &[Option<NetCopper>],
+    real: Option<&super::pours::Refilled>,
+    sites: &[(usize, Vec<TermPad>)],
+    pitch: i64,
+) -> (Vec<usize>, Vec<(usize, super::pours::Rejoin)>) {
+    let planned: Vec<usize> = pours.jobs().collect();
+    let empty = NetCopper::default();
+    let mut open = Vec::with_capacity(jobs.len());
+    let mut plans = Vec::new();
+    for (k, job) in jobs.iter().enumerate() {
+        let c = copper.get(k).and_then(Option::as_ref).unwrap_or(&empty);
+        let given = sites
+            .iter()
+            .find(|(j, _)| *j == k)
+            .map_or(&[][..], |(_, s)| s.as_slice());
+        let again = planned
+            .contains(&k)
+            .then(|| pours.rejoin(world, design, jobs, copper, k, pitch, real, given))
+            .flatten();
+        let with_given;
+        let ctx = match &again {
+            Some(a) => &a.ctx,
+            None if given.is_empty() => &job.ctx,
+            None => {
+                with_given = super::pours::with_sites(&job.ctx, given, pitch);
+                &with_given
+            }
+        };
+        let mut parts = c.pieces(ctx).terminals;
+        parts.sort_unstable();
+        parts.dedup();
+        open.push(parts.len().saturating_sub(1));
+        if let Some(a) = again {
+            plans.push((k, a));
+        }
+    }
+    (open, plans)
+}
+
+/// Fewer vias: each net with any again, with vias dear, kept if it has fewer and is
+/// little longer. After a negotiation that its share ended, the nets with the most
+/// first: the time may end before all of them have had their turn, and those are
+/// the ones with the most to lose.
+fn fewer_vias(
+    board: &Board,
+    world: &World<'_>,
+    nets: &mut [WNet],
+    sc: &mut Scratch,
+    run: &Run<'_>,
+    taken: &[u64],
+    cut: bool,
+) -> usize {
+    let grid = board.grid;
+    let mut vias_saved = 0;
+    let mut by_vias: Vec<(usize, usize)> = nets
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (board.measure(n).0, i))
+        .filter(|&(v, _)| v > 0)
+        .collect();
+    if cut {
+        by_vias.sort_by_key(|&(v, i)| (core::cmp::Reverse(v), i));
+    }
+    for (_, i) in by_vias {
+        if run.ending() {
+            break;
+        }
+        let net = &mut nets[i];
+        let (vias, len) = board.measure(net);
+        let old = net.wires.clone();
+        board.uncommit(net);
+        let ctl = Ctl {
+            run: Some(run),
+            flag: run.flag(),
+            limit: hard_nodes(run, taken[i]).0,
+        };
+        let (res, pops) = board.route_net(
+            world,
+            sc,
+            net,
+            Mode::Hard,
+            FEWER_VIA * board.via_scale,
+            &ctl,
+            None,
+            None,
+        );
+        let (nv, nl) = board.measure(net);
+        let ok = res.is_ok()
+            && net.wires.len() >= old.len()
+            && nv < vias
+            && nl <= len * (1.0 + FEWER_STRETCH) + FEWER_SLACK * grid.g as f64 * (vias - nv) as f64;
+        if ok {
+            vias_saved += vias - nv;
+        } else {
+            net.wires = old;
+        }
+        board.commit(net);
+        run.charge(pops);
+        if run.poll() {
+            break;
+        }
+    }
+    vias_saved
 }
 
 /// How many rounds a negotiation has at most: at twice the pitch, forty, as cadlab's
@@ -2856,6 +3129,21 @@ pub(crate) fn route<'r>(
     let mut pour_rounds = 0;
     let mut pour_cuts = 0;
     let mut refills = 0;
+    // With the routes made legal before the pours are filled: whether that goes on, the
+    // legal routes that the nets were last planned again from, with the connections that
+    // were open on that board, the nets taken out to make the routes legal that the
+    // rounds ended with, the points shared when routes were last made legal, and how
+    // often the routes went back.
+    let legal = options.legal_pours;
+    let mut pours_on = true;
+    type Sites = Vec<(usize, Vec<TermPad>)>;
+    let mut pending: Option<(usize, Vec<WNet>, Sites)> = None;
+    let mut early_out = 0;
+    let mut early_shared: Option<usize> = None;
+    let mut pours_back = 0;
+    // Whether a negotiation still going late in its share has looked at its pours: one
+    // that plans no net on more pours than before has nothing more cut off for it.
+    let mut mid_checked = !options.outer_pours;
     let mut sites: Vec<(usize, Vec<TermPad>)> = Vec::new();
     // What the first round took, in time and in nodes, once it has ended.
     let mut first_round: Option<(std::time::Duration, u64)> = None;
@@ -3110,12 +3398,145 @@ pub(crate) fn route<'r>(
                 best = Some((total, nets.iter().map(|n| n.wires.clone()).collect()));
                 best_at = it;
             }
-            if total == 0 || cut || it - best_at >= STALE {
+            // With the routes made legal before the pours are filled, the rounds that
+            // end at their most have their pours looked at as well.
+            let at_most =
+                legal && pours_on && pours.is_some() && it + 1 >= most_rounds(coarse, pour_rounds);
+            // And those of a negotiation that is still at its first rounds late in its
+            // share, if the routes as they are cut enough pads off: the rounds for them
+            // then have the rest of the share.
+            let mut pause = false;
+            if legal
+                && pours_on
+                && !mid_checked
+                && !cut
+                && total > 0
+                && pour_rounds == 0
+                && !at_most
+                && it - best_at < STALE
+                && let Some(pours) = pours
+            {
+                let by_time = run.part_left().map(|left| {
+                    let took = began.0.elapsed().as_secs_f64();
+                    took / (took + left.as_secs_f64()).max(1e-9)
+                });
+                let left = run.limits(u64::MAX).max_expansions;
+                let by_work = (left != u64::MAX).then(|| {
+                    let worked = (run.work() - began.1) as f64;
+                    worked / (worked + left as f64).max(1.0)
+                });
+                let used = by_time.into_iter().chain(by_work).fold(0.0, f64::max);
+                if used >= POUR_FIRST {
+                    mid_checked = true;
+                    let copper: Vec<Option<NetCopper>> = nets
+                        .iter()
+                        .map(|n| {
+                            (!n.wires.is_empty())
+                                .then(|| NetCopper::from_tree(&jobs[n.job].ctx, &tree_of(board, n)))
+                        })
+                        .collect();
+                    let off: usize = pours
+                        .jobs()
+                        .filter_map(|k| {
+                            pours.rejoin(world, design, jobs, &copper, k, pitch, None, &[])
+                        })
+                        .map(|again| again.cut)
+                        .sum();
+                    pause = off > 0 && off * POUR_PAUSE >= connections;
+                }
+            }
+            if total == 0 || cut || it - best_at >= STALE || at_most || pause {
                 // The pads that the routes as they are cut off their fills: their nets
                 // are planned again with them, and the rounds go on from the prices as
                 // they are, for the nets round them to make room.
                 let mut changed: Vec<usize> = Vec::new();
-                if let Some(pours) = pours.filter(|_| !cut && pour_rounds < POUR_ROUNDS) {
+                if legal {
+                    // In cadlab's router's order: the routes of the best round, made
+                    // legal, are what the board would get, and the pours are filled
+                    // around those. With more connections open than on the legal routes
+                    // that the nets were last planned again from, the routes go back
+                    // to those, and the pours are left to the passes.
+                    if let Some(pours) = pours.filter(|_| {
+                        !cut && pours_on && (pending.is_some() || pour_rounds < POUR_ROUNDS)
+                    }) {
+                        if let Some((least, wires)) = best.take() {
+                            early_shared = Some(least);
+                            if least < total {
+                                for net in &mut nets {
+                                    board.uncommit(net);
+                                }
+                                for (net, w) in nets.iter_mut().zip(wires) {
+                                    net.wires = w;
+                                    board.commit(net);
+                                }
+                            }
+                        }
+                        // The routes of the best round as they are: the rounds go on from
+                        // those, and a net that making them legal took out, and found no
+                        // way for where nothing is claimed, is in them as it was.
+                        let shared_routes: Vec<Vec<Wire>> =
+                            nets.iter().map(|n| n.wires.clone()).collect();
+                        early_out = legalise(board, world, &mut nets, &mut sc, run, &taken);
+                        let copper: Vec<Option<NetCopper>> = nets
+                            .iter()
+                            .map(|n| {
+                                (!n.wires.is_empty()).then(|| {
+                                    NetCopper::from_tree(&jobs[n.job].ctx, &tree_of(board, n))
+                                })
+                            })
+                            .collect();
+                        let real = (!run.poll() && pours.outer(design))
+                            .then(|| pours.refill(run, design, jobs, &copper, fixed, false))
+                            .flatten();
+                        refills += usize::from(real.is_some());
+                        let (opens, plans) = open_on_fills(
+                            world,
+                            design,
+                            jobs,
+                            pours,
+                            &copper,
+                            real.as_ref(),
+                            &sites,
+                            pitch,
+                        );
+                        let open: usize = opens.iter().sum();
+                        if let Some((before, old, old_sites)) = pending.take()
+                            && open > before
+                        {
+                            for net in &mut nets {
+                                board.uncommit(net);
+                            }
+                            nets = old;
+                            for net in &mut nets {
+                                net.keys.clear();
+                                board.commit(net);
+                            }
+                            sites = old_sites;
+                            pours_on = false;
+                            pours_back += 1;
+                        } else if pour_rounds < POUR_ROUNDS && !plans.is_empty() && !run.poll() {
+                            pending = Some((open, nets.clone(), sites.clone()));
+                            pour_rounds += 1;
+                            early_out = 0;
+                            for net in &mut nets {
+                                board.uncommit(net);
+                            }
+                            for (net, w) in nets.iter_mut().zip(shared_routes) {
+                                net.wires = w;
+                                board.commit(net);
+                            }
+                            for (k, again) in plans {
+                                pour_cuts += again.cut;
+                                plan_again(board, world, &mut nets[k], &again.ctx, &mut sc);
+                                match sites.iter_mut().find(|(j, _)| *j == k) {
+                                    Some((_, s)) => s.extend(again.sites),
+                                    None => sites.push((k, again.sites)),
+                                }
+                                changed.push(k);
+                            }
+                        }
+                    }
+                } else if let Some(pours) = pours.filter(|_| !cut && pour_rounds < POUR_ROUNDS) {
                     pour_rounds += 1;
                     let copper: Vec<Option<NetCopper>> = nets
                         .iter()
@@ -3153,59 +3574,7 @@ pub(crate) fn route<'r>(
                             continue;
                         };
                         pour_cuts += again.cut;
-                        let ctx = &again.ctx;
-                        let net = &mut nets[k];
-                        net.terms = vec![Vec::new(); ctx.terminals];
-                        net.boxes = vec![Rect::default(); ctx.terminals];
-                        let mut any = vec![false; ctx.terminals];
-                        for pad in &ctx.pads {
-                            let r = Rect::new(pad.center, pad.center);
-                            net.boxes[pad.terminal] = if any[pad.terminal] {
-                                net.boxes[pad.terminal].union(&r)
-                            } else {
-                                r
-                            };
-                            any[pad.terminal] = true;
-                            for l in pad.layers.iter() {
-                                let li = usize::from(l.0);
-                                if li >= layers {
-                                    continue;
-                                }
-                                let found = board.access(
-                                    world,
-                                    net,
-                                    pad.center,
-                                    pad.bbox,
-                                    l,
-                                    ctx.widths[li],
-                                    &mut sc.near,
-                                );
-                                net.terms[pad.terminal].extend(found);
-                            }
-                        }
-                        let (conns, length) = spanning(ctx);
-                        net.dead = vec![false; conns.len()];
-                        net.looked = vec![false; conns.len()];
-                        net.conns = conns;
-                        net.length = length;
-                        // Its wires end at the terminals that their pads are of now.
-                        let cells = board.grid.cells();
-                        let at = |p: Point, l: usize| {
-                            ctx.pads
-                                .iter()
-                                .find(|q| q.center == p && q.layers.contains(LayerId(l as u8)))
-                                .map(|q| q.terminal)
-                        };
-                        for w in &mut net.wires {
-                            if let (Some(_), Some(&n)) = (w.from, w.nodes.first()) {
-                                let p = w.start.map_or_else(|| board.node_point(n), |s| s.0);
-                                w.from = at(p, n as usize / cells);
-                            }
-                            if let (Some(_), Some(&n)) = (w.to, w.nodes.last()) {
-                                let p = w.end.map_or_else(|| board.node_point(n), |s| s.0);
-                                w.to = at(p, n as usize / cells);
-                            }
-                        }
+                        plan_again(board, world, &mut nets[k], &again.ctx, &mut sc);
                         match sites.iter_mut().find(|(j, _)| *j == k) {
                             Some((_, s)) => s.extend(again.sites),
                             None => sites.push((k, again.sites)),
@@ -3274,7 +3643,7 @@ pub(crate) fn route<'r>(
         return Err(NoWhole::NoRoom);
     }
     // Back to the best round.
-    let mut shared = 0;
+    let mut shared = early_shared.unwrap_or(0);
     if let Some((total, wires)) = best {
         shared = total;
         let now: usize = nets.iter().map(|n| board.conflicts(n).len()).sum();
@@ -3310,133 +3679,8 @@ pub(crate) fn route<'r>(
             });
         run.allow(time, nodes, was);
     }
-    // What is still shared is taken out, the net with the most first, and routed again
-    // where nothing is claimed.
-    let mut out: Vec<usize> = Vec::new();
-    loop {
-        let conf: Vec<usize> = nets.iter().map(|n| board.conflicts(n).len()).collect();
-        let Some(worst) = (0..nets.len())
-            .filter(|&i| conf[i] > 0)
-            .max_by_key(|&i| (conf[i], nets[i].length, core::cmp::Reverse(i)))
-        else {
-            break;
-        };
-        // Its wires that are in another's way go, and those that hung on them.
-        let keep: Vec<bool> = nets[worst]
-            .wires
-            .iter()
-            .map(|w| {
-                let mut c = Vec::new();
-                board.wire_conflicts(&nets[worst], w, &mut c);
-                c.is_empty()
-            })
-            .collect();
-        board.uncommit(&mut nets[worst]);
-        let old = core::mem::take(&mut nets[worst].wires);
-        nets[worst].wires = kept_wires(nets[worst].terms.len(), old, &keep)
-            .into_iter()
-            .map(|(_, w)| w)
-            .collect();
-        board.commit(&mut nets[worst]);
-        if !out.contains(&worst) {
-            out.push(worst);
-        }
-    }
-    let taken_out = out.len();
-    out.sort_by_key(|&i| (nets[i].length, i));
-    // The nodes that a search of a net may expand, and those that the run has left.
-    let nodes_for = |took: u64| -> (u64, u64) {
-        let most = HARD_NODES.max(HARD_TIMES.saturating_mul(took));
-        let left = run.limits(u64::MAX).max_expansions;
-        (left.min(most), left)
-    };
-    for i in out {
-        if run.ending() {
-            break;
-        }
-        let before = nets[i].wires.clone();
-        let all = vec![true; before.len()];
-        board.uncommit(&mut nets[i]);
-        let (limit, left) = nodes_for(taken[i]);
-        let ctl = Ctl {
-            run: Some(run),
-            flag: run.flag(),
-            limit,
-        };
-        let via = nets[i].via;
-        let (res, pops) = board.route_net(
-            world,
-            &mut sc,
-            &mut nets[i],
-            Mode::Hard,
-            via,
-            &ctl,
-            Some(&all),
-            None,
-        );
-        if res.is_err() {
-            nets[i].wires = before;
-        }
-        board.commit(&mut nets[i]);
-        run.charge(pops);
-        // Stopped by its own number of nodes, the net is left to the passes.
-        if run.poll() || (res.is_err() && pops >= left) {
-            break;
-        }
-    }
-    // Fewer vias: each net with any again, with vias dear, kept if it has fewer and is
-    // little longer. After a negotiation that its share ended, the nets with the most
-    // first: the time may end before all of them have had their turn, and those are
-    // the ones with the most to lose.
-    let mut vias_saved = 0;
-    let mut by_vias: Vec<(usize, usize)> = nets
-        .iter()
-        .enumerate()
-        .map(|(i, n)| (board.measure(n).0, i))
-        .filter(|&(v, _)| v > 0)
-        .collect();
-    if cut {
-        by_vias.sort_by_key(|&(v, i)| (core::cmp::Reverse(v), i));
-    }
-    for (_, i) in by_vias {
-        if run.ending() {
-            break;
-        }
-        let net = &mut nets[i];
-        let (vias, len) = board.measure(net);
-        let old = net.wires.clone();
-        board.uncommit(net);
-        let ctl = Ctl {
-            run: Some(run),
-            flag: run.flag(),
-            limit: nodes_for(taken[i]).0,
-        };
-        let (res, pops) = board.route_net(
-            world,
-            &mut sc,
-            net,
-            Mode::Hard,
-            FEWER_VIA * board.via_scale,
-            &ctl,
-            None,
-            None,
-        );
-        let (nv, nl) = board.measure(net);
-        let ok = res.is_ok()
-            && net.wires.len() >= old.len()
-            && nv < vias
-            && nl <= len * (1.0 + FEWER_STRETCH) + FEWER_SLACK * grid.g as f64 * (vias - nv) as f64;
-        if ok {
-            vias_saved += vias - nv;
-        } else {
-            net.wires = old;
-        }
-        board.commit(net);
-        run.charge(pops);
-        if run.poll() {
-            break;
-        }
-    }
+    let taken_out = early_out + legalise(&board, world, &mut nets, &mut sc, run, &taken);
+    let vias_saved = fewer_vias(&board, world, &mut nets, &mut sc, run, &taken, cut);
     // What each net ends with, as a tree.
     let mut trees: Vec<Option<Tree>> = vec![None; jobs.len()];
     for net in &nets {
@@ -3454,6 +3698,7 @@ pub(crate) fn route<'r>(
         sites,
         pour_cuts,
         refills,
+        pours_back,
         ended: !cut,
         capped,
     })

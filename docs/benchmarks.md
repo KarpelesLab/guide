@@ -5920,8 +5920,9 @@ rounds end where this crate's go on. So its negotiation itself is here now, whol
 first stage that a host can ask for: `RouteOptions::rounds`, `Rounds::Native`. **It ends
 its rounds as cadlab's router ends them, round for round on two boards of four and within
 a few vias in a hundred on the others. It is off by default, and cadlab leaves it off:
-with the passes after it a board has some 5 % fewer vias and 6 % less track where its
-rounds end in their share, and more connections open.** Measured on 2026-11-23 and
+with the passes after it `tinytapeout-demo` and `buspirate5-rev10` have some 5 % fewer
+vias and 6 % less track, the first with four to seven connections open for none or one
+and the second in half as much time again, and `lumenpnp-mobo` has more of both.** Measured on 2026-11-23 and
 2026-11-24 through cadlab's adapter and its `route_bench`, with a checkout of this crate
 in place of the release and prints in both routers that are in no release; three threads
 a run, the load that `uptime` gives 3.4 to 7.7 with two to four runs at a time.
@@ -6039,10 +6040,13 @@ build, two orders of each at a time; open by order, medians of the vias and the 
 | board | own rounds: open; vias; track; time | `Rounds::Native` |
 |---|---|---|
 | `tinytapeout-demo` | 0/1/0/0; 284.5; 5038 mm; 53 to 56 s | 5/5/4/7; 271.5; 4723 mm; 55 to 57 s |
-| `buspirate5-rev10` | 0/0/1/2; 307.5; 3056 mm; 20 to 33 s | 2/1/3/1; 293; 2871 mm; 34 to 40 s |
-| `lumenpnp-mobo` | 0/0/0/0; 334; 5300 mm; 50 to 54 s | 1/0/0/0; 339; 5467 mm; 57 to 58 s |
+| `buspirate5-rev10` | 0/0/0/0; 307.5; 3056 mm; 20 to 33 s | 0/0/0/0; 293; 2871 mm; 34 to 40 s |
+| `lumenpnp-mobo` | 0/0/0/0; 334; 5300 mm; 50 to 54 s | 0/0/0/0; 339; 5467 mm; 57 to 58 s |
 
-Two of the twelve runs with the stage have a pad with no spoke. With this crate's own
+Open is what the router reports; on the board as cadlab fills it after the run,
+`buspirate5-rev10` has 2, 1, 3 and 1 connections apart with the stage for 0, 0, 1 and 2,
+and `lumenpnp-mobo` 1, 0, 0 and 0 for none. Two of the twelve runs with the stage have a
+pad with no spoke. With this crate's own
 escapes in place of the stage's ways out (`RouteOptions::rounds_fanout` off),
 `tinytapeout-demo` has 1/0/3/2 open, 281.5 vias and 4741 mm, and `buspirate5-rev10`
 294.5 vias and 2883 mm. At 120 s, one order, the nets planned on every fill:

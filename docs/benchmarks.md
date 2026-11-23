@@ -5963,8 +5963,8 @@ runs of one order differ by as much as two orders do).
   **Now it does, at `RouteOptions::spoke_cost` as they do, and the last spoke of a pad is
   kept (`kept_spokes`) from the stage's routes as from any other: the walls go up before
   its routes are laid in the world.** Four sets of eight orders with the price: no pad
-  without a spoke in 32 runs. The price for the spokes that are held alone left one in four
-  runs of eight, and the walls alone in two of eight.
+  without a spoke in 32 runs. With the price for the spokes that are held alone, four runs
+  of eight had such a pad, and with the walls alone two of eight.
 - *A board given up after its first round.* That round said whether the grid reaches the
   pads; `Engine::no_way` now says it before anything is routed, of each connection by its
   own two islands (41 of 868 on `cynthion` for the 32 that the round found, 42 of 753 on

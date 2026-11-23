@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.31](https://github.com/KarpelesLab/guide/compare/v0.0.30...v0.0.31) - 2026-11-23
+
+### Added
+
+- *(pcb)* a pour left whole in a run for shorter ways, a run's end at a pad, and what a host's fills are clear of ([#54](https://github.com/KarpelesLab/guide/pull/54))
+
 ## [0.0.30](https://github.com/KarpelesLab/guide/compare/v0.0.29...v0.0.30) - 2026-11-23
 
 ### Added

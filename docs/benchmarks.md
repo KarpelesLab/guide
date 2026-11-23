@@ -5922,7 +5922,7 @@ concerned: `RouteOptions::whole_finer`. **It is off by default, and cadlab leave
 it halves what the passes are given and the nets they take out, and the board ends as it
 did.** Measured on 2026-11-23 through cadlab's adapter and its `route_bench`, with a
 checkout of this crate in place of the release and prints that are in no release; 60 s
-runs two orders of each of two builds at a time, three threads each, the load 3.4 to
+runs two orders of each of two builds at a time, three threads each, the load 4.3 to
 8.9; budgets of nodes on one thread.
 
 ### What it is

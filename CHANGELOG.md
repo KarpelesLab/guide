@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.32](https://github.com/KarpelesLab/guide/compare/v0.0.31...v0.0.32) - 2026-11-23
+
+### Added
+
+- *(pcb)* the negotiation can make its routes legal before the pours are filled, and a net with a plane can be planned on its outer pours ([#56](https://github.com/KarpelesLab/guide/pull/56))
+
 ## [0.0.31](https://github.com/KarpelesLab/guide/compare/v0.0.30...v0.0.31) - 2026-11-23
 
 ### Added

@@ -206,25 +206,15 @@ pub(crate) fn run(
     if bounded && straight && sweep(world, jobs, copper) {
         return expanded;
     }
-    if options.shorten {
-        // And the end of each run at a pad to where on the pad the run comes to it, now
-        // that nothing looks for another way: last, as what pulls a net tight takes it
-        // to the pad's centre again.
-        for (job, slot) in jobs.iter().zip(copper.iter_mut()) {
-            let Some(c) = slot else { continue };
-            if stopped(world) {
-                return expanded;
-            }
-            let net = job.ctx.net;
-            let held = design
-                .pairs
-                .iter()
-                .any(|p| p.positive == net || p.negative == net)
-                || design.lengths.iter().any(|l| l.nets.contains(&net));
-            if !held && aim_at_pads(world, &job.ctx, c) {
-                c.place(world, &job.ctx);
-            }
-        }
+    // And the end of each run at a pad to where on the pad the run comes to it, now that
+    // nothing looks for another way: last, as what pulls a net tight takes it to the pad's
+    // centre again. In a run for shorter ways, and in a host's last run, which lays the
+    // stairs straight and routes nothing ([`RouteOptions::leave_given`]): the runs it was
+    // handed may have been ended so by the run before, and laid straight they are pulled
+    // tight.
+    let last = straight && options.leave_given;
+    if (options.shorten || (last && bounded)) && aim_all(world, design, jobs, copper) {
+        return expanded;
     }
     if bounded {
         return expanded;
@@ -238,10 +228,37 @@ pub(crate) fn run(
             tidy(world, &job.ctx, c);
         }
     }
-    if straight {
-        sweep(world, jobs, copper);
+    if straight && !sweep(world, jobs, copper) && last {
+        aim_all(world, design, jobs, copper);
     }
     expanded
+}
+
+/// The end of each run at a pad aimed at the pad's copper where the run comes to it
+/// ([`aim_at_pads`]), for every net but those of pairs and with a length to keep. Whether
+/// the run has to stop.
+fn aim_all(
+    world: &mut World<'_>,
+    design: &Design,
+    jobs: &[Job],
+    copper: &mut [Option<NetCopper>],
+) -> bool {
+    for (job, slot) in jobs.iter().zip(copper.iter_mut()) {
+        let Some(c) = slot else { continue };
+        if world.run().is_some_and(super::control::Run::poll) {
+            return true;
+        }
+        let net = job.ctx.net;
+        let held = design
+            .pairs
+            .iter()
+            .any(|p| p.positive == net || p.negative == net)
+            || design.lengths.iter().any(|l| l.nets.contains(&net));
+        if !held && aim_at_pads(world, &job.ctx, c) {
+            c.place(world, &job.ctx);
+        }
+    }
+    false
 }
 
 /// Every net pulled tight and laid the ways that are as long with fewer tracks

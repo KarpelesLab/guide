@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.44](https://github.com/KarpelesLab/guide/compare/v0.0.43...v0.0.44) - 2026-11-24
+
+### Fixed
+
+- *(pcb)* a host's last run ends its runs on the pads' copper again once the stairs are laid straight ([#86](https://github.com/KarpelesLab/guide/pull/86))
+
 ## [0.0.43](https://github.com/KarpelesLab/guide/compare/v0.0.42...v0.0.43) - 2026-11-24
 
 ### Added

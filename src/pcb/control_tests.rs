@@ -129,6 +129,43 @@ fn a_run_under_control_that_nothing_stops_is_the_run_without() {
 }
 
 #[test]
+fn a_run_that_lays_its_stairs_straight_has_fewer_tracks_and_none_longer() {
+    let d = weave();
+    let plain = route_checked(&d, &RouteOptions::default());
+    let options = RouteOptions {
+        straighten: true,
+        ..RouteOptions::default()
+    };
+    let straight = route_checked(&d, &options);
+    check(&d, &straight);
+    assert!(straight.unrouted.is_empty() && straight.open.is_empty());
+    assert_eq!(straight.vias, plain.vias);
+    assert!(
+        straight.tracks.len() < plain.tracks.len(),
+        "{} {}",
+        straight.tracks.len(),
+        plain.tracks.len()
+    );
+    assert!(straight.stats.after_cleanup.1 <= plain.stats.after_cleanup.1 + 1.0);
+    // The same on one thread and on three.
+    let threaded = RouteOptions {
+        threads: 3,
+        ..options
+    };
+    same(&straight, &route_checked(&d, &threaded));
+    // And in a run with a deadline, which lays its nets straight when cleanup begins as
+    // well: whole, with no more tracks than the run without.
+    let control = RunControl {
+        deadline: Some(Instant::now() + Duration::from_secs(3600)),
+        ..RunControl::default()
+    };
+    let timed = route_with(&d, &options, &control).unwrap();
+    check(&d, &timed);
+    assert!(timed.unrouted.is_empty() && timed.stopped.is_none());
+    assert!(timed.tracks.len() <= plain.tracks.len());
+}
+
+#[test]
 fn a_work_budget_stops_a_run_the_same_way_every_time_and_on_any_thread() {
     let d = weave();
     let whole = route(&d, &RouteOptions::default()).unwrap();

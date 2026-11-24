@@ -94,7 +94,7 @@ const TRIED: u8 = 1;
 const CHAINED: u8 = 2;
 
 /// What a net had before a chain touched it.
-pub(super) struct Before {
+pub(crate) struct Before {
     pub(super) job: usize,
     pub(super) copper: Option<NetCopper>,
     pub(super) missing: Vec<usize>,
@@ -484,6 +484,65 @@ impl Settle<'_> {
                 .sum()
         });
         routes.open_all(&nets) + cut
+    }
+
+    /// Joins up job `x`, which has no copper or is in pieces, by one chain that does not
+    /// cross the nets `walls`, whatever rip-up locked, and returns what the nets that it
+    /// touched had before, for [`undo`](Settle::undo): if the chain leaves `open`
+    /// connections open in all. If it leaves more, it is undone and `None` returned.
+    pub(crate) fn mend(
+        &mut self,
+        world: &mut World<'_>,
+        jobs: &[Job],
+        routes: &mut Routes<'_>,
+        x: usize,
+        walls: &[NetId],
+        open: usize,
+    ) -> Option<Vec<Before>> {
+        let locked: Vec<bool> = jobs.iter().map(|j| world.locked(j.ctx.net)).collect();
+        let fixed: Vec<bool> = self.fixed.iter().map(|&n| world.locked(n)).collect();
+        for job in jobs {
+            world.set_locked(job.ctx.net, false);
+        }
+        for &net in self.fixed {
+            world.set_locked(net, true);
+        }
+        let nets: Vec<&NetCtx> = jobs.iter().map(|j| &j.ctx).collect();
+        let chain = self.chain(world, &nets, routes, x, walls);
+        let whole = chain.whole && routes.open_all(&nets) <= open;
+        let journal = if whole {
+            Some(chain.journal)
+        } else {
+            Self::undo(world, jobs, routes, chain.journal);
+            None
+        };
+        for (job, was) in jobs.iter().zip(locked) {
+            world.set_locked(job.ctx.net, was);
+        }
+        for (&net, was) in self.fixed.iter().zip(fixed) {
+            world.set_locked(net, was);
+        }
+        journal
+    }
+
+    /// Gives the nets of `journal` back what they had before a chain touched them.
+    pub(crate) fn undo(
+        world: &mut World<'_>,
+        jobs: &[Job],
+        routes: &mut Routes<'_>,
+        journal: Vec<Before>,
+    ) {
+        for b in journal.into_iter().rev() {
+            if let Some(mut c) = routes.copper[b.job].take() {
+                c.unplace(world);
+            }
+            routes.copper[b.job] = b.copper.map(|mut c| {
+                c.place(world, &jobs[b.job].ctx);
+                c
+            });
+            routes.missing[b.job] = b.missing;
+            routes.apart[b.job] = b.apart;
+        }
     }
 
     /// One chain for job `j`, with the nets `walls` not to be crossed. Nothing is undone.

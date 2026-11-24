@@ -20,6 +20,7 @@ use super::pours::{self, Pours};
 use super::report::{self, Known};
 use super::rows;
 use super::settle::{Routes, Settle};
+use super::shut;
 use super::spokes;
 use super::tune;
 use super::uncut;
@@ -596,6 +597,9 @@ pub(crate) fn run(
 ) -> Result<Routed, RouteError> {
     run_from(design, None, options, control)
 }
+
+/// How long past a deadline the nets round a pad shut in are laid another way for it.
+const SHUT_OVERTIME: std::time::Duration = std::time::Duration::from_millis(1500);
 
 /// As [`run`], going on from the routes of an earlier run if there are any.
 pub(crate) fn run_from(
@@ -3155,6 +3159,8 @@ fn route_all<'a>(
     // move nothing: now that nothing moves any more, a piece that is cut off stays so.
     // And once more after a cleanup that looked for shorter ways: a run of tracks that
     // goes another way may cut a fill where the old one did not.
+    // By job, whether the nets round its pads shut in were tried and none gave way.
+    let mut shut_tried = vec![false; jobs.len()];
     for cleaned in [false, true] {
         if cleaned && !(options.cleanup && options.shorten) {
             break;
@@ -3249,6 +3255,24 @@ fn route_all<'a>(
                         break;
                     }
                     let mut joined = false;
+                    // What a pad shut in is tried for past a deadline, at most.
+                    let mut shut_until: Option<std::time::Instant> = None;
+                    let mut shut_ins: Vec<(usize, usize, Params)> = Vec::new();
+                    // The nets that may be laid another way for one: whole, and of no pair
+                    // and no group of lengths.
+                    let may_move: Vec<bool> = jobs
+                        .iter()
+                        .enumerate()
+                        .map(|(j, job)| {
+                            let net = job.ctx.net;
+                            missing[j].is_empty()
+                                && !design
+                                    .pairs
+                                    .iter()
+                                    .any(|p| p.positive == net || p.negative == net)
+                                && !design.lengths.iter().any(|l| l.nets.contains(&net))
+                        })
+                        .collect();
                     // By the host's own fill around the routes as they are, if it gives one, on
                     // a board with pours that routes cut.
                     let real = pours
@@ -3304,31 +3328,111 @@ fn route_all<'a>(
                             ..params
                         };
                         let found = detail::route_net(&world, &ctx, &steps, stubs, None, None);
-                        let tree = match found {
-                            Ok(tree) => tree,
+                        // How many pieces the search left cut off: pads shut in.
+                        let shut_in = match found {
+                            Ok(tree) => {
+                                stats.expanded += tree.expanded;
+                                let more = NetCopper::from_tree(&ctx, &tree);
+                                if !more.is_empty()
+                                    && let Some(mut old) = copper[k].take()
+                                {
+                                    old.unplace(&mut world);
+                                    old.segs.extend(more.segs);
+                                    for v in more.vias {
+                                        if !old.vias.contains(&v) {
+                                            old.vias.push(v);
+                                        }
+                                    }
+                                    old.merge(&jobs[k].ctx);
+                                    old.place(&mut world, &jobs[k].ctx);
+                                    copper[k] = Some(old);
+                                    joined = true;
+                                }
+                                tree.missing.len()
+                            }
                             Err((_, expanded)) => {
                                 stats.expanded += expanded;
-                                continue;
+                                ctx.terminals
                             }
                         };
-                        stats.expanded += tree.expanded;
-                        let more = NetCopper::from_tree(&ctx, &tree);
-                        if more.is_empty() {
-                            continue;
+                        if shut_in != 0 && !shut_tried[k] {
+                            shut_ins.push((k, shut_in, stubs));
                         }
-                        if let Some(mut old) = copper[k].take() {
-                            old.unplace(&mut world);
-                            old.segs.extend(more.segs);
-                            for v in more.vias {
-                                if !old.vias.contains(&v) {
-                                    old.vias.push(v);
+                    }
+                    // The pads that the stubs left shut in, once every net has had its
+                    // stubs; in a run with a budget of work, in a round whose stubs joined
+                    // nothing, which would be the last: what the tries take is then what no
+                    // stub of this round or the next would have had.
+                    if run.work_left().is_some() && joined {
+                        shut_ins.clear();
+                    }
+                    for (k, shut_in, stubs) in shut_ins {
+                        if overtime && shut_until.is_none() {
+                            shut_until = Some(
+                                std::time::Instant::now()
+                                    + run.left().unwrap_or_default()
+                                    + SHUT_OVERTIME,
+                            );
+                        }
+                        let stop = || {
+                            shut_until.is_some_and(|t| std::time::Instant::now() >= t)
+                                || if overtime {
+                                    run.overtime_ending()
+                                } else {
+                                    run.poll()
                                 }
-                            }
-                            old.merge(&jobs[k].ctx);
-                            old.place(&mut world, &jobs[k].ctx);
-                            copper[k] = Some(old);
-                            joined = true;
+                        };
+                        let nets: Vec<&NetCtx> = jobs.iter().map(|j| &j.ctx).collect();
+                        let open = Routes {
+                            copper: &mut copper,
+                            missing: &mut missing,
+                            apart: &mut apart,
                         }
+                        .open_all(&nets);
+                        drop(nets);
+                        let mut mender = shut::Mender {
+                            settle: Settle {
+                                design,
+                                by_net: &by_net,
+                                plane: &plane_net,
+                                params,
+                                pitch,
+                                history: &history,
+                                fixed: &pair_nets,
+                                pours: None,
+                                expanded: 0,
+                                blocked: None,
+                                tried: 0,
+                                kept: 0,
+                                made: 0,
+                                chains: true,
+                                negotiate: false,
+                                negotiated: (0, 0, 0),
+                                places: false,
+                                spent: &mut spent,
+                                skip: Vec::new(),
+                            },
+                            missing: &mut missing,
+                            apart: &mut apart,
+                            open,
+                        };
+                        let opened = shut::open(
+                            &mut world,
+                            design,
+                            &mut jobs,
+                            &mut copper,
+                            pours,
+                            real.as_ref(),
+                            (k, shut_in),
+                            &may_move,
+                            (stubs, params),
+                            &mut mender,
+                            &stop,
+                        );
+                        stats.expanded += opened.expanded;
+                        joined |= opened.kept;
+                        // A net whose tries were all undone has no more of them.
+                        shut_tried[k] = opened.tried > 0 && !opened.kept;
                     }
                     run.overtime_over();
                     if !joined {
@@ -3341,6 +3445,13 @@ fn route_all<'a>(
             continue;
         }
         run.phase(Phase::Cleanup);
+        // The stairs laid straight at its end, if asked for, where nothing is laid after
+        // it that a track moved into free room could be in the way of: the stubs that
+        // join the pieces of planes, pairs side by side and meanders.
+        let straight = options.straighten
+            && !(planes_on && options.join)
+            && !(options.couple_pairs && !design.pairs.is_empty())
+            && !(options.tune_lengths && !design.lengths.is_empty());
         stats.expanded += cleanup::run(
             &mut world,
             design,
@@ -3348,7 +3459,7 @@ fn route_all<'a>(
             &mut copper,
             params,
             options,
-            &still,
+            (&still, straight),
         );
     }
     // A pour left whole, where the route that cut a pad off it has another way: in a run
@@ -4626,7 +4737,15 @@ mod tests {
             stubs: false,
             forest: false,
         };
-        cleanup::run(&mut world, &d, &jobs, &mut copper, params, &options, &[]);
+        cleanup::run(
+            &mut world,
+            &d,
+            &jobs,
+            &mut copper,
+            params,
+            &options,
+            (&[], false),
+        );
         // The search for the first net's route with no vias spent the budget, and the
         // second net is straight all the same: it was pulled tight before.
         assert_eq!(run.stopped(), Some(Stopped::WorkBudget));
@@ -4713,7 +4832,15 @@ mod tests {
                 stubs: false,
                 forest: false,
             };
-            let expanded = cleanup::run(&mut world, &d, &jobs, &mut copper, params, &options, &[]);
+            let expanded = cleanup::run(
+                &mut world,
+                &d,
+                &jobs,
+                &mut copper,
+                params,
+                &options,
+                (&[], false),
+            );
             let routes: Vec<(Vec<Seg>, Vec<Point>)> = copper
                 .into_iter()
                 .flatten()

@@ -36,7 +36,12 @@ pub(crate) fn node_budget(connections: u64) -> u64 {
     (NODES_PER_CONNECTION * c.min(CONNECTIONS)).max(NODES_PER_CONNECTION_OF_FEW * c.min(FEW))
 }
 
-/// Cleans up every routed net, and returns the nodes its searches expanded.
+/// Cleans up every routed net, and returns the nodes its searches expanded. A net that
+/// `still` says is as an earlier run left it was cleaned up by that run. With `straight`,
+/// the runs are laid the ways that are as long with fewer tracks too ([`straighten`]),
+/// wherever a run with a budget pulls a net tight and last of all in any run: for a
+/// caller that lays no copper after this that a track moved into free room could be in
+/// the way of.
 pub(crate) fn run(
     world: &mut World<'_>,
     design: &Design,
@@ -44,7 +49,7 @@ pub(crate) fn run(
     copper: &mut [Option<NetCopper>],
     params: Params,
     options: &RouteOptions,
-    still: &[bool],
+    (still, straight): (&[bool], bool),
 ) -> u64 {
     let mut expanded = 0;
     // A net whose routes are as an earlier run left them was cleaned up by that run.
@@ -64,6 +69,9 @@ pub(crate) fn run(
     // searches for fewer vias then have the time that is left, each net pulled tight again
     // if it was routed anew, where they used to have all of it on a board that a budget
     // cuts, and the tracks of every net were left as rip-up had them.
+    // With `straight`, laid straight as well, then and after its search: a run that its
+    // deadline ends in the searches has its stairs straight all the same.
+    let tidy_or_straighten = if straight { straighten } else { tidy };
     if bounded {
         for (j, (job, slot)) in jobs.iter().zip(copper.iter_mut()).enumerate() {
             let Some(c) = slot else { continue };
@@ -71,7 +79,7 @@ pub(crate) fn run(
                 return expanded;
             }
             if !still(j) {
-                tidy(world, &job.ctx, c);
+                tidy_or_straighten(world, &job.ctx, c);
             }
         }
     }
@@ -179,7 +187,7 @@ pub(crate) fn run(
             // And the hops that the search for the whole net left, one at a time.
             expanded += fewer_hops(world, job, c, params, options);
             if bounded && before != (c.vias.len(), c.segs.len()) {
-                tidy(world, &job.ctx, c);
+                tidy_or_straighten(world, &job.ctx, c);
             }
             // A net with other copper than it had makes another world of this one: the
             // searches made ahead in the world as it was are of no use from here on.
@@ -192,6 +200,12 @@ pub(crate) fn run(
         halt.store(true, Ordering::Relaxed);
         ahead.close();
     });
+    // In a run with a budget every net was pulled tight before the searches, each with the
+    // others as rip-up had left them: once more now that they are all tight, and the
+    // stairs and the jogs laid straight.
+    if bounded && straight && sweep(world, jobs, copper, &still) {
+        return expanded;
+    }
     if options.shorten {
         // And the end of each run at a pad to where on the pad the run comes to it, now
         // that nothing looks for another way: last, as what pulls a net tight takes it
@@ -224,7 +238,41 @@ pub(crate) fn run(
             tidy(world, &job.ctx, c);
         }
     }
+    if straight {
+        sweep(world, jobs, copper, &still);
+    }
     expanded
+}
+
+/// Every net that `still` does not leave as it is pulled tight and laid the ways that are
+/// as long with fewer tracks ([`straighten`]), up to [`STRAIGHT_SWEEPS`] times, for as
+/// long as a sweep leaves fewer tracks: a net laid straight makes room for the next.
+/// Whether the run has to stop.
+fn sweep(
+    world: &mut World<'_>,
+    jobs: &[Job],
+    copper: &mut [Option<NetCopper>],
+    still: &dyn Fn(usize) -> bool,
+) -> bool {
+    let tracks = |copper: &[Option<NetCopper>]| -> usize {
+        copper.iter().flatten().map(|c| c.segs.len()).sum()
+    };
+    for _ in 0..STRAIGHT_SWEEPS {
+        let before = tracks(copper);
+        for (j, (job, slot)) in jobs.iter().zip(copper.iter_mut()).enumerate() {
+            let Some(c) = slot else { continue };
+            if world.run().is_some_and(super::control::Run::poll) {
+                return true;
+            }
+            if !still(j) {
+                straighten(world, &job.ctx, c);
+            }
+        }
+        if tracks(copper) >= before {
+            break;
+        }
+    }
+    false
 }
 
 /// How many points along each of the eight directions from a pad's centre a run's end may
@@ -377,6 +425,10 @@ const TIDY_AGAIN: f64 = 5e-4;
 /// How many times the nets are gone through for shorter runs, and how many runs of one
 /// net are searched for in one of them: a run that moves leaves room for another's.
 const SHORTER_SWEEPS: usize = 3;
+
+/// How many times at most every net is laid straight once the searches of cleanup are
+/// over, for as long as a sweep leaves fewer tracks.
+const STRAIGHT_SWEEPS: usize = 3;
 
 /// The share of cleanup's time, and of the work that a budget leaves, that the search
 /// for shorter runs may have.
@@ -732,6 +784,14 @@ pub(crate) fn tighten_net(world: &World<'_>, ctx: &NetCtx, c: &mut NetCopper) {
 pub(crate) fn tidy(world: &mut World<'_>, ctx: &NetCtx, c: &mut NetCopper) {
     drop_idle_vias(c, ctx);
     pull_tight(world, ctx, c);
+    c.place(world, ctx);
+}
+
+/// As [`tidy`], with the runs laid the ways that are as long with fewer tracks too
+/// ([`pull_straight`]).
+pub(crate) fn straighten(world: &mut World<'_>, ctx: &NetCtx, c: &mut NetCopper) {
+    drop_idle_vias(c, ctx);
+    pull_straight(world, ctx, c);
     c.place(world, ctx);
 }
 
@@ -1156,7 +1216,22 @@ fn ways(a: Point, b: Point) -> Vec<Vec<Point>> {
 /// Replaces each run of tracks between pads, vias and branches with shortcuts where they
 /// are legal, longest first.
 pub(crate) fn pull_tight(world: &World<'_>, ctx: &NetCtx, c: &mut NetCopper) {
-    each_run(ctx, c, |l, run| tighten(world, ctx, l, run));
+    each_run(ctx, c, |l, run| tighten(world, ctx, l, run, false));
+}
+
+/// As [`pull_tight`], and each stretch of a run that is as long as the two tracks that go
+/// the same way, the steps of a stair or a jog, replaced with those two where they are
+/// legal, nothing of another net is between them and the stretch ([`between_free`]), the
+/// stretch has no point on a pad of the net between its ends, and no more of the run is
+/// outside the pads for it. A search lays a run round what is in its way when it is made,
+/// on the lines of its lattice, and leaves the steps there when that has moved: cadlab's
+/// own router has two tracks where this crate had five (`docs/benchmarks.md`).
+///
+/// The two tracks are in room that the stair left free, a part of a pitch to the side:
+/// room that copper laid after this, a via of a stub to a plane, may have had. So it is
+/// for the end of a run's cleanup, and not before the pieces of planes are joined up.
+pub(crate) fn pull_straight(world: &World<'_>, ctx: &NetCtx, c: &mut NetCopper) {
+    each_run(ctx, c, |l, run| tighten(world, ctx, l, run, true));
 }
 
 /// How many points of a run are looked at together for a way round the corners of what
@@ -1187,7 +1262,7 @@ pub(crate) fn round_corners(
         if round.len() == run.len() && round == run {
             round
         } else {
-            tighten(world, ctx, l, &round)
+            tighten(world, ctx, l, &round, false)
         }
     });
     c.length() + ROUND_GAIN <= before
@@ -1452,18 +1527,73 @@ fn within(rect: &Rect, a: Point, b: Point) -> f64 {
     (t1 - t0).max(0.0)
 }
 
-/// A run of points made shorter: from each point, the furthest later one that a legal
-/// octilinear shortcut reaches.
-fn tighten(world: &World<'_>, ctx: &NetCtx, l: u8, run: &[Point]) -> Vec<Point> {
+/// Whether nothing of another net is between the run `run` and the way `way` from its
+/// first point to its last, or nearer what is between them than the net's tracks may be:
+/// the run laid that way is then on the same side of every pad, via and track as it was,
+/// and what it was laid round, a pad of a pour that the fill reaches between two tracks,
+/// has it on the side it had. A way that the two enclose no area with is the run itself.
+fn between_free(world: &World<'_>, ctx: &NetCtx, l: u8, run: &[Point], way: &[Point]) -> bool {
+    let mut ring: Vec<Point> = run.to_vec();
+    // The way back, without its end, which is the run's.
+    ring.extend(way.iter().rev().skip(1).copied());
+    // Without the points said twice and the spikes where the two go the same way.
+    loop {
+        let n = ring.len();
+        if n < 3 {
+            return true;
+        }
+        let spike = (0..n).find(|&k| {
+            let (a, b, c) = (ring[(k + n - 1) % n], ring[k], ring[(k + 1) % n]);
+            let (u, v) = ((b.x - a.x, b.y - a.y), (c.x - b.x, c.y - b.y));
+            let cross = i128::from(u.0) * i128::from(v.1) - i128::from(u.1) * i128::from(v.0);
+            let dot = i128::from(u.0) * i128::from(v.0) + i128::from(u.1) * i128::from(v.1);
+            a == b || (cross == 0 && dot <= 0)
+        });
+        match spike {
+            Some(k) => {
+                ring.remove(k);
+            }
+            None => break,
+        }
+    }
+    Shape::rounded_polygon(&ring, &[], ctx.widths[usize::from(l)] / 2)
+        .is_ok_and(|s| world.track(ctx.net, LayerId(l), &s, None) == Verdict::Free)
+}
+
+/// How much longer than a run a way with fewer tracks may be to count as no longer, in
+/// nanometres: what the sums of the lengths differ by.
+const SAME: f64 = 0.5;
+
+/// A run of points made shorter, or as long with fewer tracks: from each point, the
+/// furthest later one that a legal octilinear shortcut reaches.
+fn tighten(world: &World<'_>, ctx: &NetCtx, l: u8, run: &[Point], straight: bool) -> Vec<Point> {
     let mut out = vec![run[0]];
     let mut i = 0;
     while i + 1 < run.len() {
         let mut next = (i + 1, vec![run[i + 1]]);
         for j in (i + 2..run.len()).rev() {
             let old: f64 = run[i..=j].windows(2).map(|w| dist(w[0], w[1])).sum();
-            if octile(run[i], run[j]) >= old {
+            // With `straight`, a way that is as long with fewer tracks is taken too
+            // ([`pull_straight`]).
+            let direct = octile(run[i], run[j]);
+            if direct >= old && !(straight && direct <= old + SAME && j - i >= 3) {
                 continue;
             }
+            // Not where the run has a point on a pad of its net between the two: that
+            // may be where the pad is joined, and a way as long that leaves the pad is
+            // a connection lost for nothing.
+            let on_a_pad = direct >= old
+                && run[i + 1..j].iter().any(|&p| {
+                    ctx.pads.iter().any(|pad| {
+                        pad.layers.contains(LayerId(l))
+                            && pad.bbox.min().x <= p.x
+                            && p.x <= pad.bbox.max().x
+                            && pad.bbox.min().y <= p.y
+                            && p.y <= pad.bbox.max().y
+                    })
+                });
+            // How much of the run is outside the pads, if a way no shorter is looked at.
+            let mut old_outside: Option<f64> = None;
             let mut found: Option<(f64, Vec<Point>)> = None;
             for way in ways(run[i], run[j]) {
                 let mut from = run[i];
@@ -1476,7 +1606,16 @@ fn tighten(world: &World<'_>, ctx: &NetCtx, l: u8, run: &[Point]) -> Vec<Point> 
                     })
                     .sum();
                 if new >= old {
-                    continue;
+                    if !(straight && new <= old + SAME && way.len() < j - i) || on_a_pad {
+                        continue;
+                    }
+                    let was = *old_outside
+                        .get_or_insert_with(|| outside(ctx, l, run[i], &run[i + 1..=j]));
+                    if outside(ctx, l, run[i], &way) > was + 1.0
+                        || !between_free(world, ctx, l, &run[i..=j], &way)
+                    {
+                        continue;
+                    }
                 }
                 let mut from = run[i];
                 // And no nearer a pad of another net in the room of a spoke of its relief
@@ -2093,7 +2232,7 @@ mod tests {
             &mut copper,
             params,
             &options,
-            &[true, true],
+            (&[true, true], false),
         );
         let by_net = |n: u32| {
             let j = jobs
@@ -2104,5 +2243,75 @@ mod tests {
         };
         assert_eq!(by_net(1), (10 * MM) as f64);
         assert_eq!(by_net(2), (20 * MM) as f64);
+    }
+    #[test]
+    fn the_steps_of_a_stair_and_a_jog_are_two_tracks_as_long_where_those_are_free() {
+        // Two pads, 5 mm and 2 mm apart, a third 1 mm and 10 mm away, and a pad of
+        // another net on one of the two ways between the first two.
+        let pads = vec![
+            smd(0, 0, 1),
+            smd(5 * MM, 2 * MM, 1),
+            smd(MM, 10 * MM, 1),
+            smd(2_500_000, 0, 2),
+        ];
+        let d = design(1, pads, 3);
+        let options = RouteOptions::default();
+        let mut world = World::new(
+            &d.board,
+            &d.rules,
+            &d.outline,
+            d.edge_clearance,
+            &d.obstacles,
+        )
+        .unwrap();
+        world.configure(&d, &options);
+        let pitch = router::pitch(&d, &options);
+        let jobs = router::jobs(&d, &world, pitch, &[], &[]);
+        let ctx = &jobs
+            .iter()
+            .find(|j| j.ctx.net == crate::id::NetId(1))
+            .unwrap()
+            .ctx;
+        let seg = |a: (i64, i64), b: (i64, i64)| Seg {
+            a: Point::new(a.0, a.1),
+            b: Point::new(b.0, b.1),
+            l: 0,
+        };
+        let mut c = NetCopper::default();
+        c.segs = vec![
+            // A stair of five tracks, as long as the two that go the same way.
+            seg((0, 0), (MM, 0)),
+            seg((MM, 0), (2 * MM, MM)),
+            seg((2 * MM, MM), (3 * MM, MM)),
+            seg((3 * MM, MM), (4 * MM, 2 * MM)),
+            seg((4 * MM, 2 * MM), (5 * MM, 2 * MM)),
+            // A jog of three.
+            seg((0, 0), (0, 4 * MM)),
+            seg((0, 4 * MM), (MM, 5 * MM)),
+            seg((MM, 5 * MM), (MM, 10 * MM)),
+        ];
+        let before = c.length();
+        // Pulled tight alone, it is as it was: no way is shorter.
+        let was = c.segs.clone();
+        super::pull_tight(&world, ctx, &mut c);
+        assert_eq!(c.segs.len(), was.len());
+        super::pull_straight(&world, ctx, &mut c);
+        assert_eq!(c.segs.len(), 4, "{:?}", c.segs);
+        assert!((c.length() - before).abs() < 1.0, "{} {before}", c.length());
+        // The stair's two: the straight one first would go across the other net's pad,
+        // so the one at 45° is first.
+        let from_first: Vec<&Seg> = c
+            .segs
+            .iter()
+            .filter(|s| (s.a == Point::new(0, 0)) != (s.b == Point::new(0, 0)))
+            .collect();
+        assert!(
+            from_first
+                .iter()
+                .any(|s| [s.a, s.b].contains(&Point::new(2 * MM, 2 * MM))),
+            "{:?}",
+            c.segs
+        );
+        assert!(c.all_free(&world, ctx));
     }
 }

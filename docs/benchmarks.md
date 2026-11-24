@@ -6080,8 +6080,8 @@ both at two in a hundred.
 - *What is open after those rounds settled before any net is taken out*, where eight nets or
   fewer are: 275.5 vias for 278 over six and eight orders, not told from noise. The rounds
   of one order end with 6 nets to route in one run and 7 in the next, and the runs whose
-  passes take no net out end with 259 to 281 vias, those that take 27 to 148 out with 288
-  to 294.
+  passes take two nets out or none end with 259 to 281 vias, those that take 27 to 148 out
+  with 288 to 294.
 - *cadlab's run for shorter ways on `corne-cherry`*, by stage: 4.2 s here in an order whose
   run ends at 28 s, of which each net again 1.9 s (6 of 326 kept, 18 mm and 2 vias), the
   shorter runs 1.4 s (20 mm of the 1107 mm that 111 nets' runs cost over straight ways) and

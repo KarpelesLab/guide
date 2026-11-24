@@ -5985,6 +5985,102 @@ nodes, nine boards in three orders: every one of 27 runs has the connections ope
 vias and the track that it had (570 open, 9997 vias, 109 321 mm). At 150 million, seven
 boards in two orders: every one of 14 likewise. A run with no deadline has no overtime.
 
+### At 60 s, beside cadlab's router measured in the same minutes
+
+The release's source behind cadlab's adapter as it is with 0.0.42 (the step that moves routes
+out of the rooms of spokes there keeps the nets that this crate found no way for round their
+rooms as they were, [`Routed::failed`]), cadlab's own router and, on six boards, 0.0.41 behind
+the adapter it had, side by side, four runs at a time on three threads each (the load 2.8 at
+the start and 5.9 at the end). Open is the DRC's count of unrouted on the board that left,
+for both; open and the pads short of two necks by order; medians of the vias, the track and
+the track outside the pads; the fastest and the slowest run.
+
+| board | open | vias | track | track outside pads | short of two necks | time |
+|---|---|---|---|---|---|---|
+| `buspirate-flash-sop` | equal (0/0/0/0 against 0/0/0/0) | equal (+0 %) 4 against 4 | better (-4 %) 442 against 461 | equal (-0 %) 431 against 431 | equal (0/0/0/0 against 0/0/0/0) | equal (1 to 1 s against 0 to 0 s) |
+| `buspirate-rs232` | equal (0/0/0/0 against 0/0/0/0) | better (-20 %) 8 against 10 | equal (+1 %) 284 against 281 | equal (+1 %) 275 against 272 | equal (0/0/0/0 against 0/0/0/0) | equal (0 to 0 s against 0 to 0 s) |
+| `lumenpnp-ringlight` | equal (0/0/0/0 against 0/0/0/0) | equal (+0 %) 3 against 3 | better (-7 %) 166 against 177 | equal (-1 %) 158 against 159 | equal (0/0/0/0 against 0/0/0/0) | equal (0 to 1 s against 0 to 0 s) |
+| `nrfmicro` | equal (0/0/0/0 against 0/0/0/0) | better (-14 %) 41 against 47.5 | better (-3 %) 437 against 450 | equal (+2 %) 421 against 414 | equal (0/0/0/0 against 0/0/0/0) | equal (2 to 14 s against 2 to 12 s) |
+| `sweep-v2.2` | equal (3/3/3/3 against 3/3/3/3) | better (-20 %) 20.5 against 25.5 | equal (-2 %) 2120 against 2159 | equal (-1 %) 2109 against 2122 | better (0/0/0/0 against 2/1/2/1) | better (35 to 36 s against 53 to 54 s) |
+| `corne-cherry` | better (1/0/0/1 against 1/3/2/4) | better (-7 %) 429 against 459 | better (-8 %) 7482 against 8103 | better (-6 %) 7411 against 7915 | better (2/1/1/1 against 3/3/2/2) | worse (27 to 56 s against 20 to 31 s) |
+| `tinytapeout-demo` | better (1/0/0/0/0/0/1/1 against 19/1/4/5/1/2/2/9) | equal (-1 %) 271.5 against 273 | equal (-1 %) 4838 against 4894 | worse (+2 %) 4784 against 4672 | better (1/2/0/0/1/2/4/2 against 20/12/10/16/16/14/17/19) | equal (40 to 55 s against 35 to 62 s) |
+| `buspirate5-rev10` | better (0/0/0/0 against 4/2/4/4) | better (-6 %) 284.5 against 302 | better (-8 %) 2886 against 3129 | better (-4 %) 2802 against 2911 | better (8/10/8/10 against 22/24/30/21) | better (13 to 18 s against 20 to 33 s) |
+| `lumenpnp-mobo` | better (0/0/0/0 against 9/23/7/13) | equal (-2 %) 331 against 337.5 | better (-3 %) 5294 against 5455 | equal (+1 %) 5218 against 5169 | better (0/0/0/0 against 2/4/0/2) | better (30 to 33 s against 60 to 61 s) |
+| `cynthion` | better (8/8/8/8 against 28/29/30/28) | better (-13 %) 416.5 against 478 | better (-5 %) 3037 against 3184 | equal (-1 %) 2963 against 2981 | equal (1/1/1/1 against 1/1/1/1) | better (32 to 37 s against 60 to 62 s) |
+| `glasgow-revC3` | better (8/6/9/7 against 35/29/39/30) | better (-5 %) 395.5 against 417.5 | worse (+5 %) 3632 against 3448 | worse (+11 %) 3542 against 3190 | equal (0/0/0/0 against 0/0/0/0) | equal (58 to 59 s against 60 to 62 s) |
+| `glasgow-revD1` | better (12/17/4/12 against 146/109/145/144) | worse (+10 %) 1130 against 1024 | worse (+18 %) 10520 against 8916 | worse (+22 %) 10267 against 8397 | better (9/12/14/10 against 51/31/49/47) | better (55 to 57 s against 60 to 63 s) |
+
+Of the 72 cells 34 are better, 31 equal, none has ranges that overlap and 7 are worse, where
+0.0.41 had 33, 30, one and 8. The three cells that moved are not this release's:
+
+- *`tinytapeout-demo`'s connections open*, better for ranges that overlap: the eight orders
+  of the table have 1, 0, 0, 0, 0, 0, 1 and 1, and 0.0.41 in the same minutes 0, 0, 0, 0, 0, 0,
+  1 and 1. Over sixteen orders this has 1, 0, 0, 0, 0, 0, 1, 1, 1, 2, 0, 0, 3, 0, 0 and 0: the
+  order with 3 is the thirteenth, which the table does not have.
+- *`lumenpnp-mobo`'s vias, track and track outside the pads*, equal for better, better for
+  equal and equal for worse: this crate's four boards are 0.0.41's to the via and the
+  millimetre (331 vias, 5294 mm, 5218 mm outside the pads), and cadlab's router has 337.5
+  vias, 5455 mm and 5169 mm for 338.5, 5393 mm and 5108 mm, with 23 connections open in one
+  order for 10.
+- *0.0.41 in the same minutes*: `nrfmicro`, `sweep-v2.2`, `corne-cherry` and `glasgow-revC3`
+  are the same boards to the via and the millimetre. `glasgow-revD1`: 12, 17, 4 and 12 open
+  for 12, 17, 7 and 12 (the third order has 4 or 7 with either from one set to the next),
+  1130 vias and 10 520 mm for 1130 and 10 513 mm, and 9, 12, 14 and 10 pads short of two
+  spokes for 10, 12, 14 and 11, by cadlab's step for the spokes, kept in two orders of four
+  for none.
+
+The worse cells: `corne-cherry`'s time; `tinytapeout-demo`'s track outside the pads;
+`glasgow-revC3`'s track and track outside the pads; `glasgow-revD1`'s vias (+10 % for +6 %:
+1130 for 1122 against cadlab's router's 1024 for 1059.5, with 146, 109, 145 and 144
+connections open for 127, 109, 119 and 144), track and track outside the pads. In the 60 runs
+of this crate, sixteen orders of `tinytapeout-demo` among them, no pad of a pour is without a
+spoke, none is made solid by a track, the DRC has no error other than unrouted, and the run's
+count of open connections is the DRC's in every one.
+
+The same runs by the nets that both routers complete:
+
+| board | nets both complete (median of the pairs) | vias on them | track on them | track outside pads on them | nets only guide completes, their track and vias; only native |
+|---|---|---|---|---|---|
+| `buspirate-flash-sop` | 12 | equal (+0 %) 4 against 4 | better (-4 %) 442 against 461 | equal (-0 %) 431 against 431 | 0 nets, 0 mm, 0 vias; 0 |
+| `buspirate-rs232` | 30 | better (-20 %) 8 against 10 | equal (+1 %) 284 against 281 | equal (+1 %) 275 against 272 | 0 nets, 0 mm, 0 vias; 0 |
+| `lumenpnp-ringlight` | 12 | equal (+0 %) 3 against 3 | better (-7 %) 166 against 177 | equal (-1 %) 157 against 159 | 0 nets, 0 mm, 0 vias; 0 |
+| `nrfmicro` | 41 | better (-14 %) 41 against 47.5 | better (-3 %) 437 against 450 | equal (+2 %) 421 against 414 | 0 nets, 0 mm, 0 vias; 0 |
+| `sweep-v2.2` | 40 | better (-23 %) 18.5 against 24 | equal (-1 %) 2039 against 2060 | equal (+0 %) 2029 against 2028 | 0 nets, 0 mm, 0 vias; 0 |
+| `corne-cherry` | 149.5 | better (-5 %) 423 against 446 | better (-8 %) 7324 against 7991 | better (-7 %) 7256 against 7807 | 2.5 nets, 158 mm, 12 vias; 0.5 |
+| `tinytapeout-demo` | 135 | worse (+5 %) 245 against 233 | equal (+2 %) 4743 against 4661 | worse (+5 %) 4693 against 4477 | 1 nets, 58 mm, 24 vias; 0 |
+| `buspirate5-rev10` | 181 | equal (+1 %) 251.5 against 250 | better (-2 %) 2869 against 2927 | worse (+2 %) 2788 against 2720 | 2 nets, 28 mm, 33.5 vias; 0 |
+| `lumenpnp-mobo` | 188.5 | worse (+5 %) 258 against 245 | better (-3 %) 4932 against 5066 | equal (+1 %) 4867 against 4819 | 4.5 nets, 312 mm, 70 vias; 3.5 |
+| `cynthion` | 310.5 | better (-23 %) 276.5 against 360.5 | better (-6 %) 2695 against 2870 | better (-3 %) 2635 against 2714 | 15.5 nets, 348 mm, 134.5 vias; 0 |
+| `glasgow-revC3` | 199.5 | better (-15 %) 249 against 294 | better (-2 %) 2725 against 2788 | worse (+2 %) 2660 against 2600 | 19 nets, 912 mm, 145 vias; 6.5 |
+| `glasgow-revD1` | 499.5 | better (-5 %) 748 against 788 | worse (+7 %) 8095 against 7548 | worse (+10 %) 7901 against 7150 | 49.5 nets, 2371 mm, 377.5 vias; 10 |
+
+Over these 36 cells 17 are better, 12 equal and 7 worse, for 16, 14 and 6: `glasgow-revC3`'s
+track is better for equal (-2 %), and `lumenpnp-mobo`'s vias worse for equal (+5 %, 258
+against 245), cadlab's router completing another set of nets there.
+
+### Where the track outside the pads is, by net
+
+0.0.41's final sets (four orders, the nets that both routers complete), by whether this
+crate's net has fewer vias than cadlab's router's, as many, or more:
+
+| board | fewer vias: nets, outside the pads, track, vias | as many | more |
+|---|---|---|---|
+| `glasgow-revC3` | 48, +22 mm of 1002 (+2.2 %), -14 mm, -83 | 135, +47 mm of 1189 (+3.9 %), -16 mm | 17, +16 mm of 313 (+5.2 %), -4 mm, +32 |
+| `tinytapeout-demo` | 28, -1 mm of 1545 (-0.1 %), -49 mm, -44 | 71, +45 mm of 1452 (+3.1 %), +2 mm | 36, +181 mm of 1412 (+12.9 %), +144 mm, +60 |
+| `glasgow-revD1` | 70, +114 mm of 2876 (+3.9 %), +50 mm, -126 | 379, +304 mm of 3061 (+9.9 %), +184 mm | 52, +296 mm of 1217 (+24.4 %), +277 mm, +74 |
+| `lumenpnp-mobo` | 22, -8 mm of 1039 (-0.8 %), -44 mm, -50 | 132, -10 mm of 2229 (-0.5 %), -125 mm | 34, +97 mm of 1557 (+6.2 %), +57 mm, +61 |
+| `buspirate5-rev10` | 24, +4 mm of 578 (+0.7 %), -19 mm, -40 | 135, +15 mm of 1389 (+1.1 %), -46 mm | 22, +48 mm of 751 (+6.4 %), +6 mm, +40 |
+
+It is not a trade of track for vias: where this crate's net has fewer vias it has the track
+outside its pads that the other has, or 2 to 4 % more on the two `glasgow` boards. On
+`tinytapeout-demo`, `lumenpnp-mobo` and `buspirate5-rev10` what is more is on the nets that
+have more vias too, the nets that go under a bundle and back. On `glasgow-revC3` the track is
+equal with 85 mm more outside the pads: cadlab's router has 119 mm more inside its pads, its
+tracks taken to their centres, which the measure leaves out for both. The tracks lie the
+same way (49 % along the axes, 49 % at 45° and 2 % otherwise for 46, 50 and 4 % on
+`glasgow-revC3`), with more bends: 1915 segments for 1584 there, 5834 for 4640 on
+`glasgow-revD1`. Nothing was changed for it.
+
 ### Tried and not kept, and what remains open
 
 - *A round of the joining after every cleanup.* Cleanup's own steps, each net pulled tight

@@ -5911,6 +5911,186 @@ at a time.
   are what it has for the balls left shut in, and no other way to those was tried.
 - More than one thread, or a deadline: the comparison is by nodes.
 
+## PCB routing with a run pulled tight no nearer a pad across the gap of its spoke
+
+0.0.40 left eight cells worse beside cadlab's own router at 60 s, and the round after it was
+for the track and the vias of the two `glasgow` boards and of `tinytapeout-demo`. **Two
+things are changed. Pulling a net's runs tight, the step of cleanup that takes no search,
+laid a run that went round the end of another net's thermal spoke straight across the gap
+that the spoke bridges, and the pad lost the spoke: a way is now refused where it is in the
+room of a spoke of another net's pad and nearer the place where the spoke starts in its pad
+than the run it stands for. And after this crate's own rounds, with no zones to join,
+cleanup has a quarter of the time that a deadline leaves when the passes begin, for a
+twelfth. `glasgow-revD1` through cadlab at 60 s, beside 0.0.40 in the same minutes: 10, 12,
+14 and 10 pads short of two spokes for 8, 23, 23 and 22, 1122 vias for 1145.5, 10 514 mm of
+track for 10 576 mm, and 10, 17, 8 and 13 connections open for 12, 17, 4 and 12. Neither the
+track nor the vias of the boards come within what cadlab's router
+has on the nets that both complete, and what was measured says that time does not give it.**
+
+### Where `glasgow-revD1`'s track is
+
+Through cadlab at 60 s, 0.0.40, by the nets that both routers complete (495 to 503 of 561):
+7753 mm against 7163 mm in the default order, +590 mm, of which the nets that are longer
+with this crate carry +852 mm and those that are shorter −261 mm. The five nets with the
+most carry +186 mm, ten +287, twenty +423, fifty +618: it is spread, with a few long ways
+round (one net 87 mm for 18 mm). With 120 s the first run is ended by its deadline again,
+at 84 s, with 854 nets taken out for 332, and the nets both complete have +440 mm (+6 %);
+with 240 s it ends on its own at 106 s, cadlab's run for shorter ways has its turn and takes
+84 mm and 6 vias off, and they have +337 mm (+5 %) with 5 connections open for 12. cadlab's
+router leaves 105 to 144 connections open on this board, and the nets it completes have the
+room of those.
+
+### What the first run's cleanup had, and what it has
+
+The stages of the first run, by a trace that is in no release, 0.0.40, four orders: the
+rounds end at 23 to 27 s, the passes at 40.5 to 40.8 s of a deadline at 42 s. In two orders
+the joining of what the routes cut off the fills, 1.1 s, ended at the deadline and nothing
+of cleanup was begun; in the two others every net was pulled tight, 0.07 s for 290 to
+330 mm of 11 700, and the searches for fewer vias were cut as they began. Each net routed
+again where the others are, which wants a second of its own, had its turn in none.
+
+| cleanup's share of the time | open, four orders | vias | track | pads short of two spokes after the first run |
+|---|---|---|---|---|
+| a twelfth (0.0.40) | 12/17/7/12 | 1145.5 | 10576 mm | 8/23/10/22 |
+| a quarter | 12/17/7/12 | 1130.5 | 10499 mm | 20/23/25/21 |
+| two fifths | 12/17/7/12 | 1124 | 10417 mm | 20/23/23/22 |
+| a quarter, and the rule for the spokes (0.0.41) | 12/17/7/12 | 1130 | 10515 mm | 10/12/14/11 |
+
+The passes end with the connections they had with less of the time: what they are given
+past a quarter of it is nets taken out and put back. `glasgow-revC3` has its cleanup whole
+with a twelfth already (each net again in 0.4 s, the tightening in 1.1 s, the searches for
+fewer vias in 1.7 s), and 402, 395 and 394 vias with the three shares, 9/6/9/8, 8/6/9/8 and
+12/6/9/8 connections open. After the rounds of cadlab's router the share is as it was:
+`tinytapeout-demo` had 3 connections open in two runs of twelve with the quarter and in none
+of 32 with the twelfth, its passes having a few nets to settle in what the run has left.
+
+### The pads that pulling tight left short of their spokes
+
+The two orders that pulled nothing tight had 8 and 10 pads short of two spokes after the
+first run, the two that did 23 and 22; with the tightening alone, and nothing else of
+cleanup, 20 and 23 for 8 and 12 without it. Twelve pads of the default order are short with
+it and not without, each the ground pad of a decoupling capacitor beside a row of pins: a
+track from a pin to a resistor went 1.06 to 1.26 mm from the pad's centre, round the end of
+its spoke, and pulled straight it is 0.76 mm from it, across the gap.
+
+- *Walls round every free room of a spoke for the time of cleanup* (`World::keep_spokes`
+  with 2 and with every room), and *the rooms 0.3 and 0.5 mm longer*: 21/23/23/22, 20 and
+  23, 20 to 23. The run round the end of a spoke is in its room already, nearer the spoke
+  than the clearance, and the room is occupied before and after.
+- *What is kept*: a tightened way is refused where it is nearer a spoke of another net's pad
+  than the clearance and nearer the place where the spoke starts in its pad than any of the
+  run that it stands for (`World::nearer_a_spoke`, of `Zones::spokes`). 10/12/14/11 pads
+  short, with 16 mm more track than the tightening without it.
+
+### Budgets of nodes
+
+One thread, twelve runs at a time, beside 0.0.40 (the load 3 to 8). At 40 million nodes, nine
+boards in three orders: every run has the connections open that it had, by the run's count
+and by the DRC's (570 in all); 9997 vias for 10012 and 109 321 mm for 109 294 mm (+0.02 %);
+ten runs of 27 are the same to the via and the tenth of a millimetre, `corne-cherry`,
+`glasgow-revC3` and `nrfmicro` in every order. At 150 million, eight boards in two orders:
+the connections open of every run as they were (42 on seven boards, 56 and 75 on
+`glasgow-revD1`), 6777 vias for 6788, 76 779 mm for 76 709 mm (+0.09 %). The most that a
+run differs by: `sweep-v2.2`'s second order, 18 vias for 20 and 2149 mm for 2117 mm;
+`tinytapeout-demo`'s default order at 40 million, 263 vias for 277.
+
+### At 60 s, beside cadlab's router measured in the same minutes
+
+The release's source behind cadlab's adapter, cadlab's own router and, on six boards, 0.0.40,
+side by side, four runs at a time on three threads each (the load 6.4 at the start and 6.2
+at the end). Open is the DRC's count of unrouted on the board that left, for both; open and
+the pads short of two necks by order; medians of the vias, the track and the track outside
+the pads; the fastest and the slowest run.
+
+| board | open | vias | track | track outside pads | short of two necks | time |
+|---|---|---|---|---|---|---|
+| `buspirate-flash-sop` | equal (0/0/0/0 against 0/0/0/0) | equal (+0 %) 4 against 4 | better (-4 %) 442 against 461 | equal (-0 %) 431 against 431 | equal (0/0/0/0 against 0/0/0/0) | equal (1 to 1 s against 0 to 0 s) |
+| `buspirate-rs232` | equal (0/0/0/0 against 0/0/0/0) | better (-20 %) 8 against 10 | equal (+1 %) 284 against 281 | equal (+1 %) 275 against 272 | equal (0/0/0/0 against 0/0/0/0) | equal (0 to 0 s against 0 to 0 s) |
+| `lumenpnp-ringlight` | equal (0/0/0/0 against 0/0/0/0) | equal (+0 %) 3 against 3 | better (-7 %) 166 against 177 | equal (-1 %) 158 against 159 | equal (0/0/0/0 against 0/0/0/0) | equal (0 to 0 s against 0 to 0 s) |
+| `nrfmicro` | equal (0/0/0/0 against 0/0/0/0) | better (-14 %) 41 against 47.5 | better (-3 %) 437 against 450 | equal (+2 %) 421 against 414 | equal (0/0/0/0 against 0/0/0/0) | equal (2 to 14 s against 2 to 12 s) |
+| `sweep-v2.2` | equal (3/3/3/3 against 3/3/3/3) | better (-20 %) 20.5 against 25.5 | equal (-2 %) 2120 against 2159 | equal (-1 %) 2109 against 2122 | better (0/0/0/0 against 2/1/2/1) | better (36 to 36 s against 53 to 53 s) |
+| `corne-cherry` | better (1/0/0/1 against 1/3/2/4) | better (-7 %) 429 against 459 | better (-8 %) 7482 against 8103 | better (-6 %) 7411 against 7915 | better (2/1/1/1 against 3/3/2/2) | worse (27 to 56 s against 21 to 33 s) |
+| `tinytapeout-demo` | overlap, median 0 against 3 (1/0/3/0/0/0/0/0 against 19/1/4/5/1/2/2/9) | equal (-0 %) 272 against 273 | equal (-1 %) 4851 against 4894 | worse (+3 %) 4796 against 4672 | better (1/2/1/0/1/3/0/3 against 20/12/10/16/16/14/17/19) | equal (40 to 54 s against 35 to 60 s) |
+| `buspirate5-rev10` | better (0/0/0/0 against 4/2/4/4) | better (-6 %) 284.5 against 302 | better (-8 %) 2886 against 3129 | better (-4 %) 2802 against 2911 | better (8/10/8/10 against 22/24/30/21) | better (15 to 19 s against 20 to 33 s) |
+| `lumenpnp-mobo` | better (0/0/0/0 against 9/10/7/13) | better (-2 %) 331 against 338.5 | equal (-2 %) 5294 against 5393 | worse (+2 %) 5218 against 5108 | better (0/0/0/0 against 2/1/0/2) | better (30 to 33 s against 61 to 62 s) |
+| `cynthion` | better (8/8/8/8 against 28/29/30/28) | better (-13 %) 416.5 against 478 | better (-5 %) 3037 against 3184 | equal (-1 %) 2963 against 2981 | equal (1/1/1/1 against 1/1/1/1) | better (32 to 37 s against 62 to 62 s) |
+| `glasgow-revC3` | better (8/6/9/7 against 35/34/39/30) | better (-6 %) 395.5 against 419.5 | worse (+5 %) 3632 against 3448 | worse (+11 %) 3542 against 3190 | equal (0/0/0/0 against 0/0/0/0) | equal (58 to 59 s against 61 to 62 s) |
+| `glasgow-revD1` | better (10/17/8/13 against 127/109/119/144) | worse (+6 %) 1122 against 1059.5 | worse (+17 %) 10514 against 8968 | worse (+21 %) 10261 against 8447 | better (10/12/14/10 against 43/31/43/47) | better (54 to 56 s against 60 to 64 s) |
+
+Of 72 cells 33 are better, 30 equal, one has ranges that overlap and 8 are worse, where
+0.0.40 had 36, 28, none and 8. What moved:
+
+- *`glasgow-revD1`*: 10, 12, 14 and 10 pads short of two necks for 8, 23, 23 and 22 with
+  0.0.40 in the same minutes, 1122 vias for 1145.5 (+6 % beside cadlab's router for +8 %),
+  10 514 mm for 10 576 mm, 54 to 56 s for 56 to 58 s, and 10, 17, 8 and 13 connections open
+  for 12, 17, 4 and 12. `glasgow-revC3`: 395.5 vias for 402, 8, 6, 9 and 7 open for 9, 6, 9
+  and 8.
+- *`sweep-v2.2`'s track*, equal for better: 2120 mm for 2115 mm against 2159 mm, either side
+  of two in a hundred, with no pad short of two necks in any order for one in two orders.
+- *`tinytapeout-demo`'s connections open*, ranges that overlap for better: one order of the
+  eight ends with 3 open, its first run ended by its deadline before what the routes cut off
+  the fills was joined to them again. Over sixteen orders 1, 0, 3, 0, 0, 0, 0, 0, 1, 2, 2, 0,
+  1, 0, 0 and 0, where 0.0.40 had 0, 0, 0, 0, 0, 0, 1, 0, 1, 2, 0, 0, 3, 0, 0 and 0: the same
+  kind of run, in another order. Its vias, equal for worse: 272 against 273, with 0.0.40 at
+  280.5 in the same minutes and the runs of one order 259 to 303 apart; not this release's.
+- *`lumenpnp-mobo`'s track and track outside the pads*, equal for better and worse for
+  equal: this crate's four boards are within 4 mm of what they were (5294 mm, 5218 mm
+  outside the pads), and cadlab's router has 5393 mm and 5108 mm for 5446 mm and 5160 mm.
+
+The worse cells: `corne-cherry`'s time; `tinytapeout-demo`'s track outside the pads;
+`lumenpnp-mobo`'s track outside the pads; `glasgow-revC3`'s track and track outside the
+pads; `glasgow-revD1`'s vias, track and track outside the pads. In the 60 runs of this
+crate, sixteen orders of `tinytapeout-demo` among them, no pad of a pour is without a spoke,
+none is made solid by a track, the DRC has no error other than unrouted, and the run's count
+of open connections is the DRC's in every one.
+
+The same runs by the nets that both routers complete:
+
+| board | nets both complete (median of the pairs) | vias on them | track on them | track outside pads on them | nets only guide completes, their track and vias; only native |
+|---|---|---|---|---|---|
+| `buspirate-flash-sop` | 12 | equal (+0 %) 4 against 4 | better (-4 %) 442 against 461 | equal (-0 %) 431 against 431 | 0 nets, 0 mm, 0 vias; 0 |
+| `buspirate-rs232` | 30 | better (-20 %) 8 against 10 | equal (+1 %) 284 against 281 | equal (+1 %) 275 against 272 | 0 nets, 0 mm, 0 vias; 0 |
+| `lumenpnp-ringlight` | 12 | equal (+0 %) 3 against 3 | better (-7 %) 166 against 177 | equal (-1 %) 157 against 159 | 0 nets, 0 mm, 0 vias; 0 |
+| `nrfmicro` | 41 | better (-14 %) 41 against 47.5 | better (-3 %) 437 against 450 | equal (+2 %) 421 against 414 | 0 nets, 0 mm, 0 vias; 0 |
+| `sweep-v2.2` | 40 | better (-23 %) 18.5 against 24 | equal (-1 %) 2039 against 2060 | equal (+0 %) 2029 against 2028 | 0 nets, 0 mm, 0 vias; 0 |
+| `corne-cherry` | 149.5 | better (-5 %) 423 against 446 | better (-8 %) 7324 against 7991 | better (-7 %) 7256 against 7807 | 2.5 nets, 158 mm, 12 vias; 0.5 |
+| `tinytapeout-demo` | 136 | worse (+6 %) 247.5 against 233 | equal (+2 %) 4758 against 4684 | worse (+5 %) 4708 against 4499 | 1 nets, 58 mm, 23.5 vias; 0 |
+| `buspirate5-rev10` | 181 | equal (+1 %) 251.5 against 250 | better (-2 %) 2869 against 2927 | worse (+2 %) 2788 against 2720 | 2 nets, 28 mm, 33.5 vias; 0 |
+| `lumenpnp-mobo` | 188.5 | equal (+2 %) 264 against 259.5 | better (-3 %) 4988 against 5121 | equal (+1 %) 4922 against 4865 | 4.5 nets, 255 mm, 64 vias; 3.5 |
+| `cynthion` | 310.5 | better (-23 %) 276.5 against 360.5 | better (-6 %) 2695 against 2870 | better (-3 %) 2635 against 2714 | 15.5 nets, 348 mm, 134.5 vias; 0 |
+| `glasgow-revC3` | 199.5 | better (-18 %) 210 against 257.5 | equal (-0 %) 2667 against 2675 | worse (+4 %) 2613 against 2509 | 19 nets, 938 mm, 184 vias; 6.5 |
+| `glasgow-revD1` | 500.5 | better (-7 %) 739.5 against 791 | worse (+7 %) 8096 against 7566 | worse (+10 %) 7902 against 7168 | 50 nets, 2418 mm, 374.5 vias; 10 |
+
+Over these 36 cells 16 are better, 14 equal and 6 worse, as with 0.0.40; `lumenpnp-mobo`'s
+vias are equal for worse and `buspirate5-rev10`'s track outside the pads worse for equal,
+both at two in a hundred.
+
+
+### Tried and not kept, and what remains open
+
+- *A net's route with fewer vias across the routes of at most two other nets, those laid
+  again round it*: built, and kept for none of 91 nets of `tinytapeout-demo` at 150 million
+  nodes. With vias ten times as dear and a route crossed at a quarter of a via a step, 67
+  nets have the vias they had with no route crossed, and where a way with fewer crosses
+  routes it crosses 4 to 12 nets: a net that goes under and back goes under a bundle. Not
+  in the release.
+- *The share of the rounds of cadlab's router* at 0.5, 0.65 and 0.8 of the run on
+  `tinytapeout-demo`: 280, 280.5 and 280.5 vias over four orders. The rounds end on their own
+  in most runs with the half.
+- *What is open after those rounds settled before any net is taken out*, where eight nets or
+  fewer are: 275.5 vias for 278 over six and eight orders, not told from noise. The rounds
+  of one order end with 6 nets to route in one run and 7 in the next, and the runs whose
+  passes take two nets out or none end with 259 to 281 vias, those that take 27 to 148 out
+  with 288 to 294.
+- *cadlab's run for shorter ways on `corne-cherry`*, by stage: 4.2 s here in an order whose
+  run ends at 28 s, of which each net again 1.9 s (6 of 326 kept, 18 mm and 2 vias), the
+  shorter runs 1.4 s (20 mm of the 1107 mm that 111 nets' runs cost over straight ways) and
+  the tightening after them 0.2 s (19 mm); `cynthion` 7.4 s for 53 mm of 3473 and 7 vias.
+  Not gated: nothing that the stage knows before it tells the one from the other.
+- *The step that moves routes out of the rooms of spokes on `glasgow-revD1`* is not kept in
+  any of 12 runs measured (it leaves 1 to 7 connections more open), in 6 s of each.
+- *`glasgow-revD1`'s and `glasgow-revC3`'s track on the nets both complete*: as above.
+
 ## PCB routing with cleanup's searches made ahead on the other threads
 
 0.0.39 left nine cells worse beside cadlab's own router at 60 s, and the round after it was

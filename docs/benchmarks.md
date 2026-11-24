@@ -5922,7 +5922,9 @@ nearest to it taken out, one and then two together; the stub is laid, and they a
 again round it, with nothing moved or by a chain, and all of it stays only if every net is
 whole again and no pad of any pour is cut off for it: 17 of 30 such nets had their pads
 joined so over three sets of sixteen orders, and the runs in which every one was end with no
-connection open. And cleanup lays the steps of stairs and the jogs as the two tracks as
+connection open; over sixteen orders the board's count of open connections is not told from
+0.0.42's all the same (24 for 30 in four sets, 13 for 12 in the two at the lower load), the
+host's second run joining after the first what the step joins in it. And cleanup lays the steps of stairs and the jogs as the two tracks as
 long that go the same way, where nothing of another net is between, if it is asked to
 ([`RouteOptions::straighten`]): through cadlab's adapter a board then has a tenth of its
 tracks fewer on the nets both routers complete, with the connections and the vias it had at
@@ -5990,6 +5992,16 @@ three open in every set of 0.0.42 and 0.0.41 has none in one of these sets and s
 other with the step, three in both without: two of its three are nets that the passes
 leave open, which this does not touch, and its first run is ended by its share of the
 minute in the passes, so that it is another run from one set to the next with the load.
+
+Two more sets of sixteen orders, this source with no switch and 0.0.42 from crates.io side
+by side behind cadlab's adapter (the load 3.9 to 6.3 and 3.0 to 5.5): 7 connections open for
+7 and 6 for 5, the pads of pours among them 5 for 4 and 2 for 3. Over the four sets 24 for
+30, and over the two at the lower load 13 for 12. What the step joins in a first run is in
+good part what the host's second run, on the filled board with the routes fixed, joined
+after it (three of seven such runs ended with nothing open without the step in the first
+set); and where the step has no way, that run has none either. It saves that run, 1.5 to
+3 s, where it joins, and costs up to 4.5 s where it does not. The board's count over sixteen
+orders is not told from 0.0.42's by it.
 
 ### Where the bends are, and the stairs laid straight
 

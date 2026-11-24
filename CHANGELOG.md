@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.37](https://github.com/KarpelesLab/guide/compare/v0.0.36...v0.0.37) - 2026-11-24
+
+### Added
+
+- *(pcb)* the rounds of cadlab's router brought to their end sooner, with a time for their pass for fewer vias ([#67](https://github.com/KarpelesLab/guide/pull/67))
+
 ## [0.0.36](https://github.com/KarpelesLab/guide/compare/v0.0.35...v0.0.36) - 2026-11-23
 
 ### Added

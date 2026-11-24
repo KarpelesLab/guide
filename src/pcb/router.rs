@@ -3239,8 +3239,13 @@ fn route_all<'a>(
                 continue;
             }
             if let Some(pours) = &pours {
-                for _ in 0..POUR_ROUNDS {
-                    if run.poll() {
+                for round in 0..POUR_ROUNDS {
+                    // The first round also once the deadline is past: what the routes cut
+                    // off the fills stays cut off once nothing moves, and a run that its
+                    // deadline ended in the passes, or in the round itself, left those pads
+                    // so and counted them joined (`must_rejoin`, `Run::overtime`).
+                    let overtime = must_rejoin(round, cleaned) && run.overtime();
+                    if !overtime && run.poll() {
                         break;
                     }
                     let mut joined = false;
@@ -3261,7 +3266,11 @@ fn route_all<'a>(
                         .flatten();
                     stats.refills += usize::from(real.is_some());
                     for k in pours.jobs().collect::<Vec<usize>>() {
-                        if run.poll() {
+                        if if overtime {
+                            run.overtime_ending()
+                        } else {
+                            run.poll()
+                        } {
                             break;
                         }
                         let Some(c) = copper[k].as_ref() else {
@@ -3321,6 +3330,7 @@ fn route_all<'a>(
                             joined = true;
                         }
                     }
+                    run.overtime_over();
                     if !joined {
                         break;
                     }
@@ -3558,6 +3568,14 @@ fn route_all<'a>(
         .filter_map(|(j, f)| f.filter(|&f| f > 0).map(|f| (j.ctx.net, f)))
         .collect();
     Ok((routed, failed, counted, narrow, floors))
+}
+
+/// Whether a round of joining what the routes cut off the fills to them again is made
+/// also in a run that its deadline has ended ([`Run::overtime`]): the first of those before
+/// cleanup. What a cleanup that looked for shorter ways cuts off is a run's with the time
+/// for it.
+fn must_rejoin(round: usize, cleaned: bool) -> bool {
+    round == 0 && !cleaned
 }
 
 /// How many nodes the search for a net on the board with no route on it may expand.

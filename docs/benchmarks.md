@@ -5911,6 +5911,105 @@ at a time.
   are what it has for the balls left shut in, and no other way to those was tried.
 - More than one thread, or a deadline: the comparison is by nodes.
 
+## PCB routing with what the routes cut off the fills joined to them past a deadline
+
+0.0.41 left one run of `tinytapeout-demo` in sixteen orders with three connections open
+beside cadlab's own router at 60 s, and the round after it began with that run: what a run
+that its deadline ends returns. **One thing is changed. The round that joins the pads that
+the routes have cut off their fills to them again, once nothing moves any more, was begun
+only with time left and ended at the deadline between two of its searches, or in one: a run
+whose passes had all of its time returned such pads as they were, and counted their
+connections as made, on the fill that it had planned on. The first such round is now made
+whatever the clock says, each search with the nodes it may expand, and only the caller's
+flag or a budget of work ends it; a run with no deadline is what it was, to the node. It
+does not close the three connections: those, and nearly every connection that
+`tinytapeout-demo` is left with, are pads that no search joins among the routes as they
+are, whether the deadline cut the run or not.**
+
+### What a run that its deadline ends returned, and returns
+
+A run's time is shared out: routing, then cleanup with what routing left
+([`RouteOptions::whole_share`], [`RouteOptions::join`]). Before cleanup, each net is laid
+again where the others are, and then, in up to three rounds, every net with a fill is asked
+for the pads and stubs that the routes cut off it (by the host's own fill around the routes,
+where a host gives one) and a search joins each to the fill again by stubs that move
+nothing. Every step of that looked at the clock first, and a search under way took the
+run's stop flag.
+
+`a_run_that_its_deadline_ends_joins_a_pad_cut_off_its_fill_all_the_same` (`pcb::pours`) is
+the case in small: a strip of fill with a pad behind another net's track, a host that
+answers the round's request for its fill when the deadline is past. 0.0.41 returned the
+board with the pad on its own piece, `stopped: Deadline` and the net among its `unrouted`;
+this returns it joined. `Run::overtime` is what makes the round: while it lasts the clock
+ends no part and stops no search, the caller's flag stops everything as it did and the run
+is then one that its caller stopped, and a budget of work that runs out ends it too
+(`what_a_run_does_past_its_deadline_is_stopped_by_its_caller_and_its_budget_alone`).
+
+On a board (`tinytapeout-demo` through cadlab at 60 s, the order whose run has three open in
+every set measured; a trace of the stages that is in no release): the rounds of cadlab's
+router in this crate end at 27.2 s with seven nets to route, the passes take 246 nets out
+for them, are ended by their share at 45.2 s and go back to the routes that made the most,
+two nets open; the round begins at 45.8 s with the host's fill, finds three pieces of the
+ground's fill and one of a supply's cut off, and the deadline is at 46.8 s. 0.0.41: the
+round ended there with the first net's search cut, the run was back at 46.9 s with four
+nets open on the host's filled board, and the host's second run, on that board with the
+routes fixed, made the ground's stubs in 1.5 s. This: the search goes its way, 45 segments
+and two vias for the ground's three pieces by 47.65 s, the supply's pad has no way, and the
+run is back at 47.8 s with three nets open. The board leaves with the same three
+connections open either way, at 51.8 s for 56.5 s.
+
+### What `tinytapeout-demo` is left with
+
+Sixteen orders at 60 s, this source and 0.0.41 side by side in the same minutes (four runs
+at a time on three threads each, the load 4.4 at the start and 4.5 at the end; open is the
+host's DRC's count on the board that left): 0, 0, 0, 0, 0, 0, 1, 1, 0, 1, 0, 0, 3, 0, 0 and 0
+for 0, 0, 0, 0, 0, 0, 1, 1, 1, 2, 0, 0, 3, 0, 0 and 0; medians of 276.5 vias and 4848 mm for
+287 and 4867 mm. Six connections for eight in sixteen runs is not told from noise, and the
+run with three is the same run.
+
+What those connections are, by the trace over three sets of sixteen orders: in 6 to 8 first
+runs of 16 a pad of a net with a pour, or a via of its stubs, is on a piece of its own when
+the rounds of the joining end, and the search for it comes back with nothing: its way out is
+between the tracks of its neighbours on a package of 0.4 mm pitch (`U6.68 is shut in by pad
+U6.67, pad U6.70, track, track`). It is so in runs that end on their own, with eight
+seconds of the minute unused, as in those that the deadline cuts. The host's run on the
+filled board with the routes fixed finds no way for it either; a run that has every route
+back to move takes 137 to 195 nets out for the one pad and closed it in none of seven
+tries, in 3 to 12 s each. And the order with three: two of its three are the nets that
+the passes left open, each shut in the same way.
+
+### Budgets of nodes
+
+One thread, this crate alone behind cadlab's adapter, beside 0.0.41's sets. At 40 million
+nodes, nine boards in three orders: every one of 27 runs has the connections open, the
+vias and the track that it had (570 open, 9997 vias, 109 321 mm). At 150 million, seven
+boards in two orders: every one of 14 likewise. A run with no deadline has no overtime.
+
+### Tried and not kept, and what remains open
+
+- *A round of the joining after every cleanup.* Cleanup's own steps, each net pulled tight
+  and laid again for fewer vias, cut a pad off its fill in about one first run of
+  `tinytapeout-demo` in four (the host asked for its fill after cleanup, sixteen orders:
+  six runs with a pad cut off then, in most of them the pad that the rounds before cleanup
+  had left so, in two one more). A round after cleanup joined such a pad in 4 runs of 16 and saved
+  the host its second run there; it asks the host for a fill more in every run that has
+  cleanup, and `cynthion`'s first run was back 2.4 s later (19.9 s for 17.4 s) with the
+  board it had. Over four orders no connection, via or millimetre differs for it on
+  `buspirate5-rev10`, `cynthion`, `lumenpnp-mobo`, `sweep-v2.2` and `corne-cherry`. Not in
+  the release: after a cleanup that looked for shorter ways the
+  round is made as it was, with the time for it.
+- *A run that moves only the routes near what is open*, in cadlab's adapter: the nets with
+  copper within 2 mm of an end of an open connection handed back, the others fixed. Five
+  tries on `tinytapeout-demo` closed one pad, in 1.5 to 7 s each with up to 73 nets taken
+  out among the 14 to 51 handed back; `corne-cherry`'s first order spent 12 s on one, 119
+  nets taken out among 17, for nothing. Not kept.
+- *Chains of moves for the pieces cut off* are what settling does not do, by an earlier
+  measurement (`settle.rs`): not tried again.
+- **What remains open**: a pad of a net with a pour that the routes of the rounds shut in.
+  Nothing that runs after the rounds joins it; what would is a way kept for it while the
+  nets round it are still negotiated, which the rounds' three looks at the pads cut off do
+  for the pads they see, and not for the one that the last routes made legal cut off.
+
 ## PCB routing with a run pulled tight no nearer a pad across the gap of its spoke
 
 0.0.40 left eight cells worse beside cadlab's own router at 60 s, and the round after it was

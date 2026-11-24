@@ -681,6 +681,66 @@ fn a_part_of_a_run_ends_at_its_share_and_the_run_is_then_one_that_was_stopped() 
 }
 
 #[test]
+fn what_a_run_does_past_its_deadline_is_stopped_by_its_caller_and_its_budget_alone() {
+    use super::control::Run;
+    use core::sync::atomic::Ordering::Relaxed;
+    // A run with no deadline has no such time: it is as it was.
+    let control = RunControl::default();
+    let run = Run::new(&control, Some(1000));
+    assert!(!run.overtime());
+    // A deadline that is past stops the run and its searches; in overtime the searches
+    // go on, and the run is as stopped as it was once that is over.
+    let cancel = AtomicBool::new(false);
+    let control = RunControl {
+        deadline: Some(Instant::now()),
+        cancel: Some(&cancel),
+        ..RunControl::default()
+    };
+    let run = Run::new(&control, None);
+    assert!(run.poll());
+    assert_eq!(run.stopped(), Some(Stopped::Deadline));
+    assert!(run.flag().load(Relaxed));
+    assert!(run.overtime());
+    assert!(!run.flag().load(Relaxed));
+    assert!(!run.overtime_ending());
+    assert_eq!(run.limits(500).max_expansions, 500);
+    run.overtime_over();
+    assert!(run.flag().load(Relaxed));
+    assert_eq!(run.stopped(), Some(Stopped::Deadline));
+    // A deadline that passes in overtime stops no search either.
+    let later = RunControl {
+        deadline: Some(Instant::now() + Duration::from_millis(20)),
+        ..control
+    };
+    let run = Run::new(&later, None);
+    assert!(run.overtime());
+    std::thread::sleep(Duration::from_millis(30));
+    assert!(run.poll());
+    assert_eq!(run.stopped(), Some(Stopped::Deadline));
+    assert!(!run.flag().load(Relaxed));
+    assert!(!run.overtime_ending());
+    // The caller's flag does, and the run is then one that its caller stopped.
+    cancel.store(true, Relaxed);
+    assert!(run.overtime_ending());
+    assert_eq!(run.stopped(), Some(Stopped::Cancelled));
+    assert!(run.flag().load(Relaxed));
+    // A run that its caller stopped has no overtime, nor one out of its budget of work.
+    let run = Run::new(&later, None);
+    assert!(!run.overtime());
+    cancel.store(false, Relaxed);
+    let run = Run::new(&later, Some(10));
+    run.charge(10);
+    assert_eq!(run.stopped(), Some(Stopped::WorkBudget));
+    assert!(!run.overtime());
+    // And a budget that is spent in overtime ends it.
+    let run = Run::new(&later, Some(10));
+    assert!(run.overtime());
+    run.charge(10);
+    assert!(run.overtime_ending());
+    assert!(run.flag().load(Relaxed));
+}
+
+#[test]
 fn a_result_says_which_nets_were_tried() {
     let d = weave();
     let whole = route(&d, &RouteOptions::default()).unwrap();

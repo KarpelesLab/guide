@@ -2285,4 +2285,40 @@ mod tests {
         assert_eq!(routed.stats.pour_cuts, 0);
         assert_eq!(routed.unrouted, [NetId(1)]);
     }
+
+    #[test]
+    fn a_run_that_its_deadline_ends_joins_a_pad_cut_off_its_fill_all_the_same() {
+        use super::super::{Refill, RunControl, Stopped, route_with};
+        use std::cell::Cell;
+        use std::time::{Duration, Instant};
+        let d = strip();
+        let options = RouteOptions {
+            join: false,
+            ..RouteOptions::default()
+        };
+        // A host with no fill to give, which is first asked for one when routing is over
+        // and the round that joins what the routes cut off the fills begins, and answers
+        // when the deadline is past: a run whose passes had all of its time.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let asked = Cell::new(0);
+        let refill = |r: &Refill<'_>| {
+            if !r.last {
+                asked.set(asked.get() + 1);
+                std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+            }
+            None
+        };
+        let control = RunControl {
+            deadline: Some(deadline),
+            refill: Some(&refill),
+            ..RunControl::default()
+        };
+        let routed = route_with(&d, &options, &control).unwrap();
+        assert!(asked.get() >= 1);
+        assert_eq!(routed.stopped, Some(Stopped::Deadline));
+        // The pad behind the other net's track is joined to its fill again, as in a run
+        // that had the time (`a_run_with_a_budget_joins_a_pad_cut_off_its_fill_again`).
+        assert!(routed.stats.pour_cuts >= 1, "{:?}", routed.stats);
+        assert!(routed.unrouted.is_empty(), "{:?}", routed.unrouted);
+    }
 }

@@ -121,6 +121,14 @@ pub struct RunControl<'a> {
     /// When to stop, by the clock, read as often as the flag. A run with a deadline routes
     /// [for the most connections soonest](super#stopping-a-run-and-what-is-left-open), as
     /// one with a work budget does, whether the deadline stops it or not.
+    ///
+    /// One thing is done past it: a run that
+    /// [tells the pads its routes cut off their fills](super::RouteOptions::pour_cuts)
+    /// joins them to their fills again once, with a search for each such pad that goes its
+    /// way, whenever its routing ended. A pad left cut off is a connection open that the
+    /// run counts as made, and a run whose passes had all of its time, or whose deadline
+    /// passed between two of those searches, used to return such pads. The flag stops
+    /// that too.
     pub deadline: Option<Instant>,
     /// Called at every change of phase, and otherwise no more often than
     /// [`progress_interval`](RunControl::progress_interval), on the thread that routes.
@@ -249,6 +257,9 @@ pub(crate) struct Run<'a> {
     cut: Cell<Option<Stopped>>,
     /// When the run began.
     began: Instant,
+    /// Whether the run is past its deadline in what it has to end with
+    /// ([`overtime`](Run::overtime)): its searches go on until its caller stops them.
+    overtime: Cell<bool>,
 }
 
 impl<'a> Run<'a> {
@@ -270,6 +281,7 @@ impl<'a> Run<'a> {
             paused: Cell::new(false),
             cut: Cell::new(None),
             began: Instant::now(),
+            overtime: Cell::new(false),
         };
         if budget == Some(0) {
             run.halt(Stopped::WorkBudget);
@@ -291,7 +303,65 @@ impl<'a> Run<'a> {
     fn halt(&self, why: Stopped) {
         if self.why.get().is_none() {
             self.why.set(Some(why));
+            self.stop.store(
+                !self.overtime.get() || why != Stopped::Deadline,
+                Ordering::Relaxed,
+            );
+        }
+    }
+
+    /// Whether the caller's flag is set.
+    fn flagged(&self) -> bool {
+        self.control
+            .cancel
+            .is_some_and(|c| c.load(Ordering::Relaxed))
+    }
+
+    /// Begins what a run with a deadline has to end with also when the deadline is past,
+    /// and returns whether it may: neither its caller nor its budget of work has stopped
+    /// it or the part of it under way. Until [`overtime_over`](Run::overtime_over) the
+    /// clock stops nothing: the searches of the run go their way, each with the nodes it
+    /// may expand, and the caller's flag and the budget of work stop them as they did.
+    /// A run with no deadline has no such time, and is as it was.
+    ///
+    /// For the round that joins what the routes cut off the fills to them again: a pad
+    /// that is left cut off is a connection open that the run takes for made, and what
+    /// joining it takes is a search for each such pad.
+    pub(crate) fn overtime(&self) -> bool {
+        let by_other = match self.why.get() {
+            Some(Stopped::Deadline) => false,
+            Some(_) => true,
+            None => self.paused.get() && self.cut.get() != Some(Stopped::Deadline),
+        };
+        if self.control.deadline.is_some() && !by_other && !self.flagged() {
+            self.overtime.set(true);
+            self.stop.store(false, Ordering::Relaxed);
+        }
+        self.overtime.get()
+    }
+
+    /// Whether what is done in [`overtime`](Run::overtime) has to stop: by the caller's
+    /// flag, which a run that its deadline stopped is then stopped by, or by the budget
+    /// of work. Looks at the flag and the clock.
+    pub(crate) fn overtime_ending(&self) -> bool {
+        self.poll();
+        if self.flagged() && self.why.get() != Some(Stopped::Cancelled) {
+            self.why.set(Some(Stopped::Cancelled));
             self.stop.store(true, Ordering::Relaxed);
+        }
+        matches!(
+            self.why.get(),
+            Some(Stopped::Cancelled | Stopped::WorkBudget)
+        )
+    }
+
+    /// Ends [`overtime`](Run::overtime): the run is as stopped as it was.
+    pub(crate) fn overtime_over(&self) {
+        if self.overtime.replace(false) {
+            self.stop.store(
+                self.why.get().is_some() || self.paused.get(),
+                Ordering::Relaxed,
+            );
         }
     }
 
@@ -345,7 +415,10 @@ impl<'a> Run<'a> {
         }
         let why = if self.work.get() >= self.part_work.get() {
             Some(Stopped::WorkBudget)
-        } else if clock && self.part_until.get().is_some_and(|t| Instant::now() >= t) {
+        } else if clock
+            && !self.overtime.get()
+            && self.part_until.get().is_some_and(|t| Instant::now() >= t)
+        {
             Some(Stopped::Deadline)
         } else {
             None

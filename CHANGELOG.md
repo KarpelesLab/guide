@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.39](https://github.com/KarpelesLab/guide/compare/v0.0.38...v0.0.39) - 2026-11-24
+
+### Other
+
+- *(pcb)* the searches of the rounds faster, with every run at a budget of nodes as it was ([#73](https://github.com/KarpelesLab/guide/pull/73))
+- *(benchmarks)* glasgow-revD1's first run, the times as measured and the shares as such ([#71](https://github.com/KarpelesLab/guide/pull/71))
+
 ## [0.0.38](https://github.com/KarpelesLab/guide/compare/v0.0.37...v0.0.38) - 2026-11-24
 
 ### Other

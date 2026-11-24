@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.41](https://github.com/KarpelesLab/guide/compare/v0.0.40...v0.0.41) - 2026-11-24
+
+### Fixed
+
+- *(pcb)* a run pulled tight goes no nearer a pad across the gap of its spoke, and cleanup has a quarter of the time that a deadline leaves ([#79](https://github.com/KarpelesLab/guide/pull/79))
+
+### Other
+
+- *(benchmarks)* the table beside cadlab's router with 0.0.40, and what a shorter budget returns on corne-cherry ([#77](https://github.com/KarpelesLab/guide/pull/77))
+
 ## [0.0.40](https://github.com/KarpelesLab/guide/compare/v0.0.39...v0.0.40) - 2026-11-24
 
 ### Other

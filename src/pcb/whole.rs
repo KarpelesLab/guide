@@ -402,16 +402,31 @@ impl Rng {
     }
 }
 
+/// What a search knows of a node, in one place in memory: a search looks at the nodes
+/// round the one it is at, and each of them is one line of the cache where they were
+/// four, by what was kept.
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct Slot {
+    /// The search that the rest is of, by its stamp.
+    seen: u32,
+    cost: f32,
+    parent: u32,
+    dir: u8,
+    /// The search that the node is a target of, by its stamp for targets.
+    target: u16,
+}
+
 /// A search's own memory.
 struct Scratch {
-    cost: Vec<f32>,
-    parent: Vec<u32>,
-    dir: Vec<u8>,
-    seen: Vec<u32>,
-    target: Vec<u32>,
+    slots: Vec<Slot>,
     stamp: u32,
+    target_stamp: u16,
     heap: Ranked,
-    own_vias: Vec<(i32, i32)>,
+    /// By cell, whether a via of the net that is being routed would be too near another
+    /// of its own wires' vias, hole to hole: by the stamp of the net's routing.
+    own_near: Vec<u32>,
+    own_stamp: u32,
     near: Vec<EntryId>,
     /// What the nodes nearest a search's targets cost to them, by stamp.
     lb_cost: Vec<f32>,
@@ -493,53 +508,88 @@ fn rank(f: f32, h: f32) -> u64 {
     (u64::from((f * PARTS) as u32) << 32) | u64::from((h * PARTS) as u32)
 }
 
-/// A binary heap of ranks and nodes, the least first, and of equal ranks the least node.
+/// A heap of ranks and nodes, the least first, and of equal ranks the least node: each
+/// item above four others, so that a pop goes down half as many levels as with two, and
+/// the four it chooses among are next to each other. A rank and its node are one number,
+/// the rank above the node, which two of them are compared as at once.
 #[derive(Default)]
 struct Ranked {
-    items: Vec<(u64, u32)>,
+    items: Vec<u128>,
 }
 
 impl Ranked {
     fn clear(&mut self) {
         self.items.clear();
     }
+    #[inline]
     fn push(&mut self, rank: u64, node: u32) {
+        let item = (u128::from(rank) << 32) | u128::from(node);
         let mut i = self.items.len();
-        self.items.push((rank, node));
+        self.items.push(item);
+        let items = self.items.as_mut_slice();
         while i > 0 {
-            let p = (i - 1) / 2;
-            if self.items[i] >= self.items[p] {
+            let p = (i - 1) / 4;
+            let up = items[p];
+            if item >= up {
                 break;
             }
-            self.items.swap(i, p);
+            items[i] = up;
             i = p;
         }
+        items[i] = item;
     }
+    #[inline]
     fn pop(&mut self) -> Option<(u64, u32)> {
-        let n = self.items.len();
-        if n == 0 {
-            return None;
-        }
-        self.items.swap(0, n - 1);
-        let top = self.items.pop();
-        let n = n - 1;
+        let last = self.items.pop()?;
+        let items = self.items.as_mut_slice();
+        let n = items.len();
+        let Some(&top) = items.first() else {
+            return Some(((last >> 32) as u64, last as u32));
+        };
+        // The last item goes down from the top to where no item under it is less.
         let mut i = 0;
         loop {
-            let (l, r) = (2 * i + 1, 2 * i + 2);
-            let mut m = i;
-            if l < n && self.items[l] < self.items[m] {
-                m = l;
-            }
-            if r < n && self.items[r] < self.items[m] {
-                m = r;
-            }
-            if m == i {
+            let first = 4 * i + 1;
+            let (m, least) = if first + 4 <= n {
+                let four: &[u128; 4] = items[first..first + 4]
+                    .try_into()
+                    .unwrap_or(&[u128::MAX; 4]);
+                let (a, x) = if four[1] < four[0] {
+                    (1, four[1])
+                } else {
+                    (0, four[0])
+                };
+                let (b, y) = if four[3] < four[2] {
+                    (3, four[3])
+                } else {
+                    (2, four[2])
+                };
+                if y < x {
+                    (first + b, y)
+                } else {
+                    (first + a, x)
+                }
+            } else if first < n {
+                let mut m = first;
+                let mut least = items[first];
+                for (k, &it) in items[first + 1..n].iter().enumerate() {
+                    if it < least {
+                        least = it;
+                        m = first + 1 + k;
+                    }
+                }
+                (m, least)
+            } else {
+                break;
+            };
+            if last <= least {
                 break;
             }
-            self.items.swap(i, m);
+            items[i] = least;
             i = m;
         }
-        top
+        items[i] = last;
+        Some(((top >> 32) as u64, top as u32))
     }
 }
 
@@ -640,14 +690,12 @@ impl Board {
         (layer * self.grid.cells() + self.grid.cidx(x, y)) as u32
     }
 
+    #[inline]
     fn unpack(&self, n: u32) -> (usize, i32, i32) {
-        let cells = self.grid.cells();
-        let (l, c) = (n as usize / cells, n as usize % cells);
-        (
-            l,
-            (c % self.grid.w as usize) as i32,
-            (c / self.grid.w as usize) as i32,
-        )
+        // A node is numbered in 32 bits, and so are the cells: divided as such.
+        let (cells, w) = (self.grid.cells() as u32, self.grid.w as u32);
+        let (l, c) = (n / cells, n % cells);
+        (l as usize, (c % w) as i32, (c / w) as i32)
     }
 
     fn node_point(&self, n: u32) -> Point {
@@ -815,6 +863,20 @@ impl Board {
         near: &mut Vec<EntryId>,
     ) -> bool {
         let (l, x, y) = self.unpack(n);
+        self.point_ok_at(world, gi, net, n, (l, x, y), near)
+    }
+
+    /// [`point_ok`](Board::point_ok) for a node whose layer and cell are at hand.
+    #[inline]
+    fn point_ok_at(
+        &self,
+        world: &World<'_>,
+        gi: usize,
+        net: NetId,
+        n: u32,
+        (l, x, y): (usize, i32, i32),
+        near: &mut Vec<EntryId>,
+    ) -> bool {
         self.ensure(world, gi, l, x, y, near);
         match u16::from(self.groups[gi].points[n as usize].load(Ordering::Relaxed)) {
             FREE => true,
@@ -1222,14 +1284,21 @@ impl Board {
     fn scratch(&self) -> Scratch {
         let n = self.layers * self.grid.cells();
         Scratch {
-            cost: vec![0.0; n],
-            parent: vec![0; n],
-            dir: vec![NONE; n],
-            seen: vec![0; n],
-            target: vec![0; n],
+            slots: vec![
+                Slot {
+                    seen: 0,
+                    cost: 0.0,
+                    parent: 0,
+                    dir: NONE,
+                    target: 0,
+                };
+                n
+            ],
             stamp: 0,
+            target_stamp: 0,
             heap: Ranked::default(),
-            own_vias: Vec::new(),
+            own_near: vec![0; self.grid.cells()],
+            own_stamp: 0,
             near: Vec::new(),
             lb_cost: vec![0.0; n],
             lb_seen: vec![0; n],
@@ -1245,6 +1314,11 @@ impl Board {
     /// nets claim, is looked at backwards from the targets, [`POCKET`] nodes at most. A
     /// search for what has no way would look at everything that the sources reach before
     /// it said so, which on a board of several layers is most of it.
+    ///
+    /// The answer does not depend on the order the nodes are looked at in: it is yes
+    /// where what reaches the targets is [`POCKET`] nodes at most with no source among
+    /// them. So the nodes nearest a source are looked at first, and where there is a way
+    /// it is most often found in about as many nodes as it is long.
     fn pocket(
         &self,
         world: &World<'_>,
@@ -1262,13 +1336,30 @@ impl Board {
         let (gi, id) = (net.group, net.net);
         let grid = self.grid;
         let cells = grid.cells();
+        let gw = grid.w as usize;
         let has_via = self.groups[gi].via.is_some() && self.layers > 1;
+        let Some(&first) = targets.first() else {
+            return true;
+        };
+        // The source nearest the first target is what the nodes are ordered by.
+        let (_, tx, ty) = self.unpack(first);
+        let mut aim = (0usize, tx, ty);
+        let mut best = i32::MAX;
         // The sources are marked in the same map, by a cost that no node has.
         for &(n, _) in sources {
             sc.lb_seen[n as usize] = stamp;
             sc.lb_cost[n as usize] = -1.0;
+            let (l, x, y) = self.unpack(n);
+            let d = (x - tx).abs().max((y - ty).abs());
+            if d < best {
+                best = d;
+                aim = (l, x, y);
+            }
         }
-        let mut stack: Vec<u32> = Vec::new();
+        let far = |l: usize, x: i32, y: i32| -> f32 {
+            (2 * (x - aim.1).abs().max((y - aim.2).abs()) + i32::from(l != aim.0)) as f32
+        };
+        sc.lb_heap.clear();
         for &t in targets {
             let i = t as usize;
             if sc.lb_seen[i] == stamp {
@@ -1279,16 +1370,18 @@ impl Board {
             }
             sc.lb_seen[i] = stamp;
             sc.lb_cost[i] = 0.0;
-            stack.push(t);
+            let (l, x, y) = self.unpack(t);
+            sc.lb_heap.push(far(l, x, y), t);
         }
         let mut seen = 0usize;
-        while let Some(v) = stack.pop() {
+        while let Some((_, v)) = sc.lb_heap.pop() {
             seen += 1;
             if seen > POCKET {
                 return false;
             }
             let vi = v as usize;
-            let (l, x, y) = self.unpack(v);
+            let (l, c) = (vi / cells, vi % cells);
+            let (x, y) = ((c % gw) as i32, (c / gw) as i32);
             self.ensure(world, gi, l, x, y, &mut sc.near);
             let bits = self.groups[gi].moves[vi].load(Ordering::Relaxed);
             for (nd, &(dx, dy)) in DIRS.iter().enumerate() {
@@ -1310,12 +1403,11 @@ impl Board {
                 }
                 sc.lb_seen[ui] = stamp;
                 sc.lb_cost[ui] = 0.0;
-                stack.push(ui as u32);
+                sc.lb_heap.push(far(l, x + dx, y + dy), ui as u32);
             }
             if has_via && self.via_ok(world, gi, id, x, y) {
-                let cell = grid.cidx(x, y);
                 for l2 in (0..self.layers).filter(|&l2| l2 != l) {
-                    let ui = l2 * cells + cell;
+                    let ui = l2 * cells + c;
                     if sc.lb_seen[ui] == stamp {
                         if sc.lb_cost[ui] < 0.0 {
                             return false;
@@ -1324,7 +1416,7 @@ impl Board {
                     }
                     sc.lb_seen[ui] = stamp;
                     sc.lb_cost[ui] = 0.0;
-                    stack.push(ui as u32);
+                    sc.lb_heap.push(far(l2, x, y), ui as u32);
                 }
             }
         }
@@ -1449,6 +1541,46 @@ impl Board {
         f32::INFINITY
     }
 
+    /// How near a via of a group's nets may not be to another of the same net, hole to
+    /// hole: in cells and squared, as the largest that is nearer than that, or less than
+    /// nought where none is. The squares of whole numbers are exact, and so is what is
+    /// asked of them one by one: whether so many cells are less than the distance.
+    fn own_reach(&self, gi: usize) -> i64 {
+        let own_min = self.groups[gi]
+            .via
+            .map_or(0.0, |(_, drill)| (drill + self.hole_to_hole) as f64 - 1.0);
+        let g = self.grid.g as f64;
+        let near = |s: i64| (s as f64).sqrt() * g < own_min;
+        let (mut lo, mut hi) = (-1i64, 1i64 << 40);
+        while hi - lo > 1 {
+            let mid = lo + (hi - lo) / 2;
+            if near(mid) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
+    }
+
+    /// Marks the cells that a via of the net's own wires at a cell leaves no other via of
+    /// the net: those within `reach` of it, squared, but its own.
+    fn own_via(&self, sc: &mut Scratch, reach: i64, x: i32, y: i32) {
+        if reach < 1 {
+            return;
+        }
+        let r = reach.isqrt() as i32;
+        let (w, h) = (self.grid.w, self.grid.h);
+        for cy in (y - r).max(0)..=(y + r).min(h - 1) {
+            for cx in (x - r).max(0)..=(x + r).min(w - 1) {
+                let (dx, dy) = (i64::from(cx - x), i64::from(cy - y));
+                if (cx, cy) != (x, y) && dx * dx + dy * dy <= reach {
+                    sc.own_near[self.grid.cidx(cx, cy)] = sc.own_stamp;
+                }
+            }
+        }
+    }
+
     /// The cheapest path of a net from one of `sources`, each at its cost, to one of
     /// `targets`, and how many nodes it took.
     #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
@@ -1469,11 +1601,16 @@ impl Board {
         }
         sc.stamp = sc.stamp.wrapping_add(1);
         if sc.stamp == 0 {
-            sc.seen.iter_mut().for_each(|v| *v = 0);
-            sc.target.iter_mut().for_each(|v| *v = 0);
+            sc.slots.iter_mut().for_each(|v| v.seen = 0);
             sc.stamp = 1;
         }
+        sc.target_stamp = sc.target_stamp.wrapping_add(1);
+        if sc.target_stamp == 0 {
+            sc.slots.iter_mut().for_each(|v| v.target = 0);
+            sc.target_stamp = 1;
+        }
         let stamp = sc.stamp;
+        let target = sc.target_stamp;
         let ns = self.layers;
         let grid = self.grid;
         let cells = grid.cells();
@@ -1486,7 +1623,7 @@ impl Board {
         let mut tb = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
         let mut by_layer = vec![tb; ns];
         for &t in targets {
-            sc.target[t as usize] = stamp;
+            sc.slots[t as usize].target = target;
             let (l, x, y) = self.unpack(t);
             tb = (tb.0.min(x), tb.1.min(y), tb.2.max(x), tb.3.max(y));
             let b = &mut by_layer[l];
@@ -1540,9 +1677,6 @@ impl Board {
             }
         };
         let mut floor = 0.0f32;
-        let own_min = self.groups[gi]
-            .via
-            .map_or(0.0, |(_, drill)| (drill + self.hole_to_hole) as f64 - 1.0);
         sc.heap.clear();
         for &(n, c0) in sources {
             let (l, x, y) = self.unpack(n);
@@ -1553,13 +1687,14 @@ impl Board {
             }
             let c = c0 + price(&self.hist_t[k]) + pres * occ;
             let i = n as usize;
-            if sc.seen[i] == stamp && sc.cost[i] <= c {
+            let slot = &mut sc.slots[i];
+            if slot.seen == stamp && slot.cost <= c {
                 continue;
             }
-            sc.seen[i] = stamp;
-            sc.cost[i] = c;
-            sc.parent[i] = u32::MAX;
-            sc.dir[i] = NONE;
+            slot.seen = stamp;
+            slot.cost = c;
+            slot.parent = u32::MAX;
+            slot.dir = NONE;
             let h = bound(sc, floor, i, l, x, y);
             sc.heap.push(rank(c + h, h), n);
         }
@@ -1574,13 +1709,18 @@ impl Board {
         while let Some((f, u)) = sc.heap.pop() {
             let ui = u as usize;
             let (l, x, y) = self.unpack(u);
-            let gu = sc.cost[ui];
+            let Slot {
+                cost: gu,
+                dir: du,
+                target: at_target,
+                ..
+            } = sc.slots[ui];
             // Left behind by a cheaper way to the node since.
             let h = bound(sc, floor, ui, l, x, y);
             if f >> 32 > rank(gu + h, h) >> 32 {
                 continue;
             }
-            if sc.target[ui] == stamp {
+            if at_target == target {
                 found = Some(u);
                 break;
             }
@@ -1603,7 +1743,6 @@ impl Board {
             }
             self.ensure(world, gi, l, x, y, &mut sc.near);
             let bits = self.groups[gi].moves[ui].load(Ordering::Relaxed);
-            let du = sc.dir[ui];
             let occ_l = &self.occ_t[hi][l * dn..(l + 1) * dn];
             let hist_l = &self.hist_t[l * dn..(l + 1) * dn];
             let k0 = grid.didx(2 * x, 2 * y) as isize;
@@ -1655,13 +1794,14 @@ impl Board {
                 }
                 let hist = price(&hist_l[km]) + price(&hist_l[kq]);
                 let c = gu + (base + hist) * (1.0 + pres * occ) + bend_cost[t as usize];
-                if sc.seen[vi] == stamp && sc.cost[vi] <= c {
+                let slot = &mut sc.slots[vi];
+                if slot.seen == stamp && slot.cost <= c {
                     continue;
                 }
-                sc.seen[vi] = stamp;
-                sc.cost[vi] = c;
-                sc.parent[vi] = u;
-                sc.dir[vi] = nd as u8;
+                slot.seen = stamp;
+                slot.cost = c;
+                slot.parent = u;
+                slot.dir = nd as u8;
                 let h = bound(sc, floor, vi, l, nx, ny);
                 sc.heap.push(rank(c + h, h), vi as u32);
             }
@@ -1677,10 +1817,7 @@ impl Board {
                     continue;
                 }
                 // Hole to hole from the vias of the net's own wires.
-                if sc.own_vias.iter().any(|&(vx, vy)| {
-                    let (dx, dy) = (f64::from(vx - x), f64::from(vy - y));
-                    (vx, vy) != (x, y) && (dx * dx + dy * dy).sqrt() * (grid.g as f64) < own_min
-                }) {
+                if sc.own_near[cell] == sc.own_stamp {
                     continue;
                 }
                 let c0 = gu + (via_cost + price(&self.hist_v[cell])) * (1.0 + pres * occ);
@@ -1690,16 +1827,18 @@ impl Board {
                     }
                     let v = (l2 * cells + cell) as u32;
                     let vi = v as usize;
-                    if sc.seen[vi] == stamp && sc.cost[vi] <= c0 {
+                    let slot = sc.slots[vi];
+                    if slot.seen == stamp && slot.cost <= c0 {
                         continue;
                     }
-                    if !self.point_ok(world, gi, id, v, &mut sc.near) {
+                    if !self.point_ok_at(world, gi, id, v, (l2, x, y), &mut sc.near) {
                         continue;
                     }
-                    sc.seen[vi] = stamp;
-                    sc.cost[vi] = c0;
-                    sc.parent[vi] = u;
-                    sc.dir[vi] = NONE;
+                    let slot = &mut sc.slots[vi];
+                    slot.seen = stamp;
+                    slot.cost = c0;
+                    slot.parent = u;
+                    slot.dir = NONE;
                     let h = bound(sc, floor, vi, l2, x, y);
                     sc.heap.push(rank(c0 + h, h), v);
                 }
@@ -1711,8 +1850,8 @@ impl Board {
         let path = found.map(|u| {
             let mut path = vec![u];
             let mut c = u;
-            while sc.parent[c as usize] != u32::MAX {
-                c = sc.parent[c as usize];
+            while sc.slots[c as usize].parent != u32::MAX {
+                c = sc.slots[c as usize].parent;
                 path.push(c);
             }
             path.reverse();
@@ -1775,7 +1914,12 @@ impl Board {
         margin: Option<(i32, i32)>,
     ) -> (Result<(), Stop>, u64) {
         let old = core::mem::take(&mut net.wires);
-        sc.own_vias.clear();
+        sc.own_stamp = sc.own_stamp.wrapping_add(1);
+        if sc.own_stamp == 0 {
+            sc.own_near.iter_mut().for_each(|v| *v = 0);
+            sc.own_stamp = 1;
+        }
+        let reach = self.own_reach(net.group);
         let n = net.terms.len();
         let mut parent: Vec<usize> = (0..n).collect();
         let mut members: Vec<Vec<usize>> = (0..n).map(|t| vec![t]).collect();
@@ -1806,7 +1950,7 @@ impl Board {
                 for q in w.nodes.windows(2) {
                     if q[0] / cells != q[1] / cells {
                         let (_, x, y) = self.unpack(q[0]);
-                        sc.own_vias.push((x, y));
+                        self.own_via(sc, reach, x, y);
                     }
                 }
                 net.wires.push(w);
@@ -1907,7 +2051,7 @@ impl Board {
             for w in path.windows(2) {
                 if w[0] / cells != w[1] / cells {
                     let (_, x, y) = self.unpack(w[0]);
-                    sc.own_vias.push((x, y));
+                    self.own_via(sc, reach, x, y);
                 }
             }
             let (mb, tb) = (

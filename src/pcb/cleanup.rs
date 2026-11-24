@@ -1479,8 +1479,20 @@ fn tighten(world: &World<'_>, ctx: &NetCtx, l: u8, run: &[Point]) -> Vec<Point> 
                     continue;
                 }
                 let mut from = run[i];
+                // And no nearer a pad of another net in the room of a spoke of its relief
+                // than the run is: pulled straight, a run that went round the end of a
+                // spoke goes across the gap that the spoke bridges, and the pad is short
+                // of a spoke for a millimetre of track (`glasgow-revD1`, 12 pads of 20
+                // that the board had short of two spokes, `docs/benchmarks.md`).
                 let free = way.iter().all(|&to| {
-                    let ok = legal(world, ctx, from, to, l);
+                    let ok = legal(world, ctx, from, to, l)
+                        && !world.nearer_a_spoke(
+                            ctx.net,
+                            LayerId(l),
+                            ctx.widths[usize::from(l)],
+                            &run[i..=j],
+                            (from, to),
+                        );
                     from = to;
                     ok
                 });
@@ -1637,6 +1649,82 @@ mod tests {
         fewer_hops(&mut world, &jobs[1], under, params, &options);
         assert_eq!(under.vias.len(), 2, "{under:?}");
         assert_eq!(under.pieces(&jobs[1].ctx).apart(), 0);
+    }
+
+    #[test]
+    fn a_run_is_pulled_no_nearer_a_pad_across_the_gap_of_its_spoke() {
+        // Two pads of a net 4 mm apart, one above the other, and a run between them that
+        // goes a millimetre to the left on its way. A pad of another net 1.2 mm to the
+        // right of the straight line, with a spoke of its relief to the left that ends
+        // 0.2 mm from that line: the straight track is clear of the pad, and is in the
+        // room of the spoke.
+        let pad = |x: i64, y: i64, net: u32| crate::geom::drc::Pad {
+            shape: crate::geom::Shape::rect(crate::geom::Rect::new(
+                Point::new(x - 300_000, y - 300_000),
+                Point::new(x + 300_000, y + 300_000),
+            ))
+            .unwrap(),
+            layers: crate::geom::LayerSet::EMPTY.with(crate::geom::LayerId(0)),
+            hole: None,
+            net: Some(crate::id::NetId(net)),
+            clearance: None,
+            stack: Vec::new(),
+        };
+        let (a, b) = (Point::new(0, -2 * MM), Point::new(0, 2 * MM));
+        let other = Point::new(1_200_000, 0);
+        let pads = vec![pad(a.x, a.y, 1), pad(b.x, b.y, 1), pad(other.x, other.y, 2)];
+        let options = RouteOptions::default();
+        let run = |spoke: bool| {
+            let mut d = design(3, pads.clone(), 2);
+            if spoke {
+                d.zones.spokes.push(crate::pcb::Spoke {
+                    pad: 2,
+                    layer: crate::geom::LayerId(0),
+                    from: other,
+                    to: Point::new(200_000, 0),
+                    width: 250_000,
+                });
+            }
+            let mut world = World::new(
+                &d.board,
+                &d.rules,
+                &d.outline,
+                d.edge_clearance,
+                &d.obstacles,
+            )
+            .unwrap();
+            world.configure(&d, &options);
+            let pitch = router::pitch(&d, &options);
+            let jobs = router::jobs(&d, &world, pitch, &[], &[]);
+            let job = jobs
+                .iter()
+                .find(|j| j.ctx.net == crate::id::NetId(1))
+                .unwrap();
+            let (p, q) = (Point::new(-MM, -MM), Point::new(-MM, MM));
+            let mut c = NetCopper::default();
+            c.segs = vec![
+                Seg { a, b: p, l: 0 },
+                Seg { a: p, b: q, l: 0 },
+                Seg { a: q, b, l: 0 },
+            ];
+            super::pull_tight(&world, &job.ctx, &mut c);
+            c
+        };
+        // With no relief there, the run is pulled straight.
+        let straight = run(false);
+        assert_eq!(straight.segs.len(), 1, "{straight:?}");
+        assert!((straight.length() - 4e6).abs() < 1.0, "{straight:?}");
+        // With the spoke, it stays as far from the pad as it was: 2.2 mm.
+        let kept = run(true);
+        let near = |s: &Seg| {
+            let (px, py) = (other.x as f64, other.y as f64);
+            let (ax, ay, bx, by) = (s.a.x as f64, s.a.y as f64, s.b.x as f64, s.b.y as f64);
+            let (dx, dy) = (bx - ax, by - ay);
+            let t = (((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)).clamp(0.0, 1.0);
+            ((px - ax - t * dx).powi(2) + (py - ay - t * dy).powi(2)).sqrt()
+        };
+        assert!(kept.segs.iter().all(|s| near(s) > 2_190_000.0), "{kept:?}");
+        assert!(kept.length() > 4.5e6, "{kept:?}");
     }
 
     #[test]

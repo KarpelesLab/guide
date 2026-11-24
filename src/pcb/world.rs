@@ -10,6 +10,7 @@
 //! net keeps out every net's copper, stricter than the check.
 
 use core::cell::RefCell;
+use std::sync::Arc;
 
 use super::control::Run;
 use super::gates::Gates;
@@ -206,6 +207,10 @@ pub(crate) struct World<'r> {
     /// The boxes of the pads that a via of their net may be in although vias are kept out
     /// of pads ([`Zones::via_pads`](super::Zones::via_pads)), with their nets.
     via_pads: Vec<(NetId, crate::geom::Rect)>,
+    /// By layer, the spokes that the host's fill makes for the pads in pours of their
+    /// nets ([`Zones::spokes`](super::Zones::spokes)): the pad's net, where the spoke
+    /// starts in its pad and ends in the pour, and its width.
+    relieved: Arc<Vec<Vec<Relieved>>>,
     /// Where zones of nets are planes, which other nets' tracks pay more to cross.
     planes: Option<Planes>,
     /// Where the spokes of pads in pours will be, which other nets pay to be in.
@@ -244,6 +249,7 @@ pub(crate) struct Frozen {
     locked: Vec<bool>,
     clearances: Vec<i64>,
     via_pads: Vec<(NetId, crate::geom::Rect)>,
+    relieved: Arc<Vec<Vec<Relieved>>>,
     planes: Option<Planes>,
     spokes: Option<super::spokes::Spokes>,
     kept: Option<Kept>,
@@ -265,6 +271,11 @@ pub(crate) struct Planes {
     pub(crate) nets: Vec<u32>,
     pub(crate) cost: f64,
 }
+
+/// A spoke that the host's fill makes for a pad in a pour of its net: the pad's net, where
+/// the spoke starts in its pad and ends in the pour, and its width.
+#[derive(Clone, Copy, Debug)]
+struct Relieved(NetId, Point, Point, i64);
 
 impl<'r> World<'r> {
     /// The fixed items of a board, and its edge.
@@ -304,6 +315,7 @@ impl<'r> World<'r> {
             spokes: None,
             kept: None,
             via_pads: Vec::new(),
+            relieved: Arc::default(),
             vias_in_pads: true,
             excepts: Vec::new(),
             ties: Vec::new(),
@@ -576,6 +588,98 @@ impl<'r> World<'r> {
         self.restricted =
             self.run_layers & all != all || self.track_layers.iter().any(|&mask| mask & all != all);
         self.keep_spokes(design, options.kept_spokes);
+        let mut relieved = vec![Vec::new(); self.layers.len()];
+        for spoke in &design.zones.spokes {
+            let net = design.board.pads.get(spoke.pad).and_then(|pad| pad.net);
+            if let (Some(net), Some(on)) = (net, relieved.get_mut(usize::from(spoke.layer.0)))
+                && spoke.width > 0
+                && spoke.from != spoke.to
+            {
+                on.push(Relieved(net, spoke.from, spoke.to, spoke.width));
+            }
+        }
+        self.relieved = Arc::new(relieved);
+    }
+
+    /// Whether a track of `net` from `a` to `b` on `layer`, `width` wide, is nearer a pad
+    /// of another net in the room of one of its spokes than the run `old` that it would
+    /// stand for: in the room, which is nearer the spoke than the clearance, and nearer
+    /// the place where the spoke starts in its pad than any of `old` is.
+    ///
+    /// A run that passes the end of a spoke leaves the pad its spoke, shorter, and the
+    /// same run pulled straight across the gap between the pad and its pour takes it:
+    /// both are in the room, which tells the two apart by nothing, and the room is
+    /// neither priced nor walled for a step that makes no search
+    /// ([`pull_tight`](super::cleanup::pull_tight)).
+    pub(crate) fn nearer_a_spoke(
+        &self,
+        net: NetId,
+        layer: LayerId,
+        width: i64,
+        old: &[Point],
+        (a, b): (Point, Point),
+    ) -> bool {
+        let Some(spokes) = self.relieved.get(usize::from(layer.0)) else {
+            return false;
+        };
+        if spokes.is_empty() {
+            return false;
+        }
+        let f = |p: Point| (p.x as f64, p.y as f64);
+        // From a point to a segment.
+        let to_segment = |p: (f64, f64), a: (f64, f64), b: (f64, f64)| -> f64 {
+            let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+            let len = dx * dx + dy * dy;
+            let t = if len > 0.0 {
+                (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / len).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            ((p.0 - a.0 - t * dx).powi(2) + (p.1 - a.1 - t * dy).powi(2)).sqrt()
+        };
+        let side = |p: (f64, f64), a: (f64, f64), b: (f64, f64)| {
+            (b.0 - a.0) * (p.1 - a.1) - (b.1 - a.1) * (p.0 - a.0)
+        };
+        let (a, b) = (f(a), f(b));
+        let (x0, x1) = (a.0.min(b.0), a.0.max(b.0));
+        let (y0, y1) = (a.1.min(b.1), a.1.max(b.1));
+        let clearance = self.clearance(Some(net), layer).max(0);
+        for &Relieved(of, from, to, spoke) in spokes.iter() {
+            if of == net {
+                continue;
+            }
+            let reach = (spoke / 2 + width / 2 + clearance) as f64;
+            let (p, q) = (f(from), f(to));
+            if p.0.min(q.0) - reach > x1
+                || p.0.max(q.0) + reach < x0
+                || p.1.min(q.1) - reach > y1
+                || p.1.max(q.1) + reach < y0
+            {
+                continue;
+            }
+            let crosses =
+                side(a, p, q) * side(b, p, q) < 0.0 && side(p, a, b) * side(q, a, b) < 0.0;
+            let apart = if crosses {
+                0.0
+            } else {
+                to_segment(a, p, q)
+                    .min(to_segment(b, p, q))
+                    .min(to_segment(p, a, b))
+                    .min(to_segment(q, a, b))
+            };
+            if apart >= reach {
+                continue;
+            }
+            let new = to_segment(p, a, b);
+            let was = old
+                .windows(2)
+                .map(|w| to_segment(p, f(w[0]), f(w[1])))
+                .fold(f64::INFINITY, f64::min);
+            if new + 1.0 < was {
+                return true;
+            }
+        }
+        false
     }
 
     /// Whether tracks of `net` may be on a layer.
@@ -616,6 +720,7 @@ impl<'r> World<'r> {
             locked,
             clearances,
             via_pads,
+            relieved,
             planes,
             spokes,
             kept,
@@ -637,6 +742,7 @@ impl<'r> World<'r> {
             locked: locked.clone(),
             clearances: clearances.clone(),
             via_pads: via_pads.clone(),
+            relieved: Arc::clone(relieved),
             planes: planes.clone(),
             spokes: spokes.clone(),
             kept: kept.clone(),
@@ -669,6 +775,7 @@ impl<'r> World<'r> {
             locked: frozen.locked.clone(),
             clearances: frozen.clearances.clone(),
             via_pads: frozen.via_pads.clone(),
+            relieved: Arc::clone(&frozen.relieved),
             planes: frozen.planes.clone(),
             spokes: frozen.spokes.clone(),
             kept: frozen.kept.clone(),

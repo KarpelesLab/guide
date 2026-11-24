@@ -5911,6 +5911,171 @@ at a time.
   are what it has for the balls left shut in, and no other way to those was tried.
 - More than one thread, or a deadline: the comparison is by nodes.
 
+## PCB routing with the rounds of cadlab's router brought to their end
+
+0.0.36 left one board worse with the rounds of cadlab's own router (`Rounds::Native`, the
+sections below) than with this crate's own: `tinytapeout-demo`, with 4 % more vias, its first
+run ending at its deadline in every order. This round measured why, and what it found is the
+rounds, not what comes after them. **A point that stays shared now costs 2 more in each round
+that it was, for 0.5, and the rounds reach their end in 119 million nodes for 167 in the mean
+of eight orders; the pass for fewer vias after them has a time of its own where their share
+ended them; and the maps that the look at the board makes are the rounds' if the board is the
+one looked at. Through cadlab at 60 s, in sixteen orders side by side, `tinytapeout-demo` has
+277 vias in the median for 283.5 and 7 connections open in all for 11; with the three of
+this section and a first run of 0.78 of the minute for 0.7 in cadlab, 277 where 0.0.36 had
+302.5 in other minutes of the round, this crate's own rounds 288 and cadlab's router 273.**
+
+All of it measured through cadlab's adapter (its route_bench; at 60 s three threads a run and
+four runs at a time, the load 2 to 7 on a machine of 64 threads; at a budget of nodes one
+thread, where a run is the same every time). A run at 60 s ends by the clock, and two runs of
+one order differ by as much as two orders do: the sets below are of eight or sixteen orders,
+side by side in the same minutes.
+
+### What a run that is cut loses
+
+`tinytapeout-demo` in eight orders at 60 s with 0.0.36, by what the first run says of itself:
+
+| | runs | rounds | points shared at their end | wires taken out | vias saved by the rounds' pass | nets taken out by the passes | vias as the first run ends | vias of the board |
+|---|---|---|---|---|---|---|---|---|
+| the rounds ended by their share | 8 of 8 | 24 to 32 | 8 to 57 | 2 to 6 | 0 in six, 2 and 17 | 9 to 83 | 317 to 375 | 276 to 370, median 302 |
+| a budget of 150 million nodes, one order | | 28 | 9 | 3 | 31 | 47 | 314 | 279 |
+
+The rounds have nine tenths of their share and what makes their routes legal the rest; the
+pass for fewer vias comes after both and was begun with the share spent. The nets that are
+taken out for the points still shared are the passes', which take other nets out for them:
+174 in one run, for 47 where the rounds had ended. And this crate's cleanup, which is the
+last of the first run, is not reached.
+
+The rounds themselves visit as many nodes a second as cadlab's (5.2 to 5.5 million on a
+thread), and neither has anything of a second thread on this board: a round's nets are
+routed a few at a time only where their boxes do not meet, and of 59 nets in a late round 58
+are alone (measured: 58 batches). What differs is how many rounds it takes. cadlab's router
+has 2007 points shared after the first and 30 after the tenth; these rounds, with the price
+of a spoke's room and no net planned on a pour of an outer layer (both kept: the first is
+what leaves no pad without a spoke, the second what leaves no pad cut off its pour), have
+2685 and 136, and 4 to 7 million nodes a round for 2 to 4.
+
+### A point that stays shared costs more
+
+Each point that is still shared after a round costs more in every round after it, by a fixed
+amount for each time that it was: 0.5 in cadlab's router, which is what the rounds had. With
+more, the nets that keep meeting at a point leave it sooner. `tinytapeout-demo` at a budget
+of 150 million nodes, which ends no round, in eight orders (the nodes that the rounds visit
+before they end, in millions; the board's vias):
+
+| each time | nodes, by order | mean | most | rounds | open, eight orders | vias, mean | median |
+|---|---|---|---|---|---|---|---|
+| 0.5 | 162 186 197 127 180 144 136 203 | 167 | 203 | 23 to 40 | 1 | 276.9 | 278 |
+| 1 | 119 174 97 150 179 110 123 124 | 134 | 179 | 18 to 36 | 1 | 278.8 | 275 |
+| 1.5 | 99 100 116 136 133 116 202 100 | 125 | 202 | 17 to 40 | 0 | 269.0 | 263 |
+| **2** | 115 105 101 136 128 100 143 123 | **119** | **143** | 20 to 29 | 0 | 271.1 | 269 |
+| 3 | 96 107 95 84 118 84 80 101 | 96 | 118 | 17 to 20 | 1 | 282.0 | 278.5 |
+| 4 | 116 126 85 101 137 93 116 88 | 108 | 137 | 17 to 24 | 0 | 275.9 | 273.5 |
+
+A run at 60 s has some 150 million nodes for its rounds: with 0.5 five orders of eight need
+more, with 2 none. The two other boards that the rounds are for, in four orders at the same
+budget: `buspirate5-rev10` 283, 284, 288 and 301 vias and 2941, 2882, 2920 and 2972 mm with
+0.5, and 284, 288, 286 and 281 and 2882, 2871, 2863 and 2897 mm with 2, the rounds 27 to 47
+million nodes for 21 to 27; `lumenpnp-mobo` 326, 331, 338 and 328 vias and 5330, 5200, 5225
+and 5246 mm, and 344, 328, 329 and 330 and 5348, 5240, 5246 and 5340 mm, 57 to 70 million
+nodes for 47 to 68. No connection open on either with either.
+
+A board that has no legal routing ends otherwise: on the test's board of one layer, a line
+of six pads that two nets have to cross, the rounds with 0.5 end with both nets across on
+one wire of the line, which is taken out alone, and the passes leave the line with its five
+connections open; with 2 they end with each net across on another wire of the line, and the
+two wires across are taken out, two connections open (`rounds_tests`).
+
+### A time for the pass for fewer vias
+
+Where the rounds' share ended them, the pass that routes each net again with vias four
+times as dear now has three tenths of the time that the run has left
+(`rounds::VIAS`): it takes about 2 s on `tinytapeout-demo` and saved 23 to 51 vias in each
+of the 32 runs with it that were looked at. In a run with a budget of work it has what the stage has
+left, as it had.
+
+### The maps of the look
+
+The look at the board (0.0.36) makes the maps of what is fixed on it, and the rounds made
+them again: 0.72 s each time on `tinytapeout-demo`, 0.15 s on `lumenpnp-mobo`, 0.08 s on
+`buspirate5-rev10`. They are now the rounds' if the board is the one that was looked at, by
+its obstacles, its profiles, its grid and its layers; in a debug build they are made again
+and compared. `tinytapeout-demo` and `lumenpnp-mobo` have them so. `buspirate5-rev10` does
+not: the host's fill around the ways out, which is made between the two, has a fill for a
+zone that had none, and that is copper to the other nets. The ways out are planned on a
+board without them and make their own maps as before (0.72 s on `tinytapeout-demo`).
+
+### What a board given up has of the time
+
+`RouteOptions::given_up_share`: a host that gives the run with these rounds a later deadline
+than the run without them says what a board that the look gives up is to have of it, and
+that run then ends where it would have. cadlab gives the first run 0.78 of its budget where
+it asks for the rounds, for 0.7, and tells 0.7 / 0.78.
+
+### At 60 s
+
+`tinytapeout-demo` through cadlab, side by side in the same minutes (open is what cadlab's
+DRC counts unrouted on the board that left; the first run "ended by itself" is one that its
+deadline did not end):
+
+| set, orders | what | open, summed | vias, median | mean | first run ended by itself |
+|---|---|---|---|---|---|
+| C, eight | 0.0.36 | 10 | 302.5 | 302.5 | 0 of 8 |
+| | a time for the pass | 7 | 306 | 307.5 | 0 |
+| | the first run 0.78 of the minute | 6 | 285.5 | 302.6 | 1 |
+| | both | 7 | 279 | 279.5 | 1 |
+| D, eight | both | 10 | 274.5 | 282.8 | |
+| | both, the first run 0.82 | 18 | 287.5 | 284.9 | |
+| | both, the first run 0.74 | 13 | 299 | 297.6 | |
+| | both, the pass with 0.2 | 3 | 286 | 286.1 | |
+| | both, the pass with 0.5 | 5 | 277 | 282.0 | |
+| J, sixteen | both, each time 0.5 | 11 | 283.5 | 287.9 | 4 of 16 |
+| | **both, each time 2** | 7 | **277** | 280.4 | 10 of 16 |
+| | each time 2, the first run 0.7 | 3 | 281 | 292.1 | 5 of 16 |
+
+A run whose first run ends by itself has 253 to 290 vias; one whose first run is cut has up
+to 406. With a time for the pass alone the first run's cleanup is not begun in five runs of
+eight where it was in all, and the board is as it was.
+
+This crate's own rounds on the same board, in eight orders in other minutes of the same
+round: 288 vias in the median, 6 connections open in all. cadlab's own router, as its D132
+has it: 273, and 47.
+
+### Budgets of nodes
+
+One thread, guide alone. At 40 million nodes (nine boards, three orders) 570 connections
+open for 575: `tinytapeout-demo` none, none and 1 with 277, 293 and 296 vias for 2, 1 and 3
+with 343, 338 and 353, its rounds ending inside the budget's share; `buspirate5-rev10` 284,
+288 and 286 vias for 283, 284 and 288, `lumenpnp-mobo` 344, 328 and 329 for 326, 331 and
+338, none open on either; the six others, which have this crate's own rounds or are given
+up, the same to the connection and the via. At 150 million (D131's seven boards, two orders)
+42 for 43, `tinytapeout-demo` none and none with 260 and 274 vias for 1 and none with 279
+and 279; `glasgow-revD1` 56 and 75, as it had.
+
+### Tried and not kept
+
+- *The rounds with eight tenths of their share, for nine*, so that what makes the routes
+  legal and the pass for fewer vias have two: 306.5 vias in the median of eight orders for
+  302.5, as many connections open.
+- *The price of a shared point rising twice a round, for 1.6 times*: 173, 151, 183 and 88
+  million nodes to the rounds' end in four orders for 162, 186, 197 and 127, two orders
+  ending with more than 50 points shared.
+- *Each time 1, 1.5, 3 or 4*, above: 1.5 leaves one order of eight at 202 million nodes, 3
+  ends soonest and has 282 vias in the mean for 271.
+- *The first run with 0.74 or 0.82 of the minute, the pass with 0.2 or 0.5 of what is
+  left*, above.
+
+### What remains open
+
+- `tinytapeout-demo`'s first run is still ended by its deadline in 6 orders of 16 at 60 s,
+  and those runs have the most vias. The rounds have nothing of a second thread
+  on a board whose nets all meet; routing several of them at once against the same board
+  is another negotiation, and was not tried.
+- The ways out are planned on their own maps (0.72 s on `tinytapeout-demo`), and
+  `buspirate5-rev10`'s rounds make theirs again.
+- Two layers, six layers and the dense boards are where they were: the rounds are not
+  begun on them.
+
 ## PCB routing with the rounds of cadlab's router looked at before the run begins
 
 0.0.34 and 0.0.35 have the negotiation of cadlab's own router as a first stage

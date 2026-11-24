@@ -177,7 +177,7 @@ pub fn seg_seg_dist(a: P, b: P, c: P, d: P) -> f64 {
 }
 
 /// A polygon with holes (one polygon of a canonical `PolygonSet`).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Poly {
     /// Outer ring then holes.
     pub rings: Vec<Vec<P>>,
@@ -247,7 +247,7 @@ impl Poly {
 }
 
 /// A region the router keeps away from, or connects to.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Shape {
     /// Stadium: every point within `r` of segment `a`–`b` (tracks; vias and round holes with `a == b`).
     Capsule {

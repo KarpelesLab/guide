@@ -605,7 +605,7 @@ pub(crate) fn run_from(
     control: &RunControl<'_>,
 ) -> Result<Routed, RouteError> {
     report::validate(design)?;
-    let run = Run::new(control, options.work_budget);
+    let mut run = Run::new(control, options.work_budget);
     run.phase(Phase::Prepare);
     run.poll();
     // The run with the rounds of cadlab's own router, if it is asked for and they take the
@@ -622,6 +622,10 @@ pub(crate) fn run_from(
     } else {
         None
     };
+    // A board given up has what a run without those rounds was to have of the time.
+    if first.is_none() && options.rounds == super::Rounds::Native && options.given_up_share < 1.0 {
+        run.shorten(options.given_up_share);
+    }
     let own_options = RouteOptions {
         rounds: super::Rounds::Own,
         ..*options
@@ -1579,6 +1583,8 @@ fn route_all<'a>(
         with_escapes = d;
         &with_escapes
     };
+    // What the look at the board made that the rounds have again, if they are begun.
+    let look_kept: std::cell::Cell<Option<super::rounds::Kept>> = std::cell::Cell::new(None);
     // The rounds of cadlab's own router, where they are asked for, are given up here, before
     // anything of the run is planned for them but their own ways out: on a board that they
     // have no room for in their share, or whose pads their grid does not reach, the run
@@ -1602,7 +1608,8 @@ fn route_all<'a>(
             counted: &counted,
             spoke: &|_, _| (0, 0.0),
         };
-        let look = super::rounds::look(design, &pours);
+        let (look, kept) = super::rounds::look_kept(design, &pours).unzip();
+        look_kept.set(kept.flatten());
         let share = options.whole_share.clamp(0.0, 1.0);
         let work = run.work_left().map(|w| w as f64 * share);
         let time = run.left().map(|t| t.as_secs_f64() * share);
@@ -2086,7 +2093,7 @@ fn route_all<'a>(
                     &jobs,
                     &pours,
                     (&own_fixed.0, &own_fixed.1),
-                    (share, was),
+                    (share, was, look_kept.take()),
                     options,
                     run,
                 );

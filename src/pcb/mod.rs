@@ -584,9 +584,12 @@ pub enum Rounds {
     /// layers alone, unless [`RouteOptions::outer_pours`]; the nets whose pads the routes
     /// cut off their fills are negotiated for again only with
     /// [`RouteOptions::rounds_pours`]; the rounds end once the price of a shared point is at
-    /// its most and no more than one point for every 32 connections is shared; and a unit
-    /// of the run's work ([`RouteOptions::work_budget`]) is six nodes of their search, which
-    /// visits six times the nodes in the time.
+    /// its most and no more than one point for every 32 connections is shared; a point
+    /// that stays shared costs four times as much more in each round as it does in that
+    /// router, which ends the rounds of a crowded board in fewer; the pass for fewer vias
+    /// after them has three tenths of the time that the run has left where their share
+    /// ended them; and a unit of the run's work ([`RouteOptions::work_budget`]) is six nodes
+    /// of their search, which visits six times the nodes in the time.
     ///
     /// A board is looked at before anything of the run is routed or planned for these rounds
     /// but their ways out, and given up if more than one connection in fifty has no way on
@@ -940,6 +943,14 @@ pub struct RouteOptions {
     /// legal a wire at a time"); the passes join such pads as they do after this crate's
     /// own rounds.
     pub rounds_pours: bool,
+    /// What a run has of the time to its [deadline](RunControl::deadline) once the rounds of
+    /// [`Rounds::Native`] were asked for and given up at their look at the board
+    /// ([`Stats::rounds_given_up`]). The default is 1, all of it. The run with those rounds
+    /// has more to do before its passes begin than the run with this crate's own, and a
+    /// host that gives it a later deadline for that says here what a run without them is
+    /// to have of it: the board given up then ends when it would have with this crate's own
+    /// rounds asked for.
+    pub given_up_share: f64,
     /// How many threads [`whole`](RouteOptions::whole) routes nets on. The default is 1;
     /// the routes are the same for any number. The nets of a round are routed a few at a
     /// time, each against what the others claim before any of the few, and have their
@@ -1020,6 +1031,7 @@ impl Default for RouteOptions {
             rounds: Rounds::Own,
             rounds_fanout: true,
             rounds_pours: false,
+            given_up_share: 1.0,
             threads: 1,
             shorten: false,
         }

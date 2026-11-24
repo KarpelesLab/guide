@@ -23,7 +23,7 @@ pub(crate) struct ProfileKey {
 }
 
 /// A rule profile with its values as floats (half widths and radii).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Profile {
     pub key: ProfileKey,
     /// Half track width.
@@ -40,7 +40,7 @@ pub(crate) struct Profile {
 }
 
 /// How much room an obstacle demands.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Clear {
     /// Copper of a net with this clearance: the larger of both nets' clearances applies.
     Net(f64),
@@ -73,7 +73,7 @@ pub(crate) enum ObKind {
 }
 
 /// Something routing must keep away from.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Obstacle {
     pub shape: Shape,
     pub bbox: BoxF,

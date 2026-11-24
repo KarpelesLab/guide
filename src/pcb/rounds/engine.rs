@@ -403,7 +403,27 @@ impl<'a> Engine<'a> {
         costs: Costs,
         stop: &'a (dyn Fn() -> bool + Sync),
     ) -> Engine<'a> {
-        let st = Statics::build(rb, &grid, &slots, active_profiles);
+        Engine::with(rb, grid, slots, active_profiles, costs, stop, None)
+    }
+
+    /// As [`Engine::new`], with the maps of what is fixed on the board if they are at hand:
+    /// those of the same board on the same grid, layers and profiles
+    /// (`Statics::build`), which are most of what an engine takes to make.
+    pub fn with(
+        rb: &'a RouterBoard,
+        grid: Grid,
+        slots: Vec<usize>,
+        active_profiles: &[bool],
+        costs: Costs,
+        stop: &'a (dyn Fn() -> bool + Sync),
+        st: Option<Statics>,
+    ) -> Engine<'a> {
+        debug_assert!(
+            st.as_ref()
+                .is_none_or(|st| *st == Statics::build(rb, &grid, &slots, active_profiles)),
+            "the maps kept are those of this board"
+        );
+        let st = st.unwrap_or_else(|| Statics::build(rb, &grid, &slots, active_profiles));
         let mut act = vec![usize::MAX; rb.profiles.len()];
         let mut active = Vec::new();
         for (i, a) in active_profiles.iter().enumerate() {

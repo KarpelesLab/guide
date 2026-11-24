@@ -584,9 +584,12 @@ pub enum Rounds {
     /// layers alone, unless [`RouteOptions::outer_pours`]; the nets whose pads the routes
     /// cut off their fills are negotiated for again only with
     /// [`RouteOptions::rounds_pours`]; the rounds end once the price of a shared point is at
-    /// its most and no more than one point for every 32 connections is shared; and a unit
-    /// of the run's work ([`RouteOptions::work_budget`]) is six nodes of their search, which
-    /// visits six times the nodes in the time.
+    /// its most and no more than one point for every 32 connections is shared; a point
+    /// that stays shared costs four times as much more in each round as it does in that
+    /// router, which ends the rounds of a crowded board in fewer; the pass for fewer vias
+    /// after them has three tenths of the time that the run has left where their share
+    /// ended them; and a unit of the run's work ([`RouteOptions::work_budget`]) is six nodes
+    /// of their search, which visits six times the nodes in the time.
     ///
     /// A board is looked at before anything of the run is routed or planned for these rounds
     /// but their ways out, and given up if more than one connection in fifty has no way on

@@ -3862,6 +3862,12 @@ impl Best {
     }
 }
 
+/// Cleanup's share of the time that a deadline leaves when routing begins: with zones to
+/// join after it or after the rounds of cadlab's router, and after this crate's own rounds
+/// with none to join.
+const CLEANUP_SHARE_JOINING: f64 = 0.08;
+const CLEANUP_SHARE: f64 = 0.25;
+
 /// The shares of the time that a deadline leaves, and of the work that a budget leaves,
 /// that the parts of a run may spend: routing, of what there is when it begins, and then
 /// cleanup with the pairs, of what routing left. The rest is for joining zones' pieces, which makes the connections of the nets with planes
@@ -3884,7 +3890,26 @@ impl Shares {
         };
         // Cleanup makes no connection, and has no work kept for it: it has what work
         // routing leaves of its own share, which is all of it where routing ends early.
-        let cleanup = if options.cleanup { 0.08 } else { 0.0 };
+        //
+        // Of the time a quarter, where no zones are to be joined after it and the rounds
+        // are this crate's own: with a twelfth the passes of a board that its deadline
+        // cuts took what cleanup begins with, each net again where the others are and
+        // every net pulled tight, and ended with the connections they had
+        // (`glasgow-revD1` at 60 s, four orders: 12, 17, 7 and 12 open with either, 1130
+        // vias for 1146; `docs/benchmarks.md`). With zones to join the joining has its
+        // share as it had, and cleanup the twelfth; and after the rounds of cadlab's
+        // router, which have had their own pass for fewer vias and leave the passes a
+        // few nets to settle in what is left of the run (`tinytapeout-demo`: 3
+        // connections open in two runs of twelve with the quarter, in none of 32 with
+        // the twelfth).
+        let cleanup = match (
+            options.cleanup,
+            join.0 > 0.0 || options.rounds == super::Rounds::Native,
+        ) {
+            (false, _) => 0.0,
+            (true, true) => CLEANUP_SHARE_JOINING,
+            (true, false) => CLEANUP_SHARE,
+        };
         // Of the time left when the part begins: cleanup's is of what routing left.
         let of_rest = |c: f64, j: f64| if j > 0.0 { c / (c + j) } else { 1.0 };
         Shares {
@@ -4227,6 +4252,39 @@ mod tests {
             which(rounds_fills(&two, fills(), &planes, false)),
             which(counted_fills(&two, fills(), &planes, false))
         );
+    }
+
+    #[test]
+    fn cleanup_has_a_quarter_of_the_time_with_no_zones_to_join() {
+        let mut options = crate::pcb::RouteOptions {
+            join: false,
+            ..Default::default()
+        };
+        let none = super::Shares::of(&options, true);
+        assert_eq!(
+            (none.routing, none.cleanup, none.join_work),
+            ((0.75, 1.0), 1.0, 0.0)
+        );
+        // After the rounds of cadlab's router, the twelfth.
+        options.rounds = crate::pcb::Rounds::Native;
+        assert_eq!(super::Shares::of(&options, true).routing, (0.92, 1.0));
+        options.rounds = crate::pcb::Rounds::Own;
+        options.join = true;
+        let joining = super::Shares::of(&options, true);
+        assert!(
+            (joining.routing.0 - 0.75).abs() < 1e-9,
+            "{:?}",
+            joining.routing
+        );
+        assert!(
+            (joining.cleanup - 0.08 / 0.25).abs() < 1e-9,
+            "{}",
+            joining.cleanup
+        );
+        // The work is shared as it was: cleanup has none of its own.
+        assert_eq!((joining.routing.1, joining.join_work), (0.95, 0.05));
+        options.cleanup = false;
+        assert_eq!(super::Shares::of(&options, false).routing, (1.0, 1.0));
     }
 
     #[test]

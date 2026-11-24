@@ -5911,6 +5911,143 @@ at a time.
   are what it has for the balls left shut in, and no other way to those was tried.
 - More than one thread, or a deadline: the comparison is by nodes.
 
+## PCB routing with the searches of this crate's rounds made faster
+
+0.0.38 left seven cells worse beside cadlab's own router at 60 s, and each of them is at
+bottom a matter of time: `corne-cherry`'s rounds, the cleanup that `glasgow-revD1`'s first
+run has no time for, the deadline that ends `tinytapeout-demo`'s first run in three to five
+orders of eight. This round looked at where the time goes with a profiler, and changed
+nothing that a run decides. **Whether an end of a connection is walled in is asked from the
+nodes nearest a source first, which is the same answer in a hundredth of the nodes; the
+heap of a search of this crate's own rounds has four items under each and compares a rank
+and its node as one number. At budgets of nodes every one of 43 runs has the connections
+open, the vias, the track and the work that 0.0.38 has; the rounds themselves take 0.79 of
+the time on `corne-cherry` and 0.73 on `glasgow-revD1` on one thread.**
+
+### Where the time went
+
+`perf` is not on the machine that measured this and its kernel does not let a process be
+sampled from outside it, so the profile is the process's own: a timer signal 499 times a
+second of its processor time, and the stack at each (the `pprof` crate behind a hook in
+cadlab's `route_bench`, in no commit). Lines within a function it does not tell; for those,
+`callgrind` counted the instructions of `whole::Board::search` alone over the first four
+rounds of `corne-cherry`. Through cadlab at 60 s on three threads, 0.0.38, the default order;
+shares of the processor time of the whole process (cadlab's fills and checks are in it):
+
+| board | processor time of the minute | this crate's own rounds | the rounds of cadlab's router | the passes (`detail`) | the rest |
+|---|---|---|---|---|---|
+| `corne-cherry` | 37 s of 54 s | 27 %: searches 20 %, walled-in ends 7.5 % | | 32 %: rip-up 22 %, settling 10 % | cadlab's DRC 7.6 % |
+| `glasgow-revD1` | 38.5 s of 58 s | 43 %: walled-in ends 31 %, searches 10 % | | 11 % | the fills' polygons 14 % |
+| `tinytapeout-demo` | 32 s of 52 s | 3.5 % (each net routed again) | 52 %: searches 20 % of the whole, claims 9 % | 26 %: the search for fewer vias 16 % | the fills' polygons 6.5 % |
+| `cynthion` | 25 s of 38 s | 5 % | | 27 %: the search for fewer vias 18 % | the fills' polygons 18 %, points in rings 6.7 % |
+
+A minute on three threads has 180 s of processor time and the runs use 25 to 39 s of it:
+the rounds route eight nets at a time and wait for the longest search of the eight, and
+everything after them is one thread.
+
+- **Walled-in ends** (`whole::Board::pocket`). Before a connection is first searched for, the
+  nodes that reach its targets over what the board's own copper allows are looked at, 20 000
+  at most, and a connection with no source among them is not searched for. They were looked
+  at in the order of a stack, which wanders: with a way to a source, the 20 000 were most
+  often used up before a source was met, in memory that no cache holds: 2577 calls in
+  `glasgow-revD1`'s first round, 31 % of the processor time of its minute on three threads
+  and 3 s of its rounds' 45 s on one. What is answered does not depend on the
+  order (yes where what reaches the targets is 20 000 nodes at most with no source among
+  them), so the nodes nearest the source nearest the first target are looked at first: 0.14 s
+  for the same 2577 answers.
+- **The heap of a search** (`whole::Ranked`). A binary heap of a rank of 64 bits and a node,
+  compared one after the other. `callgrind` put a quarter of a search's instructions in its
+  pops after the heap had four items under each, and more before; half of what is popped in
+  the first rounds is an entry that a cheaper way has left behind (115 million pops for 75
+  million nodes on `corne-cherry`). Now four items under each, and the rank and the node one
+  number of 128 bits. The order that nodes come out in is the order of that number, as it
+  was.
+- **What a search knows of a node in one place** (`whole::Slot`), a node's layer and cell by
+  divisions of 32 bits, and the cells too near a via of the net's own wires marked in a map
+  when the via is laid in place of every such via asked at every node (the squared distance
+  in cells against the largest whole number whose root times the pitch is less than the
+  distance asked for, which is the same question): none of the three is told from noise in
+  the time of the rounds. They are in the release as they leave less to do.
+
+The rounds alone, on one thread at a budget of nodes (the same rounds to the node: 33 rounds
+and 75.0 million nodes on `corne-cherry` at 150 million, 40 rounds and 124.6 million on
+`glasgow-revD1` at 600 million; two runs side by side, the load 2 to 5):
+
+| step | `corne-cherry`: s; million nodes a second | `glasgow-revD1` |
+|---|---|---|
+| 0.0.38 | 19.1 to 20.1; 3.7 to 3.9 | 45.3; 2.75 |
+| walled-in ends from the nearest node | 19.6 | 42.1 to 43.6; 2.9 |
+| four items under each | 18.9 to 19.0 | 40.9 to 41.1 |
+| a node in one place | 19.0 | 41.1 |
+| the net's own vias in whole numbers | 17.9 to 18.8 | 38.1 |
+| rank and node one number | 15.1; 5.0 | 33.4; 3.7 |
+| the net's own vias marked, 32 bits | 15.3; 4.9 | 32.8; 3.8 |
+
+1.27 times the nodes a second on `corne-cherry`'s rounds and 1.38 times on
+`glasgow-revD1`'s. The target of the round was 1.5 times on the whole run, and that is not
+reached: over a whole run at a budget of nodes the gain is 1 to 8 % (below), since such a
+run gives the rounds up on most boards and is the passes, whose search was not changed.
+
+### At budgets of nodes: the same runs
+
+Nine boards in three orders at 40 million nodes and eight boards in two at 150 million, one
+thread, this release beside 0.0.38, ten runs at a time: **each of the 43 runs has the
+connections open by the run's count and by cadlab's DRC, the vias, the track to the tenth of
+a millimetre and the work of 0.0.38's.** 570 open at 40 million (`nrfmicro` none;
+`sweep-v2.2` 3, 3 and 3; `corne-cherry` 36, 28 and 22; `tinytapeout-demo` none, none and 1;
+`buspirate5-rev10` and `lumenpnp-mobo` none; `cynthion` 8, 8 and 8; `glasgow-revC3` 12, 15
+and 12; `glasgow-revD1` 145, 136 and 130); 42 at 150 million on seven boards and 56 and 75
+on `glasgow-revD1`. Nodes a second over the whole run, by board, the three or two orders
+together:
+
+| board | 40 million: 0.0.38; this release | 150 million |
+|---|---|---|
+| `nrfmicro` | 1.89; 2.01 million a second | |
+| `sweep-v2.2` | 0.64; 0.64 | 0.67; 0.64 |
+| `corne-cherry` | 1.17; 1.22 | 1.58; 1.71 |
+| `tinytapeout-demo` | 0.65; 0.66 | 0.69; 0.72 |
+| `buspirate5-rev10` | 0.62; 0.63 | 0.62; 0.64 |
+| `lumenpnp-mobo` | 0.58; 0.60 | 0.57; 0.60 |
+| `cynthion` | 0.36; 0.37 | 0.38; 0.40 |
+| `glasgow-revC3` | 0.71; 0.74 | 0.53; 0.54 |
+| `glasgow-revD1` | 0.76; 0.79 | 0.62; 0.63 |
+
+### At 60 s
+
+Through cadlab on three threads, 0.0.38 and this release side by side in four orders, four
+runs at a time (the load 2.5 to 5.6):
+
+| board, four orders | 0.0.38 | this release |
+|---|---|---|
+| `corne-cherry` | 4, 0, 1, 1 open; 427, 450, 432, 419 vias; 53.4, 35.3, 52.6 and 50.9 s | 1, 0, 1, 1; 425, 450, 432, 419; 54.2, 30.6, 47.9 and 44.9 s |
+| `glasgow-revD1` | 16, 22, 7, 8 open; 1181, 1187, 1183, 1210 vias; 10 503, 10 138, 10 950, 10 662 mm | 12, 17, 7, 12; 1132, 1138, 1183, 1153; 10 584, 10 437, 10 950, 10 568 mm |
+| `tinytapeout-demo` | 0, 0, 3, 0 open; 303, 275, 306, 290 vias; its first run ended by its deadline in two orders | 0, 0, 1, 0; 282, 282, 271, 282; in none |
+
+`corne-cherry`'s three orders whose first run ends on its own end with the board they had,
+4.7 to 6.0 s sooner; its default order's first run is ended by its deadline with either
+build, and is another board. `glasgow-revD1`'s rounds are ended by their share of the
+time, not by their number, so that what is saved goes to more rounds and not to the
+passes (with the walled-in ends alone changed, 39 rounds for 32 in the default order and
+119 million nodes for 112 as they end): 4 % fewer vias in three orders of four and the
+same board in the fourth. In the 60 runs of the
+twelve boards with this release (`tinytapeout-demo` in sixteen orders, the load 1.4 to
+4.9) no pad of a pour is without a spoke, cadlab's DRC has no error but the connections
+left open, and the count that the run reports is the DRC's in every one.
+
+### Tried and not kept, and what remains open
+
+- **The time of the passes was not changed.** They are the search of `detail` over
+  `search::Search`, which is this crate's for every domain: on `glasgow-revD1` at 40
+  million nodes 56 % of the processor time, of which the search's own loop 27 %, the
+  steps of a node 20 %, the spatial index 14 %, the number of a node 10 % and a step's
+  price 8 %. Nothing in it is a single place as the walled-in ends were.
+- **The rounds wait for their longest search**: eight nets at a time, 32 s of searches in
+  the 20 s of `corne-cherry`'s rounds on three threads. A round late in a negotiation
+  has fewer than eight nets to route and one long search among them; the batches were not
+  changed, since what a net is routed as depends on them.
+- **The fills** are `polyclip`'s, 6 to 18 % of the processor time on the boards with pours
+  on several layers, and were not looked at.
+
 ## PCB routing with a negotiation that ended with one point shared not begun again
 
 0.0.37 left nine cells worse beside cadlab's own router at 60 s, and this round took three of

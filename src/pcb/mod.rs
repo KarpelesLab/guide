@@ -1046,7 +1046,10 @@ pub struct RouteOptions {
     /// else to route then routes nothing, and its cleanup has the nets that are whole:
     /// with [`straighten`](RouteOptions::straighten) and no right to take a net out
     /// ([`rip_ups`](RouteOptions::rip_ups) at none), that is a host's last run, which
-    /// lays the stairs straight and makes no search. The default is false.
+    /// lays the stairs straight and makes no search; it then ends each run at a pad on
+    /// the pad's copper where the run comes to it, as a run for shorter ways does
+    /// ([`shorten`](RouteOptions::shorten)), which what pulls a run tight had taken to
+    /// the pad's centre again. The default is false.
     pub leave_given: bool,
 }
 

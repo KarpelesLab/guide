@@ -6159,6 +6159,19 @@ took out (above): cadlab gives back the old routes of the nets with new tracks n
 connection that its fill then leaves open, a pour cut by a track that moved, and of those
 whose new tracks are then too near the old ones, 0 to 26 nets of a board.
 
+*The ends at the pads after the last run (0.0.44).* What lays a net straight pulls it tight,
+and what pulls a run tight takes its end to the pad's centre: a run that the run for
+shorter ways had ended on the pad's copper where it comes to it (`aim_at_pads`) was at the
+centre again after the last run, and a board that had both had more track outside its pads
+for the stairs: `nrfmicro` 422 mm for 421 with 0.0.42, by the medians of four orders at
+60 s, one cell of cadlab's table at its edge. A run with `straighten` and `leave_given` now
+aims its ends again when the stairs are laid. Twelve boards in four orders, this beside
+0.0.43 in the same minutes: `nrfmicro` 420 mm outside the pads for 422 and 437 mm of track
+for 439, `corne-cherry` 7416 for 7420, `glasgow-revC3` 3536 for 3539, `cynthion` 2963 for
+2965, `lumenpnp-mobo` 5199 for 5201, the others within a millimetre; the connections open
+and the pads short of two spokes the same but for what `glasgow-revD1`'s third order
+differs by from one run to the next. A run that asks for neither is 0.0.43's.
+
 ### Budgets of nodes
 
 One thread, this crate alone behind cadlab's adapter, beside 0.0.42's sets.

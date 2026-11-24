@@ -141,7 +141,9 @@
 //! and a cancel flag, whose results depend on the moment. A stopped run skips what is left
 //! of escapes, routing, cleanup, the coupling of pairs, the joining of zones' pieces and
 //! meanders, and fills the zones around what it has; nets that rip-up had taken out and not
-//! yet routed again are as they were before it took them out. Its [`Routed::unrouted`] and
+//! yet routed again are as they were before it took them out; and a run that its deadline
+//! stopped joins the pads that its routes cut off their fills to them again all the same,
+//! once ([`RunControl::deadline`]). Its [`Routed::unrouted`] and
 //! the nets and connections of its [`Stats`] are counted on the board it returns, and
 //! [`Routed::tried`] has the nets it got to. [`RunControl::progress`] hears of the run as
 //! it goes. Every phase looks at the deadline and the flag, the fills before routing

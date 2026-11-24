@@ -9,7 +9,13 @@
 //! nearer to a narrower pad of its net than the track's own half width and a margin is cut
 //! out of the track and laid again at the pad's width, along the same line. What is laid
 //! is inside the copper that was there, so nothing is nearer to another net than it was,
-//! and every end is where it was, so nothing that was joined comes apart.
+//! and every end is where it was. A narrower track has a smaller round end and narrower
+//! sides, though: what the track touched by its round end or its side alone, a pad that it
+//! ended just short of or a via beside it, may be apart from the piece laid narrow by half
+//! of what the width lost. That is the host's to check, by the measure it tells its
+//! connections with: cadlab leaves a track as it was where a piece no longer touches what
+//! the track did (a track of 0.21 mm ended where its round end just touched a pad of
+//! 0.2 mm was 5 µm short of it once narrowed).
 //!
 //! The width of a pad is the host's to say ([`PadEntry::width`]): a host that judges a pad
 //! by a measure of its own gives that, never under the least width its rules allow.
@@ -91,7 +97,9 @@ fn near(shape: &Shape, at: Point, reach: i64) -> bool {
 /// half the track's width and `beyond`: what stays at the track's own width then has
 /// `beyond` between its copper and the pad's. A host that reads a pad's joints in a band
 /// round its outline gives that band's width and a little more. Arc tracks are left as
-/// they are, and so is a track on no layer of the pad.
+/// they are, and so is a track on no layer of the pad. Whether each piece still touches
+/// what the track touched by its round end or its side alone is the caller's to check
+/// (the module's text).
 pub fn neck_at_pads(pads: &[PadEntry<'_>], tracks: &[Track], beyond: i64) -> Vec<(usize, Track)> {
     let beyond = beyond.max(0);
     // The pads by net, in order.

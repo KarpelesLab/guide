@@ -203,7 +203,7 @@ pub(crate) fn run(
     // In a run with a budget every net was pulled tight before the searches, each with the
     // others as rip-up had left them: once more now that they are all tight, and the
     // stairs and the jogs laid straight.
-    if bounded && straight && sweep(world, jobs, copper, &still) {
+    if bounded && straight && sweep(world, jobs, copper) {
         return expanded;
     }
     if options.shorten {
@@ -239,34 +239,29 @@ pub(crate) fn run(
         }
     }
     if straight {
-        sweep(world, jobs, copper, &still);
+        sweep(world, jobs, copper);
     }
     expanded
 }
 
-/// Every net that `still` does not leave as it is pulled tight and laid the ways that are
-/// as long with fewer tracks ([`straighten`]), up to [`STRAIGHT_SWEEPS`] times, for as
-/// long as a sweep leaves fewer tracks: a net laid straight makes room for the next.
-/// Whether the run has to stop.
-fn sweep(
-    world: &mut World<'_>,
-    jobs: &[Job],
-    copper: &mut [Option<NetCopper>],
-    still: &dyn Fn(usize) -> bool,
-) -> bool {
+/// Every net pulled tight and laid the ways that are as long with fewer tracks
+/// ([`straighten`]), up to [`STRAIGHT_SWEEPS`] times, for as long as a sweep leaves fewer
+/// tracks: a net laid straight makes room for the next. The nets that an earlier run left
+/// as they are too: that run's cleanup pulled them tight, and laid them straight only if
+/// it was asked to, so that a run which is handed every route back with nothing to route
+/// and is asked for this does this and no search. Whether the run has to stop.
+fn sweep(world: &mut World<'_>, jobs: &[Job], copper: &mut [Option<NetCopper>]) -> bool {
     let tracks = |copper: &[Option<NetCopper>]| -> usize {
         copper.iter().flatten().map(|c| c.segs.len()).sum()
     };
     for _ in 0..STRAIGHT_SWEEPS {
         let before = tracks(copper);
-        for (j, (job, slot)) in jobs.iter().zip(copper.iter_mut()).enumerate() {
+        for (job, slot) in jobs.iter().zip(copper.iter_mut()) {
             let Some(c) = slot else { continue };
             if world.run().is_some_and(super::control::Run::poll) {
                 return true;
             }
-            if !still(j) {
-                straighten(world, &job.ctx, c);
-            }
+            straighten(world, &job.ctx, c);
         }
         if tracks(copper) >= before {
             break;

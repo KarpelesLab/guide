@@ -1944,6 +1944,10 @@ fn route_all<'a>(
     let mut given: Vec<NetId> = Vec::new();
     // By job, the routes it began with, in order, to tell at the end if they were moved.
     let mut as_given: Vec<Option<(Vec<Seg>, Vec<Point>)>> = vec![None; jobs.len()];
+    // The nets given that are left where they are ([`RouteOptions::leave_given`]).
+    let mut left_given: BTreeMap<NetId, (Vec<Seg>, Vec<Point>)> = BTreeMap::new();
+    // By job, whether its net is one of those: it has no turn in this run.
+    let mut left = vec![false; jobs.len()];
     for j in 0..jobs.len() {
         let net = jobs[j].ctx.net;
         let Some((segs, vias)) = taken_back.remove(&net) else {
@@ -2006,14 +2010,68 @@ fn route_all<'a>(
         }
         let ctx = &jobs[j].ctx;
         let mut theirs = NetCopper::default();
+        // As it was given, for a run that leaves alone what it cannot take back whole.
+        let raw = options.leave_given.then(|| (segs.clone(), vias.clone()));
         theirs.segs = segs;
         theirs.vias = vias;
         theirs.merge(ctx);
+        let whole = raw.as_ref().map(|_| {
+            let (mut segs, mut vias) = (theirs.segs.clone(), theirs.vias.clone());
+            segs.sort_unstable();
+            vias.sort_unstable();
+            (segs, vias)
+        });
         let mut c = theirs.free_in(&world, ctx, pitch);
         if ctx.terminals < BRANCH_TERMINALS {
             c.drop_floating(ctx);
         } else {
             c.prune(ctx);
+        }
+        // With [`RouteOptions::leave_given`], a net that is not all legal here, has copper
+        // that leads nowhere or is in pieces stays where it is, as copper of the board.
+        if let (Some(raw), Some(whole)) = (raw, whole) {
+            let (mut segs, mut vias) = (c.segs.clone(), c.vias.clone());
+            segs.sort_unstable();
+            vias.sort_unstable();
+            let same = (segs, vias) == whole;
+            let mut joined = same && c.pieces(ctx).apart() == 0;
+            if same && !joined {
+                // A track that ends on a pad short of where this crate's routes join it,
+                // as a host's own router ends its tracks at the first copper of a pad, is
+                // taken there by a piece over the pad, if that is free.
+                let mut more = NetCopper::default();
+                for p in &ctx.pads {
+                    let on = |l: u8| p.layers.contains(LayerId(l));
+                    for (q, l) in c
+                        .segs
+                        .iter()
+                        .filter(|s| on(s.l))
+                        .flat_map(|s| [(s.a, s.l), (s.b, s.l)])
+                        .filter(|(q, _)| *q != p.center && p.bbox.intersects(&Rect::new(*q, *q)))
+                    {
+                        let piece = Seg {
+                            a: q,
+                            b: p.center,
+                            l,
+                        };
+                        if !more.segs.contains(&piece) {
+                            more.segs.push(piece);
+                        }
+                    }
+                }
+                // Those that are free, each for itself.
+                more = more.free_in(&world, ctx, pitch);
+                if !more.segs.is_empty() {
+                    c.segs.extend(more.segs);
+                    joined = c.pieces(ctx).apart() == 0;
+                }
+            }
+            if !joined {
+                given.pop();
+                left_given.insert(net, raw);
+                left[j] = true;
+                continue;
+            }
         }
         if c.is_empty() {
             continue;
@@ -2046,6 +2104,7 @@ fn route_all<'a>(
     // A net with nothing to route has no route to take back: what was given for it stays
     // where it is, in the way of the others as copper of the board is.
     let mut back_copper: Vec<(Vec<Track>, Vec<Via>)> = Vec::new();
+    taken_back.extend(left_given);
     for (net, (segs, vias)) in core::mem::take(&mut taken_back) {
         let (tracks, vias) = route_copper(design, net, &segs, &vias);
         let _ = pairs::Undo::place(&mut world, &tracks, &vias);
@@ -2427,7 +2486,8 @@ fn route_all<'a>(
                 jobs[j].ctx.terminals,
                 copper[j].is_some(),
                 apart[j],
-            ) {
+            ) || left[j]
+            {
                 continue;
             }
             // A net that was cut more than once since its last turn waits more than once,
@@ -3355,7 +3415,7 @@ fn route_all<'a>(
                                 ctx.terminals
                             }
                         };
-                        if shut_in != 0 && !shut_tried[k] {
+                        if options.open_shut && shut_in != 0 && !shut_tried[k] {
                             shut_ins.push((k, shut_in, stubs));
                         }
                     }

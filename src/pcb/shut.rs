@@ -10,8 +10,10 @@
 //!
 //! So for each net with a piece that the stubs left cut off, the search for the stubs is
 //! made again with the places near the pads that it was not given before, and if that
-//! joins nothing more, the nets with copper nearest to what is cut off are taken out, one
-//! at a time and then two together: the stub is searched for again, and with it in place
+//! joins nothing more, nets round what is cut off are taken out: first those that the
+//! stub's cheapest way across the routes runs into, at a price for each route crossed and
+//! for the places where nets have been in each other's way, then those with copper nearest
+//! to it, one at a time and then two together. The stub is searched for again, and with it in place
 //! those nets are routed again round it, moving nothing, or by a chain that moves what is
 //! in their way and joins it up again ([`Settle::mend`]), the stub's net not crossed. If
 //! the stub was found, every net is whole again and the cells tell no pad of any pour
@@ -20,7 +22,7 @@
 
 use super::Design;
 use super::cleanup;
-use super::detail::{self, Params, StepCache};
+use super::detail::{self, Params, RipUp, StepCache};
 use super::geometry::NetCopper;
 use super::pours::{self, Pours, Refilled};
 use super::router::{Job, completion};
@@ -40,6 +42,12 @@ const TRIES: usize = 9;
 
 /// How many times the search for the stubs is made again with new places to end at.
 const AGAIN: usize = 3;
+
+/// What crossing a route costs the search for the stub that tells which nets to take out
+/// first, in millimetres of track, and how many nets at most it may run into for those to
+/// be a try.
+const CROSSING: f64 = 10.0;
+const CROSSED: usize = 3;
 
 /// What the step did: the tries made, whether one was kept, and the nodes that its
 /// searches expanded.
@@ -206,6 +214,45 @@ pub(crate) fn open(
     for i in 0..paired {
         for j in i + 1..paired {
             sets.push(vec![near[i], near[j]]);
+        }
+    }
+    // Before those, the nets that the stub's cheapest way across the routes runs into, by
+    // the price of a route crossed and of the places where nets have been in each other's
+    // way: the nearest net is not the one with another way, and where the routes have
+    // fought, the net taken out has none back.
+    {
+        let steps = StepCache::default();
+        let rip = RipUp {
+            penalty: Some(CROSSING),
+            history: mender.settle.history,
+        };
+        match detail::route_net(world, &ctx, &steps, stubs, None, Some(rip)) {
+            Ok(tree) => {
+                out.expanded += tree.expanded;
+                let (victims, _) = detail::victims(world, &ctx, &tree);
+                let set: Option<Vec<usize>> = victims
+                    .iter()
+                    .map(|v| {
+                        jobs.iter().position(|j| j.ctx.net == *v).filter(|&x| {
+                            x != k
+                                && !jobs[x].plane
+                                && copper[x].is_some()
+                                && may.get(x).copied().unwrap_or(false)
+                        })
+                    })
+                    .collect();
+                if let Some(mut set) = set.filter(|s| !s.is_empty() && s.len() <= CROSSED) {
+                    set.sort_unstable();
+                    set.dedup();
+                    sets.retain(|other| {
+                        let mut other = other.clone();
+                        other.sort_unstable();
+                        other != set
+                    });
+                    sets.insert(0, set);
+                }
+            }
+            Err((_, expanded)) => out.expanded += expanded,
         }
     }
     sets.truncate(TRIES);

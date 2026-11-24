@@ -5911,6 +5911,299 @@ at a time.
   are what it has for the balls left shut in, and no other way to those was tried.
 - More than one thread, or a deadline: the comparison is by nodes.
 
+## PCB routing with the nets round a pad shut in laid another way, and the stairs laid straight if asked
+
+0.0.42 left `tinytapeout-demo` with one to three connections open in five or six orders of
+sixteen beside cadlab's own router at 60 s, nearly all of them pads of nets with pours that
+the routes shut in, and its routes with a third more bends than cadlab's router's on the
+nets both complete. **Two things are changed. A pad that the routes cut off its fill and
+that the stubs have no way for among the routes as they are has the nets with copper
+nearest to it taken out, one and then two together; the stub is laid, and they are routed
+again round it, with nothing moved or by a chain, and all of it stays only if every net is
+whole again and no pad of any pour is cut off for it: 17 of 30 such nets had their pads
+joined so over three sets of sixteen orders, and the runs in which every one was end with no
+connection open; over sixteen orders the board's count of open connections is not told from
+0.0.42's all the same (24 for 30 in four sets, 13 for 12 in the two at the lower load), the
+host's second run joining after the first what the step joins in it. And cleanup lays the steps of stairs and the jogs as the two tracks as
+long that go the same way, where nothing of another net is between, if it is asked to
+([`RouteOptions::straighten`]): through cadlab's adapter a board then has a tenth of its
+tracks fewer on the nets both routers complete, with the connections and the vias it had at
+budgets of nodes. It is off unless asked for, and not done in a run that joins the pieces
+of its planes after cleanup: the two tracks are in room that a stub's via may have had, and
+one curated board lost a connection so. cadlab does not ask for it yet, for two things
+measured below. The target was no pad shut in over sixteen orders, and it is not met: a net
+taken out for a stub has no way back in nearly half of the tries.**
+
+**As released (0.0.43), neither changes a run that does not ask for it.** The step for the
+pads shut in is behind [`RouteOptions::open_shut`], off by default, and with it asked for
+the first nets taken out are those that the stub's cheapest way across the routes runs
+into; the stairs are laid straight with [`RouteOptions::straighten`], off by default, for
+every net of a run, those that [`route_from`] left as they were given among them; and
+[`RouteOptions::leave_given`] makes a run that is handed routes leave a net alone that it
+cannot take back whole, so that a host's last run can lay the stairs straight and route
+nothing. With none of the three asked for, each of 41 runs at budgets of nodes is 0.0.42's
+to the via and the millimetre. [What a host asks for](#what-a-host-asks-for-0043) has what
+was measured of each through cadlab.
+
+### A pad shut in, and the nets round it
+
+Once routing is over, every net with a fill is asked for the pads and stubs that the routes
+cut off it, by the host's own fill where a host gives one, and a search joins each to the
+fill again by stubs that move nothing (the section below this one). On `tinytapeout-demo`
+the search comes back with nothing for a pad in 6 to 9 first runs of 16: a supply's pour is
+on the top layer alone, the tracks that leave an 80-pin package of 0.4 mm pitch cut it into
+an island for every pin of the supply and its capacitor, and each island needs a via and a
+track under the others to the rest. Among routes that are fixed there is no room for it.
+
+`pcb::shut` is the step for those, in the round of the joining, after every net of the
+round has had its stubs. For a net with a piece left cut off:
+
+- the search is made again with the places near the pads that it was not given before (a
+  search has eight places in the fill near a pad to end at, the nearest first, and the next
+  eight are other places), up to three times while one joins more;
+- then the nets with copper within 1.2 mm of what is cut off are taken out, the five
+  nearest one at a time and the four nearest two together, nine tries at most; not a net
+  with a plane, a pair, a length to keep, or one that is itself in pieces;
+- with them out, the stub is searched for; if it joins more than before it is laid, and
+  each net taken out is routed again round it, the shortest first, by a search that moves
+  nothing, and failing that by one chain of settling (`Settle::mend`: the nets in its way
+  cut and joined up again in their turn, the stub's net not crossed), kept only if the
+  board then has every connection it had;
+- the nets laid again are pulled tight, and the try stays if the cells then tell no net
+  with more cut off its fill and this one with less; if not, everything is as it was, to
+  the track, and a net whose tries were all undone has no more of them in the run.
+
+Past a deadline the tries have 1.5 s, and in a run with a budget of work they are made in
+a round whose stubs joined nothing, which would be the last: made between the stubs, they
+took the work kept for the stubs of the nets after them (`corne-cherry` at 40 million
+nodes, 113 connections open for 86 in three orders).
+
+`the_track_that_shuts_a_pad_in_goes_round_the_stub_that_joins_the_pad_to_its_fill`
+(`pcb::shut`) is the case in small: a strip of fill with a pad behind another net's track,
+on a board that ends at that net's pads, and a net with no via to go under the track by.
+
+### `tinytapeout-demo` at 60 s, with the step and without
+
+Through cadlab at 60 s, sixteen orders, a build with a switch for the step, both ways side
+by side in the same minutes, twice (four runs at a time on three threads each; the load 5.7
+to 9.0 and 5.6 to 8.1; open is the host's DRC's count on the board that left):
+
+| set | with: runs with a pad shut in after the stubs | of those, every pad joined by the step | leave with a pad of a pour open | connections open, sixteen orders | without: runs with a pad shut in | leave with a pad of a pour open | connections open |
+|---|---|---|---|---|---|---|---|
+| first | 5 | 2 | 3 | 8 | 7 | 4 | 10 |
+| second | 8 | 5 | 2 | 3 | 9 | 5 | 8 |
+
+By net with such a pad, over those two sets and one before them: 17 of 30 joined by the
+step. Every run in which the step joined all of them left with no connection open, and
+without a second run of the host for them (1.5 to 3 s). Where it does not: the stub is found
+with a net out and that net then has no way back, by a chain either (most of the tries
+undone), or no stub is found with any one or two of the nets out. A try is 0.05 to 1 s,
+and a net whose nine tries are all undone costs the run up to 4.5 s. The order that had
+three open in every set of 0.0.42 and 0.0.41 has none in one of these sets and six in the
+other with the step, three in both without: two of its three are nets that the passes
+leave open, which this does not touch, and its first run is ended by its share of the
+minute in the passes, so that it is another run from one set to the next with the load.
+
+Two more sets of sixteen orders, this source with no switch and 0.0.42 from crates.io side
+by side behind cadlab's adapter (the load 3.9 to 6.3 and 3.0 to 5.5): 7 connections open for
+7 and 6 for 5, the pads of pours among them 5 for 4 and 2 for 3. Over the four sets 24 for
+30, and over the two at the lower load 13 for 12. What the step joins in a first run is in
+good part what the host's second run, on the filled board with the routes fixed, joined
+after it (three of seven such runs ended with nothing open without the step in the first
+set); and where the step has no way, that run has none either. It saves that run, 1.5 to
+3 s, where it joins, and costs up to 4.5 s where it does not. The board's count over sixteen
+orders is not told from 0.0.42's by it.
+
+### Where the bends are, and the stairs laid straight
+
+Counted at the points where exactly two tracks of a net meet on a layer: a bend, and two
+bends in a row that turn opposite ways (a jog, or a step of a stair). Four orders at 60 s
+through cadlab, the nets that both routers complete, 0.0.42 and this with the stairs laid
+straight side by side with cadlab's router in the same minutes:
+
+| board | tracks: 0.0.42, this, cadlab's router | bends | opposite in a row |
+|---|---|---|---|
+| `glasgow-revC3` | 7449, 6962, 6314 | 4884, 4256, 3588 | 2200, 1495, 960 |
+| `glasgow-revD1` | 23 672, 23 326, 18 394 | 15 396, 15 131, 10 201 | 6621, 5841, 2660 |
+| `tinytapeout-demo` | 7457, 6569, 7258 | 4880, 4007, 3369 | 2044, 1261, 798 |
+| `lumenpnp-mobo` | 6891, 6268, 5882 | 4169, 3564, 3243 | 1680, 1131, 873 |
+
+What 0.0.42 has more of is jogs and stairs. A search lays a run on the lines of its lattice
+round what is in its way when it is made; what pulls a run tight (`pull_tight`) replaces a
+stretch with the straight way or the two tracks, one along an axis and one at 45°, only if
+that is shorter, and a stair of any number of steps is as long as those two tracks to the
+nanometre. So the steps stay when what they went round has moved.
+
+`pull_straight` takes the way that is as long with fewer tracks too: where the two tracks
+are legal, nothing of another net is in the area between them and the stretch, grown by
+half the track's width, or nearer it than the net's tracks may be (so the run is on the
+side of every pad, via and track that it was on), the stretch has no point on a pad of its
+net between its ends, no more of the run is outside the pads for it, and it comes no nearer
+a pad of another net in the room of a spoke of its relief. With
+[`RouteOptions::straighten`], cleanup lays every net so once its searches are over, up to
+three times for as long as a sweep leaves fewer tracks; a run with a deadline or a budget
+also when cleanup begins, where it pulls every net tight, so that one ended in the searches
+has it too. `glasgow-revD1`'s first run is ended in its routing, and its cleanup has what
+that leaves: the board is a fifteenth of the way to cadlab's router's tracks,
+`glasgow-revC3` and `lumenpnp-mobo` about half of it, and `tinytapeout-demo` has fewer than
+cadlab's router. The track, the vias and the track outside the pads are what they were, to
+a percent.
+
+*Why it is an option, and off where the run joins its planes.* The two tracks are in room
+that the stair left free, a part of a pitch to its side. In every `pull_tight` of a run it
+lost `TS4231-BOB`, of the curated boards, a connection
+(`small_curated_boards_place_and_route`): a net's stair laid straight passed 0.29 mm from
+where the stub that joins the ground's pad to its plane, after cleanup, had its via
+(0.8 mm across), and the pad was left with no way. Asked to keep 0.2 mm more than the
+clearance from everything, the straightening leaves that board whole and does next to
+nothing (`glasgow-revC3` at 40 million nodes: 2828 tracks for 2859 without, 2606 with no
+such room asked): the stairs are where other copper is near. So it is asked for by a host
+that lays nothing after the run but what its own fill leaves apart, and is not done in a
+run that joins the pieces of its planes, lays pairs side by side or tunes lengths after
+cleanup. A run without the option is 0.0.42's (with the step above not asked for either).
+
+*Why cadlab does not ask for it yet.* Two things, both measured with it asked for in every
+run. A run that moves every route, which cadlab makes for what its fill leaves open after
+the first, begins from the straightened routes: on `corne-cherry` at 60 s one order of four
+then ends with a connection open that 0.0.42 closes, in each of three sets (225 rip-ups
+for 55 in that run); the other boards have what they had, within what their orders differ
+by from one set to the next.
+And one run of 41 at budgets of nodes left through cadlab with a connection open that its
+report did not have: a stair laid straight comes to a pad along a diagonal that ends where
+the track's round end just touches the pad, cadlab takes the piece inside the pad out as
+copper on copper, and then lays the track 10 µm narrower at the pad, after its report. What
+is needed there is in the host: the stairs laid straight in its last run alone, and its
+tracks narrowed before it counts.
+
+### What a host asks for (0.0.43)
+
+*The step for the pads shut in, behind an option, and the stub's cheapest way first.* The
+step as it was built joined 17 of 30 nets with a pad shut in and left `tinytapeout-demo`'s
+count over sixteen orders where it was, and where it failed the net taken out for the stub
+had no way back. It took out the nets with copper nearest to the pad. It now first
+searches for the stub across the routes, at the price of ten millimetres of track for each
+route crossed and of the history of the places where nets have been in each other's way,
+and takes out the nets that this way runs into, if they are three at most and may be
+moved: the nearest net is not the one with another way, and where the routes have fought a
+net taken out has none back. Then the nearest, as before, nine tries in all. Through
+cadlab at 60 s, `tinytapeout-demo` in sixteen orders, the same build with the option asked
+for and not, side by side in the same minutes, three times (four runs at a time on three
+threads each; the load 4.5 to 8.7; open is the host's DRC's count):
+
+| set | asked for: connections open, sixteen orders | orders with any | not asked for: connections open | orders with any |
+|---|---|---|---|---|
+| first | 10 | 5 | 12 | 6 |
+| second | 4 | 3 | 9 | 6 |
+| third | 7 | 3 | 11 | 6 |
+
+Fewer in each set, 21 for 32 in all, and the order that has had the most open in every set
+since 0.0.41 has 5, 2 and 5 for 7, 3 and 6. The twelve boards in four orders
+the same way: the eleven others have the connections open, the vias and the track that
+they have without it in every order but one (`glasgow-revD1` 12, 17, 6 and 12 open for 12,
+17, 7 and 12), and no run's count differs from the host's DRC's. What was not isolated: how
+much of the 21 for 32 is the stub's way across tried first and how much the step as it was
+(24 for 30 over four sets before, 13 for 12 over the two at the lower load). And one thing
+against it: in two of the three sets the order with the most open left with a pad of the
+supply on a piece of its pour that has no room for a spoke to it, which cadlab's census
+counts as a pad with no spoke and no run without the option had in these sets; whether the
+host asks for the step is its decision (cadlab's D140).
+
+*A host's last run for the stairs.* [`route_from`] with every route of the board handed
+back, nothing to route, no right to take a net out ([`rip_ups`](RouteOptions::rip_ups) at
+none), `straighten` and `leave_given`. Three things were in the way of that being a run
+that lays the stairs straight and does nothing else, each found by making it through
+cadlab:
+
+- *A net that an earlier run's cleanup had seen was left alone by this one's*: cleanup
+  takes a net whose routes are as they were given for cleaned up, and the sweep that lays
+  the stairs straight left those out too, which in such a run is every net. The sweep now
+  has every net.
+- *A net that the routes given leave in pieces, or that is not all legal on the board as
+  it is, was routed again*: 63 of 137 nets of `tinytapeout-demo` were whole at the start of
+  such a run, the others waiting for a search, and the run came back at its deadline with
+  116 connections open on its own board. With `leave_given` such a net stays where it is,
+  copper of the board, and has no turn.
+- *A track that a host's own router ended at the first copper of a pad was a net in
+  pieces*: this crate joins a pad at one place, and a track that ends on the pad short of
+  it joined nothing by its count (every net of the boards that cadlab routes by its own
+  router's rounds in this crate: 155 of 183 nets of `buspirate5-rev10` left alone). With
+  `leave_given`, a track's end inside the box of a pad of its net is taken to that place by
+  a piece over the pad, where that piece is free, before the net is judged.
+
+Such a run makes no search (`a_run_handed_every_route_back_lays_the_stairs_straight_and_searches_nothing`).
+What it takes is what a run takes before it routes and after: on `glasgow-revD1`, of 3.3 s,
+0.5 s to make the board ready with no plane planned ([`planes`](RouteOptions::planes) off;
+2.4 s with), 0.8 s in the global stage, which has nothing to plan, 0.35 s for the stairs of
+466 nets and 1.45 s for the report.
+
+Through cadlab, which asks for it in the last run alone, after every step of its own that
+moves a route, and keeps what comes back only if its check takes nothing out, no net has
+more open and no pad is worse off for its relief: seven boards in four orders at 60 s, the
+same build with the last run and without, side by side (the load 5.5 to 11.0). Tracks of
+the nets that both builds complete, summed over the orders:
+
+| board | tracks with the last run, without | |
+|---|---|---|
+| `glasgow-revC3` | 10 802, 11 482 | -6 % |
+| `glasgow-revD1` | 28 590, 30 545 | -6 % |
+| `tinytapeout-demo` | 7376, 7865 | -6 % |
+| `cynthion` | 9450, 10 097 | -6 % |
+| `lumenpnp-mobo` | 7262, 7666 | -5 % |
+| `buspirate5-rev10` | 7689, 7913 | -3 % |
+| `corne-cherry` | 9403, 9553 | -2 % |
+
+The connections open are the same in every one of the 28 pairs of runs, `corne-cherry`'s
+1, 0, 0 and 1 among them, and so are the pads short of two spokes; the track is within
+0.2 % and the run 2 to 5 s longer. It is less than the stairs laid straight in every run
+took out (above): cadlab gives back the old routes of the nets with new tracks near a
+connection that its fill then leaves open, a pour cut by a track that moved, and of those
+whose new tracks are then too near the old ones, 0 to 26 nets of a board.
+
+### Budgets of nodes
+
+One thread, this crate alone behind cadlab's adapter, beside 0.0.42's sets.
+
+*As released, with nothing asked for* (this crate's source behind cadlab's adapter without
+its last run, beside 0.0.42 from crates.io run the same day): each of the 41 runs is
+0.0.42's to the via and the millimetre, 570 connections open at 40 million nodes and 167 at
+150 million, `glasgow-revD1`'s 56 and 75 among them. And the same 41 of 41 with polyclip 0.0.7, which this release requires (0.0.6 until now), on
+both sides of the adapter. With cadlab's last
+run for the stairs, which a run that ends inside its budget has: the connections open of
+every one of the 41 are the same, 24 runs are the same to the via and the millimetre, and
+the others are within 18 mm and 10 vias (`lumenpnp-mobo` 318 and 319 vias for 328 and 329
+in two orders, the vias that a net laid straight no longer needs). With `open_shut` asked
+for as well: 570 for 570 at 40 million (`tinytapeout-demo`'s default order 270 vias for
+263) and, at 150 million, `corne-cherry` 6 open for 8 and `glasgow-revC3` 6 for 7 in one
+order each, the other runs the same. In none of them does the host's DRC count other than
+the run's report.
+
+*As the step was built, always on, and with the stairs laid straight in every run* (the
+sets of the pull request before the options):
+
+At 40 million nodes, nine boards in three orders: 26 of 27 runs are 0.0.42's to the via and
+the millimetre, and `tinytapeout-demo`'s default order has none open as it had, with 271
+vias for 263, a pad that the step joined: 570 connections open for 570, 10 005 vias for
+9997. At 150 million, seven boards in two orders: 12 of 14 the same, `corne-cherry` with 6
+open for 8 and 426 vias for 435 in one order, `glasgow-revC3` with the connections and the
+vias it had and a millimetre less track in one: 165 open for 167. In none of the 41 does
+the host's DRC count other than the run's report.
+
+With the stairs laid straight asked for by the adapter: 569 open for 570 and 165 for 167,
+10 011 vias for 9997 and 6694 for 6735, the track +0.1 % and -0.6 %. No run of the 41 has
+more open, and one has the host's DRC's count one over its report (above).
+
+### Tried and not kept
+
+- *The tries between the stubs of a round*, in a run with a budget of work: above.
+- *The straightening in every `pull_tight`*, and with room kept beside the two tracks: above.
+- *The straightening asked for by cadlab in every run*: above.
+
+### What this does not show
+
+- The 60 s table beside cadlab's router: it follows the release.
+- A board with pairs or lengths, or a run that joins its planes, with the stairs laid
+  straight: they are not, there.
+
 ## PCB routing with what the routes cut off the fills joined to them past a deadline
 
 0.0.41 left one run of `tinytapeout-demo` in sixteen orders with three connections open

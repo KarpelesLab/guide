@@ -51,7 +51,7 @@ return_self_not_must_use = "warn"
 
 [dependencies]
 # Exact integer polygon geometry. Kept out of the public API: see src/geom/poly.rs.
-polyclip = { version = "0.0.6", optional = true }
+polyclip = { version = "0.0.7", optional = true }
 
 [dev-dependencies]
 proptest = { version = "1", default-features = false, features = ["std"] }

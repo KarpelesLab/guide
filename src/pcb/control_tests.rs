@@ -129,6 +129,158 @@ fn a_run_under_control_that_nothing_stops_is_the_run_without() {
 }
 
 #[test]
+fn a_run_that_lays_its_stairs_straight_has_fewer_tracks_and_none_longer() {
+    let d = weave();
+    let plain = route_checked(&d, &RouteOptions::default());
+    let options = RouteOptions {
+        straighten: true,
+        ..RouteOptions::default()
+    };
+    let straight = route_checked(&d, &options);
+    check(&d, &straight);
+    assert!(straight.unrouted.is_empty() && straight.open.is_empty());
+    assert_eq!(straight.vias, plain.vias);
+    assert!(
+        straight.tracks.len() < plain.tracks.len(),
+        "{} {}",
+        straight.tracks.len(),
+        plain.tracks.len()
+    );
+    assert!(straight.stats.after_cleanup.1 <= plain.stats.after_cleanup.1 + 1.0);
+    // The same on one thread and on three.
+    let threaded = RouteOptions {
+        threads: 3,
+        ..options
+    };
+    same(&straight, &route_checked(&d, &threaded));
+    // And in a run with a deadline, which lays its nets straight when cleanup begins as
+    // well: whole, with no more tracks than the run without.
+    let control = RunControl {
+        deadline: Some(Instant::now() + Duration::from_secs(3600)),
+        ..RunControl::default()
+    };
+    let timed = route_with(&d, &options, &control).unwrap();
+    check(&d, &timed);
+    assert!(timed.unrouted.is_empty() && timed.stopped.is_none());
+    assert!(timed.tracks.len() <= plain.tracks.len());
+}
+
+#[test]
+fn a_run_handed_every_route_back_lays_the_stairs_straight_and_searches_nothing() {
+    // A host's last run: the routes of the run before, nothing to route, no net to take
+    // out. Without the option such a run leaves every net as it was given; with it, the
+    // stairs are laid straight, with the vias where they were and no track longer.
+    let d = weave();
+    let plain = route_checked(&d, &RouteOptions::default());
+    let earlier = Earlier::new(plain.tracks.clone(), plain.vias.clone());
+    let last = RouteOptions {
+        rip_ups: 0,
+        settle: false,
+        negotiate: false,
+        fine_pass: false,
+        leave_given: true,
+        ..RouteOptions::default()
+    };
+    let control = RunControl {
+        deadline: Some(Instant::now() + Duration::from_secs(3600)),
+        ..RunControl::default()
+    };
+    let as_given = route_from(&d, &earlier, &last, &control).unwrap();
+    check(&d, &as_given);
+    assert_eq!(as_given.tracks.len(), plain.tracks.len());
+    let options = RouteOptions {
+        straighten: true,
+        ..last
+    };
+    let straight = route_from(&d, &earlier, &options, &control).unwrap();
+    check(&d, &straight);
+    assert!(straight.unrouted.is_empty() && straight.open.is_empty());
+    assert!(straight.stopped.is_none());
+    assert_eq!(straight.vias, plain.vias);
+    assert!(
+        straight.tracks.len() < plain.tracks.len(),
+        "{} {}",
+        straight.tracks.len(),
+        plain.tracks.len()
+    );
+    assert!(straight.stats.after_cleanup.1 <= plain.stats.after_cleanup.1 + 1.0);
+    // No search: the run expands no node.
+    assert_eq!(straight.stats.expanded, 0);
+    // And the same without a deadline.
+    let untimed = route_from(&d, &earlier, &options, &RunControl::default()).unwrap();
+    check(&d, &untimed);
+    assert!(untimed.tracks.len() < plain.tracks.len());
+    // A net given in pieces is completed from them by a run as it was; with
+    // `leave_given` it stays as it is, copper of the board, and is not taken back: the
+    // run routes nothing, and the others are laid straight all the same.
+    let count = |net: Option<NetId>| plain.tracks.iter().filter(|t| t.net == net).count();
+    let first = plain
+        .tracks
+        .iter()
+        .map(|t| t.net)
+        .max_by_key(|&n| (count(n), core::cmp::Reverse(n)))
+        .unwrap();
+    assert!(count(first) >= 3);
+    // The second of its tracks: what is left of the net is two pieces, each from a pad.
+    let cut = plain
+        .tracks
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.net == first)
+        .nth(1)
+        .map(|(i, _)| i)
+        .expect("a track of the net");
+    let mut tracks = plain.tracks.clone();
+    tracks.remove(cut);
+    let in_pieces = Earlier::new(tracks, plain.vias.clone());
+    let completed = route_from(
+        &d,
+        &in_pieces,
+        &RouteOptions {
+            leave_given: false,
+            ..options
+        },
+        &control,
+    )
+    .unwrap();
+    assert!(completed.unrouted.is_empty() && completed.stats.expanded > 0);
+    assert!(completed.tracks.iter().any(|t| t.net == first));
+    let left = route_from(&d, &in_pieces, &options, &control).unwrap();
+    assert_eq!(left.stats.expanded, 0);
+    assert!(!left.taken_back.contains(&first.unwrap()));
+    assert!(left.tracks.iter().all(|t| t.net != first));
+    assert_eq!(left.taken_back.len() + 1, straight.taken_back.len());
+    // A track that ends on a pad short of the pad's middle, as a host's own router ends
+    // its tracks at the first copper of a pad: the net is not in pieces for that, it is
+    // taken back with a piece over the pad, and comes back whole.
+    let middle = Point::new(0, 2 * MM);
+    let mut tracks = plain.tracks.clone();
+    let short = tracks
+        .iter_mut()
+        .find(|t| t.start == middle || t.end == middle)
+        .expect("a track to the first pad");
+    let net = short.net.unwrap();
+    let other = if short.start == middle {
+        short.end
+    } else {
+        short.start
+    };
+    let step = |a: i64, b: i64| a + (b - a).signum() * 100_000;
+    let at = Point::new(step(middle.x, other.x), step(middle.y, other.y));
+    if short.start == middle {
+        short.start = at;
+    } else {
+        short.end = at;
+    }
+    let ended_short = Earlier::new(tracks, plain.vias.clone());
+    let joined = route_from(&d, &ended_short, &options, &control).unwrap();
+    check(&d, &joined);
+    assert_eq!(joined.stats.expanded, 0);
+    assert!(joined.taken_back.contains(&net));
+    assert!(joined.unrouted.is_empty() && joined.open.is_empty());
+}
+
+#[test]
 fn a_work_budget_stops_a_run_the_same_way_every_time_and_on_any_thread() {
     let d = weave();
     let whole = route(&d, &RouteOptions::default()).unwrap();

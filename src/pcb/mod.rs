@@ -76,7 +76,8 @@
 //!    searched for again between the two pieces that this leaves the net in, every
 //!    other route where it is, and the new one is kept if it costs less: a route keeps
 //!    the way round another that has moved since, until something looks for a shorter
-//!    one.
+//!    one. With [`RouteOptions::straighten`], last of all, the steps of stairs and the
+//!    jogs are laid as the two tracks as long that go the same way.
 //! 5. **Differential pairs**, [`Design::pairs`]: each pair's two routes are taken out, and
 //!    the pair is routed side by side in their place, at its gap, where it fits: a search
 //!    for its centreline, wide enough for both tracks, offset into the two tracks, with
@@ -193,7 +194,11 @@
 //! other nets if it has to be. A pass that ends with fewer connections than its routes
 //! made at their best goes back to those. Once routing is over, the pads that routes cut
 //! off the fill that their net was planned on are joined to it again by stubs
-//! ([`RouteOptions::pour_cuts`]), and if asked, the ways out of rows of fine pitch are
+//! ([`RouteOptions::pour_cuts`]); if asked, for a pad that the routes shut in, with no stub
+//! among them as they are, the nets with copper nearest to it are taken out, one and then
+//! two together, the stub is laid and they are routed again round it, kept only if each is
+//! whole again and no pad is cut off for it ([`RouteOptions::open_shut`]). And if asked, the ways out of rows of fine
+//! pitch are
 //! planned a row at a time before anything is routed ([`RouteOptions::row_fanout`]). Two
 //! nets whose pads take turns along such a row, with no room to cross on its layer, have
 //! their crossing on another layer planned first, as fixed copper
@@ -250,6 +255,7 @@ mod rounds;
 mod router;
 mod rows;
 mod settle;
+mod shut;
 mod spokes;
 pub mod swap;
 mod tune;
@@ -991,6 +997,57 @@ pub struct RouteOptions {
     /// have one with no more vias that is not much longer, and loses the stub
     /// ([`Stats::uncut`]).
     pub shorten: bool,
+    /// Whether cleanup lays the steps of stairs and the jogs straight: each
+    /// stretch of a run of tracks that is as long as the two tracks that go the same
+    /// way, one along an axis and one at 45°, is replaced with those two, where they are
+    /// legal, nothing of another net is between them and the stretch, the stretch has no
+    /// point on a pad of its net, no more of the run is outside the pads for it, and it
+    /// comes no nearer a pad of another net in the room of a spoke of its relief. A
+    /// search lays a run round what is in its way when it is made and leaves the steps
+    /// there when that has moved, and what pulls a run tight takes only a shorter way: a
+    /// board has a tenth to a fifth of its tracks fewer for it (`docs/benchmarks.md`).
+    /// It is done once cleanup's searches are over, every net up to three times for as
+    /// long as that leaves fewer tracks; in a run with a deadline or a budget also when
+    /// cleanup begins, where every net is pulled tight, and for a net that a search laid
+    /// anew, so that a run ended in the searches has it too. Every net is laid so, those
+    /// that [`route_from`] left as an earlier run had them among them: such a run with
+    /// every route handed back, nothing to route and no right to take a net out
+    /// ([`rip_ups`](RouteOptions::rip_ups) at none) does this and no search for a net
+    /// that its routes join whole, which is how a host has its stairs laid straight at
+    /// its end ([`leave_given`](RouteOptions::leave_given) for the nets that they do
+    /// not). The default is false.
+    ///
+    /// The two tracks are in room that the stair left free, a part of a pitch to its
+    /// side, which copper laid after cleanup may have had: so it is not done in a run
+    /// that then joins the pieces of its planes ([`join`](RouteOptions::join)), lays
+    /// [pairs](Design::pairs) side by side or tunes [lengths](Design::lengths), whatever
+    /// this says. It is for a host that fills its zones itself and has no more to lay
+    /// but what its own fill leaves apart; one that routes in several runs sets it in the
+    /// last, as [`shorten`](RouteOptions::shorten): a run that moves the routes again
+    /// begins from where they are, and from routes laid straight it has ended with a
+    /// connection open that it closed from the stairs (`docs/benchmarks.md`).
+    pub straighten: bool,
+    /// Whether, for a pad that the routes cut off the fill its net was planned on and
+    /// that no stub reaches among the routes as they are
+    /// ([`pour_cuts`](RouteOptions::pour_cuts)), the nets with copper nearest to it are
+    /// taken out, one at a time and then two together, the stub is laid and they are
+    /// routed again round it, kept only if each is whole again and no pad is cut off for
+    /// it. It joins about half of such pads on the board it was built for; a try that is
+    /// undone costs up to a second of a run, a net's nine tries up to 4.5 s, and a host
+    /// that routes again on its own fill may join the same pads without it
+    /// (`docs/benchmarks.md`). The default is false, and a run without it is the run
+    /// there was before the step.
+    pub open_shut: bool,
+    /// Whether, in [`route_from`], a net whose routes given are not all legal on the
+    /// board as it is, have copper that leads nowhere or leave the net in pieces stays
+    /// where it is, as copper of the board, in place of being completed or routed again:
+    /// what was given for it is then not in the result, and the net is not among
+    /// [`Routed::taken_back`]. A run that is given every route of a board with nothing
+    /// else to route then routes nothing, and its cleanup has the nets that are whole:
+    /// with [`straighten`](RouteOptions::straighten) and no right to take a net out
+    /// ([`rip_ups`](RouteOptions::rip_ups) at none), that is a host's last run, which
+    /// lays the stairs straight and makes no search. The default is false.
+    pub leave_given: bool,
 }
 
 impl Default for RouteOptions {
@@ -1041,6 +1098,9 @@ impl Default for RouteOptions {
             given_up_share: 1.0,
             threads: 1,
             shorten: false,
+            straighten: false,
+            open_shut: false,
+            leave_given: false,
         }
     }
 }

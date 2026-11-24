@@ -1198,6 +1198,21 @@ const WHOLE_FINER: [(i64, u64); 9] = [
 /// net if that is more: a board with more has another trouble than its grid.
 const FINER_SHARED: usize = 100;
 
+/// How many points a negotiation for every net may end with still shared and not be begun
+/// again on another grid or in another order: one point is one wire to take out, which the
+/// passes lay again, and the tries after such a negotiation found none that ended with
+/// nothing shared where they were made (`nrfmicro`, two orders of eight: nine tries more in
+/// 7 to 8 s of a run of 22 s, and the board that the run without them ends with, to the via
+/// and the tenth of a millimetre; `docs/benchmarks.md`).
+const WHOLE_FEW: usize = 1;
+
+/// Whether a negotiation for every net that ended on its own (`ended`) with `shared` points
+/// still shared is begun again ([`WHOLE_ORDERS`], [`WHOLE_FINER`]): not one that its rounds
+/// ended at their most (`capped`), nor one with no more shared than [`WHOLE_FEW`].
+fn tried_again(ended: bool, shared: usize, capped: bool) -> bool {
+    ended && !capped && shared > WHOLE_FEW
+}
+
 /// What [`route_all`] returns: the result, how the last search of each net that failed
 /// ended, for the nets left open, the fill that the joining of zones' pieces ended on,
 /// if it was made, by net the width it was routed at where that is narrower than its
@@ -2161,7 +2176,7 @@ fn route_all<'a>(
             if native
                 || whole
                     .as_ref()
-                    .is_none_or(|w| !w.ended || w.shared == 0 || w.capped)
+                    .is_none_or(|w| !tried_again(w.ended, w.shared, w.capped))
             {
                 break;
             }
@@ -4331,6 +4346,20 @@ mod tests {
             Err((Failure::NoPath, expanded)) => assert!(expanded < 500_000, "{expanded}"),
             other => panic!("{:?}", other.map(|t| t.expanded)),
         }
+    }
+
+    #[test]
+    fn a_negotiation_that_ended_with_a_point_shared_is_not_begun_again() {
+        use super::{WHOLE_FEW, tried_again};
+        // With points shared, it is: on another grid, in another order.
+        assert!(tried_again(true, 2, false));
+        assert!(tried_again(true, 60, false));
+        // With none, or with the one that is a wire for the passes to lay again, it is not.
+        assert!(!tried_again(true, 0, false));
+        assert!(!tried_again(true, WHOLE_FEW, false));
+        // Nor one that its share ended, or its rounds at their most.
+        assert!(!tried_again(false, 60, false));
+        assert!(!tried_again(true, 60, true));
     }
 
     #[test]

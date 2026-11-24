@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.43](https://github.com/KarpelesLab/guide/compare/v0.0.42...v0.0.43) - 2026-11-24
+
+### Added
+
+- *(pcb)* three options for a host, none on by default: the nets round a pad shut in laid another way (open_shut), the stairs laid straight (straighten), a last run that routes nothing (leave_given); polyclip 0.0.7 ([#85](https://github.com/KarpelesLab/guide/pull/85))
+
+### Other
+
+- *(benchmarks)* the table beside cadlab's router with 0.0.42, and where the track outside the pads is by net ([#83](https://github.com/KarpelesLab/guide/pull/83))
+
 ## [0.0.42](https://github.com/KarpelesLab/guide/compare/v0.0.41...v0.0.42) - 2026-11-24
 
 ### Fixed

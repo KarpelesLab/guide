@@ -6034,6 +6034,50 @@ twelve boards with this release (`tinytapeout-demo` in sixteen orders, the load 
 4.9) no pad of a pour is without a spoke, cadlab's DRC has no error but the connections
 left open, and the count that the run reports is the DRC's in every one.
 
+### Beside cadlab's router, and two things measured that change nothing
+
+The round had two more items, and both were measured before anything was built for them.
+
+**Where the routes enter their pads.** 0.0.38 has more track outside the pads of its nets than
+cadlab's router on the large boards, on the nets both complete, and the thought was that a
+route aimed at a pad's centre goes further round the pad than one that ends at the first
+copper of it. By pad of those nets, the net's track inside the pad's outline, within 2 mm of
+the pad's box and outside the pad, and farther (both routers at 60 s in the same minutes,
+two orders):
+
+| board, order | inside the pads: this crate; cadlab's router | within 2 mm, outside the pad | farther |
+|---|---|---|---|
+| `glasgow-revC3`, 0 | 58; 171 mm | 1420; 1415 mm | 1178; 1071 mm |
+| `glasgow-revC3`, 2 | 56; 164 | 1400; 1387 | 1219; 1045 |
+| `tinytapeout-demo`, 0 | 53; 185 | 1137; 1223 | 3568; 3340 |
+| `tinytapeout-demo`, 2 | 52; 187 | 1134; 1212 | 3661; 3246 |
+
+Near its pads this crate has as much track as cadlab's router or 6 to 7 % less, and its
+tracks cross the pads' outlines on the same sides (`glasgow-revC3`: 37 % a long side, 52 % a short one, 11 %
+near a corner, for 35, 53 and 12 %). What it has more of is in the open. Routing only the
+nets that cadlab's router completes, its track on them is -1.4 %, -1.8 %, +3.0 % and +3.9 %
+beside cadlab's on `glasgow-revD1` in four orders, where with the whole board it is +6.5 to
++8.4 %: a part of the track in the open is what the nets cost that only this crate
+completes, 49 of them with 2392 mm on that board. Nothing was changed.
+
+**What a shorter budget returns.** `corne-cherry` takes 29 to 54 s of its minute where
+cadlab's router takes 20 to 32 s. The board returned at a budget of 20, 30, 40 and 60 s, four
+orders, connections open by cadlab's DRC: 42, 47, 48 and 50; 9, 0, 3 and 6; 13, 0, 1 and 1;
+1, 0, 1 and 1, where cadlab's router has 1, 3, 2 and 4 at 60 s. The time buys the
+connections, and no rule ends a run sooner.
+
+**The table.** Twelve boards in four orders (`tinytapeout-demo` in eight), this release and
+cadlab's router side by side at 60 s on three threads, the load 3.6 to 7.7, judged cell by
+cell as in the sections below: of 72 cells 34 better, 28 equal, 1 overlapping and 9 worse,
+for 35, 29, 1 and 7 with 0.0.38 in its own minutes and 35, 29, none and 8 with 0.0.38 in
+these. The cells that differ are cadlab's router's own runs on `lumenpnp-mobo` (this
+crate's four runs are the boards they were), `tinytapeout-demo`'s third order, which ends
+with none or with three connections open with either release, and `tinytapeout-demo`'s
+vias, 279.5 against 273 where 0.0.38 has 274: over three sets of eight orders side by side
+the medians are 279.5, 281.5 and 279.5 with this release and 274, 282 and 275 with 0.0.38,
+and the means of the 24 runs 280.1 and 279.1. A faster search changes which run a deadline
+ends; nothing says that it changes more.
+
 ### Tried and not kept, and what remains open
 
 - **The time of the passes was not changed.** They are the search of `detail` over

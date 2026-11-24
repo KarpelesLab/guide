@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.42](https://github.com/KarpelesLab/guide/compare/v0.0.41...v0.0.42) - 2026-11-24
+
+### Fixed
+
+- *(pcb)* a run that its deadline ends joins the pads that its routes cut off their fills all the same ([#82](https://github.com/KarpelesLab/guide/pull/82))
+
+### Other
+
+- *(benchmarks)* where glasgow-revD1's track is, the pads that pulling tight left short of their spokes, the table beside cadlab's router with 0.0.41 ([#80](https://github.com/KarpelesLab/guide/pull/80))
+
 ## [0.0.41](https://github.com/KarpelesLab/guide/compare/v0.0.40...v0.0.41) - 2026-11-24
 
 ### Fixed

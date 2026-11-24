@@ -5921,8 +5921,10 @@ that the spoke bridges, and the pad lost the spoke: a way is now refused where i
 room of a spoke of another net's pad and nearer the place where the spoke starts in its pad
 than the run it stands for. And after this crate's own rounds, with no zones to join,
 cleanup has a quarter of the time that a deadline leaves when the passes begin, for a
-twelfth. `glasgow-revD1` through cadlab at 60 s has the connections it had in every order,
-10, 12, 14 and 10 pads short of two spokes for 8, 23, 23 and 22 with 0.0.40 in the same minutes, 1122 vias for 1145.5 and 10 514 mm of track for 10 576 mm. Neither the track nor the vias of the boards come within what cadlab's router
+twelfth. `glasgow-revD1` through cadlab at 60 s, beside 0.0.40 in the same minutes: 10, 12,
+14 and 10 pads short of two spokes for 8, 23, 23 and 22, 1122 vias for 1145.5, 10 514 mm of
+track for 10 576 mm, and 10, 17, 8 and 13 connections open for 12, 17, 4 and 12. Neither the
+track nor the vias of the boards come within what cadlab's router
 has on the nets that both complete, and what was measured says that time does not give it.**
 
 ### Where `glasgow-revD1`'s track is

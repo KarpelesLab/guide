@@ -104,6 +104,19 @@ const NODES_A_UNIT: u64 = 6;
 /// connections are near their end.
 const NEARLY: usize = 4;
 
+/// What a point that is still shared after a round costs more in every round after it, for
+/// each time that it was. cadlab's router has 0.5; with the price of a spoke's room and no net
+/// planned on a pour of an outer layer the rounds of this crate take longer to their end with
+/// that, and are ended by their share with points still shared in half of the runs of a board
+/// that they would have ended on (`tinytapeout-demo`, in eight orders at a budget that does not
+/// end them: 167 million nodes to their end in the mean and 203 at the most with 0.5, 119 and
+/// 143 with 2, the vias of the board 277 and 271 in the mean; `docs/benchmarks.md`).
+const HISTORY: f32 = 2.0;
+
+/// What the pass for fewer vias has of the time that the run has left, where the rounds'
+/// share of it ended before the pass was begun.
+const VIAS: f64 = 0.3;
+
 /// And rounds with no more points shared than one for every this many connections, once the
 /// price of a shared point is at its most, have ended: `lumenpnp-mobo` had 11 points shared
 /// after 17 rounds and 9 after 40, in 12.7 s and in 24.7 s, and `buspirate5-rev10` 10 after
@@ -316,6 +329,13 @@ fn minimize_vias(
         eng.commit(r);
     }
     saved
+}
+
+/// Whether the pass for fewer vias has a time of its own ([`VIAS`]): the stage's share is
+/// `over` before it is begun, in a run that has no budget of work, which a share of the time
+/// would make another run on another machine, and that nothing has stopped.
+fn vias_time(over: bool, budgeted: bool, stopped: bool) -> bool {
+    over && !budgeted && !stopped
 }
 
 /// The routes made legal a wire at a time: while any wire shares a point with another net's,
@@ -1069,7 +1089,48 @@ impl Look {
 /// [`LOOK_SAMPLE`] of the connections searched for on the board with no route on it, each
 /// for as many as its length is of the whole. `design` has the ways out on it ([`fanout`]).
 /// `None` on a board that the rounds have nothing to route on.
+#[cfg(test)]
 pub(crate) fn look(design: &Design, pours: &Pours<'_>) -> Option<Look> {
+    look_kept(design, pours).map(|(look, _)| look)
+}
+
+/// What a [look](look_kept) at a board made that the rounds on the same board have again
+/// in place of making it: the maps of what is fixed on it, with what they were made of.
+pub(crate) struct Kept {
+    obstacles: Vec<model::Obstacle>,
+    profiles: Vec<model::Profile>,
+    bbox: BoxF,
+    grid: grid::Grid,
+    slots: Vec<usize>,
+    active: Vec<bool>,
+    st: grid::Statics,
+}
+
+impl Kept {
+    /// The maps, if they are those of `rb` on `grid`: the same obstacles and profiles, on
+    /// the same layers for the same profiles. The fills that the host makes around the
+    /// run's ways out between the look and the rounds are other fills, and those of them
+    /// that are copper to the other nets are obstacles.
+    fn maps(
+        self,
+        rb: &RouterBoard,
+        grid: &grid::Grid,
+        slots: &[usize],
+        active: &[bool],
+    ) -> Option<grid::Statics> {
+        (self.grid == *grid
+            && self.slots == slots
+            && self.active == active
+            && self.bbox == rb.bbox
+            && self.profiles == rb.profiles
+            && self.obstacles == rb.obstacles)
+            .then_some(self.st)
+    }
+}
+
+/// As [`look`], with what it made for the rounds to have again: nothing of a board given up
+/// for its connections with no way.
+pub(crate) fn look_kept(design: &Design, pours: &Pours<'_>) -> Option<(Look, Option<Kept>)> {
     let Pours {
         fills,
         own_zones,
@@ -1121,12 +1182,15 @@ pub(crate) fn look(design: &Design, pours: &Pours<'_>) -> Option<Look> {
     }
     // A board given up for those has no first round to tell.
     if no_way * NO_WAY > conns {
-        return Some(Look {
-            conns,
-            no_way,
-            work: 0.0,
-            secs: 0.0,
-        });
+        return Some((
+            Look {
+                conns,
+                no_way,
+                work: 0.0,
+                secs: 0.0,
+            },
+            None,
+        ));
     }
     // One for each step of the whole length divided by the sample, from half a step in:
     // a connection is searched for as often as its length is of the whole, and what it took
@@ -1163,7 +1227,7 @@ pub(crate) fn look(design: &Design, pours: &Pours<'_>) -> Option<Look> {
     let secs = began.elapsed().as_secs_f64();
     let searched = eng.work.used() as f64;
     let nodes = nodes * CROWD;
-    Some(Look {
+    let look = Look {
         conns,
         no_way,
         work: nodes / NODES_A_UNIT as f64,
@@ -1172,7 +1236,17 @@ pub(crate) fn look(design: &Design, pours: &Pours<'_>) -> Option<Look> {
         } else {
             0.0
         },
-    })
+    };
+    let kept = Kept {
+        obstacles: rb.obstacles.clone(),
+        profiles: rb.profiles.clone(),
+        bbox: rb.bbox,
+        grid: eng.grid,
+        slots,
+        active,
+        st: eng.st,
+    };
+    Some((look, Some(kept)))
 }
 
 /// The board of `design` without the fills that it took as copper (its zones from
@@ -1555,7 +1629,8 @@ fn pour_round(
 /// their nets as the others are, which a connection may end on, and copper to every other
 /// net, as they are to the passes. `share` is the share of the run that the stage has, and
 /// `was` what ended a part of the run before it, for a stage that is near its end when its
-/// share is spent to have as much again, once.
+/// share is spent to have as much again, once; `kept` is what the look at the board made
+/// ([`look_kept`]), whose maps the stage has if the board is the one that was looked at.
 ///
 /// # Errors
 ///
@@ -1566,7 +1641,7 @@ pub(crate) fn route(
     jobs: &[Job],
     pours: &Pours<'_>,
     fixed: (&[Track], &[Via]),
-    (share, was): (f64, Option<super::Stopped>),
+    (share, was, kept): (f64, Option<super::Stopped>, Option<Kept>),
     options: &RouteOptions,
     run: &Run<'_>,
 ) -> Result<Whole, NoWhole> {
@@ -1641,7 +1716,9 @@ pub(crate) fn route(
     }
     let grid = make_grid(rb, &routes);
     let pitch = grid.g;
-    let mut eng = Engine::new(rb, grid, slots.clone(), &active, costs(), &stop);
+    // With the maps of the look at the board, where that was a look at this one.
+    let maps = kept.and_then(|k| k.maps(rb, &grid, &slots, &active));
+    let mut eng = Engine::with(rb, grid, slots.clone(), &active, costs(), &stop, maps);
     eng.work = meter.clone();
     // The rooms of the spokes of pads in pours, at a price to every other net.
     {
@@ -1684,7 +1761,7 @@ pub(crate) fn route(
     // ---- negotiated congestion ----
     let mut rng = Rng(options.seed.unwrap_or(0) ^ 0x5EED_CAD1_AB00_0000);
     let mut pres = 0.6f32;
-    let hist_fac = 0.5f32;
+    let hist_fac = HISTORY;
     let mut order: Vec<usize> = (0..routes.len()).collect();
     let mut reroute: Vec<usize> = order.clone();
     let mut pour_rounds = 0;
@@ -1929,6 +2006,22 @@ pub(crate) fn route(
             run.poll() || stop()
         });
         // ---- fewer vias: each net again where the others are, with vias four times as dear ----
+        // In a time of its own where the rounds' share ended them: it saved nothing in 6 of
+        // 8 runs so ended, the share over before it or as it began, and where it runs it
+        // saves 26 to 46 of some 350 vias in about 2 s (`tinytapeout-demo`,
+        // `docs/benchmarks.md`). With a budget of work it has what the stage has left, as it
+        // had.
+        if vias_time(
+            run.poll() || stop(),
+            meter.limit().is_some(),
+            run.stopped().is_some(),
+        ) {
+            run.extend(VIAS, VIAS, was);
+            if !run.ending() {
+                *phase_end.lock().expect("deadline") =
+                    Limit::share(run.part_left(), Instant::now(), &meter, 0, 1.0);
+            }
+        }
         if !(run.poll() || stop()) {
             vias_saved = minimize_vias(&mut eng, &mut scratch, &mut routes, &|| {
                 run.poll() || stop()
@@ -2082,13 +2175,88 @@ pub(crate) fn route(
 
 #[cfg(test)]
 mod tests {
-    use super::{Island, copper_at};
+    use super::{Island, Pours, base_of, copper_at, look_kept, make_grid, plan, scene, vias_time};
+    use crate::geom::{Point, Rect};
+    use crate::pcb::tests::{MM, design, outline, smd};
+    use std::collections::BTreeSet;
+
+    /// Two nets side by side on a board of two layers, the second pad of the second net
+    /// `dx` further to the right.
+    fn two_nets(dx: i64) -> crate::pcb::Design {
+        let pads = vec![
+            smd(0, 0, 1),
+            smd(8 * MM, 0, 1),
+            smd(0, 2 * MM, 2),
+            smd(8 * MM + dx, 2 * MM, 2),
+        ];
+        let mut d = design(2, pads, 3);
+        d.outline = outline(Rect::new(
+            Point::new(-2 * MM, -2 * MM),
+            Point::new(12 * MM, 4 * MM),
+        ));
+        d
+    }
+
+    #[test]
+    fn the_maps_of_a_look_are_those_of_the_rounds_on_the_same_board_and_of_no_other() {
+        let counted = |fills: Vec<crate::pcb::Fill>| fills;
+        let pours_of = |d: &crate::pcb::Design| Pours {
+            fills: &[],
+            own_zones: d.board.zones.len(),
+            is_plane: &[],
+            counted: &counted,
+            spoke: &|_, _| (0, 0.0),
+        };
+        // The model as the rounds make it, and the maps as they make them.
+        let slots = vec![0, 1];
+        let wanted: BTreeSet<u32> = [1, 2].into();
+        let made = |d: &crate::pcb::Design| {
+            let (base, fills) = base_of(d, &[], d.board.zones.len());
+            let sc = scene(d, base, &fills, &[]);
+            let routes = plan(&sc.rb, &wanted);
+            let mut active = vec![false; sc.rb.profiles.len()];
+            for r in &routes {
+                active[r.prof] = true;
+            }
+            let grid = make_grid(&sc.rb, &routes);
+            (sc, grid, active)
+        };
+        let d = two_nets(0);
+        let (look, kept) = look_kept(&d, &pours_of(&d)).expect("a board to route");
+        assert_eq!((look.conns, look.no_way), (2, 0));
+        let (sc, grid, active) = made(&d);
+        let maps = kept
+            .expect("a board that is not given up")
+            .maps(&sc.rb, &grid, &slots, &active)
+            .expect("the same board");
+        assert!(maps == super::grid::Statics::build(&sc.rb, &grid, &slots, &active));
+        // A board with a pad elsewhere is another board: its maps are made.
+        let other = two_nets(MM);
+        let (_, kept) = look_kept(&d, &pours_of(&d)).expect("a board to route");
+        let (sc, grid, active) = made(&other);
+        assert!(
+            kept.expect("a board that is not given up")
+                .maps(&sc.rb, &grid, &slots, &active)
+                .is_none()
+        );
+    }
 
     fn island(terms: &[usize]) -> Island {
         Island {
             terms: terms.to_vec(),
             ..Island::default()
         }
+    }
+
+    #[test]
+    fn the_pass_for_fewer_vias_has_its_time_where_the_rounds_share_ended_them() {
+        // Its share is over, by the clock: it has a time of its own.
+        assert!(vias_time(true, false, false));
+        // Not while the stage has time left, which is then the pass's.
+        assert!(!vias_time(false, false, false));
+        // Not in a run with a budget of work, nor in one that was stopped.
+        assert!(!vias_time(true, true, false));
+        assert!(!vias_time(true, false, true));
     }
 
     #[test]

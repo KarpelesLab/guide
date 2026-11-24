@@ -124,7 +124,7 @@ pub(crate) fn delta(r: f64, s: f64) -> f64 {
 }
 
 /// The grid geometry.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Grid {
     /// Center of cell (0, 0).
     pub ox: f64,
@@ -211,6 +211,7 @@ impl Grid {
 
 /// Static legality maps per rule profile: track centers on the double grid of each routing
 /// layer, via centers on the cells.
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Statics {
     /// `[profile][slot][double-grid index]`; empty for profiles no routed net uses.
     pub track: Vec<Vec<Vec<u32>>>,

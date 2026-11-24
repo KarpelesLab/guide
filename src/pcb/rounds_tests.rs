@@ -210,14 +210,21 @@ fn line_and_two_across() -> Design {
 fn routes_that_still_share_a_point_are_made_legal_a_wire_at_a_time() {
     let d = line_and_two_across();
     let routed = route_checked(&d, &native());
-    // The two nets across have to cross the line, and the rounds end with points shared:
-    // by one wire of the line, between two of its pads, and the two wires across it. That
-    // wire shares the most and is the one taken out: one wire, and the nets across are
-    // whole.
+    // The two nets across have to cross the line, each between two other pads of it, and the
+    // rounds end with points shared: by two wires of the line and the two wires across them.
+    // Each wire across shares as many points as the wire of the line that it crosses, and of
+    // two that share as many the longer goes, which has more other ways: the two wires
+    // across are taken out, one and then the other, and the line of five wires is whole.
+    // (cadlab's own router takes out the net that shares the most, all of it: the line.
+    // And with a point that stays shared costing a quarter as much more in each round, as
+    // it did until 0.0.37, the rounds ended with both nets across on one wire of the line,
+    // which was taken out alone, and the passes after them left the line with all five of
+    // its connections open.)
     let (_, shared, taken_out, nets) = routed.stats.whole;
     assert!(shared >= 2, "{:?}", routed.stats.whole);
-    assert_eq!((taken_out, nets), (1, 3));
-    assert_eq!(routed.unrouted, [NetId(1)]);
+    assert_eq!((taken_out, nets), (2, 1));
+    assert_eq!(routed.unrouted, [NetId(2), NetId(3)]);
+    assert_eq!(routed.open.len(), 2);
     // The same on any number of threads.
     let more = route_checked(
         &d,
@@ -249,6 +256,44 @@ fn walled_in() -> Design {
         Point::new(14 * MM, 4 * MM),
     ));
     d
+}
+
+#[test]
+fn a_board_given_up_has_the_share_of_the_time_that_it_is_told() {
+    use super::{RunControl, Stopped, route_with};
+    use std::time::{Duration, Instant};
+    let hour = || RunControl {
+        deadline: Some(Instant::now() + Duration::from_secs(3600)),
+        ..RunControl::default()
+    };
+    // Given up at the look, with none of the time to its deadline: the run that begins
+    // again is at its deadline as it begins, and says so.
+    let d = walled_in();
+    let none = RouteOptions {
+        given_up_share: 0.0,
+        ..native()
+    };
+    let routed = route_with(&d, &none, &hour()).unwrap();
+    assert!(routed.stats.rounds_given_up);
+    assert_eq!(routed.stopped, Some(Stopped::Deadline));
+    // With all of it, which is the default, nothing stops it.
+    assert_eq!(native().given_up_share, 1.0);
+    let routed = route_with(&d, &native(), &hour()).unwrap();
+    assert!(routed.stats.rounds_given_up);
+    assert_eq!(routed.stopped, None);
+    // And a board that the rounds take has its deadline whatever the share.
+    let d = crossed(6);
+    let routed = route_with(&d, &none, &hour()).unwrap();
+    assert!(!routed.stats.rounds_given_up);
+    assert_eq!(routed.stopped, None);
+    assert!(routed.unrouted.is_empty());
+    // Nor is this crate's own rounds' run told anything by it.
+    let own = RouteOptions {
+        rounds: Rounds::Own,
+        ..none
+    };
+    let routed = route_with(&walled_in(), &own, &hour()).unwrap();
+    assert_eq!(routed.stopped, None);
 }
 
 #[test]

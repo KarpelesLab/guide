@@ -940,6 +940,14 @@ pub struct RouteOptions {
     /// legal a wire at a time"); the passes join such pads as they do after this crate's
     /// own rounds.
     pub rounds_pours: bool,
+    /// What a run has of the time to its [deadline](RunControl::deadline) once the rounds of
+    /// [`Rounds::Native`] were asked for and given up at their look at the board
+    /// ([`Stats::rounds_given_up`]). The default is 1, all of it. The run with those rounds
+    /// has more to do before its passes begin than the run with this crate's own, and a
+    /// host that gives it a later deadline for that says here what a run without them is
+    /// to have of it: the board given up then ends when it would have with this crate's own
+    /// rounds asked for.
+    pub given_up_share: f64,
     /// How many threads [`whole`](RouteOptions::whole) routes nets on. The default is 1;
     /// the routes are the same for any number. The nets of a round are routed a few at a
     /// time, each against what the others claim before any of the few, and have their
@@ -1020,6 +1028,7 @@ impl Default for RouteOptions {
             rounds: Rounds::Own,
             rounds_fanout: true,
             rounds_pours: false,
+            given_up_share: 1.0,
             threads: 1,
             shorten: false,
         }

@@ -247,6 +247,8 @@ pub(crate) struct Run<'a> {
     /// What ended a part early, if anything did: the run is then one that was stopped, when
     /// it ends.
     cut: Cell<Option<Stopped>>,
+    /// When the run began.
+    began: Instant,
 }
 
 impl<'a> Run<'a> {
@@ -267,11 +269,23 @@ impl<'a> Run<'a> {
             part_work: Cell::new(u64::MAX),
             paused: Cell::new(false),
             cut: Cell::new(None),
+            began: Instant::now(),
         };
         if budget == Some(0) {
             run.halt(Stopped::WorkBudget);
         }
         run
+    }
+
+    /// Moves the deadline, if there is one, to `share` of the time from the run's beginning
+    /// to it: for a run that begins again as one with less to do.
+    pub(crate) fn shorten(&mut self, share: f64) {
+        let began = self.began;
+        if let Some(d) = self.control.deadline.as_mut() {
+            *d = began
+                + d.saturating_duration_since(began)
+                    .mul_f64(share.clamp(0.0, 1.0));
+        }
     }
 
     fn halt(&self, why: Stopped) {

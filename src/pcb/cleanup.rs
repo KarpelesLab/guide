@@ -4,9 +4,12 @@
 use super::detail::{self, NetCtx, Params, octile};
 use super::geometry::{NetCopper, Seg};
 use super::router::Job;
-use super::world::{Verdict, World};
+use super::world::{Frozen, Verdict, World};
 use super::{Design, RouteOptions};
 use crate::geom::{LayerId, Point, Rect, Shape};
+use core::sync::atomic::{AtomicBool, Ordering};
+use std::collections::VecDeque;
+use std::sync::{Arc, Condvar, Mutex};
 
 /// How much dearer vias are when a net is rerouted to lose some.
 pub(crate) const VIA_COST_FACTOR: f64 = 10.0;
@@ -123,22 +126,72 @@ pub(crate) fn run(
             }
         }
     }
-    for j in order {
-        let job = &jobs[j];
-        let Some(c) = &mut copper[j] else { continue };
-        if stopped(world) {
-            break;
+    // The nets that are looked at for fewer vias, in their order.
+    let order: Vec<usize> = order
+        .into_iter()
+        .filter(|&j| {
+            copper[j]
+                .as_ref()
+                .is_some_and(|c| !c.vias.is_empty() && !(bounded && jobs[j].plane) && !still(j))
+        })
+        .collect();
+    // On more than one thread, with no budget of nodes to keep, the searches of the nets
+    // to come are made ahead on the others ([`Ahead`]).
+    let threads = options.threads.max(1).min(order.len());
+    let unbudgeted = world.run().is_none_or(|r| r.work_left().is_none());
+    let halt = AtomicBool::new(false);
+    let ahead = Ahead::default();
+    let rules = world.rules();
+    std::thread::scope(|scope| {
+        if threads > 1 && unbudgeted {
+            // As many as the run has threads: this one has the turns, which take no
+            // search of their own while the others have them all.
+            for _ in 0..threads {
+                scope.spawn(|| ahead.work(rules, jobs, params, options, &halt));
+            }
         }
-        if !c.vias.is_empty() && !(bounded && job.plane) && !still(j) {
+        // Whether the searches made ahead are of the world as it is.
+        let mut current = false;
+        for (at, &j) in order.iter().enumerate() {
+            let job = &jobs[j];
+            if stopped(world) {
+                break;
+            }
+            if threads > 1 && unbudgeted && !current && world.calm() {
+                ahead.begin(
+                    world.freeze(),
+                    order[at..]
+                        .iter()
+                        .enumerate()
+                        .map(|(k, &j)| (at + k, j, copper[j].clone().unwrap_or_default())),
+                );
+                current = true;
+            }
+            let found = if current {
+                ahead.take(at, || stopped(world))
+            } else {
+                None
+            };
+            let Some(c) = &mut copper[j] else { continue };
             let before = (c.vias.len(), c.segs.len());
-            expanded += fewer_vias(world, job, c, params, options);
+            let was = (c.segs.clone(), c.vias.clone(), c.keep.clone());
+            expanded += fewer_vias(world, job, c, params, options, found);
             // And the hops that the search for the whole net left, one at a time.
             expanded += fewer_hops(world, job, c, params, options);
             if bounded && before != (c.vias.len(), c.segs.len()) {
                 tidy(world, &job.ctx, c);
             }
+            // A net with other copper than it had makes another world of this one: the
+            // searches made ahead in the world as it was are of no use from here on.
+            if current && (was != (c.segs.clone(), c.vias.clone(), c.keep.clone()) || !world.calm())
+            {
+                ahead.end();
+                current = false;
+            }
         }
-    }
+        halt.store(true, Ordering::Relaxed);
+        ahead.close();
+    });
     if options.shorten {
         // And the end of each run at a pad to where on the pad the run comes to it, now
         // that nothing looks for another way: last, as what pulls a net tight takes it
@@ -690,8 +743,182 @@ fn fewer_vias(
     c: &mut NetCopper,
     params: Params,
     options: &RouteOptions,
+    ahead: Option<Again>,
 ) -> u64 {
     c.unplace(world);
+    let (found, expanded) = match ahead {
+        // Looked for already, in a world as this one is: the run is charged here.
+        Some((found, expanded)) => {
+            if let Some(run) = world.run() {
+                run.charge(expanded);
+            }
+            (found, expanded)
+        }
+        None => route_again(world, job, params, options),
+    };
+    if let Some(t) = found {
+        let new = NetCopper::from_tree(&job.ctx, &t);
+        // Each via saved may cost up to half its price in the search in track, in
+        // millimetres, as the costs are.
+        let saved = c.vias.len().saturating_sub(new.vias.len());
+        let limit = c.length() + saved as f64 * 1e6 * options.via_cost * VIA_COST_FACTOR / 2.0;
+        if saved > 0 && new.length() <= limit {
+            *c = new;
+        }
+    }
+    c.place(world, &job.ctx);
+    expanded
+}
+
+/// The searches for fewer vias of the nets to come, made on other threads while this one
+/// has the turn of the net before them.
+///
+/// A net's search for a route with fewer vias asks the world without the net's own
+/// copper, and few of them end with another route for their net (3 to 8 in a hundred on
+/// the corpus): the world most often is, at a net's turn, what it was at the turn of the
+/// net before, but for copper taken out and laid back where it was. So the world is
+/// [frozen](World::freeze) as it is, each thread makes a world of its own of that, and
+/// takes the nets to come one at a time: the net's copper out, the search, the copper
+/// back. A net's turn then has the search that was made for it, and goes on as it would
+/// with its own: what a net is routed as, and whether that is kept, is the same on any
+/// number of threads. Once a net does end with other copper, what was looked for ahead is
+/// of a world that is no more, and is left; the world is frozen again as it then is.
+///
+/// Not in a run with a budget of nodes, where a search is cut by the nodes that the
+/// searches before it took.
+#[derive(Default)]
+struct Ahead {
+    state: Mutex<AheadState>,
+    wake: Condvar,
+}
+
+#[derive(Default)]
+struct AheadState {
+    /// Which freezing of the world the searches are of, counted from one.
+    epoch: u64,
+    frozen: Option<Arc<Frozen>>,
+    /// The nets to look at, the next first: the place in the order, the job, its copper.
+    queue: VecDeque<(usize, usize, NetCopper)>,
+    /// The places whose search is under way.
+    under_way: Vec<usize>,
+    /// By place, what its search came to.
+    found: Vec<(usize, Again)>,
+    closed: bool,
+}
+
+impl Ahead {
+    fn lock(&self) -> std::sync::MutexGuard<'_, AheadState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Begins the searches of `nets` in the world as `frozen` has it.
+    fn begin(&self, frozen: Frozen, nets: impl Iterator<Item = (usize, usize, NetCopper)>) {
+        let mut s = self.lock();
+        s.epoch += 1;
+        s.frozen = Some(Arc::new(frozen));
+        s.queue = nets.collect();
+        s.under_way.clear();
+        s.found.clear();
+        drop(s);
+        self.wake.notify_all();
+    }
+
+    /// Leaves the searches begun: the world is no longer the one they are of.
+    fn end(&self) {
+        let mut s = self.lock();
+        s.epoch += 1;
+        s.frozen = None;
+        s.queue.clear();
+        s.under_way.clear();
+        s.found.clear();
+    }
+
+    /// No more searches.
+    fn close(&self) {
+        self.lock().closed = true;
+        self.wake.notify_all();
+    }
+
+    /// What the search of the net at place `at` came to, waited for while it is under
+    /// way or to come. `None` if it is neither, and once `stopped` says that the run has
+    /// to stop: the caller then makes the search, which a run that has to stop ends.
+    fn take(&self, at: usize, stopped: impl Fn() -> bool) -> Option<Again> {
+        let mut s = self.lock();
+        loop {
+            if let Some(k) = s.found.iter().position(|f| f.0 == at) {
+                return Some(s.found.swap_remove(k).1);
+            }
+            if !s.under_way.contains(&at) && !s.queue.iter().any(|q| q.0 == at) {
+                return None;
+            }
+            s = self
+                .wake
+                .wait_timeout(s, std::time::Duration::from_millis(5))
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+            if stopped() {
+                return None;
+            }
+        }
+    }
+
+    /// A thread's work: the searches of the nets in the queue, each in a world of the
+    /// thread's own, until there are no more to come.
+    fn work(
+        &self,
+        rules: &crate::geom::Rules,
+        jobs: &[Job],
+        params: Params,
+        options: &RouteOptions,
+        halt: &AtomicBool,
+    ) {
+        let mut mine: Option<(u64, World<'_>)> = None;
+        loop {
+            let (epoch, frozen, (at, j, mut c)) = {
+                let mut s = self.lock();
+                loop {
+                    if s.closed {
+                        return;
+                    }
+                    if let (Some(frozen), Some(next)) = (s.frozen.clone(), s.queue.pop_front()) {
+                        s.under_way.push(next.0);
+                        break (s.epoch, frozen, next);
+                    }
+                    s = self
+                        .wake
+                        .wait(s)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                }
+            };
+            if mine.as_ref().is_none_or(|m| m.0 != epoch) {
+                mine = Some((epoch, World::thaw(rules, &frozen, halt)));
+            }
+            let Some((_, world)) = mine.as_mut() else {
+                return;
+            };
+            c.unplace(world);
+            let found = route_again(world, &jobs[j], params, options);
+            c.place(world, &jobs[j].ctx);
+            let mut s = self.lock();
+            if s.epoch == epoch && !halt.load(Ordering::Relaxed) {
+                s.under_way.retain(|&k| k != at);
+                s.found.push((at, found));
+            }
+            drop(s);
+            self.wake.notify_all();
+        }
+    }
+}
+
+/// What the search of a net for a route with fewer vias comes to: the route, if it found
+/// one, and the nodes it expanded.
+type Again = (Option<detail::Tree>, u64);
+
+/// A net's route with dearer vias, in a world that its copper is not in, and the nodes
+/// that the search for it expanded.
+fn route_again(world: &World<'_>, job: &Job, params: Params, options: &RouteOptions) -> Again {
     let p = Params {
         via_cost: options.via_cost * VIA_COST_FACTOR,
         max_expansions: params
@@ -725,18 +952,7 @@ fn fewer_vias(
             }
         }
     }
-    if let Some(t) = found {
-        let new = NetCopper::from_tree(&job.ctx, &t);
-        // Each via saved may cost up to half its price in the search in track, in
-        // millimetres, as the costs are.
-        let saved = c.vias.len().saturating_sub(new.vias.len());
-        let limit = c.length() + saved as f64 * 1e6 * options.via_cost * VIA_COST_FACTOR / 2.0;
-        if saved > 0 && new.length() <= limit {
-            *c = new;
-        }
-    }
-    c.place(world, &job.ctx);
-    expanded
+    (found, expanded)
 }
 
 /// How many nodes the search for a run in place of a hop may expand, how many pitches

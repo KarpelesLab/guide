@@ -600,11 +600,21 @@ impl<'a> Run<'a> {
 
 /// The limits of a search of `max` nodes in a run, or outside of any.
 pub(crate) fn limits<'r>(run: Option<&'r Run<'_>>, max: u64) -> SearchLimits<'r> {
+    limits_or(run, None, max)
+}
+
+/// The limits of a search of `max` nodes in a run, or outside of any until `halt` is set.
+pub(crate) fn limits_or<'r>(
+    run: Option<&'r Run<'_>>,
+    halt: Option<&'r AtomicBool>,
+    max: u64,
+) -> SearchLimits<'r> {
     match run {
         Some(run) => run.limits(max),
         None => {
             let mut limits = SearchLimits::NONE;
             limits.max_expansions = max;
+            limits.cancel = halt;
             limits
         }
     }

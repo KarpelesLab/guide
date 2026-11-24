@@ -4559,6 +4559,102 @@ mod tests {
     }
 
     #[test]
+    fn the_searches_for_fewer_vias_made_ahead_change_no_route() {
+        use super::super::cleanup;
+        use super::super::control::Run;
+        use super::super::detail::Params;
+        use super::super::geometry::{NetCopper, Seg};
+        use super::super::world::World;
+        use super::super::{RouteOptions, RunControl};
+        // Six nets of two pads on the top layer, one above the other. Every second one
+        // goes under and back up by two vias for nothing, and loses them; the others have
+        // a via at an end of a track that goes nowhere, which a search leaves as it is.
+        // So the world is another one three times while the searches of the nets after
+        // are under way on the other threads.
+        let nets = 6;
+        let pads: Vec<_> = (0..nets)
+            .flat_map(|k| {
+                let y = k * 2 * MM;
+                [smd(0, y, k as u32 + 1), smd(4 * MM, y, k as u32 + 1)]
+            })
+            .collect();
+        let d = design(2, pads, nets as usize + 1);
+        let seg = |a: (i64, i64), b: (i64, i64), l: u8| Seg {
+            a: Point::new(a.0, a.1),
+            b: Point::new(b.0, b.1),
+            l,
+        };
+        let cleaned = |threads: usize| {
+            let options = RouteOptions {
+                threads,
+                ..RouteOptions::default()
+            };
+            let control = RunControl::default();
+            let run = Run::new(&control, None);
+            let mut world = World::new(
+                &d.board,
+                &d.rules,
+                &d.outline,
+                d.edge_clearance,
+                &d.obstacles,
+            )
+            .unwrap();
+            world.configure(&d, &options);
+            world.set_run(&run);
+            let pitch = super::pitch(&d, &options);
+            let jobs = super::jobs(&d, &world, pitch, &[], &[]);
+            assert_eq!(jobs.len(), nets as usize);
+            let mut copper: Vec<Option<NetCopper>> = jobs
+                .iter()
+                .map(|job| {
+                    let y = job.ctx.pads[0].center.y;
+                    let mut c = NetCopper::default();
+                    if (y / (2 * MM)) % 2 == 0 {
+                        c.segs = vec![
+                            seg((0, y), (MM, y), 0),
+                            seg((MM, y), (3 * MM, y), 1),
+                            seg((3 * MM, y), (4 * MM, y), 0),
+                        ];
+                        c.vias = vec![Point::new(MM, y), Point::new(3 * MM, y)];
+                    } else {
+                        c.segs = vec![seg((0, y), (4 * MM, y), 0)];
+                        c.vias = vec![Point::new(2 * MM, y)];
+                    }
+                    Some(c)
+                })
+                .collect();
+            for (job, c) in jobs.iter().zip(copper.iter_mut()) {
+                c.as_mut().unwrap().place(&mut world, &job.ctx);
+            }
+            let params = Params {
+                pitch,
+                via_cost: options.via_cost,
+                layer_bias: options.layer_bias,
+                bounds: super::bounds_of(&d),
+                max_expansions: options.max_expansions,
+                under_pads: false,
+                partial: false,
+                stubs: false,
+                forest: false,
+            };
+            let expanded = cleanup::run(&mut world, &d, &jobs, &mut copper, params, &options, &[]);
+            let routes: Vec<(Vec<Seg>, Vec<Point>)> = copper
+                .into_iter()
+                .flatten()
+                .map(|c| (c.segs, c.vias))
+                .collect();
+            (routes, expanded, run.work())
+        };
+        let one = cleaned(1);
+        // The nets that went under are straight on the top layer.
+        assert!(one.0.iter().step_by(2).all(|(_, vias)| vias.is_empty()));
+        assert!(one.1 > 0);
+        for threads in [2, 3, 8] {
+            assert_eq!(cleaned(threads), one, "on {threads} threads");
+        }
+    }
+
+    #[test]
     fn a_net_with_a_plane_loses_only_the_stubs_in_the_way_in_a_run_with_a_budget() {
         // A ground of 584 pads, as stubs to its plane: in the first pass too, and far more
         // often than a net without a plane, before it is taken out whole.

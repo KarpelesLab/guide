@@ -603,6 +603,8 @@ pub(crate) struct DetailSpace<'a> {
     tree_groups: Vec<Rect>,
     /// The run the search is part of, which hears of every node.
     run: Option<&'a Run<'a>>,
+    /// With no run, the flag that stops the search, if the world has one.
+    halt: Option<&'a core::sync::atomic::AtomicBool>,
     /// The gates' anchors of the net's width of passage, as bits, and those near the node
     /// that is being expanded.
     class: u32,
@@ -646,6 +648,7 @@ impl<'a> DetailSpace<'a> {
             tree_grid: FastMap::default(),
             tree_groups: Vec::new(),
             run: world.run(),
+            halt: world.halt(),
             class: ctx.widths.first().map_or(0, |&w| {
                 world.gates().class(world.need(ctx.net, w), params.pitch)
             }),
@@ -1399,7 +1402,7 @@ impl<'a> NetRun<'a> {
             ctx.net,
             self.sources.iter().map(|&n| Source::new(n)),
             targets.map(Target::new),
-            control::limits(self.space.run, limit),
+            control::limits_or(self.space.run, self.space.halt, limit),
         );
         let path = match outcome {
             SearchOutcome::Found(found) => Ok(found.path.to_vec()),
@@ -1432,7 +1435,7 @@ impl<'a> NetRun<'a> {
             ctx.net,
             ctx.terminal_nodes(terminal).into_iter().map(Source::new),
             [Target::new(TREE)],
-            control::limits(self.space.run, limit),
+            control::limits_or(self.space.run, self.space.halt, limit),
         );
         let path = match outcome {
             SearchOutcome::Found(found) => {

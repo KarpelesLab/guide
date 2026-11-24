@@ -5996,13 +5996,15 @@ Not adopted, and cadlab's adapter asks for the rounds on more than two layers as
 On the nets that both routers complete, `glasgow-revD1` has 7 % more track than with cadlab's
 router and 11 % more outside the pads (cadlab's D133). Where it comes from, measured:
 
-- *Its first run has no cleanup.* Forty rounds at twice the pitch take 24 s, routing begins
-  3.8 s into the run, and the passes have the 10 s that are left of the first run's 42 s:
-  7.5 s of rip-up, which its share ends, 0.8 s of cleanup and the joining of the fills. No
-  net is routed again among the others (that asks for 2 s), and cleanup's searches take out
-  0 to 220 mm of 11 700 before the part ends.
+- *Its first run has next to no cleanup.* Routing begins 3.8 s into the run and its forty
+  rounds at twice the pitch end 28 s after that; the passes have what is left of the first
+  run's 42 s, 8 to 10 s, of which by the run's shares rip-up has three quarters and cleanup
+  a third of the rest, 0.6 to 0.8 s (the shares, not a measurement: the run tells no phase
+  between routing and its report at 42.05 s). No net is routed again among the others (that
+  asks for 2 s), and cleanup's searches take out nothing in one run and 212 and 222 mm of
+  11 700 in two others before the part ends.
 - *The rip-up is what the track is paid in.* With routing given three tenths of what is
-  left, for three quarters, the board has 34 connections open for 9 in the default order and
+  left, for three quarters, and cleanup nine tenths of the rest, the board has 34 connections open for 9 in the default order and
   34 for 31 in another, 1085 and 1083 vias for 1200 and 1179, and 9652 and 9628 mm for
   10 692 and 9766 mm: before cleanup 10 870 mm with 140 nets taken out for 11 744 mm with 306.
   On the nets both complete that board has 2.0 % more track than cadlab's router's and 8 %
@@ -6016,7 +6018,7 @@ router and 11 % more outside the pads (cadlab's D133). Where it comes from, meas
   for once among the others by the negotiation's search, kept if shorter, with a via more
   where that is 5 mm less. With all the time it wants, on the board as the rip-up leaves
   it: 50 nets looked at, 19 kept, 169 mm and 7 vias less in 1.05 s in one order; 35, 15 and
-  46 mm in 0.74 s in another. In eight tenths of the 0.8 s that cleanup has: one net, 45 mm,
+  46 mm in 0.74 s in another. In eight tenths of what cleanup has, under a second: one net, 45 mm,
   and 15 nets, 7 kept, 40 mm, and cleanup's own searches, which had that time, then take out
   nothing where they took 212 and 222 mm in the same two orders. So in the time there is it
   gains less than what it displaces, and with more time it gains what routing each net again

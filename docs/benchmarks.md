@@ -6092,6 +6092,85 @@ Cleanup has 1.1 s less on `corne-cherry`, 3.0 s on `tinytapeout-demo` and 1.4 s 
 for 0.2, 4.4 and 3.7 s more of the processor: the searches made ahead that a net's other
 copper left unused, and the threads' own copies of the world.
 
+### Beside cadlab's router at 60 s
+
+The release's source behind cadlab's adapter, cadlab's own router and, on six boards, 0.0.39,
+side by side in the same minutes: the twelve boards in four orders and `tinytapeout-demo` in
+eight, four runs at a time on three threads each, the load 1.6 at the start and 4.1 to 7.6
+from the first minute on. Open is cadlab's DRC count of unrouted on the board that left, for
+both; open and the pads short of two necks by order; medians of the rest; the fastest and
+the slowest run:
+
+| board | open | vias | track | track outside pads | short of two necks | time |
+|---|---|---|---|---|---|---|
+| `buspirate-flash-sop` | equal (0/0/0/0 against 0/0/0/0) | equal (+0 %) 4 against 4 | better (-4 %) 442 against 461 | equal (-0 %) 431 against 431 | equal (0/0/0/0 against 0/0/0/0) | equal (1 to 1 s against 0 to 0 s) |
+| `buspirate-rs232` | equal (0/0/0/0 against 0/0/0/0) | better (-20 %) 8 against 10 | equal (+1 %) 284 against 281 | equal (+1 %) 275 against 272 | equal (0/0/0/0 against 0/0/0/0) | equal (0 to 0 s against 0 to 0 s) |
+| `lumenpnp-ringlight` | equal (0/0/0/0 against 0/0/0/0) | equal (+0 %) 3 against 3 | better (-6 %) 166 against 177 | equal (-1 %) 158 against 159 | equal (0/0/0/0 against 0/0/0/0) | equal (0 to 1 s against 0 to 0 s) |
+| `nrfmicro` | equal (0/0/0/0 against 0/0/0/0) | better (-14 %) 41 against 47.5 | better (-3 %) 437 against 450 | equal (+2 %) 421 against 414 | equal (0/0/0/0 against 0/0/0/0) | equal (2 to 14 s against 2 to 12 s) |
+| `sweep-v2.2` | equal (3/3/3/3 against 3/3/3/3) | better (-18 %) 21 against 25.5 | better (-2 %) 2115 against 2159 | equal (-1 %) 2104 against 2122 | better (0/1/0/1 against 2/1/2/1) | better (36 to 37 s against 52 to 53 s) |
+| `corne-cherry` | better (1/0/1/1 against 1/3/2/4) | better (-7 %) 425.5 against 459 | better (-8 %) 7492 against 8103 | better (-6 %) 7421 against 7915 | better (2/2/1/1 against 3/3/2/2) | worse (28 to 54 s against 21 to 32 s) |
+| `tinytapeout-demo` | better (0/0/0/0/0/0/1/0 against 19/1/4/5/1/2/2/9) | worse (+2 %) 279.5 against 273 | equal (-1 %) 4852 against 4894 | worse (+3 %) 4797 against 4672 | better (1/2/0/0/1/1/4/3 against 20/12/10/16/16/14/17/19) | equal (40 to 54 s against 34 to 61 s) |
+| `buspirate5-rev10` | better (0/0/0/0 against 4/2/4/4) | better (-6 %) 285 against 302 | better (-8 %) 2877 against 3129 | better (-4 %) 2793 against 2911 | better (10/12/11/14 against 22/24/30/21) | better (14 to 16 s against 20 to 33 s) |
+| `lumenpnp-mobo` | better (0/0/0/0 against 9/23/10/14) | better (-2 %) 331 against 339 | better (-3 %) 5291 against 5446 | equal (+1 %) 5214 against 5160 | better (0/0/0/0 against 2/4/2/1) | better (30 to 34 s against 60 to 62 s) |
+| `cynthion` | better (8/8/8/8 against 28/29/30/28) | better (-13 %) 417 against 478 | better (-5 %) 3034 against 3184 | equal (-1 %) 2961 against 2981 | equal (1/1/1/1 against 1/1/1/1) | better (34 to 39 s against 62 to 62 s) |
+| `glasgow-revC3` | better (9/6/9/8 against 35/29/39/30) | better (-3 %) 403 against 415 | worse (+5 %) 3633 against 3448 | worse (+11 %) 3547 against 3190 | equal (0/0/0/0 against 0/0/0/0) | equal (59 to 59 s against 60 to 62 s) |
+| `glasgow-revD1` | better (12/17/7/12 against 127/109/114/144) | worse (+8 %) 1145.5 against 1061.5 | worse (+18 %) 10576 against 8953 | worse (+22 %) 10323 against 8432 | better (8/23/10/22 against 43/31/41/47) | better (56 to 58 s against 60 to 63 s) |
+
+Of 72 cells 36 are better, 28 equal and 8 worse, where 0.0.39 had 34, 28, one overlapping and
+9; with 0.0.39's own runs of these minutes on the six boards that have them the count is the
+same 36, 28 and 8. The two cells that moved did not move by this release:
+`tinytapeout-demo`'s connections open, which either release has at none in seven orders or
+at one or three in an order more, and `lumenpnp-mobo`'s track and track outside the pads,
+where this crate's four runs are the boards they were and cadlab's router's are others. The
+worse cells are 0.0.39's but for `lumenpnp-mobo`'s track outside the pads: `corne-cherry`'s time, `tinytapeout-demo`'s vias and
+track outside the pads, `glasgow-revC3`'s track and track outside the pads, `glasgow-revD1`'s
+vias, track and track outside the pads. `tinytapeout-demo` is out of its budget in none of
+these eight orders for three with 0.0.39, and in two of the eight more of the census.
+
+By the nets that both routers complete:
+
+| board | nets both complete (median of the pairs) | vias on them | track on them | track outside pads on them | nets only guide completes, their track and vias; only native |
+|---|---|---|---|---|---|
+| `buspirate-flash-sop` | 12 | equal (+0 %) 4 against 4 | better (-4 %) 442 against 461 | equal (-0 %) 431 against 431 | 0 nets, 0 mm, 0 vias; 0 |
+| `buspirate-rs232` | 30 | better (-20 %) 8 against 10 | equal (+1 %) 284 against 281 | equal (+1 %) 275 against 272 | 0 nets, 0 mm, 0 vias; 0 |
+| `lumenpnp-ringlight` | 12 | equal (+0 %) 3 against 3 | better (-7 %) 166 against 177 | equal (-1 %) 158 against 159 | 0 nets, 0 mm, 0 vias; 0 |
+| `nrfmicro` | 41 | better (-14 %) 41 against 47.5 | better (-3 %) 437 against 450 | equal (+2 %) 421 against 414 | 0 nets, 0 mm, 0 vias; 0 |
+| `sweep-v2.2` | 40 | better (-21 %) 19 against 24 | equal (-1 %) 2034 against 2060 | equal (-0 %) 2024 against 2028 | 0 nets, 0 mm, 0 vias; 0 |
+| `corne-cherry` | 149 | better (-9 %) 397.5 against 434.5 | better (-7 %) 7202 against 7759 | better (-6 %) 7139 against 7593 | 2.5 nets, 164 mm, 12.5 vias; 1 |
+| `tinytapeout-demo` | 135.5 | worse (+6 %) 246.5 against 233 | equal (+1 %) 4740 against 4680 | worse (+4 %) 4689 against 4496 | 1 nets, 60 mm, 25.5 vias; 0 |
+| `buspirate5-rev10` | 181 | equal (+1 %) 252.5 against 250 | better (-3 %) 2848 against 2927 | equal (+2 %) 2767 against 2720 | 2 nets, 30 mm, 33 vias; 0 |
+| `lumenpnp-mobo` | 187.5 | worse (+5 %) 258 against 245 | better (-3 %) 4928 against 5057 | equal (+1 %) 4864 against 4810 | 5.5 nets, 312 mm, 70 vias; 4 |
+| `cynthion` | 310.5 | better (-23 %) 277 against 360.5 | better (-6 %) 2695 against 2870 | better (-3 %) 2634 against 2714 | 15.5 nets, 345 mm, 134.5 vias; 0 |
+| `glasgow-revC3` | 199 | better (-13 %) 219.5 against 251 | equal (+2 %) 2668 against 2627 | worse (+6 %) 2615 against 2461 | 19 nets, 941 mm, 185.5 vias; 7 |
+| `glasgow-revD1` | 499.5 | better (-3 %) 766 against 788 | worse (+8 %) 8126 against 7548 | worse (+11 %) 7933 against 7150 | 49.5 nets, 2392 mm, 298 vias; 10 |
+
+16 better, 14 equal and 6 worse of 36, for 16, 15 and 5: `lumenpnp-mobo`'s vias on those nets
+are +5 % for +2 %, with this crate's boards the ones they were and cadlab's router leaving
+9, 23, 10 and 14 connections open for 9, 10, 6 and 14, so that the nets both complete are
+others.
+
+In the 60 runs of the twelve boards in four orders and `tinytapeout-demo` in sixteen: no pad
+of a pour without a spoke, no DRC error other than unrouted, no solder pad made solid by a
+track, and no run whose count of open connections is not cadlab's DRC's (cadlab's router's
+is another in 16 runs of 52, by what it counts).
+
+### What a shorter budget returns on `corne-cherry`
+
+Its time is still outside cadlab's router's, 28 to 54 s against 21 to 32 s. The board at a
+budget of 20, 30, 40 and 60 s, four orders, cadlab's router at 60 s in the same minutes (the
+load 1.8 to 5.0; open and the pads short of two necks by order, medians of the rest):
+
+| | open | vias | track | outside pads | short of two necks | s |
+|---|---|---|---|---|---|---|
+| this crate, 20 s | 18/48/48/50 | 405 | 6812 | 6751 | 0/1/1/1 | 16 to 19 |
+| 30 s | 6/0/3/3 | 452 | 7547 | 7479 | 2/2/1/2 | 25 to 26 |
+| 40 s | 1/0/4/1 | 439 | 7510 | 7441 | 1/2/1/1 | 27 to 36 |
+| 60 s | 1/0/1/1 | 425.5 | 7508 | 7438 | 2/2/1/1 | 28 to 56 |
+| cadlab's router, 60 s | 1/3/2/4 | 459 | 8103 | 7915 | 3/3/2/2 | 21 to 32 |
+
+At 40 s the third order has 4 connections open for 1 at 60 s: the minute still buys
+connections, and no end is made sooner.
+
 ### What the host's fills are
 
 cadlab fills its zones itself and gives the crate its fill when it asks. Counted in a run at

@@ -957,6 +957,11 @@ pub struct RouteOptions {
     /// turns one after another: what a net was routed as stands if it is in no claim
     /// that it was not in when it was routed, and it is routed again at its turn if not.
     /// The few are as many on one thread as on several.
+    ///
+    /// Cleanup has them too, in a run with no [budget of nodes](RouteOptions::work_budget):
+    /// each net's search for a route with fewer vias is made ahead of its turn, in a copy
+    /// of the board as it is, and stands at the turn if no net before it has ended with
+    /// other copper since, as few do. The routes are the same for any number there as well.
     pub threads: usize,
     /// Whether cleanup looks for a shorter way for each run of a net's tracks from one
     /// pad or branch to the next, with every other route where it is. The default is

@@ -226,8 +226,33 @@ pub(crate) struct World<'r> {
     run_layers: u64,
     /// The run that searches in this world belong to, for its budget and its stop flag.
     run: Option<&'r Run<'r>>,
+    /// In a world with no run, a flag that stops the searches in it, if it has one
+    /// ([`World::thaw`]).
+    halt: Option<&'r core::sync::atomic::AtomicBool>,
     /// The passages only as wide as a track, which searches look for on lattices of their
     /// own.
+    gates: Gates,
+}
+
+/// A world without the run it belongs to ([`World::freeze`]).
+#[derive(Clone, Debug)]
+pub(crate) struct Frozen {
+    edge_clearance: i64,
+    layers: Vec<ShapeIndex>,
+    meta: Vec<Vec<Meta>>,
+    reach: i64,
+    locked: Vec<bool>,
+    clearances: Vec<i64>,
+    via_pads: Vec<(NetId, crate::geom::Rect)>,
+    planes: Option<Planes>,
+    spokes: Option<super::spokes::Spokes>,
+    kept: Option<Kept>,
+    vias_in_pads: bool,
+    excepts: Vec<Vec<NetId>>,
+    ties: Vec<Vec<NetId>>,
+    restricted: bool,
+    track_layers: Vec<u64>,
+    run_layers: u64,
     gates: Gates,
 }
 
@@ -286,6 +311,7 @@ impl<'r> World<'r> {
             track_layers: Vec::new(),
             run_layers: u64::MAX,
             run: None,
+            halt: None,
             gates: Gates::default(),
         };
         let nets = board
@@ -570,6 +596,99 @@ impl<'r> World<'r> {
     /// The run that searches in this world belong to, if any.
     pub(crate) fn run(&self) -> Option<&'r Run<'r>> {
         self.run
+    }
+
+    /// The flag that stops the searches in a world with no run, if it has one.
+    pub(crate) fn halt(&self) -> Option<&'r core::sync::atomic::AtomicBool> {
+        self.halt
+    }
+
+    /// The world as it is, apart from the run it belongs to: what another thread makes a
+    /// world of its own from ([`World::thaw`]), to ask what this one would answer.
+    pub(crate) fn freeze(&self) -> Frozen {
+        let World {
+            rules: _,
+            edge_clearance,
+            layers,
+            meta,
+            reach,
+            scratch: _,
+            locked,
+            clearances,
+            via_pads,
+            planes,
+            spokes,
+            kept,
+            vias_in_pads,
+            excepts,
+            ties,
+            restricted,
+            track_layers,
+            run_layers,
+            run: _,
+            halt: _,
+            gates,
+        } = self;
+        Frozen {
+            edge_clearance: *edge_clearance,
+            layers: layers.clone(),
+            meta: meta.clone(),
+            reach: *reach,
+            locked: locked.clone(),
+            clearances: clearances.clone(),
+            via_pads: via_pads.clone(),
+            planes: planes.clone(),
+            spokes: spokes.clone(),
+            kept: kept.clone(),
+            vias_in_pads: *vias_in_pads,
+            excepts: excepts.clone(),
+            ties: ties.clone(),
+            restricted: *restricted,
+            track_layers: track_layers.clone(),
+            run_layers: *run_layers,
+            gates: gates.clone(),
+        }
+    }
+
+    /// A world as the one that `frozen` was taken of, entry for entry, with no run: its
+    /// searches expand what they are given and stop when `halt` is set. What is taken out
+    /// of it and put back leaves it answering as before, whatever the entries are then
+    /// numbered: a verdict is told by what is near, in no order.
+    pub(crate) fn thaw(
+        rules: &'r Rules,
+        frozen: &Frozen,
+        halt: &'r core::sync::atomic::AtomicBool,
+    ) -> World<'r> {
+        World {
+            rules,
+            edge_clearance: frozen.edge_clearance,
+            layers: frozen.layers.clone(),
+            meta: frozen.meta.clone(),
+            reach: frozen.reach,
+            scratch: RefCell::new(Vec::new()),
+            locked: frozen.locked.clone(),
+            clearances: frozen.clearances.clone(),
+            via_pads: frozen.via_pads.clone(),
+            planes: frozen.planes.clone(),
+            spokes: frozen.spokes.clone(),
+            kept: frozen.kept.clone(),
+            vias_in_pads: frozen.vias_in_pads,
+            excepts: frozen.excepts.clone(),
+            ties: frozen.ties.clone(),
+            restricted: frozen.restricted,
+            track_layers: frozen.track_layers.clone(),
+            run_layers: frozen.run_layers,
+            run: None,
+            halt: Some(halt),
+            gates: frozen.gates.clone(),
+        }
+    }
+
+    /// Whether every pad's kept spokes are walled as its routes leave them: no route was
+    /// taken out of a spoke's room since anything was placed ([`World::remove`]). A world
+    /// is then told by its copper alone, and one with the same copper answers the same.
+    pub(crate) fn calm(&self) -> bool {
+        self.kept.as_ref().is_none_or(|k| k.left.is_empty())
     }
 
     /// Sets where the gates are.

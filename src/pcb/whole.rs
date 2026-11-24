@@ -3628,7 +3628,16 @@ pub(crate) fn route<'r>(
                     let mut q = queue
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    for at in head..end {
+                    // The few are begun the longest first, by the nodes each took the last
+                    // time, or by its length before it has been routed: a thread is then
+                    // not left alone with the longest of them while the others wait. What
+                    // each is routed as is the same in any order, as none sees another's.
+                    let mut first: Vec<usize> = (head..end).collect();
+                    first.sort_by_key(|&at| {
+                        let i = reroute[at];
+                        (core::cmp::Reverse((taken[i], nets[i].length)), at)
+                    });
+                    for at in first {
                         let net = &nets[reroute[at]];
                         q.0.push_back(Task {
                             at,

@@ -5911,6 +5911,226 @@ at a time.
   are what it has for the balls left shut in, and no other way to those was tried.
 - More than one thread, or a deadline: the comparison is by nodes.
 
+## PCB routing with cleanup's searches made ahead on the other threads
+
+0.0.39 left nine cells worse beside cadlab's own router at 60 s, and the round after it was
+to be one of speed with no result changed: the search of the passes, the fills, the threads,
+and what the host does between the runs. **Two things are changed, and neither changes a
+route. In a run with no budget of nodes, a net's search for a route with fewer vias is made
+ahead of its turn on the other threads, in a copy of the board as it is, and stands at the
+turn if no net before it has ended with other copper since, which 92 to 97 nets in a hundred
+have not; and the nets of a round that are routed at once are begun the longest first. With
+an hour for a budget, which no run comes near, eight boards have on three threads the
+connections open, the vias, the track and the nodes that they have on one; at budgets of
+nodes every one of 43 runs is 0.0.39's. The search of the passes itself is not faster: four
+changes to it were measured and none is told from noise.**
+
+### Where the minute goes, by stage
+
+Through cadlab at 60 s on three threads, 0.0.39; the time on the clock and the processor
+time of the whole process in each stage (`CADLAB_BENCH_TRACE=cpu` in cadlab's `route_bench`
+adds the processor time to each line of the trace), medians of four orders, the load 4.3 to 7.7 (each cell the time on the clock, then the
+processor time):
+
+| stage | `corne-cherry` | `tinytapeout-demo` | `glasgow-revD1` | `cynthion` |
+|---|---|---|---|---|
+| the board looked at, the escapes and the planes | 1.5 s; 1.6 s | 3.2 s; 3.5 s | 4.4 s; 4.9 s | 5.6 s; 6.1 s |
+| routing: the rounds, and the passes that take nets out | 23.0 s; 34.1 s | 33.2 s; 33.6 s | 39.5 s; 52.5 s | 4.0 s; 4.4 s |
+| settling what is open | 8.6 s; 9.1 s | 0.1 s; 0.1 s | 0.0 s; 0.0 s | 1.1 s; 1.1 s |
+| cleanup | 8.2 s; 8.7 s | 10.7 s; 12.1 s | 0.4 s; 0.4 s | 15.8 s; 19.1 s |
+| cadlab between the runs: its check, its fill, the plan of the next | 0.9 s; 1.5 s | 1.3 s; 2.6 s | 1.9 s; 4.0 s | 3.4 s; 8.0 s |
+| cadlab after the last run: what the fill makes needless, the spokes, the ends in the pads | 2.1 s; 3.8 s | 2.9 s; 5.9 s | 9.3 s; 16.8 s | 5.5 s; 13.6 s |
+| the whole run | 45.4 s; 60.5 s | 51.7 s; 59.0 s | 57.7 s; 83.8 s | 37.8 s; 58.7 s |
+
+A stage with as much processor time as time on the clock is one thread at work. This crate's
+own rounds, which are most of the routing of `corne-cherry` and `glasgow-revD1`, have 1.3 to
+1.5 threads' worth on three; the rounds of cadlab's router in this crate, which are the
+routing of `tinytapeout-demo`, have one, their batches being of one net; what settles the
+open connections and what cleans up have one, but for cadlab's fills asked for within them;
+cadlab's own steps, between the runs and after the last, have about two. So the minute is
+mostly one thread, as the release before found by the processor time alone, and the stages
+say where.
+
+### What a node of the passes costs
+
+A run at a budget of nodes is mostly the passes, and they expand 0.4 to 0.8 million nodes a
+second over a whole run where this crate's rounds expand 3.7 to 5: the question was what a
+node of the passes has that a node of the rounds has not. Counted on `glasgow-revD1` at 40
+million nodes (`corne-cherry` and `tinytapeout-demo` within a fifth of it), for each node
+expanded: twelve numbers of nodes asked for, three of them by a hash of a block and one and
+a half by a hash of a node off the lattice; four pads of the net looked at for being near,
+of which 1.9 are; 0.47 questions to the spatial index for what is near the node, which find
+1.8 entries; 0.26 tracks that are no step of the lattice, each a question of its own; 0.12
+vias. The rounds search a grid of cells whose claims are numbers in an array; the passes ask
+exact geometry of an index of shapes at half of their nodes, and number their nodes as they
+meet them. That is what the factor is made of, and it is spread: no one of these is a third
+of a node.
+
+Four changes that change no result were made to it and measured, each of 43 runs the same to
+the node, on four boards at 40 million nodes side by side with the release before:
+
+- *A node's place by comparison with the node that its steps come from*, where it was by two
+  divisions, and *the blocks looked up last kept by the low bits of their keys*, 128 of them
+  for one;
+- *the pads near a node by boxes widened once*, and the cell of the pads kept from one node
+  to the next;
+- *the two costs of an entry of the heap compared as one number of 128 bits*, as the rounds'
+  heap has it since 0.0.39;
+- *the sides of a rectangle of the index compared with no branch on each*.
+
+Together: `glasgow-revD1` 40.30 s for 40.47 s in the crate, `corne-cherry` 29.83 for 29.71,
+`tinytapeout-demo` 54.41 for 55.18, `cynthion` 33.50 for 33.67. Not told from noise, and none
+of them is in the release. The profile by a timer's signal puts 12 to 16 % of the searches'
+time on each of these lines; what it samples is where the processor waits for memory, which
+the instructions saved do not shorten. `callgrind` with a simulated cache, which would tell,
+did not get past global routing in 25 minutes on this board.
+
+### The searches for fewer vias, made ahead
+
+Cleanup routes each net with vias again, with vias ten times as dear, and keeps the route if
+it has fewer and is not much longer. Timed by net at 150 million nodes on one thread:
+
+| board | nets looked at in the first run | nets that end with another route | the searches | the same on three threads, at best |
+|---|---|---|---|---|
+| `tinytapeout-demo` | 92 | 5 | 6.06 s | 2.17 s |
+| `cynthion` | 177 | 14 | 3.85 s | 1.68 s |
+| `corne-cherry` | 98 | 3 | 2.46 s | 0.98 s |
+
+("At best": the searches between one net that changes and the next shared out over three
+threads with nothing lost, and none shorter than its longest.) A search asks the world
+without its net's copper, and at 92 to 97 turns in a hundred the world is, but for copper
+lifted and laid back where it was, what it was at the turn before. So the world is copied as
+it is, each thread makes a world of its own of the copy and takes the nets to come in their
+order: the net's copper out, the search, the copper back. A net's turn has the search that
+was made for it, charges the run its nodes and goes on as it would with its own. When a net
+does end with other copper the searches made ahead are left, those under way too, and the
+world is copied again: 1.2 ms on `glasgow-revD1`, and 2.1 ms for a thread's own of it.
+
+That a copy answers as the world does rests on two things. A verdict on a track or a via is
+told by what is near it and is the same in whatever order that is looked at, so the numbers
+that the entries have in a world where copper went out and came back do not matter. And the
+walls round a pad's last spokes, which follow the routes, are a matter of what stands in the
+spokes' rooms once anything has been placed after a route was taken out; the world is copied
+only when that is so. It is not done in a run with a budget of nodes, where the nodes that
+the searches before it took are what cuts a search, and such a run is on one thread.
+
+*With an hour for a budget*, which no run comes near, so that nothing is decided by the
+clock (eight boards, the default order, the load 3 to 6): 0.0.39 on one thread, 0.0.39 on
+three and this release on three have the same connections open, the same vias, the same
+track to a tenth of a millimetre and the same count of nodes on every one of them
+(`nrfmicro` none open, 41 vias, 447.3 mm and 9.9 million nodes; `buspirate5-rev10` none, 284,
+2881.9 mm, 13.2 million; `sweep-v2.2` 3, 23, 2104.1 mm, 25.9 million; `tinytapeout-demo` none,
+279, 4880.2 mm, 40.1 million; `cynthion` 8, 428, 2998.1 mm, 20.5 million; `buspirate-rs232`,
+`buspirate-flash-sop` and `lumenpnp-ringlight` as small). The runs on three threads take
+49.4 s for 51.9 s on `tinytapeout-demo`, 34.7 for 35.8 on `cynthion`, 15.8 for 17.3 on
+`buspirate5-rev10`, 35.5 for 35.8 on `sweep-v2.2` and 6.9 for 6.8 on `nrfmicro`. A test has
+six nets of which three lose two vias each, on one, two, three and eight threads, and the
+copper and the count of nodes of each.
+
+### The nets of a round, the longest first
+
+The nets of a round of this crate's own rounds are routed eight at a time against the same
+claims, and the eight were begun in their order: a thread that takes the last of them is
+alone with it while the others wait, if it is the longest. They are begun by the nodes that
+each took the last time, the most first, and by their length before they have been routed.
+None sees another's route, so the order is nothing to what each is routed as.
+`corne-cherry` at 150 million nodes on three threads, the same 201 eights and the same
+board: 5.79 s for 6.22 s of the eights' searches on the clock (13.5 s of them by the
+threads' own time), and 12.16 s for 12.61 s for the rounds. What the rounds have beside the
+eights is the turns after them, 2.8 s, of which 2.1 s are the 160 nets routed again at their
+turn, and 3.5 s between the rounds.
+
+### At budgets of nodes: the same runs
+
+One thread, the crate alone behind cadlab's adapter, six runs at a time, the release's source
+and 0.0.39 from crates.io one after the other (the load 3 to 6). At 40 million nodes, nine
+boards in three orders, and at 150 million, eight boards in two: **each of the 43 runs has
+the connections open by the run's count and by cadlab's DRC, the vias, the track and the
+work of 0.0.39's.** 570 open at 40 million and 42 at 150 million on seven boards, 56 and 75
+on `glasgow-revD1`, as the two releases before. Nodes a second over the whole run, 0.0.39
+and this, the orders of a board together, at 40 million: `nrfmicro` 2.08 and 2.06 million,
+`sweep-v2.2` 0.67 and 0.66, `corne-cherry` 1.27 and 1.26, `tinytapeout-demo` 0.66 and 0.65,
+`buspirate5-rev10` 0.64 and 0.63, `lumenpnp-mobo` 0.61 and 0.60, `cynthion` 0.39 and 0.37,
+`glasgow-revC3` 0.75 and 0.74, `glasgow-revD1` 0.83 and 0.79; at 150 million `corne-cherry`
+1.75 and 1.73, `tinytapeout-demo` 0.74 and 0.74, `cynthion` 0.41 and 0.41, `glasgow-revC3`
+0.55 and 0.54, `glasgow-revD1` 0.64 and 0.63. The same: on one thread with a budget of nodes
+the release is the code that 0.0.39 is, and the sets were not measured in the same minutes.
+
+### At 60 s
+
+Both releases through cadlab at 60 s on three threads, side by side in the same minutes, two
+runs of each at a time (the load 4.3 to 7.7): `corne-cherry`, `cynthion`, `buspirate5-rev10`
+and `glasgow-revD1` in four orders and `tinytapeout-demo` in eight.
+
+- **Where a run ends on its own, it is the same board sooner.** `buspirate5-rev10`, the four
+  orders the same board to the via and the tenth of a millimetre: 16.5, 15.3, 14.7 and 15.2 s
+  for 17.9, 16.8, 16.0 and 16.4 s. `cynthion`, the same four boards: 35.3, 36.8, 39.9 and
+  34.9 s for 37.1, 38.6, 42.0 and 35.8 s. `corne-cherry`, three orders the same boards: 28.2,
+  44.9 and 42.8 s for 30.0, 46.5 and 44.3 s; its default order's first run is ended by its
+  deadline with both, 1 open in 53.5 s with 419 vias and in 53.7 s with 424.
+- *`tinytapeout-demo`*: three orders the same boards, in 54.9, 47.6 and 41.6 s for 55.2, 51.6
+  and 44.4 s. A run was out of its budget in one order of eight for three with 0.0.39, and
+  the eight have 1, 0, 0, 0, 0, 0, 0 and 0 connections open for 1, 0, 3, 0, 0, 0, 1 and 1;
+  the vias are 282 in the median with both, 279.1 and 281.6 in the mean.
+- *`glasgow-revD1`*: the same four boards (12, 17, 7 and 12 open), in 56.4 to 59.0 s for 56.6
+  to 58.5 s. Its first run is ended by its deadline before cleanup has begun, and has
+  nothing of this.
+
+By stage, this release in the same runs (the time on the clock, then the processor time):
+
+| stage | `corne-cherry` | `tinytapeout-demo` | `glasgow-revD1` | `cynthion` |
+|---|---|---|---|---|
+| the board looked at, the escapes and the planes | 1.6 s; 1.6 s | 3.2 s; 3.4 s | 4.4 s; 5.0 s | 5.5 s; 6.0 s |
+| routing: the rounds, and the passes that take nets out | 22.4 s; 34.0 s | 34.1 s; 34.6 s | 39.4 s; 53.4 s | 4.1 s; 4.7 s |
+| settling what is open | 8.7 s; 9.2 s | 0.0 s; 0.0 s | 0.0 s; 0.0 s | 1.1 s; 1.1 s |
+| cleanup | 7.0 s; 8.9 s | 7.7 s; 16.5 s | 0.4 s; 0.9 s | 14.4 s; 22.8 s |
+| cadlab between the runs: its check, its fill, the plan of the next | 0.9 s; 1.5 s | 1.0 s; 2.1 s | 1.8 s; 3.9 s | 3.4 s; 8.0 s |
+| cadlab after the last run: what the fill makes needless, the spokes, the ends in the pads | 2.2 s; 3.9 s | 3.0 s; 6.1 s | 8.5 s; 16.1 s | 5.4 s; 13.3 s |
+| the whole run | 43.9 s; 61.4 s | 49.3 s; 64.3 s | 56.5 s; 83.1 s | 36.0 s; 61.8 s |
+
+Cleanup has 1.1 s less on `corne-cherry`, 3.0 s on `tinytapeout-demo` and 1.4 s on `cynthion`,
+for 0.2, 4.4 and 3.7 s more of the processor: the searches made ahead that a net's other
+copper left unused, and the threads' own copies of the world.
+
+### What the host's fills are
+
+cadlab fills its zones itself and gives the crate its fill when it asks. Counted in a run at
+40 million nodes on one thread (the fills are on a thread a layer whatever the run has):
+
+| board | fills in the run | asked by the crate; by the check of a run; by the steps after the last run | zone layers a fill | of them kept from the fill before | time of the fills, of the run |
+|---|---|---|---|---|---|
+| `cynthion` | 14 | 3; 4; 7 | 61 | 25 % | 20.7 s of 51.4 s |
+| `tinytapeout-demo` | 11 | 5; 3; 3 | 7 | 14 % | 7.5 s of 58.9 s |
+| `glasgow-revD1` | 5 | 0; 1; 4 | 14 | 36 % | 7.1 s of 48.7 s |
+| `corne-cherry` | 5 | 1; 1; 3 | 1480 (teardrops) | 25 % | 1.9 s of 30.6 s |
+
+Each is of another board: no fill is made twice (cadlab keeps the last four whole and the
+last of each zone layer, and a board asked again costs a comparison). A zone layer is made
+again when anything it is made from differs, and a pour over the whole board differs with
+any track. Of a zone layer made again on `cynthion`, the opening that takes out what is
+narrower than the least width is 42 %, the area that other nets' copper leaves 37 %, the
+spokes 9 %. Those are `polyclip`'s operations on the whole of a pour, and nothing of them
+was changed here.
+
+### Tried and not kept, and what remains open
+
+- *The four changes to a node of the passes*, above: no time that a run shows.
+- *The passes that take nets out and settle the open connections on more than one thread*:
+  not built. Each search there is of the world that the search before it left, and most of
+  them change it; what is made ahead would be made again.
+- *A fill of the part of a pour that changed*: not built. It would have to give the polygons
+  that the whole fill gives, to the nanometre, and `polyclip` rounds a vertex where the
+  whole is cut.
+- *`corne-cherry`'s time through cadlab*, 28 to 54 s where cadlab's router takes 20 to 32 s:
+  its routing is 22 s of which the rounds are on 1.5 threads, what settles its open
+  connections 9 s on one, and the run for shorter ways that cadlab asks for after the last
+  run 5.5 s in every order (4 s of cleanup on one thread and 1.5 s of cadlab's check), for
+  7 mm of track less and a via more in one order and 39 mm more with 14 vias fewer in
+  another. Whether that run's searches are of the kind that can be made ahead, few of them
+  ending with another route, was not measured.
+- *`glasgow-revD1`'s minute* ends at 54 to 59 s with a first run that its deadline ends at
+  42 s: what cadlab keeps for its steps after the last run is more than they take.
+
 ## PCB routing with the searches of this crate's rounds made faster
 
 0.0.38 left seven cells worse beside cadlab's own router at 60 s, and each of them is at

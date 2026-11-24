@@ -1071,6 +1071,23 @@ does it:
   routed eight at a time"); the eights are told by the nets alone, so the routes are the
   same on any number. Until 0.0.21 the nets routed side by side were those whose regions
   were apart, 1.8 to a batch on a board whose nets span it.
+  Since 0.0.40 the eight are begun the longest first, by the nodes each took the last
+  time: none sees another's route, so the order is nothing to the result, and a thread
+  is not left alone with the longest search while the others wait.
+- *Threads in cleanup.* A net's search for a route with fewer vias asks the world
+  without the net's own copper, and 3 to 8 in a hundred of them end with another route
+  for their net. So in a run with no budget of nodes the searches of the nets to come
+  are made ahead of their turns (`cleanup::Ahead`): the world is copied as it is
+  (`World::freeze`), each thread makes a world of its own of the copy, and takes the
+  nets in their order, the net's copper out, the search, the copper back. A net's turn
+  has the search that was made for it and goes on as with its own. When a net ends
+  with other copper, what was looked for ahead is of a world that is no more and is
+  left, and the world is copied again. A verdict of the world is told by what is near
+  a track, in no order, and the walls round a pad's last spokes are a matter of what
+  stands in their rooms once anything is placed (`World::calm`), so a copy with the
+  same copper answers as the world does, whatever its entries are numbered: the routes
+  and the count of nodes are those of one thread. Not in a run with a budget of nodes,
+  where the nodes that the searches before it took are what cuts a search.
 
 It is off by default: without a budget the passes complete the curated boards as they
 are, and a host that routes under one sets it.

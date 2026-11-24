@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.40](https://github.com/KarpelesLab/guide/compare/v0.0.39...v0.0.40) - 2026-11-24
+
+### Other
+
+- *(pcb)* a net's search for fewer vias made ahead of its turn on the other threads, with every route as it was ([#76](https://github.com/KarpelesLab/guide/pull/76))
+- *(benchmarks)* where the routes enter their pads, what a shorter budget returns, the table beside cadlab's router ([#74](https://github.com/KarpelesLab/guide/pull/74))
+
 ## [0.0.39](https://github.com/KarpelesLab/guide/compare/v0.0.38...v0.0.39) - 2026-11-24
 
 ### Other

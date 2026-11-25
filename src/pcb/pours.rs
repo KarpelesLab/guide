@@ -1368,7 +1368,32 @@ pub(crate) fn needless(
         g.dedup();
     }
     // What touches what: two of them with a layer in common whose copper does.
-    let mut touching: Vec<(usize, usize)> = Vec::new();
+    //
+    // And of those, what is one piece of copper as wide as its tracks (`sound`): two
+    // tracks whose centre lines meet, a track and a via where the track's centre line
+    // comes to the via's copper, two vias. Two tracks that only overlap by their round
+    // ends, or side by side, are joined by less than their width: with a step no longer
+    // than they are wide between them, they touch each other across it, and the step
+    // was told needless with `between` on the word of that. What it left was a neck of
+    // the overlap of two round ends, a quarter of a track's width and less
+    // (`corne-cherry`: 39 to 89 such necks under 0.1 mm on a board routed for a host
+    // that took out what was told, the narrowest 25 um of a track of 0.25 mm;
+    // `docs/benchmarks.md`). So nothing is needless that the groups are less joined
+    // without by either count: by what touches, as before, and by what is sound.
+    let lines: Vec<Option<Shape>> = c
+        .segs
+        .iter()
+        .map(|s| Shape::track(s.a, s.b, 2).ok())
+        .collect();
+    let line = |i: usize| lines.get(i).and_then(Option::as_ref);
+    let sound = |i: usize, j: usize| match (line(i), line(j)) {
+        (Some(a), Some(b)) => a.touches(b),
+        (Some(a), None) => a.touches(&shapes[j].0),
+        (None, Some(b)) => b.touches(&shapes[i].0),
+        (None, None) => true,
+    };
+    // With each pair, whether it is sound.
+    let mut touching: Vec<(usize, usize, bool)> = Vec::new();
     {
         let boxes: Vec<Rect> = shapes.iter().map(|(s, _)| s.bbox()).collect();
         let mut order: Vec<usize> = (0..shapes.len()).collect();
@@ -1382,7 +1407,8 @@ pub(crate) fn needless(
                     && boxes[i].intersects(&boxes[j])
                     && shapes[i].0.touches(&shapes[j].0)
                 {
-                    touching.push((i.min(j), i.max(j)));
+                    let (a, b) = (i.min(j), i.max(j));
+                    touching.push((a, b, sound(a, b)));
                 }
             }
         }
@@ -1409,30 +1435,33 @@ pub(crate) fn needless(
         })
         .collect();
     // By group that counts, the first of those that it is one with, by the tracks and
-    // vias that are not `gone`.
+    // vias that are not `gone`: by all that touches, and then by what is sound alone.
     let joined = |gone: &[bool]| {
-        let mut parent: Vec<u32> = (0..(count + ns + nv) as u32).collect();
-        for (e, groups) in of.iter().enumerate() {
-            if !gone[e] {
-                for &g in groups {
-                    union(&mut parent, g as u32, (count + e) as u32);
+        let by = |only_sound: bool| {
+            let mut parent: Vec<u32> = (0..(count + ns + nv) as u32).collect();
+            for (e, groups) in of.iter().enumerate() {
+                if !gone[e] {
+                    for &g in groups {
+                        union(&mut parent, g as u32, (count + e) as u32);
+                    }
                 }
             }
-        }
-        for &(a, b) in &touching {
-            if !gone[a] && !gone[b] {
-                union(&mut parent, (count + a) as u32, (count + b) as u32);
+            for &(a, b, sound) in &touching {
+                if !gone[a] && !gone[b] && (sound || !only_sound) {
+                    union(&mut parent, (count + a) as u32, (count + b) as u32);
+                }
             }
-        }
-        let mut first = vec![u32::MAX; count + ns + nv];
-        for &g in &counted {
-            let root = find(&mut parent, g as u32) as usize;
-            first[root] = first[root].min(g as u32);
-        }
-        counted
-            .iter()
-            .map(|&g| first[find(&mut parent, g as u32) as usize])
-            .collect::<Vec<u32>>()
+            let mut first = vec![u32::MAX; count + ns + nv];
+            for &g in &counted {
+                let root = find(&mut parent, g as u32) as usize;
+                first[root] = first[root].min(g as u32);
+            }
+            counted
+                .iter()
+                .map(|&g| first[find(&mut parent, g as u32) as usize])
+                .collect::<Vec<u32>>()
+        };
+        (by(false), by(true))
     };
     let mut gone = vec![false; ns + nv];
     let before = joined(&gone);
@@ -1480,8 +1509,8 @@ pub(crate) fn needless(
             };
             let near: Vec<usize> = touching
                 .iter()
-                .filter(|&&(a, b)| a == i || b == i)
-                .map(|&(a, b)| if a == i { b } else { a })
+                .filter(|&&(a, b, _)| a == i || b == i)
+                .map(|&(a, b, _)| if a == i { b } else { a })
                 .filter(|&o| shapes[o].0.touches(&dot))
                 .collect();
             let pad = pads
@@ -2204,6 +2233,57 @@ mod tests {
         );
         d.zones.zones[1].islands = super::super::Islands::Keep;
         assert_eq!(needless(&d, &tracks, &tied, &island), (vec![0, 1], vec![0]));
+    }
+
+    #[test]
+    fn a_track_whose_neighbours_only_overlap_by_their_round_ends_is_not_needless() {
+        use super::super::tests::design;
+        use super::super::{Zones, needless_between};
+        use crate::geom::drc::Track;
+        use crate::geom::{LayerId, LayerSet};
+        // Two pads of net 1, 10 mm apart, off a small fill of the net round the first
+        // (a teardrop is such a zone), which makes the net one that is looked at.
+        let pads = vec![smd(3 * MM, 2 * MM, 1), smd(13 * MM, 2 * MM, 1)];
+        let mut d = design(2, pads, 2);
+        let mut drop = zone(1, 0, 4 * MM);
+        drop.layers = LayerSet::EMPTY.with(LayerId(0));
+        d.zones = Zones {
+            zones: vec![drop],
+            ..Zones::default()
+        };
+        let fills = vec![piece(0, 0, (2 * MM, 4 * MM), (MM, 3 * MM))];
+        let track = |a: i64, b: i64, width: i64| Track {
+            start: Point::new(a, 2 * MM),
+            end: Point::new(b, 2 * MM),
+            mid: None,
+            width,
+            layer: LayerId(0),
+            net: Some(NetId(1)),
+        };
+        // From pad to pad in three tracks of 0.25 mm, the middle one a step of 0.2 mm:
+        // the round ends of the two beside it overlap by 0.05 mm across it, a neck of
+        // 0.15 mm where the track is 0.25 mm wide. The step is no track that the pads
+        // are joined without.
+        let tracks = vec![
+            track(3 * MM, 8 * MM, 250_000),
+            track(8 * MM, 8_200_000, 250_000),
+            track(8_200_000, 13 * MM, 250_000),
+        ];
+        let none: (Vec<usize>, Vec<usize>) = Default::default();
+        assert_eq!(needless_between(&d, &tracks, &[], &fills), none);
+        // Nor one of half that, across which they overlap by more: two tracks that end
+        // short of each other are not one for it.
+        let short = vec![
+            track(3 * MM, 8 * MM, 250_000),
+            track(8 * MM, 8_100_000, 250_000),
+            track(8_100_000, 13 * MM, 250_000),
+        ];
+        assert_eq!(needless_between(&d, &short, &[], &fills), none);
+        // A second track over the whole way is one that the pads are joined without,
+        // and the longest goes first: the three stay.
+        let mut twice = tracks.clone();
+        twice.push(track(3 * MM, 13 * MM, 250_000));
+        assert_eq!(needless_between(&d, &twice, &[], &fills), (vec![3], vec![]));
     }
 
     #[test]

@@ -5911,6 +5911,129 @@ at a time.
   are what it has for the balls left shut in, and no other way to those was tried.
 - More than one thread, or a deadline: the comparison is by nodes.
 
+## PCB routing: no track told needless for the round end that the track before it has on a pad
+
+0.0.47 stopped `needless_between` from telling a host a track for needless where two tracks
+beside it touch by their round ends alone, and counted what that had left with a script over
+a board dump: two tracks of one net joined by the overlap of two round ends. cadlab now has
+a design rule check for such joints (`drc.neck`: for two items of a net that touch on a
+layer, one of them a track, the widest extent of the copper they share, against the board's
+least track width and against the narrower of the two; a joint is sound without measuring
+where the track's centre line comes to the other's copper or centre line). **With the check
+the twelve boards in four orders at 60 s had 894 such joints through cadlab's adapter with
+0.0.47, 678 of them narrower than the board's least track width, and the script had seen
+almost none of them: 884 are a track that stops short of a pad and reaches it by the tip of
+its round end. They come from the same step: `needless_between` took a track for part of
+every pad and piece of fill that its copper touches, so the last piece of a route, from the
+lattice into its pad, was told needless on the word of the piece before it, whose round end
+reaches the pad's edge. A track is now one with a pad or a fill by its whole width only
+where its centre line comes to their copper, and nothing is needless that the pads are less
+joined without by that count or by the copper's. With cadlab's own two changes beside it (its
+check of that step, and a piece of track laid across what is left), the same boards have
+none in 52 runs, for 0.01 to 0.4 % more track.**
+
+### The last piece into a pad
+
+A route on a lattice ends at a point beside its pad and goes into the pad by a last piece,
+to the pad's centre. The track before that piece ends at the lattice point, 50 to 60 um
+from the pad's edge where the lattice is 0.2 mm and the track 0.16 mm wide: its round end
+reaches over the edge, and the two touch by the chord that the edge cuts of that end, 0.10
+to 0.15 mm of a track of 0.16 mm on `tinytapeout-demo`, 45 um in the narrowest of that
+board.
+
+`needless` and `needless_between` tell a host that fills its zones itself which tracks and
+vias the pads of their nets are joined without. Each track was part of every group of pads
+and fills that its copper touches, so with a fill that joins the net's pads the last piece
+was one that the groups are as joined without: the piece before it touches the pad. The
+host took it out, and the pad was left on the chord.
+
+0.0.47 made a pair of tracks, and a track and a via, *sound* only where their centre lines
+meet, and asked that nothing be needless that the groups are less joined without by what is
+sound; a track and a pad or a fill were sound wherever they touch. Now the groups that a
+track is part of are told twice as well: by what its copper touches, and by what its centre
+line comes to: a pad's copper, a piece of fill, or a fill that holds one of its ends. A via
+is part of what it touches, as before.
+
+Tested: from a pad to a point 0.1 mm short of another pad's edge and a last piece from
+there into the pad, tracks of 0.25 mm, nothing is told; the piece out of a pad that is on a
+fill is told where the track after it begins in that fill, which holds its centre line and
+the pad; a piece that begins where the track before it is in the pad by its centre line is
+told.
+
+### What cadlab's check counts, before and after
+
+Through cadlab's adapter at 60 s, twelve boards in four orders, errors (under the board's
+least track width) + warnings (under the narrower of the two items) by `drc.neck`:
+
+| board | 0.0.47, by order | 0.0.48 |
+|---|---|---|
+| `corne-cherry` | 21+9, 28+8, 32+6, 31+7 | 0 |
+| `buspirate5-rev10` | 32+15, 32+19, 32+17, 36+17 | 0 |
+| `glasgow-revC3` | 49+0, 42+0, 49+0, 47+0 | 0 |
+| `glasgow-revD1` | 27+0, 25+0, 32+0, 23+0 | 0 |
+| `lumenpnp-mobo` | 6+23, 6+23, 6+22, 8+23 | 0 |
+| `cynthion` | 8+6, 9+5, 22+7, 18+5 | 0 |
+| `tinytapeout-demo` | 13+0, 17+0, 14+0, 9+0 | 0 |
+| `lumenpnp-ringlight` | 1+1 in each | 0 |
+| the four others | 0 | 0 |
+| 48 runs | 678 + 216 | 0 |
+
+The column of 0.0.48 is not this crate's alone. With 0.0.48 and cadlab as it was, 34 such
+joints were left in 48 runs, counted as the pieces that cadlab's mending laid. cadlab's check
+of the step now puts tracks back where the board filled again has a neck that it did not
+have (a fill keeps its gap from a pad with a thermal relief, so a fill that holds the track
+before a piece and the pad may not join them on the next fill), and a last step of its
+router lays a piece of track across what is still left, where the board's rules have room
+for it: 20 pieces in 11 of 52 runs of the final set. What this crate's own output still has:
+a stub of a net with a pour that ends at a place in its fill beside a pad (three pads of
+`cynthion`, 67 um of a track of 0.127 mm), two such stubs that end 0.2 mm apart, and the
+ends of a pair at its pads (0.22 to 0.23 of 0.25 mm). The first two are joined by the fill
+that the run was given, and are necks only where the host's last fill is another.
+
+### Budgets of nodes, and the table at 60 s
+
+At budgets of nodes, through cadlab on one thread, run for run beside 0.0.47: every run has
+the connections it had, 570 open at 40 million nodes over nine boards in three orders and
+164 at 150 million over seven boards in two (`glasgow-revD1` 56 and 75); the vias are the
+same but for `tinytapeout-demo` (one or two more of 258 to 298: a via whose only sound joint
+was a touch stays); the track is 1 to 26 mm more of a board, 0.01 to 0.4 %.
+
+At 60 s beside cadlab's own router measured in the same minutes (twelve boards in four
+orders, `tinytapeout-demo` in eight, four runs at a time on three threads, the load 5.2 to
+6.0): 35 cells better, 30 equal and 7 worse of 72, and the same for 0.0.47 in those minutes;
+the seven worse are those of the section below. `corne-cherry` has 1, 0, 0 and 1 connections
+open in its four orders, as before.
+
+`tinytapeout-demo` in sixteen orders, three times, beside 0.0.47 in the same minutes: 4, 5
+and 2 connections open for 4, 1 and 1. The tenth order's is open in every set of both (below).
+The others are pads of a pour after a first run that took its slow way: the ninth order's in
+the three sets of 0.0.48 and in one of 0.0.47, the thirteenth order's three pads in one set
+of 0.0.48. The first run is the same code in both, since what changed acts once the routes
+are final, so the two orders were run again side by side: the ninth four times with each has
+its pad open three times with each, the thirteenth twice with each has its pads open once
+with each. The difference is taken for the runs, which those repeats support and do not
+prove. By the medians of the sixteen orders: 275, 275.5 and 274 vias for 274, 274.5 and
+271.5, and 4842, 4862 and 4862 mm of track for 4839, 4851 and 4856.
+
+### Tried and not kept, and what remains open
+
+- *`tinytapeout-demo`'s tenth order* leaves one connection open in every set: mng6, from a
+  pad at the board's edge to a pin of the QFN, with no track at either. Its settling, line
+  by line: a negotiation that moves 38 nets and is undone, then four chains whose search
+  across other routes, at 10 mm a route crossed, finds a way that crosses 12, 12, 9 and 11
+  nets, where a chain cuts 4 at most (`settle.rs`, `CUT`). With the limits raised to 16 nets
+  cut and 48 moved, two chains of 17 and 25 nets end on a net that cannot be joined up
+  again. *Built and not kept*: the nets with copper within 1.5 mm of the connection's pads
+  taken out whole first, the connection routed, and those nets routed again from nothing
+  (what `shut.rs` does for a pad of a pour, for any pad). With two and with four nets out
+  the connection still crosses 10 to 12; with six out it has a way that crosses nothing,
+  five of the six come back and the sixth one pad short; with eight, another ends one pad
+  short. None leaves fewer connections open, each costs one to several million nodes. So it
+  is not the pin's last escape that the connection lacks: its whole way is taken when its
+  turn comes.
+- **What remains open**: the seven cells; that connection; the joints that this crate's own
+  output leaves on a round end (above), which a host's check now sees.
+
 ## PCB routing: no track told needless for what two round ends leave of it, and the passes measured for threads
 
 0.0.46 left seven cells worse than cadlab's own router at 60 s, and the round after it had

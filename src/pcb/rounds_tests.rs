@@ -297,6 +297,57 @@ fn a_board_given_up_has_the_share_of_the_time_that_it_is_told() {
 }
 
 #[test]
+fn a_count_of_nodes_ends_the_negotiation_between_two_rounds_whatever_the_clock() {
+    use super::{RunControl, route_with};
+    use std::time::{Duration, Instant};
+    let hour = || RunControl {
+        deadline: Some(Instant::now() + Duration::from_secs(3600)),
+        ..RunControl::default()
+    };
+    let d = crossed(6);
+    // With a count that the first round spends, the negotiation ends after that round, the
+    // routes are made legal and what is left of the run is the same each time: nothing of
+    // it is the clock's to say.
+    let counted = RouteOptions {
+        rounds_nodes: Some(1),
+        ..native()
+    };
+    let one = route_with(&d, &counted, &hour()).unwrap();
+    assert_eq!(one.stopped, None);
+    assert!(!one.stats.rounds_given_up);
+    assert_eq!(one.stats.whole.0, 1, "{:?}", one.stats);
+    assert!(one.unrouted.is_empty(), "{:?}", one.unrouted);
+    let again = route_with(&d, &counted, &hour()).unwrap();
+    assert_eq!((&one.tracks, &one.vias), (&again.tracks, &again.vias));
+    assert_eq!(one.stats.work, again.stats.work);
+    // A count that the rounds do not spend is no count: the run with the time alone, which
+    // the hour does not end.
+    let roomy = RouteOptions {
+        rounds_nodes: Some(u64::MAX / 4),
+        ..native()
+    };
+    let timed = route_with(&d, &native(), &hour()).unwrap();
+    let roomy = route_with(&d, &roomy, &hour()).unwrap();
+    assert!(timed.stats.whole.0 > 1, "{:?}", timed.stats);
+    assert_eq!((&timed.tracks, &timed.vias), (&roomy.tracks, &roomy.vias));
+    // And it says nothing to a run with a budget of work, which is a count already, nor to
+    // one with no deadline.
+    let budgeted = |nodes| RouteOptions {
+        work_budget: Some(50_000_000),
+        rounds_nodes: nodes,
+        ..native()
+    };
+    let (with, without) = (
+        route_with(&d, &budgeted(Some(1)), &hour()).unwrap(),
+        route_with(&d, &budgeted(None), &hour()).unwrap(),
+    );
+    assert_eq!((&with.tracks, &with.vias), (&without.tracks, &without.vias));
+    let free = route_checked(&d, &counted);
+    let plain = route_checked(&d, &native());
+    assert_eq!((&free.tracks, &free.vias), (&plain.tracks, &plain.vias));
+}
+
+#[test]
 fn a_board_whose_connections_have_no_way_on_the_grid_is_given_up_before_a_round() {
     let d = walled_in();
     let routed = route_checked(&d, &native());

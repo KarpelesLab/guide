@@ -959,6 +959,21 @@ pub struct RouteOptions {
     /// to have of it: the board given up then ends when it would have with this crate's own
     /// rounds asked for.
     pub given_up_share: f64,
+    /// The nodes that the negotiation of the rounds of [`Rounds::Native`] may visit before it
+    /// is ended between two of its rounds, in a run with a
+    /// [deadline](RunControl::deadline) and no [budget of work](RouteOptions::work_budget).
+    /// The default is `None`: the negotiation has nine tenths of the stage's share of the
+    /// time ([`whole_share`](RouteOptions::whole_share)), and which round is its last is
+    /// then the clock's to say, so that two runs of one board on one machine may end as two
+    /// boards. With a count the run is the same each time for as long as its deadline does
+    /// not end it: the negotiation ends between the two rounds that the count falls
+    /// between, or goes on to 1.6 times the count if it is near its end there (fewer points
+    /// shared than a quarter of the connections), what makes its routes legal and saves
+    /// vias after it runs to its own end, and the clock is a guard, at 0.85 of what the
+    /// run has left when the stage begins. A host makes the count from its budget of time
+    /// and what a second is in nodes on its machine and threads (the stage visits five to
+    /// six million nodes a second on three threads; `docs/benchmarks.md`).
+    pub rounds_nodes: Option<u64>,
     /// How many threads [`whole`](RouteOptions::whole) routes nets on. The default is 1;
     /// the routes are the same for any number. The nets of a round are routed a few at a
     /// time, each against what the others claim before any of the few, and have their
@@ -1118,6 +1133,7 @@ impl Default for RouteOptions {
             rounds_fanout: true,
             rounds_pours: false,
             given_up_share: 1.0,
+            rounds_nodes: None,
             threads: 1,
             shorten: false,
             straighten: false,

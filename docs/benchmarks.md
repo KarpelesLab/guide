@@ -5911,6 +5911,110 @@ at a time.
   are what it has for the balls left shut in, and no other way to those was tried.
 - More than one thread, or a deadline: the comparison is by nodes.
 
+## PCB routing: the joints by a round end alone mended where they are made, and the deadline asked at marks of the work, measured and not kept
+
+Measured through cadlab at 60 s, four runs at a time on three threads, the load 5.1 to 6.4,
+and at budgets of nodes on one thread. cadlab's commit for this is its decision D147.
+
+### Where the joints that cadlab mended came from
+
+cadlab's last step laid a piece of track across each joint that held by the overlap of two
+round ends alone: 20 pieces in 11 of 52 runs with 0.0.49, all of them at joints that this
+crate's first run returned. With runs that repeat, each was followed to where it is made.
+
+- *Two stubs that end a step apart* (`lumenpnp-mobo`, one in every run). The stubs that the
+  rounds lay out of two pads of a net side by side before the nets are routed end a step of
+  the lattice apart, 0.2375 mm for tracks of 0.25 mm. Their round ends overlap, the two pads
+  were one terminal for it, and nothing was ever routed between them. **0.0.50: a straight
+  track is one piece with other copper where its middle line comes to that copper.** The
+  two stubs are two terminals, and the piece between their ends is a route.
+- *A route that ends on a fill beside its pad* (`corne-cherry`, three or four in a run;
+  `cynthion`, one in two orders of four). A net with a fill has places on the fill where
+  its routes may end, near its other pads. A teardrop is such a fill, no wider than its pad,
+  and a place on one is 55 um outside the pad's edge with the round end of the track 70 um
+  into the pad: the route is joined to the pad through the fill here, and by the tip of its
+  round end on a host that tells joints by the copper of the tracks. **0.0.50 lays a piece
+  from such an end to 10 um inside the pad's copper**, or to the point of the pad that its
+  routes end at if only that is free, and to the centre of a via of the net likewise
+  (`Stats::into_pads`).
+- *A track past the corner of a pad that a fill joins to the pad it ends in*
+  (`corne-cherry`): not a joint that anything hangs on, and cadlab's check no longer
+  reports it.
+
+| | 0.0.49 | 0.0.50 |
+|---|---|---|
+| pieces that cadlab's last step lays, 52 runs (twelve boards in four orders, `tinytapeout-demo` in eight) | 20 in 11 runs | none |
+| the same, 192 runs (twelve boards in two orders, eight times each) | 72 in 32 runs | none |
+| `corne-cherry`, connections open in four orders | 1, 0, 0, 1 | 1, 0, 0, 1 |
+
+Tried and not kept, each for `corne-cherry`'s connections: a place on a fill only where the
+fill holds the whole of the track's round end (0, 1, 0 and 9 open in the four orders); no
+place where the end would be on a pad by its tip (0, 3, 1 and 1, and 14 in twelve orders for
+9); and the teardrops given by the host as copper of their nets, with no places on them (0,
+1, 2 and 1; 14 in twelve). The places on the teardrops are ways into the pads of a connector
+that the routes need.
+
+### Budgets of nodes, and the table at 60 s
+
+569 connections open at 40 million nodes over nine boards in three orders and 164 at 150
+million over seven boards in two (`glasgow-revD1` 56 and 75), as with 0.0.49: every one of
+the 41 runs has the connections and the vias that it had, and 0 to 7 mm more track.
+
+Beside cadlab's own router at 60 s (twelve boards in four orders, `tinytapeout-demo` in
+eight, six measures): 35 cells better, 30 equal and 7 worse of 72, as 0.0.49 in the same
+minutes. The seven are those of 0.0.49's table. No pad without a spoke, no neck, the
+router's count of open connections cadlab's DRC's in every run, and the pads short of two
+spokes pad for pad as with 0.0.49 (`glasgow-revD1` 9 for 10 in one order).
+
+### What a run of 60 s repeats
+
+The twelve boards in two orders, eight times each, the whole board compared track by track
+and via by via: one board in 22 of 24 board-orders with 0.0.49, 29 distinct boards in 192
+runs. The two board-orders that differ are `glasgow-revD1`'s, five boards in eight runs and
+two. With an instrument at every place where the clock ends a part of a run: on nine boards,
+in both of `tinytapeout-demo`'s orders and in one of `corne-cherry`'s, the clock ends
+nothing, and the host's questions of its own clock have 9 to 36 s to spare. On
+`glasgow-revD1` the share of the rounds ends inside a batch of eight nets, at 98 589 846
+nodes in two runs of four and at 98 715 372 in the two others, and the negotiation goes on
+from there on two boards.
+
+### The deadline asked at marks of the work: measured, not kept
+
+Built: the clock asked at counts of a part's own nodes, four to each doubling, in place of
+every 1024 nodes of whichever search is under way; from the time that the part took for its
+nodes so far the time of the next mark is told, and a part whose next mark is past its end
+ends at this one, between two searches; what it leaves of its time is not waited for, the
+run's clock is put forward by it and the host's by what the run says it skipped.
+
+| | by the clock (0.0.49) | at marks, every part | at marks, the rounds alone |
+|---|---|---|---|
+| `glasgow-revD1`, distinct boards in eight runs, two orders | 5 and 2 | 2 and 2 | 3 and 2 |
+| `glasgow-revC3` | 1 and 1 | 2 and 2 | 1 and 1 |
+| `corne-cherry` | 1 and 1 | 2 and 1 | 2 and 1 |
+| the twelve boards in two orders: distinct boards in 192 runs; board-orders with one board | 29; 22 of 24 | 29; 19 of 24 | |
+| `glasgow-revD1` at half speed, connections open, two orders | 9 and 6; 23 and 28 | 37 and 37; 23 and 23 | 37 and 37; 23 and 23 |
+
+`glasgow-revD1`'s first run is the same to the node on every repeat with the marks (131 083
+305 nodes in four runs of four). The count of boards is not better: a part ends a twelfth
+early in the mean and up to a sixth, a mark whose next is told at the part's very end has
+two answers as the clock had (`glasgow-revC3`: four runs of eight end their passes 3.7 s
+early with 12 connections open for 8), rounds that would end on their own a second before
+their share does are ended at a mark in three runs of eight (`corne-cherry`), and at half
+speed `glasgow-revD1`'s rounds end short of the point where a negotiation near its end is
+given its time again. A question asked of the clock has two answers wherever it is asked;
+what has one is a count made before the run, as the native rounds have since 0.0.49, and
+that needs what a second is in the nodes of each stage on each board: 0.8 million a second
+of a first run on `cynthion`, 3.1 on `glasgow-revD1`, 4.5 to 6.5 on `corne-cherry`, and
+within `glasgow-revD1`'s 5.2 in the rounds, 0.35 in the passes and 1.0 in the cleanup.
+
+### What remains open
+
+- *The runs that end at their budget are the clock's*: `glasgow-revD1`, `glasgow-revC3`
+  and half of `corne-cherry`'s orders. A budget of work is the run that repeats on any
+  machine, as before.
+- *The seven cells* of the table, as with 0.0.49; `corne-cherry`'s time by a signal inside
+  the run and `tinytapeout-demo`'s rounds beside cadlab's own were not begun.
+
 ## PCB routing: the negotiation of the native rounds ended by a count, between two rounds, and three rounds after its fewest shared points
 
 Measured through cadlab at 60 s, four runs at a time on three threads, the load 4.5 to 7.7,

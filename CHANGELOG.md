@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.48](https://github.com/KarpelesLab/guide/compare/v0.0.47...v0.0.48) - 2026-11-25
+
+### Fixed
+
+- *(pcb)* no track told needless for the round end that the track before it has on a pad: a track is one with a pad or a fill by its whole width where its centre line comes to their copper ([#97](https://github.com/KarpelesLab/guide/pull/97))
+
+### Other
+
+- *(benchmarks)* the necks that the tracks told between pads left and the table beside cadlab's router with 0.0.47; the passes counted for threads, the eights chosen apart, what each second of corne-cherry buys ([#95](https://github.com/KarpelesLab/guide/pull/95))
+
 ## [0.0.47](https://github.com/KarpelesLab/guide/compare/v0.0.46...v0.0.47) - 2026-11-25
 
 ### Fixed

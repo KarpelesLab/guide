@@ -5911,6 +5911,225 @@ at a time.
   are what it has for the balls left shut in, and no other way to those was tried.
 - More than one thread, or a deadline: the comparison is by nodes.
 
+## PCB routing: no track told needless for what two round ends leave of it, and the passes measured for threads
+
+0.0.46 left seven cells worse than cadlab's own router at 60 s, and the round after it had
+an order: the passes on more than one thread, `corne-cherry`'s time by what each second of
+it buys, `tinytapeout-demo`'s one connection open in a few orders of sixteen, and the nets
+that a host's last run leaves as it was given them. **One thing is changed, and it is none
+of those: `needless_between` told a host a track for needless where two tracks beside it
+touch each other by their round ends alone, and the host that took it out kept a neck of
+the overlap of two round ends, a quarter of a track's width and less. Through cadlab's
+adapter the twelve boards had 122 such necks under 0.1 mm in the default order and have 4
+(`corne-cherry` 89, 65, 57 and 39 in four orders for 1, 3, 1 and 2; cadlab's own router has
+2), for 0.4 % more track on `corne-cherry` and 0.6 % on `glasgow-revC3`. The passes are
+not made on more threads: counted before anything was built, from the blocks of the board
+that each turn read and wrote, an ideal look-ahead on three threads has 1.01 to 1.05 times
+their speed, where 1.4 was asked for it to be built. The eights of this crate's own
+rounds chosen apart by their nets' boxes would take 16.3 s for 13.8 s on `corne-cherry`
+with no net routed again at its turn. The nets that a last run leaves as given were in
+pieces by those necks, not by their teardrops.**
+
+### The tracks between pads, and the neck of two round ends
+
+`needless_between` is for a host that fills its zones itself: it tells the tracks that
+the pads of their nets are joined without where a fill joins them, the host fills again
+without them and puts back what it has to. A track was needless if the groups of the net's
+pads and fills were as joined without it, by whatever copper touches: a pad, a piece of
+fill, another track or via of the net.
+
+Two tracks of 0.25 mm that end 0.2 mm apart touch: their round ends overlap by 0.05 mm.
+Where a run of tracks has a step between them no longer than they are wide, which the
+lattice makes wherever a run turns twice, the two beside it are one without it by that
+count, and the step was told. What is left across the joint is the lens of two discs, a
+chord of 0.15 mm for a step of 0.2 mm between tracks of 0.25 mm, 64 um between tracks of
+0.21 mm, and 25 um in the narrowest seen: copper, joined by the DRC's count and by any
+count of connections, and narrower than any track that a fab makes.
+
+So a pair of the net's tracks and vias that touch is now told *sound* or not: two tracks
+whose centre lines meet, a track and a via where the track's centre line comes to the via's
+copper, two vias. Nothing is needless that the groups are less joined without by either
+count, by all that touches, as before, and by what is sound alone. No via and no track goes
+on the word of an overlap, and nothing goes that did not before: a via that only an overlap
+joined to its pad stays for that, as it did.
+
+Through cadlab's adapter at 60 s on three threads, 0.0.46 beside this, the load 4 to 6. A
+neck is counted on the board that leaves: a track's end that is at no end and on no centre
+line of another track of its net and layer, at no via and in no pad of the net, and whose
+round end overlaps another track of it; with less than 0.1 mm of copper left across. On a
+net with a pour the pour may cover it, so what is left counts some that are none.
+
+| board | ends joined by their round end alone, 0.0.46 | necks under 0.1 mm, 0.0.46 | ends, this | necks, this | cadlab's own router: ends, necks |
+|---|---|---|---|---|---|
+| `corne-cherry` | 159 on 43 nets | 89 | 6 | 1 | 4, 0 |
+| `buspirate5-rev10` | 63 on 2 | 0 (61 of 0.1 mm exactly) | 8 | 0 | 0, 0 |
+| `glasgow-revC3` | 32 on 5 | 13 | 1 | 0 | 3, 1 |
+| `lumenpnp-mobo` | 28 on 7 | 14 | 6 | 2 | 5, 0 |
+| `tinytapeout-demo` | 10 on 6 | 4 | 5 | 0 | 6, 0 |
+| `cynthion` | 2 | 2 | 0 | 0 | 3, 1 |
+| `glasgow-revD1` | 0 | 0 | 1 | 1 | 2, 0 |
+| `lumenpnp-ringlight` | 2 | 0 | 0 | 0 | 1, 0 |
+| the four others | 0 | 0 | 0 | 0 | 0, 0 |
+
+`corne-cherry` in its four orders: 159, 196, 237 and 203 ends and 89, 65, 57 and 39 necks
+for 6, 11, 12 and 11 and 1, 3, 1 and 2. What it costs is the track that stays: on
+`corne-cherry` 675 to 735 tracks and 272 to 316 mm told between pads for 797 to 888 and
+300 to 343 mm, and a board of 7498, 7531, 7490 and 7565 mm for 7470, 7503, 7461 and
+7538 mm (+0.4 %); `glasgow-revC3` 3569 mm for 3549 (+0.6 %); the others 2 to 6 mm. The
+connections, the vias and the pads short of two spokes are what they were on every board
+of the fifteen runs.
+
+Measured beside it and not kept: a track and a via counted sound only where the track's
+centre line comes to the via's centre. It leaves the same necks, 20 mm more track on
+`corne-cherry` and 13 mm on `glasgow-revC3`, and one to four vias more on three boards: a
+track that ends in a via's land short of its centre is joined by its whole width.
+
+### The nets that a host's last run leaves as given
+
+A host's last run (`RouteOptions::leave_given`) takes back only a net that it finds whole.
+On `corne-cherry`, the one board of the twelve with teardrops, it took back 41 to 45 of 150
+nets, and 0.0.46's round had it that the others end on the copper of their teardrops since
+the step that takes out what a fill joins. Looked at net by net in one order: of 103 nets
+left, 96 have every track free on the board and are in pieces all the same, a track taken
+out between two of theirs.
+
+- *Where two round ends overlap*: kept now. The run takes back 52 to 57 nets, and lays 20
+  to 48 tracks straight for 7 to 24.
+- *Where a track ends in the land of a via short of its centre*, which the step takes out
+  rightly: the track is joined by its whole width. With a track and a via counted sound at
+  the via's centre alone those stay and the run takes back 81 to 86 nets; the board then
+  has 2526 tracks for 2479 in the default order and 7451 mm outside the pads for 7431, more
+  of both than the run saves. Not kept.
+- *On the teardrops*: built first, on what the round before had said, and not kept. The
+  ends of a net's tracks that lie on a fill of the host's which reaches a pad of the net
+  were told as places of that pad's terminal: 46 and 49 nets taken back for 43 and 45 by
+  the centre line of the end, 46 to 52 by its copper.
+- The 64 to 69 nets that are left with all of it were not looked at further: what is in it
+  is the count of tracks of those nets.
+
+### The passes on more than one thread: counted, not built
+
+The passes that take nets out, the settling and the searches of cleanup are one thread's
+work, 11 s of `corne-cherry`'s slowest first run and of `glasgow-revD1`'s. As for the
+rounds of cadlab's router in 0.0.46, what a look-ahead would give was counted before
+anything was built: a build that is in no commit writes, for each turn of the passes and
+each try of the settling, the blocks of the board that its searches read (every node
+expanded, by blocks of 0.8 mm and by layer), the blocks that it wrote (the boxes of the
+copper it placed less what it took out, widened by a block), its seconds, the seconds of
+its own search, and the next turns of the queue as they stand before it. From that, the
+clock of a run in which the other threads make the searches of the turns to come against
+the board as it is, and a search made ahead stands if it is the turn's own net and no turn
+before it wrote a block that it read; nothing is counted for the copies of the board, and
+the queue is taken as known 32 turns ahead.
+
+| the passes of | turns | on one thread | own search | 2 threads | 3 threads | 8 threads |
+|---|---|---|---|---|---|---|
+| `corne-cherry`, default order, first run | 313 | 10.9 s | 90 % | 1.01 | 1.01 | 1.01 |
+| the same, the run that moves routes | 364 | 8.5 s | 83 % | 1.01 | 1.05 | 1.05 |
+| `glasgow-revD1`, first run | 838 | 10.2 s | 65 % | 1.01 | 1.02 | 1.02 |
+| `cynthion`, first run | 455 | 3.4 s | 88 % | 1.04 | 1.05 | 1.05 |
+
+With blocks of 0.4 mm the numbers are the same to 0.01. The 25 longest searches of
+`corne-cherry`'s passes are 7.9 s of the 10.9 s, and every one of them has the turn before
+it writing a block that it read: a net that a route cuts is put at the head of the queue,
+to be mended beside the route that cut it, so the turn after a turn is of what that turn
+changed. One net of 23 pads has 13 turns and 5.9 s of them, three of its searches a second
+and more each. The settling's 2.1 s on that board are one search of 1.96 s. So the passes
+are a chain, and a look-ahead of any depth has nothing to make ahead. 1.4 times was asked
+for it to be built, and it is not built.
+
+### The eights of the rounds, chosen apart
+
+This crate's own rounds route the nets of a round eight at once, each against the claims
+as they are before any of the eight, and a net that is then in a claim that it was not in
+is routed again at its turn: 401 of 2696 turns on `corne-cherry` (15 %, 4.5 s of searches
+beside 22.4 s made at once) and 241 of 3847 on `glasgow-revD1` (6 %, 2.6 s). Every net
+routed again has, before it in its eight, a net whose wires' box meets its own; one net is
+routed again 50 times. Counted from the seconds of each search: with the eights made of
+nets whose boxes do not meet, in their order and looking 32 nets ahead, a round is 1274
+groups of 2.1 nets for 401 of 6.7, and 1159 of 3.3 for 499 of 7.7.
+
+| | `corne-cherry` | `glasgow-revD1` |
+|---|---|---|
+| the eights as they are, three threads, with the nets routed again | 13.8 s | 17.6 s |
+| chosen apart, with none routed again | 16.3 s | 22.0 s |
+| on eight threads | 12.8 s and 16.2 s | 16.8 s and 21.8 s |
+
+The nets of a round are too near each other for eight of them to be apart, and two at once
+on three threads lose more than the nets routed again cost. Not built; and the routes
+would be others, at a budget of nodes too.
+
+### What each second of `corne-cherry` buys
+
+Through cadlab's adapter at 60 s on three threads, four orders in three sets, with a line
+from the same build at the end of each stage of each run: the connections, the vias and
+the track of its routes. The three sets are the same in every number (a first run is the
+same to the node) and within 0.2 s.
+
+| stage | order none | order 2 | order 3 | order 4 |
+|---|---|---|---|---|
+| the rounds end | 20.1 s, 1 open | 14.7 s, 1 open | 16.0 s, 1 open | 18.7 s, 2 open |
+| pass 0 | 2.6 s: 45 connections out and back | 0.0 s: the connection | 0.0 s: the connection | 3.2 s: 38 out and back |
+| its settling | 2.0 s: nothing | | | 1.4 s: one connection |
+| passes 1 and 2, on the finer lattice | 3.8 and 4.1 s: 16 out and back in each | none | none | none |
+| the pads cut off joined, each net again | 2.5 s: 3 vias, 14 mm less | 2.5 s: 7 vias, 5 mm | 3.3 s: 6 vias | 2.4 s: 7 vias, 8 mm |
+| cleanup | 1.0 s: 6 vias, 91 mm | 0.9 s: 2 vias, 97 mm | 1.0 s: 4 vias, 82 mm | 0.6 s: 87 mm |
+| the first run ends | 36.3 s, 1 open | 18.3 s, none | 20.3 s, none | 26.3 s, 1 open |
+| the host's run that moves routes | 12.0 s, to its deadline: nothing | none | 2.6 s: the connection | 8.3 s: 78 open, not kept |
+| another in another order | 2.8 s, to its deadline: nothing | none | none | none |
+| the host's run for shorter ways | none | 5.4 s: 1 via, 8.5 mm | 5.0 s: 7 vias, 42 mm | 4.4 s: 1 via, 4.7 mm |
+| the run | 54.0 s | 25.9 s | 30.4 s | 41.4 s |
+
+Of the 29 s after the twenty-fifth in the default order, 22.7 s buy nothing: the two passes
+on the finer lattice and the two runs that move routes. The passes on the finer lattice make
+a connection on four of the eleven other boards (`cynthion` in two orders of four,
+`lumenpnp-mobo` in every order, `nrfmicro` in two, by a third pass after a second that made
+none, `buspirate5-rev10` in one) and none on `sweep-v2.2`, 16.2 s in each order, nor on
+`glasgow-revC3`. A pass 0 and its settling that end with the connections they began with
+come before `corne-cherry`'s two passes and `sweep-v2.2`'s four, and before no pass that
+made a connection, in the 48 runs. Not built as an end for the passes: the finer lattice is
+for what the first has no way to, which is where pass 0 makes nothing; the signal is from
+five runs on two boards; and `corne-cherry`'s slowest order would be about 46 s with it
+beside a fourth order of 41 s, against cadlab's own router's 20 to 31 s.
+
+### Beside cadlab's router at 60 s, 0.0.47
+
+Through cadlab's adapter: the twelve boards in four orders and `tinytapeout-demo` in eight,
+0.0.47 from crates.io, cadlab's own router and 0.0.46 side by side in the same minutes, four
+runs at a time on three threads each, the load 5.7 to 6.1. Of 72 cells 35 are better than
+cadlab's router, 30 equal and 7 worse, for 0.0.46's 36, 29 and 7 beside it. The seven are
+0.0.46's. The cell that 0.0.46 has better and this has equal is `lumenpnp-ringlight`'s track
+outside the pads, 156.5 mm for 155.9 against 159.3 and so -1.8 % for -2.1 % where the edge is
+at 2 %: a step of 0.155 mm between two tracks of 0.25 mm stays, across which 0.196 mm of copper
+was left, no neck by the 0.1 mm of the count and a pair of tracks whose centre lines do not
+meet.
+
+| | 0.0.47 | 0.0.46 | cadlab's router |
+|---|---|---|---|
+| necks under 0.1 mm, 52 runs with the board dumped | 21 | 385 | 12 |
+| ends joined by their round end alone, the same runs | 151 | 1350 | 114 |
+| `corne-cherry`, track, median of four orders | 7514 mm | 7486 mm | 8103 mm |
+| `glasgow-revC3` | 3612 mm | 3593 mm | 3462 mm |
+| `buspirate5-rev10`, `lumenpnp-mobo`, `cynthion` | 2890, 5287, 3039 mm | 2883, 5282, 3036 mm | 3129, 5449, 3184 mm |
+| connections open at 40 million nodes (27 runs) and at 150 million (14) | 570, 164 | 570, 164 | |
+| the track of those runs | +0.29 %, +0.18 % | | |
+
+At a budget of nodes every run has 0.0.46's connections and nodes, and its vias but one in
+one run: the routes are the same, and what differs is what stays between pads. The pads short
+of two spokes are the same pad for pad where the routes are (fourteen pairs of runs at 40
+million nodes). No run has a connection open that cadlab's fill and DRC do not count, no pad
+of a pour is without a spoke and there is no DRC error other than unrouted, in 92 runs at
+60 s and 41 at budgets.
+
+`tinytapeout-demo` leaves a connection open in two to five of its sixteen orders with either
+release (3, 2 and 5 for 3, 4 and 2 in three pairs of sets). Over eleven sets, 38 connections
+in 176 runs: 17 a pad of a pour that the host's fill round the routed board does not reach,
+13 a pad shut in, 8 a net without a way when its run's time ended. One order has its
+connection open in every set, a pin of a QFN of 0.4 mm pitch that the via of another net
+shuts in from outside by its clearance, and has it open with 90 s for 60 as well; the others
+come with a first run that ends at its share under the load of four runs at once, and end
+whole when they run alone.
+
 ## PCB routing with less round each search of the rounds of cadlab's router, and nets routed ahead of their turn measured
 
 0.0.45 left `corne-cherry` slower than cadlab's own router at 60 s and `tinytapeout-demo`'s

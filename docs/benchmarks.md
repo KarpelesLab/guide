@@ -5911,6 +5911,152 @@ at a time.
   are what it has for the balls left shut in, and no other way to those was tried.
 - More than one thread, or a deadline: the comparison is by nodes.
 
+## PCB routing with less round each search of the rounds of cadlab's router, and nets routed ahead of their turn measured
+
+0.0.45 left `corne-cherry` slower than cadlab's own router at 60 s and `tinytapeout-demo`'s
+first run at the end of its share in one order of sixteen, and the round after it was one of
+threads: where a first run's time is on the clock and on the processor, and whether the
+rounds can be made on more of them with the same routes. **Two things are changed, both in
+the rounds of cadlab's router ([`Rounds::Native`]) and neither a matter of threads: whether
+the two sides of a connection can meet at all is told by the first source and the first
+target of its component, and the claims of a piece of track on a slant are made from the
+points of each row that can be near it. `tinytapeout-demo`'s rounds take 24.1 s for 27.1 s
+and its run 41 and 46 s for 44 and 50 s, with the same board to the via, the tenth of a
+millimetre and the node. What was asked for is built and is not in the release: the nets of
+a round routed ahead of their turn on the other threads, each against a copy of the claims
+as they are, and kept where none of the points that the turns before it changed is one that
+its searches read. It gives the same board and the same count of nodes on one, two, three
+and eight threads, and the rounds take longer with it than without, 29 to 34 s for 27 s on
+three threads: 68 % of what is routed ahead stands, and a round's time is in a few long
+searches that read a tenth of the board each.**
+
+### Where the time of a first run is
+
+Timers in a build that is in no commit, through cadlab's adapter at 60 s on three threads,
+two orders of each board, the load 4 to 5. Of this crate's own rounds, the eights are the
+nets of a round routed at once ([`whole`](../src/pcb/whole.rs)), their turns what follows
+them on one thread, and a net routed again at its turn one that was in a claim it had not
+been in.
+
+| | `corne-cherry` (first run 35 and 19 s) | `glasgow-revD1` (first run 42 s, its deadline) |
+|---|---|---|
+| the rounds | 18.8 and 13.7 s | 23.6 and 22.0 s |
+| of them the eights, on the clock | 10.2 and 7.5 s | 16.1 and 15.5 s |
+| the searches of the eights, summed over the threads | 18.7 and 13.4 s | 27.0 and 27.1 s |
+| the turns | 6.3 and 4.3 s | 4.9 and 4.2 s |
+| of them nets routed again at their turn | 4.8 s, 401 of 2696; 3.3 s, 274 of 1841 | 2.7 s, 241 of 3855; 2.3 s, 233 of 3944 |
+| the passes that take nets out, one thread | 10.9 and 0.02 s | none |
+| what settles the open connections, one thread | 0.1 s | 11.1 and 12.1 s |
+| the pads cut off their fills joined, each net routed again | 2.5 s | 3.0 and 2.8 s |
+| cleanup | 1.1 and 0.8 s | 0.6 and 1.1 s |
+
+The eights have 1.7 to 1.8 threads' worth of three: they are begun the longest first, and
+an eight with one long search lasts as long as that search. `corne-cherry`'s slowest order
+is slow by its passes, 313 turns of one net each in 10.9 s, and by the two runs that the
+host makes after the first.
+
+`tinytapeout-demo` has the rounds of cadlab's router, 27 to 32 s of a first run of 44 s,
+on one thread: a net is routed with the others whose regions do not meet its own, and on
+this board every region meets every other, 1405 batches for 1700 turns of a net. In them
+(one order, an hour for a budget so that nothing is decided by the clock): 23.6 s in the
+batches, of which the searches 18.3 s, 8480 of them, and the claims of the routes 6.5 s,
+1666 times, of which 4.4 s are the points near each of 8130 wires looked at one by one;
+the pass for fewer vias 1.6 s, the routes made legal 1.2 s, the look at the board before
+the run 1.1 s. A search of a net with a pour begins from every node of the tree it has and
+ends on any of the other side's: 70 million sources and targets over the 8480 searches,
+8400 a search, each a place in memory for its price and one for its mark.
+
+### What is changed
+
+- *Whether the two sides can meet* (`Components::may_reach`). Asked before every search,
+  and answered by the component of every target and then of the sources in turn, two
+  places of memory for each: 2.2 s of the 18.3 s. The first source that the maps let
+  through and the first target of its component answer the same where there is one, which
+  is nearly always: 0.28 s.
+- *The claims of a piece on a slant* (`Engine::raster_piece`). The points within a radius
+  of a piece were looked for over its bounding box, which for a piece at 45 degrees is
+  mostly farther off than the radius. Each row has the span of its points that can be
+  within it, two nanometres wider than the arithmetic of a distance is out by, and the
+  distance itself is asked of the points in the span as before: 3.6 s for 4.4 s. A test
+  has every point of a lattice that the distance puts within the radius inside the span
+  of its row, over 400 pieces along the axes, on slants and at any angle.
+- The sources and the targets of a search are made once where they were made and then
+  made again turned round, for a net whose tree holds a fill.
+
+`tinytapeout-demo`, the rounds on the clock, this beside 0.0.45's source in the same
+minutes, two orders: 24.07 and 24.03 s for 26.97 and 27.22 s, and the run 46.3 and 41.0 s
+for 49.5 and 44.3 s, each pair the same board (277 vias, 4883.2 mm and 43.1 million nodes;
+281, 4938.9 mm and 42.5 million). At budgets of nodes, one thread, behind cadlab's adapter:
+570 connections open at 40 million nodes over nine boards in three orders and 164 at
+150 million over seven in two, as 0.0.45; 39 of the 41 runs the same to the via and the
+millimetre, and two within a millimetre by what the adapter's own last run now gives back
+(it is not 0.0.45's adapter); `tinytapeout-demo`'s default order has its first run's board
+at 36.8 s for 40.6 s with the same 33.6 million nodes.
+
+### Nets routed ahead of their turn: built, exact, slower, not kept
+
+*What was built.* The batches of one net that follow each other are routed at once, as
+many as there are threads: the first as at its turn, the others ahead of theirs, each on
+a thread with a copy of the claims as they are before the first turn, its own net's taken
+out of the copy. A search keeps a bit for every node that it expands or begins from,
+which is where it asks the claims: the points of the steps from that node and its via. A
+net routed ahead has its turn as it is if none of the points whose claims the turns
+before it changed (the keys that a net had and has no more, and those it has and had not)
+can be read from a node with its bit set, and is routed again at its turn otherwise. A
+search that read nothing that changed is the search that would be made at the turn, node
+for node, so the routes and the count of nodes are those of one thread; the nodes of a
+search made ahead are counted when it is kept. The copies are kept up by the changes of
+each turn, and the claims of a route are made on the thread that routed it. A search made
+ahead is ended as soon as it comes to a node round which a turn has changed the claims,
+which only saves its time. Not with a budget of nodes, where the nodes counted before a
+search are what ends it.
+
+*That it is exact.* `tinytapeout-demo` with an hour for a budget, every form measured
+below on three threads, the first on one and on eight as well, the third on eight and the
+last on two: 277 vias, 4883.2 mm, no connection open and 43.1 million nodes in each, the
+board of 0.0.45.
+
+*What it takes.* The rounds on the clock, one order, on three threads but where it says
+otherwise, beside 27.3 s without it in the same half hour:
+
+| form | routed, kept | the rounds |
+|---|---|---|
+| three at once, the claims of a route made at its turn | 1875, 1284 | 35.8 s |
+| the claims made by the thread that routed it, the copies kept up by what changed | 1875, 1284 | 29.9 s |
+| a thread that is done goes on with the next net, nine at once, a search ended where the claims changed | 4149, 1285 | 33.9 s |
+| the same on eight threads, twenty-four at once | 8461, 1285 | 38.8 s |
+| three at once, ended early, on three threads; on two | 1875, 1284; 1532, 1273 | 29.3 s; 29.9 s |
+
+68 % of what is routed ahead stands, three at once: 634 times for 1284 turns, two turns
+each time, and 33 ms each time where the first net takes 13 ms to route and 4 ms to have
+its claims made. The nets routed at once are done when those that stand are all routed,
+and the times of the searches are far from each other, so that it lasts as long as its
+longest: the nets with pours, whose searches are the long ones, read the most (863 blocks
+of four cells by four in the median of all turns and 3400 in the 150 longest, of 11 000 on
+the board) and stand the least. Counted before it was built, from the nodes read and the
+keys changed of every turn of a run on one thread, by blocks of four cells: 1.15, 1.24,
+1.28 and 1.34 times the speed on two, three, four and eight threads with nothing for the
+copies, the claims or the threads, and 7.1 s of the 18 s of searches in turns that read
+what the turn before them changed.
+
+*Also measured and not kept*, each with the same board: the keys of a wire kept from one
+claim to the next (the wires whose points are looked at are the new ones, 8130 for 8480
+searches, so nothing is kept that is asked for again); the keys of a net sorted by the sort
+that keeps runs; the components of the targets told once where they follow each other.
+
+### What this does not show
+
+- **No run on more threads is faster by this.** The eights of this crate's own rounds have
+  1.7 to 1.8 threads' worth of three, the rounds of cadlab's router one, and the passes,
+  the settling and most of cleanup one; what is changed is on one thread.
+- **One board has the gain.** The rounds of cadlab's router are asked for by cadlab on
+  boards of more than two layers and given up on some of those before they begin;
+  `tinytapeout-demo` is the board that spends most of a first run in them.
+- **The nets routed ahead were measured on one board**, the densest of the twelve, where a
+  search reads the most. On a board whose nets are far from each other more would stand;
+  the rounds of such a board are already made in batches of several nets.
+- **Times are of a shared machine**, at a load of 3 to 6, each comparison side by side.
+
 ## PCB routing with the nets round a pad shut in laid another way, and the stairs laid straight if asked
 
 0.0.42 left `tinytapeout-demo` with one to three connections open in five or six orders of

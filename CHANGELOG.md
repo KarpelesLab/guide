@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.49](https://github.com/KarpelesLab/guide/compare/v0.0.48...v0.0.49) - 2026-11-25
+
+### Added
+
+- *(pcb)* the negotiation of the native rounds ended between two rounds, by a count of nodes that the host gives, and no sooner than three rounds after its fewest shared points ([#100](https://github.com/KarpelesLab/guide/pull/100))
+
+### Other
+
+- *(benchmarks)* the last piece of a route into its pad and what cadlab's check counts with 0.0.48 (894 joints on a round end in 48 runs for none), the budgets, the table and tinytapeout-demo's sixteen orders, and its tenth order's connection measured ([#98](https://github.com/KarpelesLab/guide/pull/98))
+
 ## [0.0.48](https://github.com/KarpelesLab/guide/compare/v0.0.47...v0.0.48) - 2026-11-25
 
 ### Fixed

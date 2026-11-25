@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.47](https://github.com/KarpelesLab/guide/compare/v0.0.46...v0.0.47) - 2026-11-25
+
+### Fixed
+
+- *(pcb)* no track told needless for what two round ends leave of it: the tracks between pads that a fill joins are told by the copper that is as wide as its tracks too ([#94](https://github.com/KarpelesLab/guide/pull/94))
+
+### Other
+
+- *(benchmarks)* the table beside cadlab's router with 0.0.46, and glasgow-revD1's passes told as passes ([#92](https://github.com/KarpelesLab/guide/pull/92))
+
 ## [0.0.46](https://github.com/KarpelesLab/guide/compare/v0.0.45...v0.0.46) - 2026-11-25
 
 ### Other

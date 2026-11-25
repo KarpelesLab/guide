@@ -1567,6 +1567,14 @@ pub fn route_from(
 /// to the rest goes, unless a zone of the net [keeps its islands](Islands::Keep). A net
 /// with an arc among its tracks here, or a via that does not go through every layer, is
 /// left as it is.
+///
+/// Nothing is told that the pads are less joined without by the copper that is as wide as
+/// its tracks, as well as by the copper that touches: two tracks are one piece where their
+/// centre lines meet, a track and a via, a pad or a fill where the track's centre line
+/// comes to its copper. A track that reaches a pad by the tip of its round end, or another
+/// track by the overlap of two round ends, is joined to it by less than its width, and a
+/// host that took out the piece between them on the word of that touch would be left with
+/// a neck (tracks and vias since 0.0.47, pads and fills since 0.0.48).
 pub fn needless(
     design: &Design,
     tracks: &[crate::geom::drc::Track],

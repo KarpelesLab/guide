@@ -389,6 +389,29 @@ impl Queue {
     }
 }
 
+/// Of the line at height `y`, the span of x outside which no point is nearer the piece
+/// from `a` to `b` than `r`; `None` if none of the line is. Wider than that by two
+/// nanometres, which is more than the arithmetic of a distance is out by: what is asked of
+/// the points in it is the distance itself, so the span only leaves out points that the
+/// distance would.
+fn row_span(a: P, b: P, y: f64, r: f64) -> Option<(f64, f64)> {
+    let r = r + 2.0;
+    let (lo, hi) = if a.y <= b.y { (a, b) } else { (b, a) };
+    if hi.y < y - r || lo.y > y + r {
+        return None;
+    }
+    // The part of the piece that is no higher or lower than the radius from the line: the
+    // nearest point of the piece to a point of the line is on it.
+    let dy = hi.y - lo.y;
+    let (xa, xb) = if dy <= 0.0 {
+        (lo.x, hi.x)
+    } else {
+        let at = |y: f64| lo.x + ((y - lo.y) / dy).clamp(0.0, 1.0) * (hi.x - lo.x);
+        (at(y - r), at(y + r))
+    };
+    Some((xa.min(xb) - r, xa.max(xb) + r))
+}
+
 fn turn(a: u8, b: u8) -> u8 {
     let d = (a as i32 - b as i32).unsigned_abs() as u8;
     d.min(8 - d)
@@ -557,7 +580,15 @@ impl<'a> Engine<'a> {
             cache.clear();
             cache.resize(self.st.states.len(), f64::NAN);
             if let Some((i0, j0, i1, j1)) = self.grid.drange(&bb.expand(r)) {
+                let h = self.grid.g / 2.0;
                 for j in j0..=j1 {
+                    // Of the row, the points that can be within the radius: a piece on a
+                    // slant has most of its box farther off than that.
+                    let Some((lo, hi)) = row_span(a, b, self.grid.oy + j as f64 * h, r) else {
+                        continue;
+                    };
+                    let i0 = i0.max(((lo - self.grid.ox) / h).ceil().max(0.0) as i32);
+                    let i1 = (i1 as i64).min(((hi - self.grid.ox) / h).floor() as i64) as i32;
                     for i in i0..=i1 {
                         let k = self.grid.didx(i, j);
                         let d2 = point_seg_d2(self.grid.dpt(i, j), a, b);
@@ -589,7 +620,13 @@ impl<'a> Engine<'a> {
             cache.clear();
             cache.resize(self.st.states.len(), f64::NAN);
             if let Some((x0, y0, x1, y1)) = self.grid.crange(&bb.expand(rv)) {
+                let g = self.grid.g;
                 for y in y0..=y1 {
+                    let Some((lo, hi)) = row_span(a, b, self.grid.oy + y as f64 * g, rv) else {
+                        continue;
+                    };
+                    let x0 = x0.max(((lo - self.grid.ox) / g).ceil().max(0.0) as i32);
+                    let x1 = (x1 as i64).min(((hi - self.grid.ox) / g).floor() as i64) as i32;
                     for x in x0..=x1 {
                         let k = self.grid.cidx(x, y);
                         let d2 = point_seg_d2(self.grid.cell(x, y), a, b);
@@ -1827,44 +1864,31 @@ impl<'a> Engine<'a> {
             };
             // What the net has already joined comes first: it starts at no cost and without a
             // stub, whatever access point lies on it.
-            let mut sources: Vec<(u32, f32)> = tree[ra].iter().map(|&t| (t, 0.0)).collect();
+            //
+            // A side that holds fills can be joined anywhere on them near the other side's end
+            // (`pours`). When only the tree's side has fills the search runs from the other
+            // side, whose ends are few, and the path is turned around.
+            let flip = !pours[ra].is_empty() && pours[rb].is_empty();
+            let (from, to) = if flip { (rb, ra) } else { (ra, rb) };
+            let mut sources: Vec<(u32, f32)> =
+                Vec::with_capacity(tree[from].len() + sets[from].src.len());
+            sources.extend(tree[from].iter().map(|&t| (t, 0.0)));
             sources.extend(
-                sets[ra]
+                sets[from]
                     .src
                     .iter()
                     .filter(|(k, v)| clear(**k, v.1))
                     .map(|(k, v)| (*k, v.0)),
             );
-            let mut targets: Vec<u32> = tree[rb].clone();
+            let mut targets: Vec<u32> = Vec::with_capacity(tree[to].len() + sets[to].dst.len());
+            targets.extend_from_slice(&tree[to]);
             targets.extend(
-                sets[rb]
+                sets[to]
                     .dst
                     .iter()
                     .filter(|(k, st)| clear(**k, **st))
                     .map(|(k, _)| *k),
             );
-            // A side that holds fills can be joined anywhere on them near the other side's end
-            // (`pours`). When only the tree's side has fills the search runs from the other
-            // side, whose ends are few, and the path is turned around.
-            let flip = !pours[ra].is_empty() && pours[rb].is_empty();
-            if flip {
-                sources = tree[rb].iter().map(|&t| (t, 0.0)).collect();
-                sources.extend(
-                    sets[rb]
-                        .src
-                        .iter()
-                        .filter(|(k, v)| clear(**k, v.1))
-                        .map(|(k, v)| (*k, v.0)),
-                );
-                targets = tree[ra].clone();
-                targets.extend(
-                    sets[ra]
-                        .dst
-                        .iter()
-                        .filter(|(k, st)| clear(**k, **st))
-                        .map(|(k, _)| *k),
-                );
-            }
             let (near, onto) = if flip {
                 (nr.conns[ci].to_at, ra)
             } else {
@@ -2129,6 +2153,56 @@ fn closest_on(a: P, b: P, c: P, d: P) -> P {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The span of a row leaves out no point that is within the radius of the piece: over
+    /// pieces along the axes, on slants, of no length and at any angle, at the size of a
+    /// board's coordinates, every point of a lattice round the piece that the distance
+    /// itself has within the radius is in the span of its row.
+    #[test]
+    fn the_span_of_a_row_has_every_point_within_the_radius() {
+        let mut rng = Rng(21);
+        let mut next = |n: u64| (rng.next() % n) as f64;
+        let h = 50_000.0;
+        let (mut within, mut outside) = (0usize, 0usize);
+        for case in 0..400 {
+            let a = P::new(1.0e8 + next(4000) * 1000.0, 9.0e7 + next(4000) * 1000.0);
+            let (dx, dy) = match case % 5 {
+                0 => (next(60) * h, 0.0),
+                1 => (0.0, next(60) * h),
+                2 => {
+                    let d = next(60) * h;
+                    (d, if case % 2 == 0 { d } else { -d })
+                }
+                3 => (0.0, 0.0),
+                _ => (next(3_000_000) - 1_500_000.0, next(3_000_000) - 1_500_000.0),
+            };
+            let b = P::new(a.x + dx, a.y + dy);
+            let r = 60_000.0 + next(400_000);
+            let bb = BoxF::of2(a, b).expand(r + 3.0 * h);
+            let (j0, j1) = ((bb.min.y / h).floor() as i64, (bb.max.y / h).ceil() as i64);
+            let (i0, i1) = ((bb.min.x / h).floor() as i64, (bb.max.x / h).ceil() as i64);
+            for j in j0..=j1 {
+                let y = j as f64 * h;
+                let span = row_span(a, b, y, r);
+                for i in i0..=i1 {
+                    let x = i as f64 * h;
+                    if point_seg_d2(P::new(x, y), a, b) < r * r {
+                        within += 1;
+                        let (lo, hi) =
+                            span.unwrap_or_else(|| panic!("no span: {a:?} {b:?} {r} at {x} {y}"));
+                        assert!(
+                            lo <= x && x <= hi,
+                            "{a:?} {b:?} {r}: {x} {y} outside {lo}..{hi}"
+                        );
+                    } else if span.is_none_or(|(lo, hi)| x < lo || x > hi) {
+                        outside += 1;
+                    }
+                }
+            }
+        }
+        // And it leaves most of the rest out.
+        assert!(within > 10_000 && outside > within, "{within} {outside}");
+    }
 
     #[test]
     fn joined_access_sets_equal_rebuilding_them() {

@@ -136,6 +136,20 @@ impl Components {
         };
         // The targets' components are few and sources may be thousands (a large net's tree):
         // the first source in one of them answers.
+        // Mostly the two sides are of one component, and a tree of thousands of nodes on
+        // either: the first source that the maps let through and the first target of its
+        // component answer, without every target's component looked up (two places of
+        // memory for each, a quarter of a millisecond for a net with a pour, a tenth of the
+        // rounds of `tinytapeout-demo`). Where they do not, all of them are, below.
+        if let Some(&(n, _)) = sources.iter().find(|(n, _)| st.ok(state(*n), net)) {
+            let of = root(tag(n));
+            if targets
+                .iter()
+                .any(|&t| st.ok(state(t), net) && root(tag(t)) == of)
+            {
+                return true;
+            }
+        }
         let mut to: Vec<u64> = targets
             .iter()
             .filter(|&&t| st.ok(state(t), net))

@@ -45,7 +45,7 @@ mod work;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use self::engine::{
     Access, Conn, Costs, Engine, FailKind, Island, Mode, NetRoute, Rng, Scratch, Stop, Wire,
@@ -123,6 +123,14 @@ const VIAS: f64 = 0.3;
 /// 17 and 4 after 40, in 5.9 s and in 8.7 s.
 const FEW: usize = 32;
 
+/// And for how many rounds the fewest points that a round has left shared have then not
+/// become fewer. Ended at the first round with so few, the rounds left two nets that share
+/// their only way to the legalisation, which gives it to one of them
+/// (`tinytapeout-demo`, one order of sixteen: 12 points shared after 17 rounds and 2 after
+/// 20, the connection that no later stage makes among the 12); the rounds after that one
+/// are of the few nets still moving, and cheap.
+const FEW_ROUNDS: usize = 3;
+
 /// And how many connections there are to be for each that has no way on the grid whatever
 /// the other nets do, a pad that no cell of the grid reaches or that the board's own copper
 /// shuts in at this pitch: the balls of an array finer than the grid are such (`cynthion`
@@ -154,6 +162,22 @@ const PARTIAL_MARGIN: f64 = 10.0;
 /// The share of the stage's time and work in which its rounds end: the rest is for making
 /// the routes legal.
 const NEGOTIATE: f64 = 0.9;
+
+/// The share of the stage at which a round of the negotiation is ended before its last net in
+/// a run with a time and no budget of work: a guard for a round that takes longer than the
+/// rest of the share. The negotiation's own share ([`NEGOTIATE`]) is asked about between two
+/// rounds.
+const NEGOTIATE_GUARD: f64 = 0.95;
+
+/// What the stage has of the time that the run has left where its negotiation ends by a count
+/// of nodes ([`RouteOptions::rounds_nodes`]): the guard of a run on a machine slower than the
+/// count was made for.
+const COUNT_GUARD: f64 = 0.85;
+
+/// And how many times its count a negotiation that is near its end when the count is spent
+/// ([`NEARLY`]) has: with the time, half of what the run has left then, which is as much
+/// again and a little more on the board that it was measured on (`tinytapeout-demo`).
+const EXTENSION: f64 = 1.6;
 
 /// Most times negotiation starts again for nets whose fills the routing cut apart.
 const POUR_NEGOTIATIONS: usize = 3;
@@ -1668,12 +1692,41 @@ pub(crate) fn route(
     } else {
         WorkMeter::limited(work_limit.saturating_mul(NODES_A_UNIT))
     };
+    // In a run with a time and no budget of work, the host may say what the negotiation has in
+    // nodes ([`RouteOptions::rounds_nodes`]): its share is then a count, the same on every
+    // run, and the clock a guard later than the count is to be.
+    let by_count = options
+        .rounds_nodes
+        .filter(|_| meter.limit().is_none() && run.part_left().is_some());
+    if by_count.is_some() {
+        run.extend(COUNT_GUARD, 1.0, was);
+    }
     let wall = run.part_left();
     let mut stage_end = Limit::share(wall, start, &meter, 0, 1.0);
-    let mut negotiate_limit = Limit::share(wall, start, &meter, 0, NEGOTIATE);
-    let pour_first = Limit::share(wall, start, &meter, 0, POUR_FIRST);
+    let mut negotiate_limit = match by_count {
+        Some(n) => Limit::count(&meter, n),
+        None => Limit::share(wall, start, &meter, 0, NEGOTIATE),
+    };
+    let pour_first = match by_count {
+        Some(n) => Limit::count(&meter, (n as f64 * POUR_FIRST / NEGOTIATE) as u64),
+        None => Limit::share(wall, start, &meter, 0, POUR_FIRST),
+    };
     let flag = run.flag();
-    let phase_end = Mutex::new(negotiate_limit.clone());
+    // What ends a round of the negotiation before its last net: with a budget of work the
+    // negotiation's own limit, which is a count and the same on every run; with a time alone a
+    // guard later than it, the limit itself being asked about between two rounds, where the
+    // board is the same whatever the clock did inside the round.
+    let guard_of = |wall: Option<Duration>, from: Instant, limit: &Limit| {
+        if meter.limit().is_some() {
+            limit.clone()
+        } else if by_count.is_some() {
+            Limit::share(wall, from, &meter, 0, 1.0)
+        } else {
+            Limit::share(wall, from, &meter, 0, NEGOTIATE_GUARD)
+        }
+    };
+    let mut negotiate_guard = guard_of(wall, start, &negotiate_limit);
+    let phase_end = Mutex::new(negotiate_guard.clone());
     let stop = || flag.load(Ordering::Relaxed) || phase_end.lock().expect("deadline").passed();
     let charge = |meter: &WorkMeter| {
         run.charge(meter.used() / NODES_A_UNIT);
@@ -1851,11 +1904,15 @@ pub(crate) fn route(
             // Or the price of a shared point is at its most and few are left: the rounds after
             // that move the same few nets round each other, and what they share is taken out
             // a wire at a time when the rounds end, here or there.
-            let stale =
-                it - best_it >= STAGNATION || (pres >= PRES_MAX && total * FEW <= total_conns);
+            let least = best.as_ref().map_or(total, |b| b.0);
+            let stale = it - best_it >= STAGNATION
+                || (pres >= PRES_MAX && least * FEW <= total_conns && it - best_it >= FEW_ROUNDS);
             // Rounds that their share ends with few points still shared are near their end:
             // they have as much again of what the run has left, once.
-            if (cut || stop())
+            // The negotiation's share is asked about here, between two rounds, where the board is
+            // the same whatever the clock did inside the round.
+            let late = |limit: &Limit| stop() || limit.passed();
+            if (cut || late(&negotiate_limit))
                 && total > 0
                 && !extended
                 && it > 0
@@ -1864,18 +1921,25 @@ pub(crate) fn route(
                 && total * NEARLY < total_conns
             {
                 extended = true;
-                run.extend(share, share, was);
-                if !run.ending() {
-                    let now = Instant::now();
-                    let left = run.part_left();
-                    stage_end = Limit::share(left, now, &meter, 0, 1.0);
-                    negotiate_limit = Limit::share(left, now, &meter, 0, NEGOTIATE);
-                    *phase_end.lock().expect("deadline") = negotiate_limit.clone();
+                if let Some(n) = by_count {
+                    // By the count: [`EXTENSION`] times what it had.
+                    negotiate_limit = Limit::count(&meter, (n as f64 * EXTENSION) as u64);
                     cut = false;
+                } else {
+                    run.extend(share, share, was);
+                    if !run.ending() {
+                        let now = Instant::now();
+                        let left = run.part_left();
+                        stage_end = Limit::share(left, now, &meter, 0, 1.0);
+                        negotiate_limit = Limit::share(left, now, &meter, 0, NEGOTIATE);
+                        negotiate_guard = guard_of(left, now, &negotiate_limit);
+                        *phase_end.lock().expect("deadline") = negotiate_guard.clone();
+                        cut = false;
+                    }
                 }
             }
-            if total == 0 || cut || pause || stop() || stale {
-                cut |= total > 0 && stop();
+            if total == 0 || cut || pause || late(&negotiate_limit) || stale {
+                cut |= total > 0 && late(&negotiate_limit);
                 capped = false;
                 break;
             }
@@ -1991,7 +2055,7 @@ pub(crate) fn route(
                     if !changed.is_empty() {
                         pour_rounds += 1;
                         pour_cuts += changed.len();
-                        *phase_end.lock().expect("deadline") = negotiate_limit.clone();
+                        *phase_end.lock().expect("deadline") = negotiate_guard.clone();
                         order = (0..routes.len()).collect();
                         order.sort_by(|a, b| routes[*a].length.total_cmp(&routes[*b].length));
                         reroute = changed;
@@ -2002,9 +2066,13 @@ pub(crate) fn route(
         }
         // ---- rip-up and retry: a connection that still fails takes the room of the wires in
         // its way, whose nets are routed again around it; kept only when fewer fail overall ----
-        retry_wires(&mut eng, &mut scratch, &mut routes, &|| {
-            run.poll() || stop()
-        });
+        // Not after a negotiation that its count ended: the time is the passes' then, as it is
+        // where the clock ends one.
+        if !(cut && by_count.is_some()) {
+            retry_wires(&mut eng, &mut scratch, &mut routes, &|| {
+                run.poll() || stop()
+            });
+        }
         // ---- fewer vias: each net again where the others are, with vias four times as dear ----
         // In a time of its own where the rounds' share ended them: it saved nothing in 6 of
         // 8 runs so ended, the share over before it or as it began, and where it runs it

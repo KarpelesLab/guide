@@ -143,6 +143,15 @@ impl Limit {
         }
     }
 
+    /// The end of a phase at `nodes` on the meter, whatever the time.
+    pub(crate) fn count(meter: &WorkMeter, nodes: u64) -> Limit {
+        Limit {
+            wall: None,
+            work: Some(nodes),
+            meter: meter.clone(),
+        }
+    }
+
     /// Whether the phase is over.
     pub(crate) fn passed(&self) -> bool {
         self.work.is_some_and(|w| self.meter.used() > w)

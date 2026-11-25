@@ -5911,6 +5911,124 @@ at a time.
   are what it has for the balls left shut in, and no other way to those was tried.
 - More than one thread, or a deadline: the comparison is by nodes.
 
+## PCB routing: where the rounds of cadlab's router leave more track than that router does, and the long ways round laid again
+
+Measured through cadlab at 60 s, four runs at a time on three threads, the load 4 to 8, and
+at budgets of nodes on one thread. cadlab's commit for this is its decision D148.
+
+### The two routers at the same places
+
+`tinytapeout-demo` has had 5 % more track outside the pads than cadlab's router on the nets
+that both complete, with rounds that are a port of that router's own. An instrument in both
+(in no release) prints, by net, the vias, the track and the track outside the net's pads at
+the same places: after the first round, when the first negotiation ends, when the stage
+ends, and on the board that leaves. Four orders; the nets with no zone that both complete,
+534 of them over the four.
+
+| where | this crate, mm outside the pads | cadlab's router | difference | vias |
+|---|---|---|---|---|
+| after the first round | 15712 | 15643 | +0.4 % | 799 and 687 |
+| the first negotiation ended | 16957 | 16123 | +5.2 % | 1074 and 906 |
+| the stage ended | 16980 | 16520 | +2.8 % | 960 and 866 |
+| the board that leaves | 17120 | 16206 | +5.6 % | 928 and 846 |
+
+Half of the difference is made in the rounds and half after them: cadlab's router pulls its
+routes tight after its stage (1.9 % less outside the pads), and this crate's passes, cleanup
+and later steps add 0.8 % to what the stage hands them.
+
+What the rounds add was taken apart with switches in the instrument build, two orders, the
+signals' track when the negotiation ends over that of cadlab's router:
+
+| the rounds | after the first round | when the negotiation ends |
+|---|---|---|
+| as released | +58 mm, 56 vias more | +434 mm (+5.2 %), 96 vias more |
+| the ground planned on its outer pours too, in the rounds | +61 mm, 57 vias | +210 mm (+2.5 %), 69 vias |
+| that, and no price for a spoke's room | +16 mm, 2 vias | +95 mm (+1.1 %), 25 vias |
+
+A net with a plane is planned on its inner fills alone, so each pad of the ground on an
+outer layer has a stub and a via to the plane: 124 connections where cadlab's router plans
+32, and 56 vias after the first round for none. Those stubs are half of what the rounds add,
+the price of a spoke's room a quarter, and what is left a fifth. The buses go with the same
+two: the short nets round the RP2350 have 103 mm more than cadlab's router's, and 19 with
+the ground on its outer pours; `uio` 60 and 31; `mng` 78, 49, and none without the price.
+After the first round the buses are equal to the millimetre: it is not the order of the nets.
+
+Neither is given up, each measured: planned on outer pours the board has connections open
+(17 in one order with `outer_pours` as it is, 5 to 11 with the ground alone, one in four
+orders with the rounds alone and 3 to 6 pads short of two spokes for 0 to 2); the nets with
+planes negotiated for after the others come in with 452 to 609 points shared and two orders
+of four end worse; with no price for a spoke's room the board leaves with 7 pads short of
+two spokes for 1.
+
+### The long ways round
+
+A negotiation leaves each route where the prices of its rounds put it. The net that was
+routed first in a round went round a shared point, and the other, routed after it, found
+the point free and stayed: `tinytapeout-demo` has a net of two pads 4 mm apart with 92 mm of
+track and five vias, round the stub of a capacitor's ground pad across its way. What a
+stage's routes have over their first round's is 300 to 418 mm a board, and the ten worst
+nets hold half of it.
+
+Since 0.0.51, after the pass for fewer vias and where the rounds ended by themselves: the
+wire that is longest over 1.1 times the way between its two ends, by twenty pitches or more,
+is laid again at a price of 3 for a shared point, with the history of the rounds taken out;
+the wires of other nets that it then shares a point with are negotiated for again at the
+highest price, a wire at a time, it staying where it is, three times; and it is kept where
+nothing is shared after that, no more connections have failed, and the routes that moved
+have no more vias and cost five pitches less. Everything back as it was otherwise; then the
+longest not yet tried, forty at most.
+
+On `tinytapeout-demo` that is 26 to 40 wires tried a board and 6 to 13 kept, 32 to 75 mm
+less as the stage ends, in 2 to 3 s. A third of the tries find the shorter way and no room
+for what is in it: wires of the supply, 20 to 40 mm each, through signals with no other way.
+
+Measured and not kept on the way: the wires in the shorter way taken out and all laid again
+where nothing is claimed (1 to 6 kept of 26 to 40: what is taken out finds no way back);
+each net again after the pass for fewer vias (0.29 % less, 2.6 vias more a board); the
+history taken out before that pass (two connections open in one order of sixteen); the step
+with any number of vias (0.6 to 0.9 % less, 7 to 8 vias more); the step after rounds that
+their count ended (2 to 4 connections open in the order that has them, by the seconds that
+it takes of the passes); the run for shorter ways after these rounds (kept in one order of
+four); shorter ways in the last run (0.5 % for 6 to 10 s).
+
+### Beside 0.0.50
+
+`tinytapeout-demo` in sixteen orders, three sets, this beside 0.0.50 side by side: no
+connection open in any of the 48 runs of either, and the same sixteen boards in the three
+sets with both. Vias 272.4 in the mean and 274.5 in the median for 272.7 and 270, 254 to
+295 for 254 to 294; track 4838.6 mm in the mean for 4856.2; outside the pads, by net in one
+set more, 4778 mm for 4796 in the mean (-0.37 %, 11 orders better and 4 worse); 23 pads
+short of two spokes a set for 23; 46 to 47 s in the median for 43.
+
+`buspirate5-rev10` in four orders: 8 mm less (-0.29 %, four of four), 1.5 vias fewer, 0.8 s
+later. `lumenpnp-mobo`: the same board in three orders of four.
+
+At budgets of nodes: 569 connections open at 40 million over nine boards in three orders and
+164 at 150 million over seven in two, as with 0.0.50; 34 of 41 runs the same board, and the
+seven others `buspirate5-rev10`'s (3 to 14 mm less track, 1, 0 and 4 vias fewer) and
+`tinytapeout-demo`'s at 150 million (254 vias and 4848 mm for 261 and 4882; 277 and 4945 for
+273 and 4947).
+
+### Beside cadlab's router
+
+Twelve boards in four orders (`tinytapeout-demo` in eight) beside cadlab's router with seeds
+1 to 4 in the same minutes: 35 cells better, 30 equal and 7 worse of 72, as 0.0.50 in the
+same minutes. The seven are `corne-cherry`'s time; `tinytapeout-demo`'s track outside the
+pads (4796 mm against 4672, +3 %; 4811 with 0.0.50); `glasgow-revC3`'s track and track
+outside the pads; `glasgow-revD1`'s vias, track and track outside the pads. No pad without
+a spoke, no pad made solid by a track, no DRC error but unrouted and no joint by a round end
+alone in the 52 runs and in the 48 of the sixteen orders.
+
+### What this does not show
+
+The cell that this was for is where it was: `tinytapeout-demo` has 3 % more track outside
+the pads than cadlab's router, 5 % on the nets that both complete, and the step takes a
+third of a percent of it. The ground's stubs and the price of a spoke's room, which are
+three quarters of what the rounds add, are also what the board has no connection open and
+one or two pads short of two spokes for; a plan that has neither cost is not found. What the
+passes add after the rounds, where cadlab's router pulls tight, is measured and not taken
+apart by step. The boards with this crate's own rounds do not have the step.
+
 ## PCB routing: the joints by a round end alone mended where they are made, and the deadline asked at marks of the work, measured and not kept
 
 Measured through cadlab at 60 s, four runs at a time on three threads, the load 5.1 to 6.4,

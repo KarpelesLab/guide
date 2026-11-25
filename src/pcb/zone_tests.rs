@@ -256,6 +256,19 @@ fn a_pour_that_joins_two_pads_is_not_cut_by_another_nets_route() {
     // The pour joins its pads as it did, with no track.
     assert!(routed.tracks.is_empty());
     assert_eq!(routed.fills.len(), 1);
+    // Not explained if that is not asked for: the same result with nothing told of
+    // what is open, and no search made for it.
+    let silent = route_checked(
+        &d,
+        &RouteOptions {
+            explain: false,
+            ..RouteOptions::default()
+        },
+    );
+    assert!(silent.open.is_empty());
+    assert_eq!(silent.unrouted, routed.unrouted);
+    assert_eq!(silent.tracks, routed.tracks);
+    assert_eq!(silent.stats.islands, routed.stats.islands);
     // A zone that says it is a plane is one, and gives way.
     let mut plane = pour_in_the_way(2);
     plane.zones.zones[0].plane = Some(true);

@@ -6172,6 +6172,50 @@ for 439, `corne-cherry` 7416 for 7420, `glasgow-revC3` 3536 for 3539, `cynthion`
 and the pads short of two spokes the same but for what `glasgow-revD1`'s third order
 differs by from one run to the next. A run that asks for neither is 0.0.43's.
 
+*What a last run takes, and two options for it (0.0.45).* Measured through cadlab at 60 s,
+by stage of the run on the clock and on the processor: `glasgow-revD1`'s last run was
+1.84 s in this crate, 0.26 s to make the board ready, 0.31 s in the global stage, 0.37 s
+for the stairs of 343 nets and 0.9 s for its report; `tinytapeout-demo`'s 1.5 s, of which
+1.25 s in cleanup with three threads busy. Two things in it were for nothing that the host
+uses:
+- *The report's explanations.* A last run has no plane planned (the host turns that off,
+  2.4 s of `glasgow-revD1`'s 3), so its own count leaves every pad of a pour open, 436
+  connections on that board, and each had its search for what is in its way: 0.85 s, the
+  count itself 6 ms. [`RouteOptions::explain`], true by default, turns the explanations
+  off: [`Routed::open`] is then empty and the rest of the result is as it is with them.
+- *A search for fewer vias.* "No search" was so for the nets that a last run finds as they
+  were given. A host that ends its tracks on the copper of a pad where they come to it,
+  short of the centre, hands this crate nets that are no longer as given once a piece over
+  the pad takes them there, and those with a via had the search for fewer vias that
+  cleanup makes for a net that moved: 29 to 31 nets of 134 on `tinytapeout-demo`, 5 of 343
+  on `glasgow-revD1`. It is not for nothing everywhere: `lumenpnp-mobo` has 319.5 and 324
+  vias with it, in two sets of four orders, and 331 without, in a run that ends half a
+  minute before its budget. So it is an option, [`RouteOptions::fewer_vias`], true by
+  default, and a host turns it off where the time is short.
+
+With both off and no global stage (`global`, which plans the corridors of searches that are
+then not made), `glasgow-revD1`'s last run is 0.54 s in this crate for 1.84 s and
+`tinytapeout-demo`'s 0.17 s for 1.5 s. A run that sets neither is 0.0.44's. At budgets of
+nodes, one thread, behind cadlab's adapter as it asks for them (a run with no deadline
+keeps the search): 570 connections open at 40 million nodes and 164 at 150 million, as with
+0.0.44 in the same hour, 30 of the 41 runs the same to the via and the millimetre and the
+others within 5 vias and 25 mm, by which nets the adapter gives their old routes back.
+
+*Tried here and not kept: a net with a long way round laid again with the nets in its
+shorter way.* For each net whose runs cost more than straight ways would, the most first:
+its route searched for again at 2 mm for each route of another net crossed, and if that is
+cheaper than what it has, the nets crossed, three at most, taken out with it, the net laid
+without them and they again round it, the shortest first, kept if each is whole and the
+group costs less. As a step of a run for shorter ways, through cadlab at 60 s: `cynthion`
+168 to 177 nets tried in four orders, 2 to 6 tries kept, 0.8 to 5.0 mm less of 3035 in 5 to
+6 s; `corne-cherry` 100 to 106 nets, 1 to 8 kept, 1.8 to 9.4 mm of 7490 in 1.5 to 1.9 s;
+`glasgow-revC3` at 180 s 63 and 88 nets, 1 kept in each of two orders, 1.8 and 13.7 mm of
+3583. On `glasgow-revD1`, where a board's track is furthest over cadlab's own router's on
+the nets both complete (+7 %), a try is 0.3 to 1.7 s of searches on six layers, and one to
+seven were made in what a first run's cleanup has, none kept. One try in thirty to a
+hundred finds a group that is shorter laid again: a net's long way is round pads and
+through an order of the nets that three others do not undo. It is not in this release.
+
 ### Budgets of nodes
 
 One thread, this crate alone behind cadlab's adapter, beside 0.0.42's sets.

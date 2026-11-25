@@ -1046,11 +1046,30 @@ pub struct RouteOptions {
     /// else to route then routes nothing, and its cleanup has the nets that are whole:
     /// with [`straighten`](RouteOptions::straighten) and no right to take a net out
     /// ([`rip_ups`](RouteOptions::rip_ups) at none), that is a host's last run, which
-    /// lays the stairs straight and makes no search; it then ends each run at a pad on
+    /// lays the stairs straight and makes no search but for fewer vias
+    /// ([`fewer_vias`](RouteOptions::fewer_vias)); it then ends each run at a pad on
     /// the pad's copper where the run comes to it, as a run for shorter ways does
     /// ([`shorten`](RouteOptions::shorten)), which what pulls a run tight had taken to
     /// the pad's centre again. The default is false.
     pub leave_given: bool,
+    /// Whether what the result leaves open is explained ([`Routed::open`]): each
+    /// connection has a search of its own for what is in its way, which on a board with
+    /// hundreds of them is a second of a run. A host that counts what its own fill leaves
+    /// apart and asks a run for its copper alone, as of a last run that routes nothing
+    /// ([`leave_given`](RouteOptions::leave_given)), which has no fill planned and so
+    /// counts every pad of a net with a zone as open, sets this to false:
+    /// [`Routed::open`] is then empty, and the rest of the result is as it is with it.
+    /// The default is true.
+    pub explain: bool,
+    /// Whether cleanup looks for a route with fewer vias for each net that the run laid
+    /// or moved, and for the hops that leaves. A host's last run, which is handed every
+    /// route with nothing to route ([`leave_given`](RouteOptions::leave_given)), has
+    /// that search for the nets whose runs the host ended short of a pad's centre, which
+    /// are not as they were given once they are taken there: a few vias fewer where the
+    /// run has the time (2 % of one board's, `docs/benchmarks.md`), most of the run's
+    /// time where it has not. With false such a run makes no search at all. The default
+    /// is true.
+    pub fewer_vias: bool,
 }
 
 impl Default for RouteOptions {
@@ -1104,6 +1123,8 @@ impl Default for RouteOptions {
             straighten: false,
             open_shut: false,
             leave_given: false,
+            explain: true,
+            fewer_vias: true,
         }
     }
 }

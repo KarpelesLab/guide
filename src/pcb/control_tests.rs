@@ -166,6 +166,79 @@ fn a_run_that_lays_its_stairs_straight_has_fewer_tracks_and_none_longer() {
 }
 
 #[test]
+fn a_last_run_searches_nothing_for_a_net_given_with_its_tracks_ended_short_of_a_pad_s_centre() {
+    // A host ends its tracks on the copper of a pad, where they come to it, and not at
+    // its centre. A net given so is taken to the centre by a piece over the pad, and is
+    // then not as it was given: such a net with a via has a search for fewer vias in a
+    // host's last run, unless that is not asked for.
+    let d = weave();
+    let plain = route_checked(&d, &RouteOptions::default());
+    assert!(!plain.vias.is_empty());
+    let with_via = |net: Option<NetId>| plain.vias.iter().any(|v| v.net == net);
+    let mut tracks = plain.tracks.clone();
+    let mut moved = 0;
+    for t in &mut tracks {
+        if !with_via(t.net) || t.mid.is_some() {
+            continue;
+        }
+        let long = (t.end.x - t.start.x).abs().max((t.end.y - t.start.y).abs());
+        if long < 400_000 {
+            continue;
+        }
+        let at_pad = |q: Point| {
+            d.board.pads.iter().any(|p| {
+                p.net == t.net
+                    && p.layers.contains(t.layer)
+                    && super::router::pad_center(&p.shape) == Some(q)
+            })
+        };
+        // 0.2 mm along the track from the pad's centre: inside the pad, 0.3 mm from it.
+        let step = |from: Point, to: Point| {
+            Point::new(
+                from.x + (to.x - from.x).signum() * 200_000,
+                from.y + (to.y - from.y).signum() * 200_000,
+            )
+        };
+        if at_pad(t.start) {
+            t.start = step(t.start, t.end);
+            moved += 1;
+        } else if at_pad(t.end) {
+            t.end = step(t.end, t.start);
+            moved += 1;
+        }
+    }
+    assert!(moved > 0);
+    let earlier = Earlier::new(tracks, plain.vias.clone());
+    let last = RouteOptions {
+        rip_ups: 0,
+        settle: false,
+        negotiate: false,
+        fine_pass: false,
+        leave_given: true,
+        straighten: true,
+        fewer_vias: false,
+        ..RouteOptions::default()
+    };
+    let control = RunControl {
+        deadline: Some(Instant::now() + Duration::from_secs(3600)),
+        ..RunControl::default()
+    };
+    let straight = route_from(&d, &earlier, &last, &control).unwrap();
+    check(&d, &straight);
+    assert!(straight.unrouted.is_empty());
+    assert_eq!(straight.stats.expanded, 0);
+    assert_eq!(straight.vias.len(), plain.vias.len());
+    let searched = RouteOptions {
+        fewer_vias: true,
+        ..last
+    };
+    let with = route_from(&d, &earlier, &searched, &control).unwrap();
+    check(&d, &with);
+    assert!(with.stats.expanded > 0);
+    assert!(with.vias.len() <= plain.vias.len());
+}
+
+#[test]
 fn a_run_handed_every_route_back_lays_the_stairs_straight_and_searches_nothing() {
     // A host's last run: the routes of the run before, nothing to route, no net to take
     // out. Without the option such a run leaves every net as it was given; with it, the

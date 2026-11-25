@@ -5927,8 +5927,9 @@ not made on more threads: counted before anything was built, from the blocks of 
 that each turn read and wrote, an ideal look-ahead on three threads has 1.01 to 1.05 times
 their speed, where 1.4 was asked for it to be built. The eights of this crate's own
 rounds chosen apart by their nets' boxes would take 16.3 s for 13.8 s on `corne-cherry`
-with no net routed again at its turn. The nets that a last run leaves as given were in
-pieces by those necks, not by their teardrops.**
+with no net routed again at its turn. The nets that a last run leaves as given are in
+pieces by tracks taken out between theirs and not by their teardrops, ten to fourteen of
+them by those steps.**
 
 ### The tracks between pads, and the neck of two round ends
 

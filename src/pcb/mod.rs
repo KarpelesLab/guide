@@ -596,8 +596,13 @@ pub enum Rounds {
     /// that stays shared costs four times as much more in each round as it does in that
     /// router, which ends the rounds of a crowded board in fewer; the pass for fewer vias
     /// after them has three tenths of the time that the run has left where their share
-    /// ended them; and a unit of the run's work ([`RouteOptions::work_budget`]) is six nodes
-    /// of their search, which visits six times the nodes in the time.
+    /// ended them; after that pass, where the rounds ended by themselves, a wire that is
+    /// much longer than the way between its two ends is laid again at a low price of
+    /// sharing and the wires that it then shares a point with are negotiated for again, it
+    /// staying where it is, kept where nothing is shared after that and the routes that
+    /// moved cost less with no more vias; and a unit of the run's work
+    /// ([`RouteOptions::work_budget`]) is six nodes of their search, which visits six times
+    /// the nodes in the time.
     ///
     /// A board is looked at before anything of the run is routed or planned for these rounds
     /// but their ways out, and given up if more than one connection in fifty has no way on

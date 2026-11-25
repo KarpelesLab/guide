@@ -17,7 +17,9 @@
 //! the price of a shared point 0.6 at first and 1.6 times that each round, and half a step
 //! of history for each point shared; forty rounds, or twelve with none better; and what is
 //! still shared then taken out, the net with the most shared points first, and routed again
-//! where nothing is claimed. With a host that fills its zones around the routes
+//! where nothing is claimed; each net again with vias four times as dear, for fewer of them;
+//! and the long ways round that the rounds leave, a wire at a time ([`relay`]). With a host
+//! that fills its zones around the routes
 //! ([`RunControl::refill`](super::RunControl)), the nets whose pads the routes cut off their
 //! fills are planned again from what the fills still join and negotiated for again, three
 //! times at most, and the routes go back where that leaves more open.
@@ -145,6 +147,27 @@ const MIN_VIA_COST: f32 = 40.0;
 /// [`minimize_vias`] accepts.
 const MIN_VIA_STRETCH: f64 = 0.1;
 const MIN_VIA_SLACK: f64 = 8.0;
+
+/// By how many pitches a wire is longer than the way between the two ends that its
+/// connection was planned between, and 1.1 times that way, for [`relay`] to lay it again:
+/// `tinytapeout-demo` has some thirty such wires as its rounds end, of 464.
+const RELAY_DETOUR: f64 = 20.0;
+
+/// How many wires [`relay`] lays again at most.
+const RELAY_TRIES: usize = 40;
+
+/// The price of a shared point at which [`relay`] lays a wire again: a step through another
+/// net's route at four times its length, which is less than the way round that the wire had.
+const RELAY_PRES: f32 = 3.0;
+
+/// How many times the wires that then share a point are negotiated for again. Those that
+/// find their room find it at once, in the first round or the second (`tinytapeout-demo`:
+/// the same wires kept with three rounds as with six and with twelve).
+const RELAY_ROUNDS: usize = 3;
+
+/// By how many pitches the routes that moved have to cost less, a via at its price in
+/// pitches, for [`relay`] to keep them.
+const RELAY_GAIN: f64 = 5.0;
 
 /// The most rounds of a negotiation.
 const ROUNDS: usize = 40;
@@ -353,6 +376,154 @@ fn minimize_vias(
         eng.commit(r);
     }
     saved
+}
+
+/// The long ways round, after the rounds: a wire that is much longer than the way between its
+/// two ends ([`RELAY_DETOUR`]) is laid again at a low price of sharing ([`RELAY_PRES`]), and
+/// the wires of other nets that it then shares a point with are negotiated for again at the
+/// highest price, a wire at a time, it staying where it is, [`RELAY_ROUNDS`] times. Kept
+/// where nothing is shared after that, no more connections have failed, the routes that
+/// moved have no more vias and cost less by [`RELAY_GAIN`]; everything back as it was
+/// otherwise. The longest way round first, each on the routes as the ones before it left
+/// them, [`RELAY_TRIES`] at most. Returns how many were kept.
+///
+/// A negotiation leaves each route where the prices of its rounds put it: the net that was
+/// routed first in a round went round a point that was shared, and the other net, routed
+/// after it, found the point free and stayed (`tinytapeout-demo`: a net of two pads 4 mm
+/// apart with 92 mm of track and five vias, round the stub of a capacitor's ground pad
+/// across its way). The history of the rounds is taken out first: a point that was shared
+/// in them is free now, and costs what any other does.
+fn relay(
+    eng: &mut Engine<'_>,
+    sc: &mut Scratch,
+    routes: &mut [NetRoute],
+    stop: &dyn Fn() -> bool,
+) -> usize {
+    for h in &mut eng.hist_t {
+        h.fill(0.0);
+    }
+    eng.hist_v.fill(0.0);
+    let g = eng.grid.g;
+    let via = f64::from(eng.costs.via);
+    let wire_len = |eng: &Engine<'_>, w: &Wire| -> f64 {
+        let (segs, _) = eng.wire_geometry(w);
+        segs.iter().map(|(_, a, b)| a.dist(*b)).sum()
+    };
+    // Vias, connections failed and cost in pitches of some wires and their failures.
+    let cost =
+        |eng: &Engine<'_>, wires: &[Wire], failed: &[Option<FailKind>]| -> (usize, usize, f64) {
+            let (v, l) = wire_stats(eng, wires);
+            let fails = failed.iter().filter(|f| f.is_some()).count();
+            (v, fails, l / g + via * v as f64)
+        };
+    let mut done: BTreeSet<(usize, usize)> = BTreeSet::new();
+    let mut kept = 0;
+    for _ in 0..RELAY_TRIES {
+        if stop() {
+            break;
+        }
+        // The longest way round not tried yet, on the routes as they are now.
+        let mut worst: Option<(f64, usize, usize)> = None;
+        for (ri, r) in routes.iter().enumerate() {
+            for w in &r.wires {
+                if w.nodes.len() < 2 || done.contains(&(ri, w.conn)) {
+                    continue;
+                }
+                let c = &r.conns[w.conn];
+                let over = wire_len(eng, w) - c.from_at.dist(c.to_at) * 1.1;
+                if over > RELAY_DETOUR * g && worst.is_none_or(|b| over > b.0) {
+                    worst = Some((over, ri, w.conn));
+                }
+            }
+        }
+        let Some((_, fi, ci)) = worst else { break };
+        done.insert((fi, ci));
+        // What moves, as it was.
+        let mut saved: BTreeMap<usize, (Vec<Wire>, Vec<Option<FailKind>>)> = BTreeMap::new();
+        saved.insert(fi, (routes[fi].wires.clone(), routes[fi].failed.clone()));
+        let mut stopped = {
+            let r = &mut routes[fi];
+            eng.uncommit(r);
+            r.keep = r.wires.iter().map(|w| w.conn != ci).collect();
+            let res = eng.route_net(sc, r, Mode::Negotiate(RELAY_PRES));
+            r.keep.clear();
+            eng.commit(r);
+            res.is_err()
+        };
+        let mut clean = false;
+        for _ in 0..RELAY_ROUNDS {
+            if stopped {
+                break;
+            }
+            let shared: Vec<bool> = routes
+                .iter()
+                .map(|r| !eng.conflicts(r).is_empty())
+                .collect();
+            if !shared.iter().any(|&s| s) {
+                clean = true;
+                break;
+            }
+            for ri in (0..routes.len()).filter(|&ri| ri != fi && shared[ri]) {
+                let r = &mut routes[ri];
+                let keep: Vec<bool> = r
+                    .wires
+                    .iter()
+                    .map(|w| {
+                        let mut at = Vec::new();
+                        eng.wire_conflicts(r, w, &mut at);
+                        at.is_empty()
+                    })
+                    .collect();
+                saved
+                    .entry(ri)
+                    .or_insert_with(|| (r.wires.clone(), r.failed.clone()));
+                eng.uncommit(r);
+                r.keep = keep;
+                let res = eng.route_net(sc, r, Mode::Negotiate(PRES_MAX));
+                r.keep.clear();
+                eng.commit(r);
+                if res.is_err() {
+                    stopped = true;
+                    break;
+                }
+            }
+        }
+        if !clean && !stopped {
+            clean = routes.iter().all(|r| eng.conflicts(r).is_empty());
+        }
+        let (mut before, mut after) = ((0, 0, 0.0), (0, 0, 0.0));
+        for (&j, (w, f)) in &saved {
+            let (b, a) = (
+                cost(eng, w, f),
+                cost(eng, &routes[j].wires, &routes[j].failed),
+            );
+            before = (before.0 + b.0, before.1 + b.1, before.2 + b.2);
+            after = (after.0 + a.0, after.1 + a.1, after.2 + a.2);
+        }
+        if clean
+            && !stopped
+            && after.0 <= before.0
+            && after.1 <= before.1
+            && after.2 <= before.2 - RELAY_GAIN
+        {
+            kept += 1;
+            continue;
+        }
+        // Taken out first, all of them: a route put back onto one that has not gone back
+        // yet would be counted as sharing with it.
+        for &j in saved.keys() {
+            eng.uncommit(&mut routes[j]);
+        }
+        for (j, (w, f)) in saved {
+            routes[j].wires = w;
+            routes[j].failed = f;
+            eng.commit(&mut routes[j]);
+        }
+        if stopped {
+            break;
+        }
+    }
+    kept
 }
 
 /// Whether the pass for fewer vias has a time of its own ([`VIAS`]): the stage's share is
@@ -2095,6 +2266,16 @@ pub(crate) fn route(
                 run.poll() || stop()
             });
         }
+        // ---- the long ways round: a wire much longer than the way between its ends laid
+        // again, and the wires in that way negotiated for again ----
+        // Not after a negotiation that its share ended, as the retry: the time is the
+        // passes' then (`tinytapeout-demo`, the one order of sixteen whose rounds their
+        // count ends: three connections open with this step, none without).
+        if !cut && !(run.poll() || stop()) {
+            relay(&mut eng, &mut scratch, &mut routes, &|| {
+                run.poll() || stop()
+            });
+        }
         break;
     }
     charge(&meter);
@@ -2307,6 +2488,72 @@ mod tests {
                 .maps(&sc.rb, &grid, &slots, &active)
                 .is_none()
         );
+    }
+
+    /// A net of two pads 4 mm apart that was laid the long way round another net's track
+    /// across its way has the short way once the long ways round are looked at, the other
+    /// net round one of its pads, and nothing shared.
+    #[test]
+    fn a_wire_laid_the_long_way_round_is_laid_again_and_the_wire_in_its_way_moves() {
+        use super::engine::{Engine, Mode};
+        use super::index::Checker;
+        // One layer: net 1 from left to right in the middle, net 2 from bottom to top
+        // between its pads.
+        let pads = vec![
+            smd(8 * MM, 10 * MM, 1),
+            smd(12 * MM, 10 * MM, 1),
+            smd(10 * MM, 0, 2),
+            smd(10 * MM, 20 * MM, 2),
+        ];
+        let mut d = design(1, pads, 3);
+        d.outline = outline(Rect::new(
+            Point::new(-2 * MM, -2 * MM),
+            Point::new(22 * MM, 22 * MM),
+        ));
+        let (base, fills) = base_of(&d, &[], d.board.zones.len());
+        let sc = scene(&d, base, &fills, &[]);
+        let wanted: BTreeSet<u32> = [1, 2].into();
+        let mut routes = plan(&sc.rb, &wanted);
+        let mut active = vec![false; sc.rb.profiles.len()];
+        for r in &routes {
+            active[r.prof] = true;
+        }
+        let grid = make_grid(&sc.rb, &routes);
+        let pitch = grid.g;
+        let stop = || false;
+        let mut eng = Engine::with(&sc.rb, grid, vec![0], &active, super::costs(), &stop, None);
+        let index = super::static_index(&sc.rb, pitch);
+        super::give_access(
+            &eng,
+            &Checker {
+                rb: &sc.rb,
+                index: &index,
+            },
+            &mut routes,
+        );
+        let mut scratch = eng.scratch();
+        let (one, two) = if routes[0].net == 1 { (0, 1) } else { (1, 0) };
+        // The state that a round can leave: net 2 straight up, net 1 round one of its pads.
+        for i in [two, one] {
+            eng.route_net(&mut scratch, &mut routes[i], Mode::Hard)
+                .expect("no budget");
+            eng.commit(&mut routes[i]);
+            assert!(routes[i].failed.iter().all(Option::is_none));
+        }
+        let length = |eng: &Engine<'_>, r: &super::NetRoute| super::wire_stats(eng, &r.wires).1;
+        let (long, straight) = (length(&eng, &routes[one]), length(&eng, &routes[two]));
+        assert!(long > 20.0 * MM as f64, "{long}");
+        assert!(straight < 21.0 * MM as f64, "{straight}");
+        assert_eq!(super::relay(&mut eng, &mut scratch, &mut routes, &stop), 1);
+        assert!(length(&eng, &routes[one]) < 5.0 * MM as f64);
+        let round = length(&eng, &routes[two]);
+        assert!(round > straight && round < 30.0 * MM as f64, "{round}");
+        for r in &routes {
+            assert!(r.failed.iter().all(Option::is_none));
+            assert!(eng.conflicts(r).is_empty());
+        }
+        // And nothing more to do: every wire is as short as it gets beside the other.
+        assert_eq!(super::relay(&mut eng, &mut scratch, &mut routes, &stop), 0);
     }
 
     fn island(terms: &[usize]) -> Island {

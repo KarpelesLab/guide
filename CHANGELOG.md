@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.50](https://github.com/KarpelesLab/guide/compare/v0.0.49...v0.0.50) - 2026-11-25
+
+### Fixed
+
+- *(pcb)* two tracks that touch by their round ends alone are two terminals, and a track that ends beside a pad or a via of its net by its round end goes on into it: the host's last step mends no joint in 52 runs of the twelve boards (20 in 11 of 52) ([#103](https://github.com/KarpelesLab/guide/pull/103))
+
+### Other
+
+- *(benchmarks)* the joints by a round end alone mended where they are made with 0.0.50 (cadlab's last step lays no piece in 52 runs and in 192, for 20 and 72), the table as 0.0.49's (35, 30 and 7 of 72), what a run of 60 s repeats (one board in 22 of 24 board-orders), and the deadline asked at marks of the work, measured and not kept ([#104](https://github.com/KarpelesLab/guide/pull/104))
+- *(benchmarks)* the rounds ended by a count and three rounds after their fewest shared points with 0.0.49: tinytapeout-demo's sixteen orders the same boards in three sets (6 of 16 before) with no connection open (7, 2 and 5), the budgets, the table, and where its track outside the pads is ([#101](https://github.com/KarpelesLab/guide/pull/101))
+
 ## [0.0.49](https://github.com/KarpelesLab/guide/compare/v0.0.48...v0.0.49) - 2026-11-25
 
 ### Added

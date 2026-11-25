@@ -1317,21 +1317,39 @@ pub(crate) fn needless(
         .collect();
     // The groups that `copper` on `layers`, with ends at `ends`, is part of: a pad of the
     // net or a fill that it touches, a track's end or a via of the board's own at one of
-    // its ends.
-    let touched = |copper: &Shape, ends: &[Point], layers: LayerSet, out: &mut Vec<usize>| {
+    // its ends. And those that it is part of by its whole width (`sound`): for a track,
+    // with the centre line `line`, a pad or a fill that the centre line comes to. A track
+    // that stops short of a pad and reaches it by the tip of its round end touches it, and
+    // is joined to it by the chord that the pad's edge cuts of that end.
+    let touched = |copper: &Shape,
+                   line: Option<&Shape>,
+                   ends: &[Point],
+                   layers: LayerSet,
+                   out: &mut Vec<usize>,
+                   sound: &mut Vec<usize>| {
         let near = copper.bbox();
         for &(p, g) in &pads {
-            if pad_touches(&design.board.pads[p], copper, layers) {
+            let pad = &design.board.pads[p];
+            if pad_touches(pad, copper, layers) {
                 out.push(g);
+                if line.is_none_or(|l| pad_touches(pad, l, layers)) {
+                    sound.push(g);
+                }
             }
         }
         for (f, piece) in fills.iter().enumerate() {
-            if layers.contains(piece.layer)
-                && of_fill[f] != usize::MAX
-                && piece.bbox.intersects(&near)
-                && (ends.iter().any(|&at| piece.holds(at)) || piece.touches(copper))
+            if !layers.contains(piece.layer)
+                || of_fill[f] == usize::MAX
+                || !piece.bbox.intersects(&near)
             {
+                continue;
+            }
+            let held = ends.iter().any(|&at| piece.holds(at));
+            if held || piece.touches(copper) {
                 out.push(of_fill[f]);
+                if held || line.is_none_or(|l| piece.touches(l)) {
+                    sound.push(of_fill[f]);
+                }
             }
         }
         for (g, points) in groups.points.iter().enumerate() {
@@ -1340,30 +1358,48 @@ pub(crate) fn needless(
                 .any(|&(q, on)| ends.contains(&q) && on.0 & layers.0 != 0)
             {
                 out.push(g);
+                sound.push(g);
             }
         }
     };
     let all = design.rules.layers();
     let (ns, nv) = (c.segs.len(), c.vias.len());
-    // By track and then by via, the groups that it is part of.
+    // By track and then by via, the groups that it is part of, and those that it is
+    // part of by its whole width.
     let mut of: Vec<Vec<usize>> = vec![Vec::new(); ns + nv];
+    let mut of_sound: Vec<Vec<usize>> = vec![Vec::new(); ns + nv];
     // The copper of each, with its layers. One that is no shape is taken for a net that
     // nothing is told of.
     let mut shapes: Vec<(Shape, LayerSet)> = Vec::with_capacity(ns + nv);
+    // The centre lines of the tracks.
+    let lines: Vec<Option<Shape>> = c
+        .segs
+        .iter()
+        .map(|s| Shape::track(s.a, s.b, 2).ok())
+        .collect();
     for (i, s) in c.segs.iter().enumerate() {
         let on = LayerSet::EMPTY.with(LayerId(s.l));
         let copper = widths
             .get(i)
             .and_then(|&w| Shape::track(s.a, s.b, w).ok())?;
-        touched(&copper, &[s.a, s.b], on, &mut of[i]);
+        let line = lines[i].as_ref().unwrap_or(&copper);
+        touched(
+            &copper,
+            Some(line),
+            &[s.a, s.b],
+            on,
+            &mut of[i],
+            &mut of_sound[i],
+        );
         shapes.push((copper, on));
     }
     for (v, &at) in c.vias.iter().enumerate() {
         let copper = diameters.get(v).and_then(|&d| Shape::circle(at, d).ok())?;
-        touched(&copper, &[at], all, &mut of[ns + v]);
+        let (out, sound) = (&mut of[ns + v], &mut of_sound[ns + v]);
+        touched(&copper, None, &[at], all, out, sound);
         shapes.push((copper, all));
     }
-    for g in &mut of {
+    for g in of.iter_mut().chain(&mut of_sound) {
         g.sort_unstable();
         g.dedup();
     }
@@ -1379,12 +1415,12 @@ pub(crate) fn needless(
     // (`corne-cherry`: 39 to 89 such necks under 0.1 mm on a board routed for a host
     // that took out what was told, the narrowest 25 um of a track of 0.25 mm;
     // `docs/benchmarks.md`). So nothing is needless that the groups are less joined
-    // without by either count: by what touches, as before, and by what is sound.
-    let lines: Vec<Option<Shape>> = c
-        .segs
-        .iter()
-        .map(|s| Shape::track(s.a, s.b, 2).ok())
-        .collect();
+    // without by either count: by what touches, as before, and by what is sound. The
+    // same holds of a track and a pad or a fill (`of_sound`): the last piece of a route,
+    // from the lattice into its pad, went on the word of the piece before it, whose
+    // round end reaches the pad's edge from a point of the lattice beside it, and the
+    // pad was left on the chord that its edge cuts of that end (`tinytapeout-demo`: 9
+    // to 17 pads so, of tracks of the board's least width).
     let line = |i: usize| lines.get(i).and_then(Option::as_ref);
     let sound = |i: usize, j: usize| match (line(i), line(j)) {
         (Some(a), Some(b)) => a.touches(b),
@@ -1439,6 +1475,7 @@ pub(crate) fn needless(
     let joined = |gone: &[bool]| {
         let by = |only_sound: bool| {
             let mut parent: Vec<u32> = (0..(count + ns + nv) as u32).collect();
+            let of = if only_sound { &of_sound } else { &of };
             for (e, groups) in of.iter().enumerate() {
                 if !gone[e] {
                     for &g in groups {
@@ -2284,6 +2321,52 @@ mod tests {
         let mut twice = tracks.clone();
         twice.push(track(3 * MM, 13 * MM, 250_000));
         assert_eq!(needless_between(&d, &twice, &[], &fills), (vec![3], vec![]));
+    }
+
+    #[test]
+    fn the_last_piece_into_a_pad_is_not_needless_for_the_round_end_of_the_piece_before_it() {
+        use super::super::tests::design;
+        use super::super::{Zones, needless_between};
+        use crate::geom::drc::Track;
+        use crate::geom::{LayerId, LayerSet};
+        // Two pads of net 1, 10 mm apart, 0.6 mm square, and a small fill of the net
+        // round the first, which makes the net one that is looked at.
+        let pads = vec![smd(3 * MM, 2 * MM, 1), smd(13 * MM, 2 * MM, 1)];
+        let mut d = design(2, pads, 2);
+        let mut drop = zone(1, 0, 4 * MM);
+        drop.layers = LayerSet::EMPTY.with(LayerId(0));
+        d.zones = Zones {
+            zones: vec![drop],
+            ..Zones::default()
+        };
+        let fills = vec![piece(0, 0, (2 * MM, 4 * MM), (MM, 3 * MM))];
+        let track = |a: i64, b: i64| Track {
+            start: Point::new(a, 2 * MM),
+            end: Point::new(b, 2 * MM),
+            mid: None,
+            width: 250_000,
+            layer: LayerId(0),
+            net: Some(NetId(1)),
+        };
+        // From the first pad to a point 0.1 mm short of the second pad's edge, as a
+        // route on a lattice ends, and a last piece from there into the pad. The round
+        // end of the first track reaches the pad, by a chord of 0.15 mm of a track of
+        // 0.25 mm: the last piece is what joins the pad by a track's width.
+        let tracks = vec![track(3 * MM, 12_600_000), track(12_600_000, 13 * MM)];
+        let none: (Vec<usize>, Vec<usize>) = Default::default();
+        assert_eq!(needless_between(&d, &tracks, &[], &fills), none);
+        // At the first pad, which is on the fill, the piece out of the pad goes: the
+        // track that begins 0.1 mm beyond the pad's edge begins in the fill, which holds
+        // its centre line and the pad.
+        let from = vec![track(3 * MM, 3_400_000), track(3_400_000, 13 * MM)];
+        assert_eq!(needless_between(&d, &from, &[], &fills), (vec![0], vec![]));
+        // A piece that ends where the track before it is in the pad by its centre line
+        // is copper on copper, and goes.
+        let inside = vec![track(3 * MM, 12_800_000), track(12_800_000, 13 * MM)];
+        assert_eq!(
+            needless_between(&d, &inside, &[], &fills),
+            (vec![1], vec![])
+        );
     }
 
     #[test]

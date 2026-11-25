@@ -134,13 +134,18 @@ pub(crate) fn run(
             }
         }
     }
-    // The nets that are looked at for fewer vias, in their order.
+    // The nets that are looked at for fewer vias, in their order. None if that is not
+    // asked for ([`RouteOptions::fewer_vias`]): in a host's last run a net handed with
+    // its runs ended short of a pad's centre is not as the earlier run left it once it
+    // is taken there, and has a search (tinytapeout-demo: 29 nets of 134, 1.2 s of the
+    // 1.5 s of such a run).
     let order: Vec<usize> = order
         .into_iter()
         .filter(|&j| {
-            copper[j]
-                .as_ref()
-                .is_some_and(|c| !c.vias.is_empty() && !(bounded && jobs[j].plane) && !still(j))
+            options.fewer_vias
+                && copper[j]
+                    .as_ref()
+                    .is_some_and(|c| !c.vias.is_empty() && !(bounded && jobs[j].plane) && !still(j))
         })
         .collect();
     // On more than one thread, with no budget of nodes to keep, the searches of the nets

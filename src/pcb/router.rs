@@ -738,7 +738,7 @@ pub(crate) fn run_from(
     }
     routed.stats.islands = (survey.needed, survey.made);
     run.poll();
-    if !survey.open.is_empty() {
+    if options.explain && !survey.open.is_empty() {
         // The world as the result leaves it: every route in it, and none locked.
         let mut world = World::new(
             &design.board,

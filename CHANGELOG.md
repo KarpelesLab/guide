@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.51](https://github.com/KarpelesLab/guide/compare/v0.0.50...v0.0.51) - 2026-11-25
+
+### Added
+
+- *(pcb)* the long ways round that the rounds of cadlab's router leave are laid again, a wire at a time, and the wires in their way negotiated for again: tinytapeout-demo's track outside the pads 0.37 % less over sixteen orders (11 better, 4 worse), buspirate5-rev10's 0.29 % less in four of four ([#105](https://github.com/KarpelesLab/guide/pull/105))
+
 ## [0.0.50](https://github.com/KarpelesLab/guide/compare/v0.0.49...v0.0.50) - 2026-11-25
 
 ### Fixed

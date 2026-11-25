@@ -5945,8 +5945,8 @@ been in.
 | the searches of the eights, summed over the threads | 18.7 and 13.4 s | 27.0 and 27.1 s |
 | the turns | 6.3 and 4.3 s | 4.9 and 4.2 s |
 | of them nets routed again at their turn | 4.8 s, 401 of 2696; 3.3 s, 274 of 1841 | 2.7 s, 241 of 3855; 2.3 s, 233 of 3944 |
-| the passes that take nets out, one thread | 10.9 and 0.02 s | none |
-| what settles the open connections, one thread | 0.1 s | 11.1 and 12.1 s |
+| the passes that take nets out, one thread | 10.9 and 0.02 s | 11.1 and 12.1 s, 832 turns, ended by the run's share |
+| what settles the open connections, one thread | 0.1 s | none |
 | the pads cut off their fills joined, each net routed again | 2.5 s | 3.0 and 2.8 s |
 | cleanup | 1.1 and 0.8 s | 0.6 and 1.1 s |
 
@@ -5992,6 +5992,34 @@ for 49.5 and 44.3 s, each pair the same board (277 vias, 4883.2 mm and 43.1 mill
 millimetre, and two within a millimetre by what the adapter's own last run now gives back
 (it is not 0.0.45's adapter); `tinytapeout-demo`'s default order has its first run's board
 at 36.8 s for 40.6 s with the same 33.6 million nodes.
+
+### Beside cadlab's router at 60 s, 0.0.46
+
+Through cadlab's adapter, whose last run is not 0.0.45's in three things of its own (it
+tells the nets on the old routes of those that go back by their new vias as by their new
+tracks and at the clearance of the nets' classes, and hands over the nets whose only zones
+are teardrops): the twelve boards in four orders and `tinytapeout-demo` in eight, 0.0.46
+from crates.io, cadlab's own router and 0.0.45 side by side in the same minutes, four runs
+at a time on three threads each, the load 4.4 to 5.8. Of 72 cells 37 are better than
+cadlab's router, 28 equal and 7 worse, for 0.0.45's 36, 28 and 8 beside it and 36, 29 and 7
+in the set before with this crate by its path: `tinytapeout-demo`'s vias and
+`glasgow-revC3`'s time change sides by the runs, and the seven worse are 0.0.45's.
+
+| | 0.0.46 | 0.0.45 |
+|---|---|---|
+| `tinytapeout-demo`, routing on the clock and the run, medians of four orders | 27.7 s, 45.1 s | 30.9 s, 47.7 s |
+| the same over sixteen orders, a pair of sets of their own | 28.3 s, 43.5 s | 30.9 s, 50.1 s |
+| `tinytapeout-demo`, connections open over sixteen orders, two pairs of sets | 3 and 5 | 4 and 4 |
+| `tinytapeout-demo`'s thirteenth order, when its first run ends | 36.5, 40.7 and 41.1 s, on its own | 40.9 s on its own; 46.9 s, its deadline |
+| `lumenpnp-mobo`, four orders, the fastest and the slowest run | 27 to 30 s | 30 to 34 s |
+| `buspirate5-rev10` | 12 to 16 s | 14 to 17 s |
+| `corne-cherry`, `glasgow-revD1`, `cynthion`: routing on the clock | 20.6, 34.7 and 3.9 s | 20.6, 35.0 and 3.9 s |
+
+The boards that have the rounds of cadlab's router in their first run end sooner with what
+they had: `lumenpnp-mobo` and `buspirate5-rev10` the same connections, vias and track to the
+millimetre, `tinytapeout-demo` within what its runs differ by. No run has a connection open
+that cadlab's fill and DRC do not count, no pad of a pour is without a spoke and there is
+no DRC error other than unrouted in 136 runs.
 
 ### Nets routed ahead of their turn: built, exact, slower, not kept
 

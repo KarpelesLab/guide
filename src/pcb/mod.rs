@@ -1248,6 +1248,11 @@ pub struct Stats {
     /// those had been asked for. A host that routes the board again from this run's routes
     /// asks for those then.
     pub rounds_given_up: bool,
+    /// How many tracks that ended beside a pad of their net, on a fill that joins the two,
+    /// with the round end on the pad and the middle line short of it, were taken into the
+    /// pad by a piece of track: a teardrop or the edge of a pour holds a place for a route
+    /// to end on that is such an end.
+    pub into_pads: usize,
     /// Of the rounds on the grid of the pitch for the connections that a negotiation at
     /// twice the pitch left open ([`RouteOptions::whole_finer`]): how many there were,
     /// and the connections open on the grid before them and after. The routes are

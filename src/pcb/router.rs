@@ -199,6 +199,8 @@ pub(crate) fn terminals(design: &Design, net: NetId) -> Vec<Group> {
         .collect();
     // By shape past the pads, the points where routes may join it.
     let mut ends: Vec<Vec<(Point, LayerSet)>> = Vec::new();
+    // By shape, the middle line of a straight track: what it is joined to other copper by.
+    let mut lines: Vec<Option<Shape>> = vec![None; shapes.len()];
     for t in b.tracks.iter().filter(|t| t.net == Some(net)) {
         let shape = match t.mid {
             None => Shape::track(t.start, t.end, t.width),
@@ -207,6 +209,12 @@ pub(crate) fn terminals(design: &Design, net: NetId) -> Vec<Group> {
         if let Ok(s) = shape {
             let on = LayerSet::EMPTY.with(t.layer);
             shapes.push((s, on));
+            lines.push(
+                t.mid
+                    .is_none()
+                    .then(|| Shape::track(t.start, t.end, 2).ok())
+                    .flatten(),
+            );
             ends.push(vec![(t.start, on), (t.end, on)]);
         }
     }
@@ -235,6 +243,22 @@ pub(crate) fn terminals(design: &Design, net: NetId) -> Vec<Group> {
         }
         i
     }
+    lines.resize(shapes.len(), None);
+    // Two shapes are one piece where their copper touches, and a straight track with
+    // another shape where its middle line comes to the other's copper: a track that
+    // reaches a pad by the tip of its round end, or another track by the overlap of two
+    // round ends, is joined to it by less than it is wide. Two stubs out of two pads of a
+    // net side by side that end a step apart are such a pair, and as one terminal nothing
+    // was ever routed between them; as two, the piece between their ends is.
+    let joined = |i: usize, j: usize| {
+        let (a, b) = (&shapes[i].0, &shapes[j].0);
+        match (&lines[i], &lines[j]) {
+            (None, None) => a.touches(b),
+            (Some(la), None) => la.touches(b),
+            (None, Some(lb)) => a.touches(lb),
+            (Some(la), Some(lb)) => la.touches(b) || a.touches(lb),
+        }
+    };
     {
         for i in 0..shapes.len() {
             for j in i + 1..shapes.len() {
@@ -242,7 +266,7 @@ pub(crate) fn terminals(design: &Design, net: NetId) -> Vec<Group> {
                 if a.1.0 & b.1.0 != 0
                     && a.0.bbox().intersects(&b.0.bbox())
                     && find(&mut parent, i) != find(&mut parent, j)
-                    && a.0.touches(&b.0)
+                    && joined(i, j)
                 {
                     let (x, y) = (find(&mut parent, i), find(&mut parent, j));
                     parent[x.max(y)] = x.min(y);
@@ -3555,6 +3579,9 @@ fn route_all<'a>(
         stats.expanded += done.expanded;
         stats.uncut = (done.tried, done.kept, done.vias);
     }
+    // A route that ends beside a pad of its net, on a fill that joins the two, goes on into
+    // the pad.
+    stats.into_pads = into_pads(&mut world, design, &jobs, &mut copper);
     // Pairs side by side, in place of the routes they were given as two nets.
     let mut paired = (0, 0.0);
     if options.couple_pairs && !design.pairs.is_empty() && !run.poll() {
@@ -4384,12 +4411,280 @@ fn plane_map(design: &Design, fills: &[Fill], grid: Corridor, cost: f64) -> Plan
     Planes { grid, nets, cost }
 }
 
+/// How far inside a pad's copper the piece that takes a track into it ends, in nanometres,
+/// and the parts that the way to where the pad's routes end is told in.
+const INTO_PAD: f64 = 10_000.0;
+const INTO_PAD_PARTS: i64 = 1 << 16;
+
+/// Lays a piece of track into the pad for each track of a net that ends beside a pad of the
+/// net with its round end on the pad's copper and its middle line short of it, and returns
+/// how many it laid.
+///
+/// A net with a fill has places on the fill where its routes may end
+/// ([`planes::sites`](super::planes)), and such a place may be beside a pad that the fill
+/// reaches: on a teardrop, which is a fill no wider than its pad, or on the edge of a pour.
+/// The route is then joined to the pad through the fill, and by the tip of its round end:
+/// by less than the track is wide, wherever a host's own fill holds less of the track's end
+/// than this crate's did. The piece goes from the track's end towards the point of the pad
+/// that routes end at, to [`INTO_PAD`] inside the pad's copper, or all the way if only that
+/// is free, and is laid only where the world has it free.
+fn into_pads(
+    world: &mut World<'_>,
+    design: &Design,
+    jobs: &[Job],
+    copper: &mut [Option<NetCopper>],
+) -> usize {
+    let mut laid = 0;
+    for (job, c) in jobs.iter().zip(copper.iter_mut()) {
+        let Some(c) = c else { continue };
+        let ctx = &job.ctx;
+        let pads: Vec<(&crate::geom::drc::Pad, Point)> = design
+            .board
+            .pads
+            .iter()
+            .filter(|p| p.net == Some(ctx.net))
+            .filter_map(|p| {
+                let bbox = p.shape.bbox();
+                ctx.pads
+                    .iter()
+                    .find(|t| t.bbox == bbox && bbox.min() != bbox.max())
+                    .map(|t| (p, t.center))
+            })
+            .collect();
+        if pads.is_empty() {
+            continue;
+        }
+        let mut more: Vec<Seg> = Vec::new();
+        // The ends of the net's tracks, each once, where no via is.
+        let mut ends: Vec<(Point, u8)> = c
+            .segs
+            .iter()
+            .flat_map(|s| [(s.a, s.l), (s.b, s.l)])
+            .filter(|(q, _)| !c.vias.contains(q))
+            .collect();
+        ends.sort_unstable();
+        ends.dedup();
+        for (q, l) in ends {
+            let s = Seg { a: q, b: q, l };
+            let width = ctx.widths[usize::from(l)];
+            {
+                let Ok(end) = Shape::circle(q, width) else {
+                    continue;
+                };
+                let reach = Rect::new(q, q).expand(width / 2 + 1);
+                for &(pad, center) in &pads {
+                    if center == q
+                        || !pad.layers.contains(LayerId(l))
+                        || !pad.shape.bbox().intersects(&reach)
+                        || !pad.shape.touches(&end)
+                        // A track from here whose middle line comes to the pad joins the
+                        // two by its width: two routes may end at one place, and one of
+                        // them go on into the pad.
+                        || c.segs.iter().any(|o| {
+                            o.l == l
+                                && (o.a == q || o.b == q)
+                                && Shape::track(o.a, o.b, 2).is_ok_and(|line| pad.shape.touches(&line))
+                        })
+                    {
+                        continue;
+                    }
+                    // To a point just inside the pad on the way to where its routes end, which
+                    // is copper that the track's round end all but covers already; or all
+                    // the way there.
+                    let holds = |p: Point| Shape::circle(p, 2).is_ok_and(|d| pad.shape.touches(&d));
+                    let on_way = |k: i64| {
+                        Point::new(
+                            q.x + (center.x - q.x) * k / INTO_PAD_PARTS,
+                            q.y + (center.y - q.y) * k / INTO_PAD_PARTS,
+                        )
+                    };
+                    let (mut out, mut inside) = (0, INTO_PAD_PARTS);
+                    while inside - out > 1 {
+                        let mid = (out + inside) / 2;
+                        if holds(on_way(mid)) {
+                            inside = mid;
+                        } else {
+                            out = mid;
+                        }
+                    }
+                    let far = ((center.x - q.x) as f64).hypot((center.y - q.y) as f64);
+                    let more_in = (INTO_PAD * INTO_PAD_PARTS as f64 / far.max(1.0)).ceil() as i64;
+                    let near = on_way((inside + more_in).min(INTO_PAD_PARTS));
+                    for to in [near, center] {
+                        let piece = Seg {
+                            a: q,
+                            b: to,
+                            l: s.l,
+                        };
+                        let free = Shape::track(q, to, width).is_ok_and(|t| {
+                            world.track(ctx.net, LayerId(s.l), &t, None) == Verdict::Free
+                        });
+                        if free {
+                            if !more.contains(&piece) {
+                                more.push(piece);
+                            }
+                            break;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        // And the same beside a via of the net, the run's own or the board's: to its centre.
+        if let Some((diameter, _)) = ctx.via {
+            let fixed = design
+                .board
+                .vias
+                .iter()
+                .filter(|v| v.net == Some(ctx.net))
+                .map(|v| (v.at, v.diameter, LayerSet::span(v.from, v.to)));
+            let all = LayerSet(u64::MAX);
+            let vias: Vec<(Point, i64, LayerSet)> = c
+                .vias
+                .iter()
+                .map(|&v| (v, diameter, all))
+                .chain(fixed)
+                .collect();
+            let far = |a: Point, b: Point| ((a.x - b.x) as f64).hypot((a.y - b.y) as f64);
+            let mut ends: Vec<(Point, u8)> = c
+                .segs
+                .iter()
+                .flat_map(|s| [(s.a, s.l), (s.b, s.l)])
+                .collect();
+            ends.sort_unstable();
+            ends.dedup();
+            for (q, l) in ends {
+                let width = ctx.widths[usize::from(l)];
+                for &(at, dia, layers) in &vias {
+                    let d = far(q, at);
+                    if !layers.contains(LayerId(l))
+                        || d <= (dia / 2) as f64
+                        || d >= ((dia + width) / 2) as f64
+                        || c.segs.iter().any(|o| {
+                            o.l == l
+                                && (o.a == q || o.b == q)
+                                && Shape::track(o.a, o.b, 2).is_ok_and(|line| {
+                                    Shape::circle(at, dia).is_ok_and(|v| v.touches(&line))
+                                })
+                        })
+                    {
+                        continue;
+                    }
+                    let piece = Seg { a: q, b: at, l };
+                    let free = Shape::track(q, at, width)
+                        .is_ok_and(|t| world.track(ctx.net, LayerId(l), &t, None) == Verdict::Free);
+                    if free && !more.contains(&piece) {
+                        more.push(piece);
+                    }
+                    break;
+                }
+            }
+        }
+        if !more.is_empty() {
+            laid += more.len();
+            c.unplace(world);
+            c.segs.extend(more);
+            c.place(world, ctx);
+        }
+    }
+    laid
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::tests::{MM, design, smd};
     use super::{BRANCH_CUTS, BRANCH_TERMINALS, loses_branches, row_origins, said_all};
     use crate::geom::drc::Pad;
     use crate::geom::{Point, Rect, Shape};
+
+    #[test]
+    fn two_tracks_that_touch_by_their_round_ends_alone_are_two_terminals() {
+        use crate::geom::LayerId;
+        use crate::geom::drc::Track;
+        use crate::id::NetId;
+        // Two pads of a net 3 mm apart, each with a stub towards the other. The stubs end
+        // 0.19 mm apart: their round ends overlap, and neither's middle line comes to the
+        // other's copper.
+        let mut d = design(1, vec![smd(0, 0, 1), smd(3 * MM, 0, 1)], 2);
+        let stub = |from: i64, to: i64| Track {
+            start: Point::new(from, 0),
+            end: Point::new(to, 0),
+            mid: None,
+            width: 200_000,
+            layer: LayerId(0),
+            net: Some(NetId(1)),
+        };
+        d.board.tracks = vec![stub(0, 1_405_000), stub(3 * MM, 1_595_000)];
+        assert_eq!(super::terminals(&d, NetId(1)).len(), 2);
+        // With the end of one inside the round end of the other they are one piece.
+        d.board.tracks[1] = stub(3 * MM, 1_495_000);
+        assert_eq!(super::terminals(&d, NetId(1)).len(), 1);
+        // And a track is one piece with a pad where its middle line comes to the pad, not
+        // where its round end alone does: 0.38 mm from the centre of a pad of 0.6 mm.
+        d.board.tracks = vec![stub(380_000, 2 * MM)];
+        let groups = super::terminals(&d, NetId(1));
+        assert_eq!(groups.len(), 2);
+        assert!(groups.iter().all(|(_, ends)| ends.is_empty()), "{groups:?}");
+        d.board.tracks = vec![stub(290_000, 2 * MM)];
+        let groups = super::terminals(&d, NetId(1));
+        assert_eq!(groups.iter().map(|(_, ends)| ends.len()).sum::<usize>(), 2);
+    }
+
+    #[test]
+    fn a_track_that_ends_beside_its_pad_by_its_round_end_is_taken_into_the_pad() {
+        use super::super::geometry::{NetCopper, Seg};
+        use super::super::world::World;
+        let d = design(1, vec![smd(0, 0, 1), smd(5 * MM, 0, 1)], 2);
+        let mut world = World::new(
+            &d.board,
+            &d.rules,
+            &d.outline,
+            d.edge_clearance,
+            &d.obstacles,
+        )
+        .unwrap();
+        let jobs = super::jobs(&d, &world, 200_000, &[], &[]);
+        assert_eq!(jobs.len(), 1);
+        // From the far pad to 0.38 mm from the near one's centre: 80 um outside its copper,
+        // with the round end of a track of 0.2 mm 20 um into it.
+        let lay = |world: &mut World<'_>, to: i64| {
+            let mut c = NetCopper::default();
+            c.segs.push(Seg {
+                a: Point::new(5 * MM, 0),
+                b: Point::new(to, 0),
+                l: 0,
+            });
+            c.place(world, &jobs[0].ctx);
+            vec![Some(c)]
+        };
+        let mut copper = lay(&mut world, 380_000);
+        assert_eq!(super::into_pads(&mut world, &d, &jobs, &mut copper), 1);
+        let c = copper[0].as_mut().unwrap();
+        // To 10 um inside the pad's copper, which ends 0.3 mm from its centre.
+        let piece = c
+            .segs
+            .iter()
+            .find(|s| s.a == Point::new(380_000, 0) && s.b.x < 380_000);
+        assert!(
+            piece.is_some_and(|s| s.b.y == 0 && (285_000..=291_000).contains(&s.b.x)),
+            "{:?}",
+            c.segs
+        );
+        // Once: the end goes on now.
+        assert_eq!(super::into_pads(&mut world, &d, &jobs, &mut copper), 0);
+        copper[0].as_mut().unwrap().unplace(&mut world);
+        // A track whose middle line comes to the pad, and one that ends clear of it, are
+        // left as they are.
+        for to in [290_000, 450_000] {
+            let mut copper = lay(&mut world, to);
+            assert_eq!(
+                super::into_pads(&mut world, &d, &jobs, &mut copper),
+                0,
+                "{to}"
+            );
+            copper[0].as_mut().unwrap().unplace(&mut world);
+        }
+    }
 
     #[test]
     fn the_rounds_of_cadlab_s_router_plan_no_net_on_a_pour_of_an_outer_layer() {

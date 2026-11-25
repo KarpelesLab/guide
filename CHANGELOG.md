@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.45](https://github.com/KarpelesLab/guide/compare/v0.0.44...v0.0.45) - 2026-11-25
+
+### Added
+
+- *(pcb)* two options for a host's last run, both on by default: what is left open explained (explain), the search for fewer vias (fewer_vias) ([#88](https://github.com/KarpelesLab/guide/pull/88))
+
 ## [0.0.44](https://github.com/KarpelesLab/guide/compare/v0.0.43...v0.0.44) - 2026-11-24
 
 ### Fixed

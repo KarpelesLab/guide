@@ -5911,6 +5911,140 @@ at a time.
   are what it has for the balls left shut in, and no other way to those was tried.
 - More than one thread, or a deadline: the comparison is by nodes.
 
+## PCB routing: the negotiation of the native rounds ended by a count, between two rounds, and three rounds after its fewest shared points
+
+Measured through cadlab at 60 s, four runs at a time on three threads, the load 4.5 to 7.7,
+and at budgets of nodes on one thread. cadlab's commit for this is its decision D146.
+
+### One order of the nets, two boards
+
+A run with a deadline and no budget of work ended the negotiation of the rounds of
+`Rounds::Native` when nine tenths of the stage's share of the time had passed: inside a
+round, in the search of whichever net had its turn. The connections of that batch were left
+as failed, and what followed had what the clock left. `tinytapeout-demo`'s ninth order,
+four times side by side with 0.0.48: the same nodes in the four runs to the end of round 19
+(107.8 million), then 111.1, 113.5 and 112.0 million when the share passes inside round 20;
+one run ends at round 31 with nothing shared, three are ended by the clock at rounds 37 and
+38 with 17 points shared in their best round and leave a pad of a pour open.
+
+Three changes, on the sixteen orders of that board twice each:
+
+| | orders the same board in both sets, of 16 | connections open, by set |
+|---|---|---|
+| 0.0.48 | 7 | 7 and 2 |
+| the share asked about between two rounds | 15 | 7 and 6 |
+| and by a count of nodes (`RouteOptions::rounds_nodes`) | 16 | 2 and 2 |
+| and the rounds ended three rounds after their fewest shared points (0.0.49) | 15 | 0 and 0 |
+
+- *Between two rounds* the board is the same whatever the clock did inside the round; inside
+  one only a guard later than the share ends a search (0.95 of the stage). What is left to
+  the clock is which round is the last, and the time of the retry and of the pass for fewer
+  vias after the rounds: the order that differs has the same rounds and 34 or 41 vias saved.
+- *By a count* the host says what the negotiation has in nodes. It ends between the two
+  rounds that the count falls between, or goes on to 1.6 times the count if it is near its
+  end there (fewer points shared than a quarter of the connections); one that its count
+  ended has no retry after it, as one that the clock ended had none; the routes are made
+  legal and the pass for fewer vias runs to its own end; the clock is a guard at 0.85 of
+  what the run has left when the stage begins. cadlab makes the count from its budget: 0.42
+  of the first run's seconds at 2.8 million nodes a second for one thread and half of each
+  further one, 110 million nodes at 60 s on three threads. The stage visited 5.5 to 5.7
+  million nodes a second on three threads on `tinytapeout-demo`, 5.9 on `buspirate5-rev10`
+  and 6.5 on `lumenpnp-mobo`.
+- *Three rounds after the fewest*: below.
+
+As released, beside 0.0.48 in the same minutes (cadlab's commit with 0.0.49 from the
+registry): the sixteen orders three times are the same sixteen boards in the three sets,
+for 6 of 16 with 0.0.48; the ninth order eight times is one board (no connection open, 264
+vias, 4840.6 mm) for five boards in eight runs (262 to 283 vias, 4788 to 4904 mm, the pad
+open in six). The fifteenth of 16 in the table above is the seventh order, whose rounds the
+count ends: it is one board in the three final sets. `corne-cherry`'s and
+`glasgow-revC3`'s first order, which have this crate's own rounds, are one board in eight
+runs with either version.
+
+### The connection that the tenth order left open
+
+`tinytapeout-demo`'s tenth order left mng6 open in every set of the last three rounds of
+measuring; 0.0.48's section has what the settling tries for it. It is lost before that, in
+these rounds. A negotiation ended at the first round that left one shared point for every
+32 connections or fewer, once the price of a shared point was at its most. In the tenth
+order that is round 16, with 12 points shared among three nets; mng6 is not one of them.
+The legalisation takes three wires out, and the retry gives the first failed connection, of
+another net of two pads, the room of the wires in its way, mng6's among them: mng6 has no
+way back, and enters the passes with no route. With the rounds going on, they have 6, 14
+and 2 points shared after the three rounds that follow, and both nets routed.
+
+A negotiation now ends on that rule three rounds after its fewest shared points have last
+become fewer, and restores that round as before. Tried first: the wait on the round's own
+count of shared points, which goes on for long where the count moves above the mark (one
+order with a connection open, 275 vias in the median); two rounds for three, as good by the
+connections, one order at 304 vias.
+
+The sixteen orders, three sets, 0.0.49 beside 0.0.48 in the same minutes:
+
+| | 0.0.48 | 0.0.49 |
+|---|---|---|
+| connections open, by set | 7, 2, 5 | 0, 0, 0 |
+| vias, median of the orders | 271, 270, 270.5 | 271.5 in each |
+| vias, least to most | 256 to 328 | 254 to 297 |
+| track, median (mm) | 4860, 4856, 4855 | 4858 in each |
+| time, median (s) | 46 to 47 | 43 |
+| pads short of two spokes, sum of the orders | 22, 24, 19 | 23 in each |
+
+### Budgets of nodes, and the table at 60 s
+
+With a budget of work the count is the budget's already, and only the third change is in the
+run. 569 connections open at 40 million nodes over nine boards in three orders for 570
+(`tinytapeout-demo`'s third order none for 1) and 164 at 150 million over seven boards in
+two for 164 (`glasgow-revD1` 56 and 75). 34 of 41 runs are the same board; the seven others
+are of the three boards with these rounds: `lumenpnp-mobo`'s first order 327 vias and 5228
+mm for 339 and 5335 at both budgets, `buspirate5-rev10` two vias fewer in one order,
+`tinytapeout-demo` within 3 vias and 36 mm either way in four.
+
+Beside cadlab's own router at 60 s (twelve boards in four orders, `tinytapeout-demo` in
+eight, six measures): 35 cells better, 30 equal and 7 worse of 72, for 35, 29 and 8 with
+0.0.48 in the same minutes (`tinytapeout-demo`'s vias, 272.5 against 273 for 280.5). The
+seven are those of 0.0.48's table: `corne-cherry`'s time; `tinytapeout-demo`'s track outside
+the pads; `glasgow-revC3`'s track and track outside the pads; `glasgow-revD1`'s vias, track
+and track outside the pads. No pad without a spoke, no neck, and the router's count of open
+connections is cadlab's DRC's in every run.
+
+### Where `tinytapeout-demo`'s track outside the pads is
+
+On the nets that both routers complete (135 or 136 of them), over four orders: 18953 mm
+outside the pads for cadlab's router's 18034, 5.1 % more.
+
+| nets | this crate (mm) | cadlab's router (mm) | more | vias |
+|---|---|---|---|---|
+| neither bus nor power | 8247 | 7886 | +360 (4.6 %) | 410 for 380 |
+| uio0 to uio7 | 2370 | 2133 | +237 (11.1 %) | 113 for 95 |
+| ui_in | 2632 | 2510 | +122 (4.9 %) | 111 for 112 |
+| mng | 1471 | 1370 | +101 (7.4 %) | 107 for 104 |
+| the short nets round the RP2350 | 605 | 526 | +79 (15.0 %) | 88 for 57 |
+| uo_out | 1797 | 1781 | +16 (0.9 %) | 102 for 98 |
+| with pours | 1833 | 1828 | +4 (0.2 %) | 104 for 131 |
+
+The trees that these rounds hand to the passes are 19637 mm in all, inside the pads too,
+for 19178 mm of the board that leaves: the passes and the steps after them shorten the
+routes, and the excess is in what the negotiation lays. Measured and not kept: the price of
+a point's history at 1 for 2 (cadlab's router has 0.5): 7 connections open in sixteen
+orders for none, 6 runs ended by their budget for 1, and 6.4 % more outside the pads.
+
+### Found and not mended, and what remains open
+
+- *The joints that cadlab's last step makes whole* (0.0.48's section) are in this crate's
+  first run as it leaves: a route's end at a point of the lattice 50 to 55 um outside its
+  pad's edge with no piece into the pad (`corne-cherry`, three or four a run at the pads of
+  its two USB-C connectors; `cynthion`, one), the tracks of two pads of one net ended 0.24
+  mm apart (`lumenpnp-mobo`), a track's end beside a via under an array
+  (`glasgow-revC3`). Which stage leaves each was not found: 20 pieces in 11 of 52 runs, as
+  with 0.0.48.
+- *The clock elsewhere*: the stages after these rounds, a host's later runs, and this
+  crate's own rounds are ended by the time still. A run that ends near its deadline can be
+  two boards.
+- *The count is a host's to make*: nodes a second are of a machine and a number of
+  threads. On a machine slower than the count was made for the guard ends the stage, later
+  in the run than the share did; not measured.
+
 ## PCB routing: no track told needless for the round end that the track before it has on a pad
 
 0.0.47 stopped `needless_between` from telling a host a track for needless where two tracks

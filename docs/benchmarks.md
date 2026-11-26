@@ -5911,6 +5911,194 @@ at a time.
   are what it has for the balls left shut in, and no other way to those was tried.
 - More than one thread, or a deadline: the comparison is by nodes.
 
+## PCB routing: each net laid again among the others with its searches made ahead on the run's threads, and where a host's run that moves routes spends its time: measured and built, not kept
+
+Measured through cadlab at 60 s, four runs at a time on three threads, the load 3 to 10 with
+other work on the machine (noted where it was more), and at budgets of nodes on one thread.
+cadlab's commit for this is its decision D151. Nothing here is released: 0.0.52 is as it was.
+What was built is a branch, `feat-29` (pull request 113, closed), which lays the same routes
+sooner and waits for the step after it.
+
+### Where the step's time is
+
+Each net is laid again among the others once every net has its route, by the negotiation's
+search over its grid (`whole::again`, 0.0.25): the first step of cleanup in a run with a
+budget, with half of cleanup's time. Prints in a build that is in no release: of
+`glasgow-revD1`'s 1.8 s, 0.38 s are the grid's set-up, 0.27 s of it the places where routes
+may end at the pads; the rest is the searches, 1.2 to 1.3 s for 0.1 s of everything else, and
+the searches are few and long, 3.8 million nodes in 369 with 1.7 million of them in ten. The
+first time through the nets, for fewer vias alone, is 1.7 s of the 1.8 s and keeps 12 to 16
+nets of 346; the second time begins with the same nets and the same search for each.
+
+### The searches made ahead, and kept
+
+On the branch, in a run with no budget of nodes:
+
+- The first search of each net's turn is made ahead of the turn on the run's other threads,
+  for the next eight nets at any time, each against the claims as they are with the net's
+  own left out of its count, as the rounds route theirs (`Board::route_task`; the places
+  where a net's routes may end at its pads counted its own claims, and no longer do). At
+  its turn the search stands if no net that had its turn since it was asked for has claims
+  that changed in a block of eight cells where the search expanded a node, or beside one,
+  and is made again there and then if one has. The claims change only at the points where a
+  net's new copper is not its old, so a search on another thread that asks about none of
+  them is the same before, during and after.
+- A net's search stands from one time through the nets to the next by the same rule.
+- The places where routes may end at the pads are asked of the board by net, on the run's
+  threads.
+
+With 4, 16 and 64 nets ahead `glasgow-revD1`'s first time through the nets took 0.99, 0.83
+and 0.97 s of searches on three threads, and 0.79 s with 8: a search that a thread is long
+at is not waited for with the others idle, and each net that ends with other copper sends
+back the searches that looked where it was (21 to 100 of 346).
+
+### The same routes
+
+A test of eleven nets on one, two and four threads. On eight boards in two orders at a
+budget of nodes that does not bind, with the searches ahead and kept beside a search at
+every turn: the step's own counts and the whole board, track for track, are the same in 16
+runs of 16 (of 6 to 877 searches made ahead a run, none to 96 were made again at their
+turn). At 40 and 150 million nodes the 41 runs are the boards of 0.0.52, the step being as
+it was in a run with a budget of nodes: 569 and 164 connections open, in both forms below.
+
+`corne-cherry`'s 1.9 and 1.8 s of the step in its first run and in its host's run for
+shorter ways are 1.0 and 0.7 s on three threads, with 52 to 159 of 327 to 331 searches kept
+from the time before, and the same board leaves 2.0 s sooner; `cynthion`'s 0.36 and 0.94 s
+are 0.27 and 0.66 s.
+
+### Ended by the time itself: not kept
+
+With the step ended by its time, `glasgow-revD1`'s first run, whose deadline ends the step,
+lays 27 to 106 nets again of 385 to 700 looked at, where a search at every turn lays 12 to
+16 of 347 to 351; in one order of four the three times through the nets end (154 kept of
+1122). Four orders side by side with 0.0.52 in the same minutes, three sets:
+
+| `glasgow-revD1` | runs each | connections open | vias, mean | track outside the pads, mean | pads short of two spokes | the host's second run made |
+|---|---|---|---|---|---|---|
+| a search at each turn, the same build | 12 | 136 | 1136.4 | 10233 mm | 129 | 11 of 12 |
+| ahead and kept, ended by the time | 12 | 137 | 1132.8 | 10154 (-0.77 %) | 141 | 12 of 12 |
+| 0.0.52 | 12 | 134 | 1137.6 | 10228 | 137 | 12 of 12 |
+| the branch | 12 | 136 | 1134.8 | 10158 (-0.69 %) | 142 | 8 of 12 |
+| 0.0.52 | 24 | 269 | 1140.0 | 10201 | 271 | 24 of 24 |
+| the branch, its time ending the searches on every thread | 24 | 270 | 1134.5 | 10168 (-0.33 %) | 281 | 20 of 24 |
+
+0.33 to 0.77 % less track outside the pads and 3 to 6 vias fewer a board, 543 connections
+open in the 48 runs for 539, and the host's second run, for the nets open on the filled
+board, made in 40 runs of 48 for 47. What follows the step in a first run is the joining of
+the pads that the routes cut off their fills: stubs by `detail`'s search, a pad at a time,
+which may run past the run's deadline (0.0.42). `glasgow-revD1`'s first run has 3.2 s for
+cleanup in its default order; the step has half, and the joining 1.0 to 1.1 s with 11 to 16
+nets laid again and 1.10 to 1.32 s with 26 to 38, about 9 ms for each net more. With 65 to
+106 it has no room (an inference from that slope: the runs that ended late had no prints):
+cleanup is not begun and the run is back at 42.7 to 43.0 s for 42.2 s, in 3 of the branch's
+36 runs and none of 36 of 0.0.52, and the host's next run, begun with a few tenths of a
+second to spare, is not made. It is what a larger share of cleanup's time for the step gave
+(the section after this one), by the step's speed for its share.
+
+### Ended when one thread would have had its time: not kept
+
+The step's time is then counted as one thread would have spent it: what each search and each
+turn took, wherever and whenever the search was made. In the same minute and order the
+branch has 779 nets looked at and 141 kept where a search at every turn has 699 and 108,
+0.24 s sooner; in the default order 368 and 21 for 348 and 12 to 16, the joining leaves
+0.9 s of cleanup's 3.5 s, and the run is back at 42.2 s. `glasgow-revD1` in four orders six
+times beside 0.0.52, under a load of 7 to 52: 274 connections open for 274, 1140.5 vias for
+1142.6, 0.35 % less track outside the pads, 274 pads short of two spokes for 265, and the
+host's second run made in 20 runs of 24 for 21.
+
+Twelve boards in four orders beside 0.0.52 in the same minutes: 43 of 48 board-orders are
+the same board to the connection, the via and 0.1 mm of track. `corne-cherry` leaves after
+54.2, 23.4, 28.6 and 39.3 s for 54.2, 25.0, 30.6 and 41.7 s, `cynthion` after 29.0 to 32.4 s
+for 29.5 to 33.8, `sweep-v2.2` after 33.8 to 34.9 s for 34.7 to 35.6. The five others are
+`glasgow-revD1`'s four, whose runs the clock ends, and `glasgow-revC3`'s first, which has two
+boards with either build.
+
+`tinytapeout-demo` in sixteen orders, three sets, the branch beside 0.0.52: no connection
+open in the 48 runs of either; vias 271.6, 271.2 and 271.6 in the mean for 271.2 in each
+set, the track the same to 0.1 mm in the mean, 20 pads short of two spokes a set with both,
+46 s in the median for 47 to 48. 14 of 16 orders are the same board in the three sets where
+0.0.52 has 15: the seventh order has 279 vias in two sets and 272 in one, for 272 in the
+three. Its first run is ended by the clock in cleanup, 8.3 s after cleanup began; with the
+step sooner the searches after it get 2.4 million nodes further in the same time, the board
+that goes on differs by two of the tracks between pads that a pour joins, and the host's
+last run is then not kept, its check finding a connection that a pour joined open and no
+track to tell the net by.
+
+Not kept: what this form gives is two seconds on the one board whose time is worse than
+cadlab's router's, where it stays worse, and a second on boards that are better already;
+what it costs is an order that is one board on every run. A step made faster in a run that
+the clock ends moves that run's board.
+
+### Beside cadlab's router
+
+0.0.52 again, twelve boards in four orders (`tinytapeout-demo` in eight) beside cadlab's
+router with seeds 1 to 4 in the same minutes, twice: 35 cells better, 31 equal and 6 worse of
+72 in both sets, as before. The six are `corne-cherry`'s time (25 to 54 s against 22 to
+25 s); `glasgow-revC3`'s track and track outside the pads (3508 mm against 3216); and
+`glasgow-revD1`'s vias, track and track outside the pads. On the nets that both routers
+complete, 18 cells better, 14 equal and 4 worse of 36 and 17, 14 and 5. No pad without a
+spoke, no pad made solid by a track, no DRC error but unrouted and no joint by a round end
+alone in the 104 runs and in the 48 of the sixteen orders.
+
+### A host's run that moves routes, and a pass's patience by what is open: measured, built, not kept
+
+`corne-cherry`'s slowest order leaves after 54 s where cadlab's router takes 23 to 27 s, and
+26.7 s of it are one connection of a net of two pads that the rounds leave open: the first
+pass 2.0 million nodes and 2.7 s, the negotiation for it 1.6 million and 1.9 s, the two
+passes on the finer lattice 2.0 million each, 3.9 and 4.0 s, and the same again in the host's
+first run that moves routes (10.6 s) and the first pass of its second (3.2 s). A sampler,
+gdb stopping the process eight times a second: 81 % of the first run's passes and settling
+is `detail`'s search, 0.5 to 0.8 million nodes a second, on one thread; of the run that
+moves routes, 8.7 s, the set-up is 0.6 s, the host's fill of the board around the routes it
+was handed, the joints of the pads counted on it and the pieces of the planned planes about
+1.6 s as the first pass begins, and the rest is the nodes of the passes. Every one of these
+passes ends at `STALL_NODES`, two million nodes after its last connection, which here is
+none.
+
+Over the 41 runs at the two budgets of nodes: 139 passes of 0.2 million nodes or more, or
+with a connection made; 75 of 1.9 million or more, of which 50 made nothing, 135 million
+nodes of the 409 million that the passes have. Of 18 passes on the finer lattice begun with
+three nets or fewer, 7 make their connection: `lumenpnp-mobo`'s last, in the five runs that
+it has at the two budgets, 0.30, 0.34 and 0.64 million nodes into the pass, and `nrfmicro`'s
+in two orders 0.09 and 0.02 million nodes into a pass that follows one of 2.0 to 2.7 million
+that made nothing.
+
+Built, on a switch: the least that a pass goes on for after its last connection the less of
+two million nodes and 300 or 600 thousand for each connection open as it begins. With 300
+thousand, 570 connections open at 40 million nodes for 569 (`lumenpnp-mobo`'s connection at
+0.64 million); with 600 thousand, 569 and 164 and the 41 runs the same boards, `nrfmicro`'s
+two orders that end early done after 8.5 and 20.1 million nodes for 10.0 and 22.9, and that
+connection within one search of the limit. At 60 s `corne-cherry`'s four orders are the same
+four boards in 54.0, 26.7, 31.3 and 42.0 s for 54.8, 26.5, 31.2 and 41.7 s: the slowest
+order's first run ends at 29.6 s for 36.2 s, and the host has three runs that move routes
+where it had two. Not kept.
+
+### What this does not show
+
+The six cells that are worse than cadlab's router are as they were, and nothing is
+released. `corne-cherry`'s time is its rounds in two orders of four, 19 s for 14 to 16 s,
+and the tries for one connection that cadlab's router leaves open as well; with nothing at
+all done for that connection the slowest order would still take 31 s. Cheaper tries do not
+shorten the minute, since the host has more of them, and ending them loses a connection at a
+budget of nodes (the section after this one).
+
+What the step's speed could lay again in a run that its deadline ends waits for the joining
+that follows it: each net laid again is 9 ms of that joining on `glasgow-revD1`, whose first
+run has half a second to spare, about 55 nets, and whose host's next run depends on that run
+ending on time. The joining is a search a pad at a time on one thread, and the search for
+fewer vias of the largest net after it, 0.2 to 1.4 s on that board, is ended by the deadline
+in every run and gives nothing. With the joining made ahead as the step's searches are, or
+made before the step with a second one for what the step cuts, the branch is the other half.
+
+`glasgow-revC3` is level with cadlab's router as its first run ends and has 2 % more track
+after it. The step that would take it off is there: the host's run for shorter ways takes
+60 to 70 mm and 4 to 7 vias off, 1.7 to 1.9 % of the board's track, in the two orders of
+four where it has 2.8 to 2.9 s for its searches. The 11 to 16 s before it are the host's run
+that moves routes, which its deadline ends in every order and which makes at least four
+connections in one order and none in three. With 3 s of that run kept for the run for
+shorter ways the board has 0.6 % less track and 62 connections open in eight runs for 60;
+with 5 s, 1.2 % less and 70 for 60.
+
 ## PCB routing: a board with this crate's own rounds beside cadlab's router, round by round and step by step, and what was built for it and not kept
 
 Measured through cadlab at 60 s, four or five runs at a time on three threads, the load 5 to 9

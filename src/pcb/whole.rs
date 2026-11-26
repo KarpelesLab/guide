@@ -437,6 +437,9 @@ struct Scratch {
     /// being routed claims it itself, for a net routed with its claims still in place.
     own_t: Vec<u8>,
     own_v: Vec<u8>,
+    /// By [block](Board::block) of cells, whether a search expanded a node in it since
+    /// this was last cleared: kept only while it is not empty.
+    looked: Vec<u64>,
 }
 
 /// A binary heap of costs and nodes, the least first, and of equal costs the least node.
@@ -983,6 +986,60 @@ impl Board {
         keys
     }
 
+    /// The block of [`LOOK`] cells a side that a cell is in.
+    fn block(&self, x: i32, y: i32) -> usize {
+        let across = (self.grid.w as usize).div_ceil(LOOK);
+        (y.max(0) as usize / LOOK) * across + x.max(0) as usize / LOOK
+    }
+
+    /// A search's memory of where it looked, cleared: with the places where the routes of
+    /// `net` may end, which every search for it asks about.
+    fn look(&self, sc: &mut Scratch, net: &WNet) {
+        let across = (self.grid.w as usize).div_ceil(LOOK);
+        let down = (self.grid.h as usize).div_ceil(LOOK);
+        sc.looked.clear();
+        sc.looked.resize((across * down).div_ceil(64), 0);
+        for a in net.terms.iter().flatten() {
+            let (_, x, y) = self.unpack(a.node);
+            let b = self.block(x, y);
+            sc.looked[b >> 6] |= 1 << (b & 63);
+        }
+    }
+
+    /// The blocks that a search has to have looked in to have asked about a claim in one
+    /// of `cells`: a search asks about the nodes round those it expands, and the points
+    /// half way to them.
+    fn blocks_near(&self, cells: &[(i32, i32)]) -> Vec<u64> {
+        let across = (self.grid.w as usize).div_ceil(LOOK);
+        let down = (self.grid.h as usize).div_ceil(LOOK);
+        let mut out = vec![0u64; (across * down).div_ceil(64)];
+        let (w, h) = (self.grid.w - 1, self.grid.h - 1);
+        for &(x, y) in cells {
+            for (dx, dy) in [(-2, -2), (2, -2), (-2, 2), (2, 2)] {
+                let b = self.block((x + dx).clamp(0, w), (y + dy).clamp(0, h));
+                out[b >> 6] |= 1 << (b & 63);
+            }
+        }
+        out
+    }
+
+    /// The cells that the claims `keys` are in: of a point between two cells, the lesser.
+    fn key_cells(&self, keys: &[u64]) -> Vec<(i32, i32)> {
+        let (w, dw) = (self.grid.w as usize, self.grid.dw() as usize);
+        let dn = self.grid.dpoints();
+        keys.iter()
+            .map(|&k| {
+                let (_, map, idx) = self.unkey(k);
+                if map == self.layers {
+                    ((idx % w) as i32, (idx / w) as i32)
+                } else {
+                    let at = idx % dn;
+                    ((at % dw) as i32 / 2, (at / dw) as i32 / 2)
+                }
+            })
+            .collect()
+    }
+
     /// Adds a net's claims to those of the others, or takes them away again.
     fn occupy(&self, keys: &[u64], add: bool) {
         for &k in keys {
@@ -1306,6 +1363,7 @@ impl Board {
             lb_heap: Heap::default(),
             own_t: vec![0; self.layers * self.grid.dpoints()],
             own_v: vec![0; self.grid.cells()],
+            looked: Vec::new(),
         }
     }
 
@@ -1725,6 +1783,10 @@ impl Board {
                 break;
             }
             pops += 1;
+            if !sc.looked.is_empty() {
+                let b = self.block(x, y);
+                sc.looked[b >> 6] |= 1 << (b & 63);
+            }
             if pops & 1023 == 0
                 && (ctl.run.is_some_and(Run::poll) || ctl.flag.load(Ordering::Relaxed))
             {
@@ -1869,6 +1931,7 @@ impl Board {
         tree: &[u32],
         other: Rect,
         mode: Mode,
+        own: &[u8],
     ) -> Vec<(u32, f32)> {
         let mut out: Vec<(u32, f32)> = tree.iter().map(|&n| (n, 0.0)).collect();
         let dn = self.grid.dpoints();
@@ -1886,7 +1949,8 @@ impl Board {
                 }
                 if mode == Mode::Hard {
                     let (l, x, y) = self.unpack(a.node);
-                    if count(&self.occ_t[net.halo][l * dn + self.grid.didx(2 * x, 2 * y)]) > 0 {
+                    let k = l * dn + self.grid.didx(2 * x, 2 * y);
+                    if count(&self.occ_t[net.halo][k]) > u16::from(own[k]) {
                         continue;
                     }
                 }
@@ -1965,9 +2029,9 @@ impl Board {
             if ra == rb {
                 continue;
             }
-            let sources = self.ends(net, &members[ra], &tree[ra], boxes[rb], mode);
+            let sources = self.ends(net, &members[ra], &tree[ra], boxes[rb], mode, &sc.own_t);
             let targets: Vec<u32> = self
-                .ends(net, &members[rb], &tree[rb], boxes[ra], mode)
+                .ends(net, &members[rb], &tree[rb], boxes[ra], mode, &sc.own_t)
                 .into_iter()
                 .map(|(n, _)| n)
                 .collect();
@@ -3017,7 +3081,7 @@ fn finer_rounds(
         h: g.dh(),
     };
     let (mut board, mut nets, mut sc) =
-        setup_on(design, world, world, jobs, grid, (twice, 2), run).ok()?;
+        setup_on(design, world, world, None, jobs, grid, (twice, 2), run).ok()?;
     // A via costs what it did, in steps half as long.
     board.via_scale = 2.0;
     for (i, net) in nets.iter_mut().enumerate() {
@@ -3190,26 +3254,31 @@ fn grid_pitch(
 /// before any is routed, each with the places where its routes may end at its pads, and
 /// a search's memory. `world` is the board that the grid's places are asked of, with no
 /// route of the nets on it; `tolls` is the world that says where the rooms of spokes
-/// are, which may be the same.
-fn setup(
+/// are, which may be the same; `more` makes a world as `world` is for each of that many
+/// threads, which then ask where the routes may end at the pads, a net each: the places
+/// are the same on any number.
+#[allow(clippy::too_many_arguments)]
+fn setup<'r>(
     design: &Design,
     world: &World<'_>,
     tolls: &World<'_>,
+    more: Option<(&(dyn Fn() -> Option<World<'r>> + Sync), usize)>,
     jobs: &[Job],
     (pitch, coarse, finer): (i64, bool, i64),
     bounds: Rect,
     run: &Run<'_>,
 ) -> Result<(Board, Vec<WNet>, Scratch), NoWhole> {
     let grid = make_grid(design, jobs, pitch, bounds);
-    setup_on(design, world, tolls, jobs, grid, (coarse, finer), run)
+    setup_on(design, world, tolls, more, jobs, grid, (coarse, finer), run)
 }
 
 /// [`setup`] on a grid that is given.
-#[allow(clippy::too_many_lines)]
-fn setup_on(
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+fn setup_on<'r>(
     design: &Design,
     world: &World<'_>,
     tolls: &World<'_>,
+    more: Option<(&(dyn Fn() -> Option<World<'r>> + Sync), usize)>,
     jobs: &[Job],
     grid: Grid,
     (coarse, finer): (bool, i64),
@@ -3425,29 +3494,80 @@ fn setup_on(
         }
     }
     let mut sc = board.scratch();
-    // Where routes may end at the pads.
-    for net in &mut nets {
+    // Where routes may end at the pads: by net, each on its own, on the threads that there
+    // are worlds for.
+    let ends = |world: &World<'_>, net: &WNet, near: &mut Vec<EntryId>| {
         let ctx = &jobs[net.job].ctx;
+        let mut terms = vec![Vec::new(); ctx.terminals];
         for pad in &ctx.pads {
             for l in pad.layers.iter() {
                 let li = usize::from(l.0);
                 if li >= layers {
                     continue;
                 }
-                let found = board.access(
-                    world,
-                    net,
-                    pad.center,
-                    pad.bbox,
-                    l,
-                    ctx.widths[li],
-                    &mut sc.near,
-                );
-                net.terms[pad.terminal].extend(found);
+                let found = board.access(world, net, pad.center, pad.bbox, l, ctx.widths[li], near);
+                terms[pad.terminal].extend(found);
             }
         }
-        if run.poll() {
+        terms
+    };
+    let threads = more
+        .map_or(1, |(_, threads)| threads.max(1))
+        .min(nets.len().max(1));
+    if threads > 1 {
+        let turn = std::sync::atomic::AtomicUsize::new(0);
+        let stop = AtomicBool::new(false);
+        let found: Mutex<Vec<Option<Vec<Vec<Access>>>>> =
+            Mutex::new(nets.iter().map(|_| None).collect());
+        // The next net's, if there is one and the run goes on.
+        let one = |world: &World<'_>, near: &mut Vec<EntryId>| {
+            if stop.load(Ordering::Relaxed) {
+                return false;
+            }
+            let k = turn.fetch_add(1, Ordering::Relaxed);
+            let Some(net) = nets.get(k) else {
+                return false;
+            };
+            let terms = ends(world, net, near);
+            found
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)[k] = Some(terms);
+            true
+        };
+        std::thread::scope(|scope| {
+            for _ in 1..threads {
+                scope.spawn(|| {
+                    if let Some(world) = more.and_then(|(make, _)| make()) {
+                        let mut near = Vec::new();
+                        while one(&world, &mut near) {}
+                    }
+                });
+            }
+            while one(world, &mut sc.near) {
+                if run.poll() {
+                    stop.store(true, Ordering::Relaxed);
+                }
+            }
+        });
+        if stop.load(Ordering::Relaxed) {
             return Err(NoWhole::Not);
+        }
+        let found = found
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (net, terms) in nets.iter_mut().zip(found) {
+            // A net that no thread got to: one that had no world.
+            net.terms = match terms {
+                Some(terms) => terms,
+                None => ends(world, net, &mut sc.near),
+            };
+        }
+    } else {
+        for net in &mut nets {
+            net.terms = ends(world, net, &mut sc.near);
+            if run.poll() {
+                return Err(NoWhole::Not);
+            }
         }
     }
     Ok((board, nets, sc))
@@ -3486,6 +3606,7 @@ pub(crate) fn route<'r>(
         design,
         world,
         world,
+        None,
         jobs,
         (pitch, coarse, finer),
         bounds,
@@ -4171,6 +4292,14 @@ const AGAIN_SWEEPS: usize = 3;
 /// How much shorter a net routed again with as many vias has to be to be kept: this
 /// share of its length, and a step at least.
 const AGAIN_SHORTER: f64 = 0.02;
+/// How many nets have their first search made ahead of their turn at any time, where the
+/// run has threads for it, the first time through the nets and after: a search that a
+/// thread is long at is then not waited for with the others idle, and a net that ends with
+/// other copper, as few do the first time and a quarter after, sends back the searches
+/// that looked where it was.
+const AGAIN_AHEAD: usize = 8;
+/// How many cells a side the blocks are by which a search made ahead says where it looked.
+const LOOK: usize = 8;
 
 /// What routing the nets again among the routes as they are ended with.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -4198,13 +4327,23 @@ pub(crate) struct Again {
 /// that all of it is free: the grid errs on the side of room for copper that is off it,
 /// and a route that it allows and the world does not is not kept.
 ///
-/// `base` is the board without the routes, which the grid is asked of; `may` says by job
-/// whether its net may be routed again. A net that is not joined whole, one with copper
-/// to keep, and one whose routes are stubs to its plane are left as they are.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn again(
+/// `base` is the board without the routes, which the grid is asked of, and `make_base`
+/// makes another as it is for a thread of its own; `may` says by job whether its net may
+/// be routed again. A net that is not joined whole, one with copper to keep, and one
+/// whose routes are stubs to its plane are left as they are.
+///
+/// In a run with no budget of nodes the searches are made ahead of the nets' turns on
+/// [`RouteOptions::threads`] threads and stand from one time through the nets to the
+/// next, each for as long as no net has other copper where it looked; the routes are
+/// those of one thread and of a search at every turn. `glasgow-revD1`, whose first run's
+/// deadline ends this step: 16 nets kept of 348 looked at in 1.8 s with a search at each
+/// turn, the first time through alone, and 77 to 106 of 578 to 700 with the searches
+/// ahead on three threads, well into the second (`docs/benchmarks.md`).
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(crate) fn again<'r>(
     design: &Design,
     base: &World<'_>,
+    make_base: &(dyn Fn() -> Option<World<'r>> + Sync),
     world: &mut World<'_>,
     jobs: &[Job],
     copper: &mut [Option<NetCopper>],
@@ -4220,9 +4359,16 @@ pub(crate) fn again(
         return out;
     }
     let pitch = grid_pitch(design, jobs, options, (pitch, coarse, 2));
-    let Ok((mut board, mut nets, mut sc)) =
-        setup(design, base, world, jobs, (pitch, coarse, 2), bounds, run)
-    else {
+    let Ok((mut board, mut nets, mut sc)) = setup(
+        design,
+        base,
+        world,
+        Some((make_base, options.threads)),
+        jobs,
+        (pitch, coarse, 2),
+        bounds,
+        run,
+    ) else {
         return out;
     };
     // No layer has a direction of its own here: that is for the nets to find room among
@@ -4231,6 +4377,7 @@ pub(crate) fn again(
     board.along = vec![2; board.layers];
     // And a net's better way is near the one it has.
     board.near_only = true;
+    let board = board;
     let late = |run: &Run<'_>| {
         run.poll() || run.ending() || until.is_some_and(|t| std::time::Instant::now() >= t)
     };
@@ -4262,116 +4409,423 @@ pub(crate) fn again(
                     .is_some_and(|c| c.keep.is_empty() && !c.is_empty() && whole(&job.ctx, c))
         })
         .collect();
-    for sweep in 0..AGAIN_SWEEPS {
-        // The nets with the most vias first, and then the longest for what they join.
-        let mut order: Vec<usize> = (0..nets.len()).filter(|&i| eligible[i]).collect();
-        let measure = |i: usize| {
-            let c = copper[nets[i].job].as_ref();
-            (
-                c.map_or(0, |c| c.vias.len()),
-                c.map_or(0.0, NetCopper::length) - nets[i].length as f64,
-            )
-        };
-        order.sort_by(|&a, &b| {
-            let (ma, mb) = (measure(a), measure(b));
-            mb.0.cmp(&ma.0).then(mb.1.total_cmp(&ma.1)).then(a.cmp(&b))
-        });
-        let mut gained = false;
-        for i in order {
-            if late(run) {
-                return out;
-            }
-            let j = nets[i].job;
-            let ctx = &jobs[j].ctx;
-            let Some(mut old) = copper[j].take() else {
-                continue;
+    // The first search of each net's turn, with vias dear, is made ahead of the turn on the
+    // other threads, for the next few nets at any time, each with the net's claims in place
+    // and left out of its own count, as the rounds route theirs ([`Board::route_task`]). At
+    // its turn it stands if no net that had its turn since the search was asked for has
+    // ended with other copper where the search looked, and is made again there and then if
+    // one has: the claims change at the points where a net's new copper is not its old, at
+    // no others and at no other time. So the routes are those of one thread on any number.
+    // Not in a run with a budget of nodes, where what a search may expand is what the
+    // searches before it left.
+    let ahead = if run.work_left().is_none() {
+        options.threads.max(1)
+    } else {
+        1
+    };
+    // And a net's search stands from one time through the nets to the next, while no net has
+    // other copper where it looked: the second time is then the nets with no via, and
+    // those that a net beside them made room for.
+    let remember = run.work_left().is_none();
+    let queue: Mutex<(VecDeque<Task>, bool)> = Mutex::new((VecDeque::new(), false));
+    let wake = std::sync::Condvar::new();
+    let flag = run.flag();
+    let (done_tx, done_rx) = mpsc::channel::<(usize, Ahead, Vec<u64>)>();
+    std::thread::scope(|scope| {
+        for _ in 1..ahead {
+            let done_tx = done_tx.clone();
+            let (board, queue, wake) = (&board, &queue, &wake);
+            scope.spawn(move || {
+                let Some(base) = make_base() else { return };
+                let mut sc = board.scratch();
+                loop {
+                    let task = {
+                        let mut q = queue
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        loop {
+                            if let Some(t) = q.0.pop_front() {
+                                break Some(t);
+                            }
+                            if q.1 {
+                                break None;
+                            }
+                            q = wake
+                                .wait(q)
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        }
+                    };
+                    let Some(task) = task else {
+                        break;
+                    };
+                    let ctl = Ctl {
+                        run: None,
+                        flag,
+                        limit: task.limit,
+                    };
+                    let at = task.at;
+                    board.look(&mut sc, &task.net);
+                    let routed = board.route_task(&base, &mut sc, task, &ctl);
+                    if done_tx.send((at, routed, sc.looked.clone())).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        let mut sweeps = || {
+            // The searches asked for so far, which names each: a sweep's begin where the
+            // one before ended.
+            let mut asked = 0usize;
+            // By net, its last search with vias dear, for as long as it stands.
+            let mut known: Vec<Option<Known>> = nets.iter().map(|_| None).collect();
+            // The nets that ended a turn with other copper, in order, and the blocks that
+            // the claims of each changed in or beside.
+            let mut changes: Vec<(usize, Vec<u64>)> = Vec::new();
+            // Whether a search stands: none of the nets that ended with other copper since
+            // it was asked for, itself aside, has claims that changed where it looked, and
+            // it had the nodes that it would have now.
+            let stands = |k: &Known, i: usize, limit: u64, changes: &[(usize, Vec<u64>)]| {
+                (k.limit == limit || (!k.stopped && k.nodes <= limit))
+                    && changes[k.since..].iter().all(|(n, blocks)| {
+                        *n == i || blocks.iter().zip(&k.looked).all(|(a, b)| a & b == 0)
+                    })
             };
-            let (ov, ol) = (old.vias.len(), old.length());
-            // The first time through the nets is for fewer vias alone: a net laid a
-            // shorter way first may be in the way that another has to lose a via by. A
-            // net with no via is looked at once for a shorter way, the second time.
-            if ov == 0 && (sweep != 1 || ol <= nets[i].length as f64 * (1.0 + AGAIN_SHORTER)) {
-                copper[j] = Some(old);
-                continue;
-            }
-            out.tried += 1;
-            board.occupy(&keys[i], false);
-            old.unplace(world);
-            let mut found: Option<NetCopper> = None;
-            // With vias dear, which finds the fewest and the shortest way with those;
-            // and where that has fewer and is too long for them, at their own price.
-            for via in [FEWER_VIA, nets[i].via] {
+            for sweep in 0..AGAIN_SWEEPS {
+                // The nets with the most vias first, and then the longest for what they join.
+                let mut order: Vec<usize> = (0..nets.len()).filter(|&i| eligible[i]).collect();
+                let measure = |i: usize| {
+                    let c = copper[nets[i].job].as_ref();
+                    (
+                        c.map_or(0, |c| c.vias.len()),
+                        c.map_or(0.0, NetCopper::length) - nets[i].length as f64,
+                    )
+                };
+                order.sort_by(|&a, &b| {
+                    let (ma, mb) = (measure(a), measure(b));
+                    mb.0.cmp(&ma.0).then(mb.1.total_cmp(&ma.1)).then(a.cmp(&b))
+                });
+                // The first time through the nets is for fewer vias alone: a net laid a
+                // shorter way first may be in the way that another has to lose a via by. A
+                // net with no via is looked at once for a shorter way, the second time.
+                order.retain(|&i| {
+                    copper[nets[i].job].as_ref().is_some_and(|c| {
+                        !(c.vias.is_empty()
+                            && (sweep != 1
+                                || c.length() <= nets[i].length as f64 * (1.0 + AGAIN_SHORTER)))
+                    })
+                });
                 // As many nodes as its length has steps, a few hundred times over: a net
                 // with no better way looks at every place it can get to before it says so.
-                let steps = (ol / board.grid.g as f64) as u64;
-                let most = (steps * AGAIN_PER_STEP).clamp(AGAIN_LEAST, AGAIN_NODES);
-                let limit = run.limits(most).max_expansions;
-                let ctl = Ctl {
-                    run: Some(run),
-                    flag: run.flag(),
-                    limit,
+                let most = |c: &NetCopper| {
+                    let steps = (c.length() / board.grid.g as f64) as u64;
+                    (steps * AGAIN_PER_STEP).clamp(AGAIN_LEAST, AGAIN_NODES)
                 };
-                nets[i].wires.clear();
-                let (res, pops) = board.route_net(
-                    base,
-                    &mut sc,
-                    &mut nets[i],
-                    Mode::Hard,
-                    via,
-                    &ctl,
-                    None,
-                    Some((WINDOW, WINDOW_SHARE)),
-                );
-                run.charge(pops);
-                out.expanded += pops;
-                if res.is_err() || nets[i].wires.is_empty() {
-                    break;
+                // A net as its search is asked for: with its claims, and what a via costs.
+                let task = |nets: &[WNet],
+                            keys: &[Vec<u64>],
+                            i: usize,
+                            at: usize,
+                            via: f32,
+                            limit: u64| {
+                    let mut net = nets[i].clone();
+                    net.wires.clear();
+                    net.keys.clone_from(&keys[i]);
+                    net.via = via;
+                    Task {
+                        at,
+                        net,
+                        keep: None,
+                        mode: Mode::Hard,
+                        margin: Some((WINDOW, WINDOW_SHARE)),
+                        limit,
+                    }
+                };
+                // By place in the order, the search made ahead, and how many nets had
+                // ended with other copper when it was asked for, if it was.
+                let first = asked;
+                asked += order.len();
+                let mut made: Vec<Option<(Ahead, Vec<u64>)>> = order.iter().map(|_| None).collect();
+                let mut since: Vec<Option<usize>> = vec![None; order.len()];
+                let mut next = 0;
+                let mut gained = false;
+                for at in 0..order.len() {
+                    if late(run) {
+                        queue
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .0
+                            .clear();
+                        return;
+                    }
+                    let i = order[at];
+                    let j = nets[i].job;
+                    let ctx = &jobs[j].ctx;
+                    let Some(mut old) = copper[j].take() else {
+                        continue;
+                    };
+                    let (ov, ol) = (old.vias.len(), old.length());
+                    let limit = run.limits(most(&old)).max_expansions;
+                    out.tried += 1;
+                    if ahead > 1 {
+                        // The next few are asked for, those whose last search no longer
+                        // stands.
+                        let to = (at + AGAIN_AHEAD).min(order.len());
+                        if next < to {
+                            let mut q = queue
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            for k in next.max(at)..to {
+                                let n = order[k];
+                                let c = if k == at {
+                                    Some(&old)
+                                } else {
+                                    copper[nets[n].job].as_ref()
+                                };
+                                let Some(c) = c else { continue };
+                                let most = run.limits(most(c)).max_expansions;
+                                if known[n]
+                                    .as_ref()
+                                    .is_some_and(|k| stands(k, n, most, &changes))
+                                {
+                                    continue;
+                                }
+                                since[k] = Some(changes.len());
+                                q.0.push_back(task(&nets, &keys, n, first + k, FEWER_VIA, most));
+                            }
+                            next = to;
+                            drop(q);
+                            wake.notify_all();
+                        }
+                    }
+                    // The search with vias dear: the net's last if it stands, or the one
+                    // made ahead if that does, or one made now.
+                    let mut dear = known[i].take().filter(|k| stands(k, i, limit, &changes));
+                    if dear.is_none()
+                        && let Some(asked_at) = since[at]
+                    {
+                        // Waited for, with a hand lent to those that wait.
+                        while made[at].is_none() {
+                            let t = queue
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .0
+                                .pop_front();
+                            if let Some(t) = t {
+                                let ctl = Ctl {
+                                    run: Some(run),
+                                    flag,
+                                    limit: t.limit,
+                                };
+                                let k = t.at;
+                                board.look(&mut sc, &t.net);
+                                let r = board.route_task(base, &mut sc, t, &ctl);
+                                if k >= first {
+                                    made[k - first] = Some((r, core::mem::take(&mut sc.looked)));
+                                }
+                                continue;
+                            }
+                            match done_rx.recv_timeout(std::time::Duration::from_millis(5)) {
+                                Ok((k, r, looked)) => {
+                                    if k >= first {
+                                        made[k - first] = Some((r, looked));
+                                    }
+                                }
+                                Err(mpsc::RecvTimeoutError::Timeout) => {
+                                    if run.poll() {
+                                        break;
+                                    }
+                                }
+                                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                            }
+                        }
+                        dear = made[at]
+                            .take()
+                            .map(|(a, looked)| Known {
+                                net: a.net,
+                                nodes: a.nodes,
+                                stopped: a.stopped,
+                                looked,
+                                since: asked_at,
+                                limit,
+                                fresh: true,
+                            })
+                            .filter(|k| stands(k, i, limit, &changes));
+                    }
+                    old.unplace(world);
+                    let mut found: Option<NetCopper> = None;
+                    // With vias dear, which finds the fewest and the shortest way with those;
+                    // and where that has fewer and is too long for them, at their own price.
+                    let own_via = nets[i].via;
+                    for via in [FEWER_VIA, own_via] {
+                        let (stopped, pops) = if via == FEWER_VIA {
+                            let k = match dear.take() {
+                                Some(k) => k,
+                                None => {
+                                    let ctl = Ctl {
+                                        run: Some(run),
+                                        flag,
+                                        limit,
+                                    };
+                                    let t = task(&nets, &keys, i, 0, via, limit);
+                                    if remember {
+                                        board.look(&mut sc, &t.net);
+                                    }
+                                    let a = board.route_task(base, &mut sc, t, &ctl);
+                                    Known {
+                                        net: a.net,
+                                        nodes: a.nodes,
+                                        stopped: a.stopped,
+                                        looked: core::mem::take(&mut sc.looked),
+                                        since: changes.len(),
+                                        limit,
+                                        fresh: true,
+                                    }
+                                }
+                            };
+                            // The nodes of a search count once, when it is made.
+                            let ended = (k.stopped, if k.fresh { k.nodes } else { 0 });
+                            // A search that the run's end cut short says nothing later.
+                            if remember && !run.ending() {
+                                nets[i] = k.net.clone();
+                                known[i] = Some(Known {
+                                    since: changes.len(),
+                                    fresh: false,
+                                    ..k
+                                });
+                            } else {
+                                nets[i] = k.net;
+                            }
+                            ended
+                        } else {
+                            let limit = run.limits(most(&old)).max_expansions;
+                            let ctl = Ctl {
+                                run: Some(run),
+                                flag,
+                                limit,
+                            };
+                            let a = board.route_task(
+                                base,
+                                &mut sc,
+                                task(&nets, &keys, i, 0, via, limit),
+                                &ctl,
+                            );
+                            nets[i] = a.net;
+                            (a.stopped, a.nodes)
+                        };
+                        nets[i].via = own_via;
+                        nets[i].keys.clear();
+                        run.charge(pops);
+                        out.expanded += pops;
+                        if stopped || nets[i].wires.is_empty() {
+                            break;
+                        }
+                        let mut c = NetCopper::from_tree(ctx, &tree_of(&board, &nets[i]));
+                        c.prune(ctx);
+                        if !c.all_free(world, ctx) {
+                            continue;
+                        }
+                        super::cleanup::tighten_net(world, ctx, &mut c);
+                        if !whole(ctx, &c) {
+                            continue;
+                        }
+                        let (nv, nl) = (c.vias.len(), c.length());
+                        // A via less may cost what it does when cleanup routes a net again for
+                        // fewer: half of what a via costs that search, in track.
+                        let fewer = nv < ov && nl <= ol + (ov - nv) as f64 * per_via;
+                        let shorter = sweep > 0
+                            && nv == ov
+                            && nl < ol - (ol * AGAIN_SHORTER).max(board.grid.g as f64);
+                        if fewer || shorter {
+                            out.vias += ov - nv;
+                            out.shorter += ol - nl;
+                            found = Some(c);
+                            break;
+                        }
+                        if nv >= ov {
+                            break;
+                        }
+                    }
+                    nets[i].wires.clear();
+                    let mut now = match found {
+                        Some(c) => {
+                            out.kept += 1;
+                            gained = true;
+                            // The claims change where the new copper's are not the old's,
+                            // and nowhere else: a search on another thread that asks about
+                            // none of those points is the same before, during and after.
+                            let new = board.copper_keys(nets[i].halo, &c);
+                            let (gone, come) = apart(&keys[i], &new);
+                            board.occupy(&gone, false);
+                            board.occupy(&come, true);
+                            let mut cells = board.key_cells(&gone);
+                            cells.extend(board.key_cells(&come));
+                            changes.push((i, board.blocks_near(&cells)));
+                            keys[i] = new;
+                            c
+                        }
+                        None => old,
+                    };
+                    now.place(world, ctx);
+                    copper[j] = Some(now);
                 }
-                let mut c = NetCopper::from_tree(ctx, &tree_of(&board, &nets[i]));
-                c.prune(ctx);
-                if !c.all_free(world, ctx) {
-                    continue;
-                }
-                super::cleanup::tighten_net(world, ctx, &mut c);
-                if !whole(ctx, &c) {
-                    continue;
-                }
-                let (nv, nl) = (c.vias.len(), c.length());
-                // A via less may cost what it does when cleanup routes a net again for
-                // fewer: half of what a via costs that search, in track.
-                let fewer = nv < ov && nl <= ol + (ov - nv) as f64 * per_via;
-                let shorter = sweep > 0
-                    && nv == ov
-                    && nl < ol - (ol * AGAIN_SHORTER).max(board.grid.g as f64);
-                if fewer || shorter {
-                    out.vias += ov - nv;
-                    out.shorter += ol - nl;
-                    found = Some(c);
-                    break;
-                }
-                if nv >= ov {
+                if !gained && sweep > 0 {
                     break;
                 }
             }
-            nets[i].wires.clear();
-            let mut now = match found {
-                Some(c) => {
-                    out.kept += 1;
-                    gained = true;
-                    keys[i] = board.copper_keys(nets[i].halo, &c);
-                    c
-                }
-                None => old,
-            };
-            now.place(world, ctx);
-            copper[j] = Some(now);
-            board.occupy(&keys[i], true);
-        }
-        if !gained && sweep > 0 {
-            break;
+        };
+        sweeps();
+        queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .1 = true;
+        wake.notify_all();
+    });
+    out
+}
+
+/// A net's search with vias dear, as it ended.
+struct Known {
+    /// The net as the search left it, with its wires.
+    net: WNet,
+    nodes: u64,
+    stopped: bool,
+    /// The blocks that it looked in.
+    looked: Vec<u64>,
+    /// How many nets had ended a turn with other copper when it was asked for.
+    since: usize,
+    /// The nodes that it might expand.
+    limit: u64,
+    /// Whether its nodes are still to be counted.
+    fresh: bool,
+}
+
+/// The keys of `old` that are not in `new`, and those of `new` that are not in `old`:
+/// both in order.
+fn apart(old: &[u64], new: &[u64]) -> (Vec<u64>, Vec<u64>) {
+    let (mut gone, mut come) = (Vec::new(), Vec::new());
+    let (mut a, mut b) = (0, 0);
+    while a < old.len() || b < new.len() {
+        match (old.get(a), new.get(b)) {
+            (Some(x), Some(y)) if x == y => {
+                a += 1;
+                b += 1;
+            }
+            (Some(x), Some(y)) if x < y => {
+                gone.push(*x);
+                a += 1;
+            }
+            (Some(x), None) => {
+                gone.push(*x);
+                a += 1;
+            }
+            (_, Some(y)) => {
+                come.push(*y);
+                b += 1;
+            }
+            (None, None) => break,
         }
     }
-    out
+    (gone, come)
 }
 
 /// A net's wires as a tree of steps.
@@ -4507,6 +4961,7 @@ mod tests {
             let got = again(
                 &d,
                 &base,
+                &|| Some(world_of(&d, &options)),
                 &mut world,
                 &jobs,
                 &mut copper,
@@ -4544,6 +4999,103 @@ mod tests {
                 );
                 c.place(&mut world, &job.ctx);
             }
+        }
+    }
+
+    #[test]
+    fn the_nets_routed_again_are_the_same_with_their_searches_made_ahead() {
+        // Ten nets of two pads side by side, each under and back up by two vias, the
+        // last five of them under the track of an eleventh: on one thread in a run with
+        // a budget of nodes, where each search is made at its net's turn, and on four in
+        // a run with none, where the searches are made ahead and stand from one time
+        // through the nets to the next, the first five lose their hops, the others keep
+        // them, and the copper of every net is the same.
+        let mut pads = Vec::new();
+        for k in 0..10 {
+            pads.push(smd(0, k * 8 * MM, k as u32 + 1));
+            pads.push(smd(4 * MM, k * 8 * MM, k as u32 + 1));
+        }
+        pads.push(smd(2 * MM, 36 * MM, 11));
+        pads.push(smd(2 * MM, 76 * MM, 11));
+        let d = design(2, pads, 12);
+        let seg = |a: (i64, i64), b: (i64, i64), l: u8| Seg {
+            a: Point::new(a.0, a.1),
+            b: Point::new(b.0, b.1),
+            l,
+        };
+        let laid = |threads: usize, budget: Option<u64>| {
+            let options = RouteOptions {
+                threads,
+                ..RouteOptions::default()
+            };
+            let base = world_of(&d, &options);
+            let mut world = world_of(&d, &options);
+            let pitch = router::pitch(&d, &options);
+            let jobs = router::jobs(&d, &world, pitch, &[], &[]);
+            assert_eq!(jobs.len(), 11);
+            let mut copper: Vec<Option<NetCopper>> = jobs
+                .iter()
+                .map(|job| {
+                    let mut c = NetCopper::default();
+                    let n = i64::from(job.ctx.net.0);
+                    if n == 11 {
+                        c.segs = vec![seg((2 * MM, 36 * MM), (2 * MM, 76 * MM), 0)];
+                    } else {
+                        let y = (n - 1) * 8 * MM;
+                        c.segs = vec![
+                            seg((0, y), (MM, y), 0),
+                            seg((MM, y), (3 * MM, y), 1),
+                            seg((3 * MM, y), (4 * MM, y), 0),
+                        ];
+                        c.vias = vec![Point::new(MM, y), Point::new(3 * MM, y)];
+                    }
+                    c.place(&mut world, &job.ctx);
+                    Some(c)
+                })
+                .collect();
+            let control = RunControl::default();
+            let run = Run::new(&control, budget);
+            let bounds = Rect::new(Point::new(-10 * MM, -10 * MM), Point::new(14 * MM, 86 * MM));
+            let got = again(
+                &d,
+                &base,
+                &|| Some(world_of(&d, &options)),
+                &mut world,
+                &jobs,
+                &mut copper,
+                &[true; 11],
+                &options,
+                &run,
+                (pitch, false),
+                bounds,
+                None,
+            );
+            let mut all: Vec<(u32, Vec<Seg>, Vec<Point>)> = jobs
+                .iter()
+                .zip(&copper)
+                .map(|(job, c)| {
+                    let c = c.as_ref().unwrap();
+                    let (mut segs, mut vias) = (c.segs.clone(), c.vias.clone());
+                    segs.sort_unstable();
+                    vias.sort_unstable();
+                    (job.ctx.net.0, segs, vias)
+                })
+                .collect();
+            all.sort_unstable();
+            (got.tried, got.kept, got.vias, all)
+        };
+        let one = laid(1, Some(1_000_000_000));
+        assert_eq!((one.1, one.2), (5, 10), "{one:?}");
+        for (net, _, vias) in &one.3 {
+            assert_eq!(
+                vias.len(),
+                if (6..=10).contains(net) { 2 } else { 0 },
+                "{net}"
+            );
+        }
+        for threads in [1, 2, 4] {
+            let ahead = laid(threads, None);
+            assert_eq!(ahead, one, "{threads}");
         }
     }
 
@@ -4597,6 +5149,7 @@ mod tests {
         let got = again(
             &d,
             &base,
+            &|| Some(world_of(&d, &options)),
             &mut world,
             &jobs,
             &mut copper,
@@ -4621,8 +5174,17 @@ mod tests {
         let control = RunControl::default();
         let run = Run::new(&control, Some(10_000_000));
         let bounds = Rect::new(Point::new(-10 * MM, -10 * MM), Point::new(14 * MM, 70 * MM));
-        let (board, nets, _) =
-            setup(&d, &world, &world, &jobs, (pitch, false, 2), bounds, &run).unwrap();
+        let (board, nets, _) = setup(
+            &d,
+            &world,
+            &world,
+            None,
+            &jobs,
+            (pitch, false, 2),
+            bounds,
+            &run,
+        )
+        .unwrap();
         let g = board.grid.g;
         let at = board.grid.cell(20, 20);
         let track = |a: Point, b: Point| {
@@ -4691,8 +5253,17 @@ mod tests {
         let control = RunControl::default();
         let run = Run::new(&control, Some(10_000_000));
         let bounds = Rect::new(Point::new(-6 * MM, -8 * MM), Point::new(14 * MM, 8 * MM));
-        let (board, mut nets, mut sc) =
-            setup(&d, &world, &world, &jobs, (pitch, true, 2), bounds, &run).unwrap();
+        let (board, mut nets, mut sc) = setup(
+            &d,
+            &world,
+            &world,
+            None,
+            &jobs,
+            (pitch, true, 2),
+            bounds,
+            &run,
+        )
+        .unwrap();
         let ctl = Ctl {
             run: Some(&run),
             flag: run.flag(),
@@ -4718,7 +5289,8 @@ mod tests {
             w: g.dw(),
             h: g.dh(),
         };
-        let (finer, _, _) = setup_on(&d, &world, &world, &jobs, fine, (true, 2), &run).unwrap();
+        let (finer, _, _) =
+            setup_on(&d, &world, &world, None, &jobs, fine, (true, 2), &run).unwrap();
         let length = |b: &Board, w: &Wire| -> (i64, Vec<Point>) {
             let (segs, vias) = b.geometry(w);
             let len: f64 = segs
@@ -4747,8 +5319,17 @@ mod tests {
         let control = RunControl::default();
         let run = Run::new(&control, Some(50_000_000));
         let bounds = Rect::new(Point::new(-6 * MM, -8 * MM), Point::new(14 * MM, 8 * MM));
-        let (board, mut nets, mut sc) =
-            setup(&d, &world, &world, &jobs, (pitch, true, 2), bounds, &run).unwrap();
+        let (board, mut nets, mut sc) = setup(
+            &d,
+            &world,
+            &world,
+            None,
+            &jobs,
+            (pitch, true, 2),
+            bounds,
+            &run,
+        )
+        .unwrap();
         let ctl = Ctl {
             run: Some(&run),
             flag: run.flag(),

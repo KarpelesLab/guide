@@ -3343,9 +3343,19 @@ fn route_all<'a>(
                     // the routes are its own; at the pitch in a run for shorter ways, whose routes
                     // are where they stay, and a way that only the finer grid has is one to take.
                     let coarse = rules.layer_count() > 2 && !options.shorten;
+                    // The same board for each thread that looks a net's way up ahead of
+                    // its turn.
+                    let make_base = || {
+                        let mut base = make_with(&pairs_first)?;
+                        for (tracks, vias) in &back_copper {
+                            let _ = pairs::Undo::place(&mut base, tracks, vias);
+                        }
+                        Some(base)
+                    };
                     let again = whole::again(
                         design,
                         &base,
+                        &make_base,
                         &mut world,
                         &jobs,
                         &mut copper,

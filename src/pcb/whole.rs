@@ -4429,7 +4429,11 @@ pub(crate) fn again<'r>(
     let remember = run.work_left().is_none();
     let queue: Mutex<(VecDeque<Task>, bool)> = Mutex::new((VecDeque::new(), false));
     let wake = std::sync::Condvar::new();
-    let flag = run.flag();
+    // What ends every search of this step at once: its own time, and the run's.
+    let halt = AtomicBool::new(false);
+    let flag = &halt;
+    // And whether the step is over.
+    let over = AtomicBool::new(false);
     let (done_tx, done_rx) = mpsc::channel::<(usize, Ahead, Vec<u64>)>();
     std::thread::scope(|scope| {
         for _ in 1..ahead {
@@ -4472,6 +4476,22 @@ pub(crate) fn again<'r>(
                 }
             });
         }
+        // The time that the step has ends the searches that are being made, on every
+        // thread, as it comes: a search goes on for up to its limit of nodes otherwise,
+        // and the step for as long past its time.
+        let watch = until.map(|until| {
+            let (halt, over) = (&halt, &over);
+            scope.spawn(move || {
+                while !over.load(Ordering::Relaxed) {
+                    let now = std::time::Instant::now();
+                    if now >= until {
+                        halt.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                    std::thread::park_timeout(until - now);
+                }
+            })
+        });
         let mut sweeps = || {
             // The searches asked for so far, which names each: a sweep's begin where the
             // one before ended.
@@ -4549,12 +4569,7 @@ pub(crate) fn again<'r>(
                 let mut next = 0;
                 let mut gained = false;
                 for at in 0..order.len() {
-                    if late(run) {
-                        queue
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .0
-                            .clear();
+                    if late(run) || halt.load(Ordering::Relaxed) {
                         return;
                     }
                     let i = order[at];
@@ -4685,7 +4700,7 @@ pub(crate) fn again<'r>(
                             // The nodes of a search count once, when it is made.
                             let ended = (k.stopped, if k.fresh { k.nodes } else { 0 });
                             // A search that the run's end cut short says nothing later.
-                            if remember && !run.ending() {
+                            if remember && !run.ending() && !halt.load(Ordering::Relaxed) {
                                 nets[i] = k.net.clone();
                                 known[i] = Some(Known {
                                     since: changes.len(),
@@ -4774,6 +4789,12 @@ pub(crate) fn again<'r>(
             }
         };
         sweeps();
+        // No search is waited for from here on: those that the other threads are at end.
+        halt.store(true, Ordering::Relaxed);
+        over.store(true, Ordering::Relaxed);
+        if let Some(watch) = &watch {
+            watch.thread().unpark();
+        }
         queue
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

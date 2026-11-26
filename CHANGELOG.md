@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.52](https://github.com/KarpelesLab/guide/compare/v0.0.51...v0.0.52) - 2026-11-26
+
+### Added
+
+- *(pcb)* each run laid round the corners beside it as a run's cleanup ends where a host asks for it (`RouteOptions::round_corners`), and a net given with every end short of its pads taken back by a last run: tinytapeout-demo's track outside the pads 0.66 % less over sixteen orders in three sets (15 better, 1 worse) with 1.1 vias fewer, lumenpnp-mobo's 0.77 % less and buspirate5-rev10's 0.65 % less in four of four ([#109](https://github.com/KarpelesLab/guide/pull/109))
+
+### Other
+
+- *(benchmarks)* where the rounds of cadlab's router leave more track than that router does on tinytapeout-demo (the ground's stubs to its plane half of what the rounds add, the price of a spoke's room a quarter, and as much again after the rounds), and the long ways round laid again with 0.0.51 (0.37 % less track outside the pads over sixteen orders, the table as 0.0.50's: 35, 30 and 7 of 72) ([#107](https://github.com/KarpelesLab/guide/pull/107))
+
 ## [0.0.51](https://github.com/KarpelesLab/guide/compare/v0.0.50...v0.0.51) - 2026-11-25
 
 ### Added

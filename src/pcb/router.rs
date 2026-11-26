@@ -654,8 +654,13 @@ pub(crate) fn run_from(
     if first.is_none() && options.rounds == super::Rounds::Native && options.given_up_share < 1.0 {
         run.shorten(options.given_up_share);
     }
+    // And none of the runs laid round the corners beside them when its cleanup ends
+    // ([`RouteOptions::round_corners`]): that is for a board whose routes no later run
+    // moves, as a host says of a board with the other rounds, and the board given up is
+    // one whose host goes on to move them.
     let own_options = RouteOptions {
         rounds: super::Rounds::Own,
+        round_corners: options.round_corners && options.rounds != super::Rounds::Native,
         ..*options
     };
     let own_design;
@@ -2051,22 +2056,29 @@ fn route_all<'a>(
         } else {
             c.prune(ctx);
         }
+        // Whether the net was given with ends short of its pads' centres and taken there.
+        let mut short_of_pads = false;
         // With [`RouteOptions::leave_given`], a net that is not all legal here, has copper
         // that leads nowhere or is in pieces stays where it is, as copper of the board.
         if let (Some(raw), Some(whole)) = (raw, whole) {
-            let (mut segs, mut vias) = (c.segs.clone(), c.vias.clone());
-            segs.sort_unstable();
-            vias.sort_unstable();
-            let same = (segs, vias) == whole;
+            let sorted = |c: &NetCopper| {
+                let (mut segs, mut vias) = (c.segs.clone(), c.vias.clone());
+                segs.sort_unstable();
+                vias.sort_unstable();
+                (segs, vias)
+            };
+            let same = sorted(&c) == whole;
             let mut joined = same && c.pieces(ctx).apart() == 0;
-            if same && !joined {
+            if !joined {
                 // A track that ends on a pad short of where this crate's routes join it,
                 // as a host's own router ends its tracks at the first copper of a pad, is
-                // taken there by a piece over the pad, if that is free.
+                // taken there by a piece over the pad, if that is free. Before anything
+                // that leads nowhere is dropped: a route between two such ends has no
+                // terminal in it, and is all of it copper that leads nowhere.
                 let mut more = NetCopper::default();
                 for p in &ctx.pads {
                     let on = |l: u8| p.layers.contains(LayerId(l));
-                    for (q, l) in c
+                    for (q, l) in theirs
                         .segs
                         .iter()
                         .filter(|s| on(s.l))
@@ -2086,8 +2098,25 @@ fn route_all<'a>(
                 // Those that are free, each for itself.
                 more = more.free_in(&world, ctx, pitch);
                 if !more.segs.is_empty() {
-                    c.segs.extend(more.segs);
-                    joined = c.pieces(ctx).apart() == 0;
+                    let mut with = NetCopper::default();
+                    with.segs = theirs.segs.clone();
+                    with.segs.extend(more.segs.iter().copied());
+                    with.vias = theirs.vias.clone();
+                    with.merge(ctx);
+                    let all = sorted(&with);
+                    let mut d = with.free_in(&world, ctx, pitch);
+                    if ctx.terminals < BRANCH_TERMINALS {
+                        d.drop_floating(ctx);
+                    } else {
+                        d.prune(ctx);
+                    }
+                    if sorted(&d) == all && d.pieces(ctx).apart() == 0 {
+                        c = d;
+                        joined = true;
+                        // Taken to its pads, the net is not as it was given: it has
+                        // the search of a net that the run moved.
+                        short_of_pads = true;
+                    }
                 }
             }
             if !joined {
@@ -2104,7 +2133,12 @@ fn route_all<'a>(
         let pieces = c.pieces(ctx);
         missing[j] = pieces.missing();
         apart[j] = pieces.apart();
-        as_given[j] = Some({
+        as_given[j] = Some(if short_of_pads {
+            let (mut segs, mut vias) = (theirs.segs.clone(), theirs.vias.clone());
+            segs.sort_unstable();
+            vias.sort_unstable();
+            (segs, vias)
+        } else {
             let (mut segs, mut vias) = (c.segs.clone(), c.vias.clone());
             segs.sort_unstable();
             vias.sort_unstable();

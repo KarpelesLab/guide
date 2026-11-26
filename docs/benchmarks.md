@@ -5911,6 +5911,160 @@ at a time.
   are what it has for the balls left shut in, and no other way to those was tried.
 - More than one thread, or a deadline: the comparison is by nodes.
 
+## PCB routing: what each router does to its routes after the rounds, step by step, and each run laid round the corners beside it
+
+Measured through cadlab at 60 s, four runs at a time on three threads, the load 7 to 13 with other work on the machine (25 as the table beside cadlab's router began), and
+at budgets of nodes on one thread. cadlab's commit for this is its decision D149.
+
+### After the rounds, step by step
+
+On `tinytapeout-demo` cadlab's router takes 1.9 % off its routes after its rounds, and this
+crate's passes and its host's later steps added 0.8 % to theirs: one number, until now. An
+instrument in both (in no release) writes the tracks and the vias by net after every step
+that changes the board, and one script measures them. Four orders; the nets with no zone
+that both routers complete; mm of track outside the pads of its net and vias, summed over
+the four orders; the three boards that have the rounds of cadlab's router.
+
+| this crate's steps, 0.0.51 and where it differs 0.0.52 | `tinytapeout-demo` | `buspirate5-rev10` | `lumenpnp-mobo` |
+|---|---|---|---|
+| the stage ends: the rounds, their retry, their pass for fewer vias, the long ways round | 16839 mm, 944 vias | 9138, 884 | 16825, 865 |
+| handed to the passes, less what this crate's rules do not allow of it | -2, -4 | -0, -4 | -0, -1 |
+| the pass on this crate's lattice: what the rounds left failed and the pads left off their pours are routed, across other nets' routes | +384, +62 | +74, +19 | +1044, +78; on the finer lattice +291, +32 |
+| each net again by the negotiation's search, the pads joined to their fills again | -30, -35 | -71, -16 | -49, -18 |
+| cleanup: pulled tight, fewer vias and hops by search; 0.0.52 also round the corners | -113, -57; 0.0.52 -270, -57 | -53, -34; -145, -34 | -55, -46; -136, -46 |
+| the ends beside pads taken into them | +3 | +1; +2 | +2; +3 |
+| the first run ends | 17081, 910; 0.0.52 16926, 910 | 9088, 849; 8997, 849 | 18059, 910; 17978, 910 |
+| the host's check, and what its fill makes needless | 0 | 0 | 0 |
+| the host's later runs: the nets open on the filled board, the pads short of spokes, and the last run (stairs, fewer vias; 0.0.52 also the corners) | -98, 0; 0.0.52 -48, +1 | -28, -1; -10, -7 | -40, -23; -96, -41 |
+| the board that leaves, with 22, 0 and 91 mm of escapes that the stage's count does not have | 17004, 914; 0.0.52 16899, 915 | 9061, 848; 8988, 842 | 18110, 887; 17973, 869 |
+
+| the steps of cadlab's router | `tinytapeout-demo` | `buspirate5-rev10` | `lumenpnp-mobo` |
+|---|---|---|---|
+| its stage ends: the rounds, the pours, the retry, the pass for fewer vias | 16540 mm, 850 vias | 9268, 884 | 17714, 844 |
+| the escapes taken into the paths that use them | -7 | -2 | -7 |
+| a section between two vias back on its layer; 45° pull-tight, the corners cut | -131, -4 | -111 | -137 |
+| the same again, for the room that the nets after it freed | -14 | -5 | -26 |
+| each stretch round the corners of the clearance of what is beside it, off the grid | -182 | -106 | -37 |
+| its later runs (boxed pads planned again, what is left shoved): nothing of these nets | 0 | 0 | 0 |
+| the board that leaves | 16206, 846 (-2.0 %) | 9046, 884 (-2.4 %) | 17507, 844 (-1.2 %) |
+| this crate's board over it, 0.0.51 and 0.0.52 | +4.9 % and +4.3 % | +0.2 % and -0.6 % | +3.4 % and +2.7 % |
+
+The pass on this crate's own lattice is the only step that adds, and what it adds closes
+connections. On `tinytapeout-demo`, 188 mm and 15 vias are six nets that the rounds left
+with a connection failed, laid whole; 196 mm and 47 vias are the 52 nets moved out of their
+way and out of the way of the pads of the ground and the supply that the stage left off
+their pours, and 131 mm of that is still there on the board that leaves. cadlab's router
+leaves such connections open, 1 to 19 a board. Every other step takes track off.
+
+What cadlab's router does after its rounds and a run after these rounds did not is one
+step: each stretch of a path laid round the corners of the clearance of what is beside it,
+off the grid, 182 mm of the 334 that its post-processing takes off `tinytapeout-demo`, 106
+of 222 on `buspirate5-rev10` and 37 of 206 on `lumenpnp-mobo`. This crate has had the port
+of it since 0.0.25, in its run for shorter ways alone, and a board with these rounds has no
+such run. Its pull-tight and its corners are in every cleanup here, with the rule for a
+spoke's room that it has not; its escapes taken into their paths are 7 mm.
+
+### Round the corners as cleanup ends
+
+Since 0.0.52, [`RouteOptions::round_corners`]: a run with a deadline or a budget that looks
+for no shorter ways ends its cleanup by laying each run of tracks round the corners of what
+is beside it, a way only if it is shorter, has no more of it outside the pads of its net,
+and is no nearer a pad of another net in the room of a spoke of its relief than the run
+was. It takes no search: 0.1 to 0.2 s of a run on `tinytapeout-demo`. cadlab asks for it from the first run on
+where the board has its router's rounds, and in its last run on every board.
+
+`tinytapeout-demo` in sixteen orders, the same build with and without, by where it is done:
+in the host's last run alone 0.18 % less track outside the pads (13 orders better, 3
+worse); in the first run and those after it 0.57 % (15 and 1); in both 0.60 % (16 and none).
+Without the rule for a spoke's room, four orders: 0.75 % less with 8 pads short of two
+spokes for 2; with it 21 in sixteen orders for 23. Without the rule for what is outside
+the pads `lumenpnp-ringlight` has 0.2 mm more outside its pads in four orders of four: a
+way that leaves a pad sooner is shorter. A second sweep, each net pulled tight and laid
+round its corners again: 1 mm a board more, not kept.
+
+A run laid so is as near what is beside it as the rules allow, off the lattice, and has no
+room left to give. `corne-cherry` with it in its first run: the host's run that takes every
+route back for one connection has 210 rip-ups for 55 and ends with seven connections open
+for none. `buspirate-rs232`: 6 vias for 8 and 287 mm for 283. So it is for a run after
+which no other moves the routes, and a run that gives the rounds of cadlab's router up has
+none of it: that board's host goes on to move its routes.
+
+### The nets that a host's last run left as they were
+
+A last run (`leave_given`) takes a net back if what it is given of it is legal, leads
+somewhere and joins the net whole. A host's own rounds end a track on the first copper of
+a pad, and such an end is taken to the pad's centre by a piece over the pad (0.0.44); but
+the ends were looked for after the copper with no terminal in it was dropped, and a route
+from one such end to another is all of it such copper. `tinytapeout-demo` had 37 nets of
+134 left as they were, 1549 mm of 4792, whole buses among them; `lumenpnp-mobo` 31 of 162.
+Since 0.0.52 the pieces are looked for on what the run was given, and such a net has the
+run's search for fewer vias as a net with one end short had: 124 to 126 of 134, and 162 of
+162.
+
+Alone, without the corners: `tinytapeout-demo`'s sixteen orders 0.05 % more track outside
+the pads (9 better, 6 worse). Without the search for fewer vias: 1.3 vias more a board, and
+2.5 on `lumenpnp-mobo`, since the nets with one end short lose theirs.
+
+### Beside 0.0.51
+
+`tinytapeout-demo` in sixteen orders, three sets, this beside 0.0.51 side by side: no
+connection open in any of the 48 runs of either. Vias 271.1 in the mean and 273 in the
+median for 272.2 and 273.5, 251 to 295 for 254 to 295; track 4809 mm in the mean for 4839;
+outside the pads 4747 mm for 4779 (-0.66 to -0.67 %, 15 orders better and 1 worse in each
+set); 20 pads short of two spokes a set for 23; 47 s in the median for 45 to 46. 14 of 16
+orders are the same board in the three sets, where 0.0.51 has 16 of 16: two orders have a
+last run that searches for fewer vias for more nets, where the host's clock leaves it the
+time, and end 2 vias or 6 mm apart.
+
+`buspirate5-rev10` in four orders: 18 mm less outside the pads (-0.65 %, four of four), 2.75
+vias fewer a board, 7, 7, 8 and 10 pads short of two spokes for 7, 8, 8 and 10.
+`lumenpnp-mobo`: 40 mm less (-0.77 %, four of four), 4.25 vias fewer. The boards with this
+crate's own rounds, which have the step in the host's last run alone, each in four orders:
+`glasgow-revC3` 0.40 % less track outside the pads (four of four), `cynthion` 0.26 % (four
+of four), `corne-cherry` 0.18 % (four of four), `buspirate-flash-sop` 0.17 %,
+`glasgow-revD1` 0.49 % in runs that its budget ends (two orders better and two worse), and
+`sweep-v2.2`, `nrfmicro`, `buspirate-rs232` and `lumenpnp-ringlight` within 0.05 %.
+
+At budgets of nodes: 569 connections open at 40 million over nine boards in three orders and
+164 at 150 million over seven in two, as with 0.0.51. 16 of 41 runs the same board; of the
+25 others, one has 0.3 mm more track (`sweep-v2.2`) and 24 less: `tinytapeout-demo` 0.60 %
+and 0.75 % less at the two budgets with 7 and 3 vias fewer over its runs, `buspirate5-rev10`
+0.68 % and 0.73 % with 8 and 4 fewer, `lumenpnp-mobo` 0.57 % and 0.52 % with 9 and 8 fewer,
+`cynthion` 0.31 % and 0.11 %, `glasgow-revC3` 0.22 %, `corne-cherry` 0.18 % and 2 vias
+fewer in one run, with the vias as they were elsewhere.
+
+### Beside cadlab's router
+
+Twelve boards in four orders (`tinytapeout-demo` in eight) beside cadlab's router with seeds
+1 to 4 in the same minutes: 35 cells better, 31 equal and 6 worse of 72, where 0.0.51 in the
+same minutes has 34, 30, one whose ranges overlap and 7. `tinytapeout-demo`'s track outside
+the pads is equal: 4753 mm against 4672 (+1.7 %), 4806 with 0.0.51 (+2.9 %). The six are
+`corne-cherry`'s time; `glasgow-revC3`'s track and track outside the pads (3501 mm against
+3210, 3520 with 0.0.51); `glasgow-revD1`'s vias, track and track outside the pads. On the
+nets that both routers complete, 17 cells better, 14 equal and 5 worse of 36 for 15, 14 and
+7: `tinytapeout-demo`'s track is equal (+1 %, +3 % with 0.0.51) and its track outside the
+pads +4 % for +6 %, `buspirate5-rev10`'s track outside the pads equal (+1 % for +2 %),
+`lumenpnp-mobo`'s vias better. No pad without a spoke, no pad made solid by a track, no DRC
+error but unrouted and no joint by a round end alone in the 52 runs and in the 48 of the
+sixteen orders.
+
+### What this does not show
+
+`tinytapeout-demo`'s board still leaves with more track than its stage ends with: 38 mm over
+four orders on the nets that both routers complete, for 143, where cadlab's router ends 334
+under its own. What is left is the pass that closes what the rounds leave open: 131 mm of
+the nets that it moves, which no step after it takes back, on a board where cadlab's router
+leaves 1 to 19 connections open. On the nets that both complete the board has 4 % more track
+outside the pads than cadlab's router's, and `lumenpnp-mobo` 3 %.
+
+The step is not in the first run of a board with this crate's own rounds, where the runs
+after it need the room: `glasgow-revD1` and `corne-cherry`, which have no time for a run
+for shorter ways, have it in the last run alone, on the nets that the host hands that run
+(those with no pour and no connection open) and less what its check takes back. The
+escapes are fixed copper and are not taken into their paths (7 mm on `tinytapeout-demo`
+in cadlab's router). The wires that the long ways round find a shorter way for and no room
+(a third of the tries) were not looked at.
+
 ## PCB routing: where the rounds of cadlab's router leave more track than that router does, and the long ways round laid again
 
 Measured through cadlab at 60 s, four runs at a time on three threads, the load 4 to 8, and

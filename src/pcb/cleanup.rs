@@ -129,7 +129,7 @@ pub(crate) fn run(
                 return expanded;
             }
             if !kept[j] {
-                round_corners(world, &job.ctx, c, params.pitch);
+                round_corners(world, &job.ctx, c, params.pitch, false);
                 c.place(world, &job.ctx);
             }
         }
@@ -218,6 +218,17 @@ pub(crate) fn run(
     // handed may have been ended so by the run before, and laid straight they are pulled
     // tight.
     let last = straight && options.leave_given;
+    // And each run round the corners of what is beside it, off the lattice, in a run
+    // that is asked for it and has no search for shorter ways, which does it itself
+    // ([`RouteOptions::round_corners`]): before the ends are aimed at the pads, as what
+    // pulls a run tight takes it to the pad's centre again.
+    if bounded
+        && options.round_corners
+        && !options.shorten
+        && round_all(world, design, jobs, copper, params)
+    {
+        return expanded;
+    }
     if (options.shorten || (last && bounded)) && aim_all(world, design, jobs, copper) {
         return expanded;
     }
@@ -237,6 +248,37 @@ pub(crate) fn run(
         aim_all(world, design, jobs, copper);
     }
     expanded
+}
+
+/// Each run of every net laid round the corners of what is beside it
+/// ([`round_corners`]), no nearer a spoke than it was: every net but those of pairs,
+/// those with a length to keep and those whose routes are stubs to their plane. Whether
+/// the run has to stop.
+fn round_all(
+    world: &mut World<'_>,
+    design: &Design,
+    jobs: &[Job],
+    copper: &mut [Option<NetCopper>],
+    params: Params,
+) -> bool {
+    for (job, slot) in jobs.iter().zip(copper.iter_mut()) {
+        let Some(c) = slot else { continue };
+        if world.run().is_some_and(super::control::Run::poll) {
+            return true;
+        }
+        let net = job.ctx.net;
+        let held = job.plane
+            || design
+                .pairs
+                .iter()
+                .any(|p| p.positive == net || p.negative == net)
+            || design.lengths.iter().any(|l| l.nets.contains(&net));
+        if !held {
+            round_corners(world, &job.ctx, c, params.pitch, true);
+            c.place(world, &job.ctx);
+        }
+    }
+    false
 }
 
 /// The end of each run at a pad aimed at the pad's copper where the run comes to it
@@ -1272,10 +1314,11 @@ pub(crate) fn round_corners(
     ctx: &NetCtx,
     c: &mut NetCopper,
     pitch: i64,
+    spokes: bool,
 ) -> bool {
     let before = c.length();
     each_run(ctx, c, |l, run| {
-        let round = round_run(world, ctx, l, run, pitch);
+        let round = round_run(world, ctx, l, run, pitch, spokes);
         if round.len() == run.len() && round == run {
             round
         } else {
@@ -1286,7 +1329,14 @@ pub(crate) fn round_corners(
 }
 
 /// A run with each stretch of it laid round the corners beside it, where that is shorter.
-fn round_run(world: &World<'_>, ctx: &NetCtx, l: u8, run: &[Point], pitch: i64) -> Vec<Point> {
+fn round_run(
+    world: &World<'_>,
+    ctx: &NetCtx,
+    l: u8,
+    run: &[Point],
+    pitch: i64,
+    spokes: bool,
+) -> Vec<Point> {
     let mut pts = run.to_vec();
     let mut i = 0;
     while i + 1 < pts.len() {
@@ -1295,7 +1345,15 @@ fn round_run(world: &World<'_>, ctx: &NetCtx, l: u8, run: &[Point], pitch: i64) 
         }
         let j = (i + ROUND_STRETCH).min(pts.len() - 1);
         if j - i >= 2
-            && let Some(mid) = stretch(world, ctx, l, &pts[i..=j], pitch)
+            && let Some(mid) = stretch(world, ctx, l, &pts[i..=j], pitch, spokes)
+            // With `spokes`, not a way with more of it outside the pads of the net: a
+            // stretch that ends on a pad may be shorter by a way that leaves the pad
+            // sooner, and what is inside a pad is copper on copper.
+            && (!spokes || {
+                let mut way = mid.clone();
+                way.push(pts[j]);
+                outside(ctx, l, pts[i], &way) <= outside(ctx, l, pts[i], &pts[i + 1..=j]) + 1.0
+            })
         {
             let n = mid.len();
             pts.splice(i + 1..j, mid);
@@ -1319,6 +1377,7 @@ fn stretch(
     l: u8,
     pts: &[Point],
     pitch: i64,
+    spokes: bool,
 ) -> Option<Vec<Point>> {
     use std::cmp::Reverse;
     use std::collections::BinaryHeap;
@@ -1376,7 +1435,15 @@ fn stretch(
             let mut from = u;
             way.iter()
                 .all(|&to| {
-                    let ok = legal(world, ctx, from, to, l);
+                    let ok = legal(world, ctx, from, to, l)
+                        && !(spokes
+                            && world.nearer_a_spoke(
+                                ctx.net,
+                                LayerId(l),
+                                ctx.widths[usize::from(l)],
+                                pts,
+                                (from, to),
+                            ));
                     from = to;
                     ok
                 })
@@ -2004,7 +2071,7 @@ mod tests {
         let before = c.length();
         super::pull_tight(&world, ctx, &mut c);
         assert!((c.length() - before).abs() < 1.0);
-        assert!(super::round_corners(&world, ctx, &mut c, pitch));
+        assert!(super::round_corners(&world, ctx, &mut c, pitch, false));
         c.place(&mut world, ctx);
         // Shorter by what the line was further off than it had to be, on a diagonal
         // either side: some 0.3 mm.
@@ -2028,7 +2095,7 @@ mod tests {
         }
         assert!((600_000..=601_000).contains(&nearest), "{nearest}: {c:?}");
         // A second time finds nothing shorter.
-        assert!(!super::round_corners(&world, ctx, &mut c, pitch));
+        assert!(!super::round_corners(&world, ctx, &mut c, pitch, false));
     }
 
     #[test]

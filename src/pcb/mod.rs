@@ -1090,6 +1090,27 @@ pub struct RouteOptions {
     /// time where it has not. With false such a run makes no search at all. The default
     /// is true.
     pub fewer_vias: bool,
+    /// Whether, in a run with a deadline or a budget that looks for no shorter ways
+    /// ([`shorten`](RouteOptions::shorten)), cleanup ends by laying each run of tracks
+    /// round the corners of what is beside it, off the lattice, as a run for shorter
+    /// ways does once its searches are over: a run that the searches made keeps to the
+    /// lattice's lines, and passes a pad or another net's track a part of a pitch
+    /// further off than the rules ask. It takes no search (a tenth to half a second of
+    /// a run on the boards it was measured on), a way is laid only if it is shorter, and
+    /// none that is nearer a pad of another net in the room of a spoke of its relief
+    /// than the run was. Not for the nets of [pairs](Design::pairs), those with a
+    /// [length](Design::lengths) to keep, and those whose routes are stubs to their
+    /// plane.
+    ///
+    /// A run laid so is as near what is beside it as the rules allow, and has no room
+    /// left to give: it is for a run after which no other moves the routes again. A
+    /// board whose first run had it and whose later run then took every route back for
+    /// one connection ended that run with seven open for none (`docs/benchmarks.md`).
+    /// So a run that was asked for the rounds of cadlab's router
+    /// ([`Rounds::Native`]) and gave them up has none of it either: it is then the run
+    /// with this crate's own rounds, which a host follows with runs that move the
+    /// routes. The default is false.
+    pub round_corners: bool,
 }
 
 impl Default for RouteOptions {
@@ -1146,6 +1167,7 @@ impl Default for RouteOptions {
             leave_given: false,
             explain: true,
             fewer_vias: true,
+            round_corners: false,
         }
     }
 }

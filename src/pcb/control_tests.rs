@@ -351,6 +351,36 @@ fn a_run_handed_every_route_back_lays_the_stairs_straight_and_searches_nothing()
     assert_eq!(joined.stats.expanded, 0);
     assert!(joined.taken_back.contains(&net));
     assert!(joined.unrouted.is_empty() && joined.open.is_empty());
+    // And with every end of the net so: what the run is given of it has no pad's middle
+    // in it, and is taken back all the same, each end by its piece over its pad.
+    let middles: Vec<Point> = d
+        .board
+        .pads
+        .iter()
+        .filter(|p| p.net == Some(net))
+        .filter_map(|p| super::router::pad_center(&p.shape))
+        .collect();
+    let mut tracks = plain.tracks.clone();
+    let mut ended = 0;
+    for t in tracks.iter_mut().filter(|t| t.net == Some(net)) {
+        let (a, b) = (t.start, t.end);
+        if middles.contains(&a) {
+            t.start = Point::new(step(a.x, b.x), step(a.y, b.y));
+            ended += 1;
+        }
+        if middles.contains(&b) {
+            t.end = Point::new(step(b.x, a.x), step(b.y, a.y));
+            ended += 1;
+        }
+    }
+    assert_eq!(ended, middles.len());
+    let all_short = Earlier::new(tracks, plain.vias.clone());
+    let joined = route_from(&d, &all_short, &options, &control).unwrap();
+    check(&d, &joined);
+    assert_eq!(joined.stats.expanded, 0);
+    assert!(joined.taken_back.contains(&net));
+    assert!(joined.unrouted.is_empty() && joined.open.is_empty());
+    assert_eq!(joined.taken_back.len(), straight.taken_back.len());
 }
 
 #[test]
@@ -1437,4 +1467,88 @@ fn a_pad_that_the_board_shuts_in_is_told_whatever_room_the_other_end_has() {
     );
     // For less than the half million nodes that the look from the far pad had.
     assert!(routed.stats.work < 400_000, "{}", routed.stats.work);
+}
+
+#[test]
+fn a_last_run_asked_for_it_lays_its_runs_round_the_corners_beside_them() {
+    // Two pads of a net 10 mm apart with a pad of another net halfway, and the route of
+    // an earlier run round that pad along a line a millimetre off, where 0.6 mm is as
+    // near as the rules ask. A host's last run leaves it on its line: no shortcut
+    // between two of its points is legal. Asked to, it lays the run round the corners of
+    // the pad's clearance, off the lattice, and searches nothing for it.
+    let pads = vec![smd(0, 0, 1), smd(10 * MM, 0, 1), smd(5 * MM, 0, 2)];
+    let d = design(2, pads, 3);
+    let plain = route_checked(&d, &RouteOptions::default());
+    let like = plain
+        .tracks
+        .iter()
+        .find(|t| t.mid.is_none())
+        .expect("a track")
+        .clone();
+    let at = |a: (i64, i64), b: (i64, i64)| Track {
+        start: Point::new(a.0, a.1),
+        end: Point::new(b.0, b.1),
+        layer: LayerId(0),
+        ..like.clone()
+    };
+    let tracks = vec![
+        at((0, 0), (3 * MM, 0)),
+        at((3 * MM, 0), (4 * MM, MM)),
+        at((4 * MM, MM), (6 * MM, MM)),
+        at((6 * MM, MM), (7 * MM, 0)),
+        at((7 * MM, 0), (10 * MM, 0)),
+    ];
+    let earlier = Earlier::new(tracks, Vec::new());
+    let last = RouteOptions {
+        rip_ups: 0,
+        settle: false,
+        negotiate: false,
+        fine_pass: false,
+        leave_given: true,
+        straighten: true,
+        fewer_vias: false,
+        ..RouteOptions::default()
+    };
+    let control = RunControl {
+        deadline: Some(Instant::now() + Duration::from_secs(3600)),
+        ..RunControl::default()
+    };
+    let length = |r: &Routed| -> f64 {
+        r.tracks
+            .iter()
+            .map(|t| {
+                let (dx, dy) = ((t.end.x - t.start.x) as f64, (t.end.y - t.start.y) as f64);
+                dx.hypot(dy)
+            })
+            .sum()
+    };
+    let on_its_line = route_from(&d, &earlier, &last, &control).unwrap();
+    check(&d, &on_its_line);
+    assert_eq!(on_its_line.taken_back.len(), 1);
+    let asked = RouteOptions {
+        round_corners: true,
+        ..last
+    };
+    let round = route_from(&d, &earlier, &asked, &control).unwrap();
+    check(&d, &round);
+    assert_eq!(round.taken_back.len(), 1);
+    assert_eq!(round.stats.expanded, 0);
+    assert!(round.unrouted.is_empty() && round.open.is_empty());
+    // Shorter by what the line was further off than it had to be, on a diagonal either
+    // side: some 0.3 mm.
+    assert!(
+        length(&round) < length(&on_its_line) - 300_000.0,
+        "{} for {}",
+        length(&round),
+        length(&on_its_line)
+    );
+    // A run for shorter ways does it itself, with or without the option.
+    let shorter = RouteOptions {
+        shorten: true,
+        straighten: false,
+        ..asked
+    };
+    let searched = route_from(&d, &earlier, &shorter, &control).unwrap();
+    check(&d, &searched);
+    assert!(length(&searched) < length(&on_its_line) - 300_000.0);
 }

@@ -5973,9 +5973,11 @@ and is no nearer a pad of another net in the room of a spoke of its relief than 
 was. It takes no search: 0.1 to 0.2 s of a run on `tinytapeout-demo`. cadlab asks for it from the first run on
 where the board has its router's rounds, and in its last run on every board.
 
-`tinytapeout-demo` in sixteen orders, the same build with and without, by where it is done:
-in the host's last run alone 0.18 % less track outside the pads (13 orders better, 3
-worse); in the first run and those after it 0.57 % (15 and 1); in both 0.60 % (16 and none).
+`tinytapeout-demo` in sixteen orders, by where it is done (switches in the instrument
+build): in the first run, the runs after it and the host's last run, 0.65 % less track
+outside the pads than the same build without it (16 orders of 16); in the first run and
+those after it alone 1.4 mm a board short of that; in the last run alone 20 mm a board
+short of it, a third of the gain.
 Without the rule for a spoke's room, four orders: 0.75 % less with 8 pads short of two
 spokes for 2; with it 21 in sixteen orders for 23. Without the rule for what is outside
 the pads `lumenpnp-ringlight` has 0.2 mm more outside its pads in four orders of four: a
@@ -5998,8 +6000,8 @@ the ends were looked for after the copper with no terminal in it was dropped, an
 from one such end to another is all of it such copper. `tinytapeout-demo` had 37 nets of
 134 left as they were, 1549 mm of 4792, whole buses among them; `lumenpnp-mobo` 31 of 162.
 Since 0.0.52 the pieces are looked for on what the run was given, and such a net has the
-run's search for fewer vias as a net with one end short had: 124 to 126 of 134, and 162 of
-162.
+run's search for fewer vias as a net with one end short had: 125 or 126 of 134, and 160 to
+162 of 162.
 
 Alone, without the corners: `tinytapeout-demo`'s sixteen orders 0.05 % more track outside
 the pads (9 better, 6 worse). Without the search for fewer vias: 1.3 vias more a board, and

@@ -4293,10 +4293,11 @@ const AGAIN_SWEEPS: usize = 3;
 /// share of its length, and a step at least.
 const AGAIN_SHORTER: f64 = 0.02;
 /// How many nets have their first search made ahead of their turn at any time, where the
-/// run has threads for it, the first time through the nets and after: a search that a
-/// thread is long at is then not waited for with the others idle, and a net that ends with
-/// other copper, as few do the first time and a quarter after, sends back the searches
-/// that looked where it was.
+/// run has threads for it: a search that a thread is long at is then not waited for with
+/// the others idle, and a net that ends with other copper, as few do the first time
+/// through the nets and a quarter after, sends back the searches that looked where it
+/// was. With 4, 16 and 64 `glasgow-revD1`'s first time through the nets took 0.99, 0.83
+/// and 0.97 s of searches on three threads, and 0.79 s with 8.
 const AGAIN_AHEAD: usize = 8;
 /// How many cells a side the blocks are by which a search made ahead says where it looked.
 const LOOK: usize = 8;
@@ -4334,11 +4335,15 @@ pub(crate) struct Again {
 ///
 /// In a run with no budget of nodes the searches are made ahead of the nets' turns on
 /// [`RouteOptions::threads`] threads and stand from one time through the nets to the
-/// next, each for as long as no net has other copper where it looked; the routes are
-/// those of one thread and of a search at every turn. `glasgow-revD1`, whose first run's
-/// deadline ends this step: 16 nets kept of 348 looked at in 1.8 s with a search at each
-/// turn, the first time through alone, and 77 to 106 of 578 to 700 with the searches
-/// ahead on three threads, well into the second (`docs/benchmarks.md`).
+/// next, each for as long as no net has other copper where it looked: the routes are
+/// those of one thread and of a search at every turn, sooner. Where `until` ends the
+/// step, it is ended when one thread would have had that time, by what each search and
+/// each turn took: what follows this step in a run, the joining of the pads that the
+/// routes cut off their fills, takes longer for each net laid again, and a run that its
+/// deadline ends has no more of the one than it had. `glasgow-revD1`, with the step ended
+/// by the time itself: 27 to 106 nets laid again for 12 to 16, the joining 1.1 to 1.3 s
+/// and more for 1.0 s, and the run back up to 0.8 s past its deadline, which cost the
+/// host its next run (`docs/benchmarks.md`).
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) fn again<'r>(
     design: &Design,

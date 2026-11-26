@@ -990,6 +990,11 @@ pub struct RouteOptions {
     /// each net's search for a route with fewer vias is made ahead of its turn, in a copy
     /// of the board as it is, and stands at the turn if no net before it has ended with
     /// other copper since, as few do. The routes are the same for any number there as well.
+    ///
+    /// And so has the step before it that lays each net again among the others by the
+    /// negotiation's search: a net's search is made ahead of its turn with the net's claims
+    /// left out of its count, and stands at the turn, and the next time through the nets,
+    /// while no net has other copper where the search looked.
     pub threads: usize,
     /// Whether cleanup looks for a shorter way for each run of a net's tracks from one
     /// pad or branch to the next, with every other route where it is. The default is

@@ -5911,6 +5911,204 @@ at a time.
   are what it has for the balls left shut in, and no other way to those was tried.
 - More than one thread, or a deadline: the comparison is by nodes.
 
+## PCB routing: a board with this crate's own rounds beside cadlab's router, round by round and step by step, and what was built for it and not kept
+
+Measured through cadlab at 60 s, four or five runs at a time on three threads, the load 5 to 9
+with other work on the machine, and at budgets of nodes on one thread. cadlab's commit for
+this is its decision D150. Nothing here is released: 0.0.52 is as it was, and this is what
+was measured and what it rules out.
+
+### The two `glasgow` boards, round by round and step by step
+
+`glasgow-revD1` and `glasgow-revC3` are given up by the rounds of cadlab's router as a run
+begins and have this crate's own, on a grid of twice the pitch (0.2 mm and 0.3025 mm; cadlab's
+router has the pitch). On the nets that both routers complete `glasgow-revD1` left with 8 to
+10 % more track outside the pads than cadlab's router's board, and `glasgow-revC3` with 0.5
+to 4.7 %. The instrument of the section below, in both routers and in no release, with a
+snapshot after rounds 1, 5, 9, 16, 24, 32 and 40 of this crate's rounds and after every
+iteration of cadlab's router's negotiation. 0.0.52; four orders; the nets with no zone that
+both complete (2002 and 768 over the four orders); mm of track outside the pads of its net
+and vias, summed over the four orders.
+
+| this crate's steps | `glasgow-revD1` | `glasgow-revC3` |
+|---|---|---|
+| the first round: each net its cheapest way, nothing priced yet | 27685 mm, 2231 vias | 8647, 308 |
+| round 9 | 30256, 2803 | 9230, 619 |
+| round 16 | 31231, 2904 | 9376, 662 |
+| round 40, the last | 31557, 2942 | 9730, 746 |
+| the rounds end: what is still shared taken out (17 and 20 nets a board), each net once more for fewer vias | 31474, 2753 | 8987, 631 |
+| the first pass and its settling, and on `glasgow-revC3` the passes on the finer lattice | +286, +40 | +484, +51 |
+| each net again by the negotiation's search, the pads joined to their fills again | -62, -91 | -317, -23 |
+| cleanup: every net pulled tight; the searches for fewer vias and hops on `glasgow-revC3` (one net of 347 on `glasgow-revD1`, the deadline) | -409, 0 | -106, -30 |
+| the ends beside pads taken into them | +5 | +1 |
+| the escapes, which the counts above do not have | +248, +252 | +142, +66 |
+| the first run ends, at 42 s and at 36 to 37 s | 31542, 2954 | 9190, 695 |
+| the host's later runs, the last with its stairs and corners | -419, +3 | -60, -6 |
+| the board that leaves | 31123, 2957 | 9131, 689 |
+
+| cadlab's router's steps | `glasgow-revD1` | `glasgow-revC3` |
+|---|---|---|
+| the first iteration of its negotiation | 27153 mm, 2345 vias | 8578, 632 |
+| iteration 8 | 28978, 3095 | 9036, 822 |
+| its stage ends, after 8 or 9 iterations and after 28 to 40: the pours, what is still shared taken out, the retry, the pass for fewer vias | 29018, 3147 | 9118, 878 |
+| the escapes taken into their paths; 45° pull-tight and the corners cut, twice | -269 | -149, -8 |
+| each stretch round the corners of the clearance of what is beside it | -208 | -52 |
+| the board that leaves | 28544, 3147 (-1.6 %) | 8920, 870 (-2.2 %) |
+| this crate's board over it | +9.0 %, with 6 % fewer vias | +2.4 %, with 21 % fewer vias |
+
+`glasgow-revD1`'s track is made in the rounds. With the escapes on both sides this crate has
+2.9 % more after the first round, 9.3 % more when its rounds end and 9.0 % more on the board
+that leaves. Of the 2456 mm between the two as the rounds end, 532 are there after the first
+round; from the first round to the ninth this crate's routes grow by 2571 mm where cadlab's
+router's grow by 1825, 746 mm more; and rounds 10 to 40 add 1301 mm, which cadlab's router
+has no rounds for: its minute ends its negotiation after 8 or 9 iterations with 368 to 466
+points shared, and its board leaves with 116 to 125 connections failed for 6 to 17.
+
+The prices are the same in both, in steps of the grid (a via ten, a bend 0.4 and 1.5, a
+shared point 0.6 times its base and 1.6 times more a round up to a thousand, half a step of
+history a round), and this crate's step is twice as long here. Three things were measured
+for it, on switches in the instrument build, and none is kept:
+
+- *The via's price*: seven steps and five, which is cadlab's router's in millimetres, for
+  ten: 33 and 88 vias more a board on `glasgow-revD1` (3 % and 8 %) with 0.3 % more track,
+  and 43 and 34 connections open over four orders for 46; `glasgow-revC3` 1.1 % and 2.0 %
+  more track with 10 and 6 vias more. A cheaper via buys connections and no track.
+- *The grid*: the rounds on the grid of the pitch (`glasgow-revD1`, one order, 300 s: 24
+  such rounds take 80 s where 40 at twice the pitch take 20). The signals' routes are
+  8093 mm with 692 vias after the first round for 8137 mm with 555, 8748 mm after the ninth
+  for 8842 and 8962 mm after the 24th for 9352: they grow by 10.7 % where at twice the pitch
+  they grow by 14.9 %. At twice the pitch two tracks at 45° on neighbouring lines are
+  0.14 mm apart on centres, less than a track and its clearance, and a diagonal bus has
+  every second line. The minute has no room for the finer grid on this board. Each net laid
+  again at the pitch once the rounds are over costs four times the nodes: `glasgow-revD1`
+  0.73 % more track (its deadline ends the first of the three sweeps), `glasgow-revC3`
+  0.65 % less with 34 connections open over four orders for 30, `cynthion` 0.24 % less.
+- *More rounds*: 80 for 40 leave 24 connections open over `glasgow-revD1`'s four orders for
+  46 and 23 for 32 on `glasgow-revC3`, with 1.8 % and 3.6 % more track outside the pads and
+  28.5 and 7.75 vias more a board; on the nets that both routers complete 9.5 % and 3.6 %
+  more than cadlab's router for 8.6 % and 2.1 %.
+
+`glasgow-revC3` is level with cadlab's router as its first run ends (9190 mm against 9118 as
+that router's stage ends, +0.8 %): its rounds are 3.2 to 3.7 s and end with 133 to 136
+points shared and 20 nets taken out, which the passes route in 25 s. Cadlab's router then
+takes 2.2 % off, and the host's later runs 0.65 %.
+
+### Each net again with the time for its three sweeps: built, and not kept
+
+`glasgow-revD1`'s first run is ended by its deadline in cleanup, which has 4.3 s there.
+Routing each net again among the others by the negotiation's search has half of it: its
+first sweep, for fewer vias alone, 1.8 s, 11 to 16 nets kept of 347, and none of the two for
+shorter ways. With no clock on it the step has its three sweeps in 3.1 s, 149 to 163 nets
+kept and 145 to 213 mm of track and 20 to 37 vias less a board, where cleanup's searches in
+the same seconds are one net.
+
+Built: the step with 0.85 of what cleanup has left (and 0.7, and 0.6) in a run whose cleanup
+has no searches of its own for what the step is for, and every net pulled tight all the
+same in a run that its deadline has ended by the time cleanup begins.
+
+- With 0.85, four orders beside 0.0.52 in the same minutes: 113 mm less track outside the
+  pads a board (1.1 %, four of four) and 10 vias fewer, with 48 connections open for 43.
+- In 12 runs each, side by side: 133 connections open with 0.0.52, 137 with 0.85 and 141
+  with 0.7, for 0.53 % and 0.56 % less track and 7.5 and 9.4 vias fewer. The first run ends
+  later, by the joining past its deadline, and the host's run after it, for the nets open on
+  the filled board, which makes a connection in three orders of four, has no room: it is
+  made in 12 of 12 runs with 0.0.52, 9 with 0.85 and 7 with 0.7.
+- With 0.6, with which the host's run after it is made as often (11 of 12 runs with
+  both): 132 connections open for 134, the vias the same, and 0.38 % less track where two
+  sets of 12 runs of 0.0.52 are 0.30 % apart.
+- With 0.85 in every first run, `tinytapeout-demo`'s third order, whose first run ends at
+  its deadline, has 30 mm more track: the corners of 0.0.52 not laid.
+
+Not kept: a connection is not a price for half a per cent of track.
+
+Measured and not kept as well: every net pulled tight before the step on every board
+(`glasgow-revD1` 0.73 % less, `glasgow-revC3` 0.42 %, `tinytapeout-demo` 0.26 %, `cynthion`
+0.22 %; `corne-cherry` 0.33 % more, and a pad short of two spokes on `sweep-v2.2` in one
+order where it has none); a net that an earlier run laid narrower for a row of pads taken
+back by the runs after it at that width (`glasgow-revD1`: 133 nets of some 470 that its
+host's last run leaves as copper of the board; with them the run has 466 of 467, 11 pads
+have fewer necks after it and 62 nets go back for 6, and the board has 0.06 % more track).
+
+### The finer lattice not begun where the first pass made nothing: built, and not kept
+
+`corne-cherry`'s slowest order has two passes on the finer lattice, 7.9 s of its 54 s, that
+make nothing, and `sweep-v2.2` has them for its three connections that no router makes.
+Before each of them the first pass and its settling had ended with the connections they
+began with. Built as a gate: in a run with a budget whose first pass began with routes and
+made nothing more of them with its settling, the passes on the finer lattice are not begun.
+
+- At 60 s, beside the same build without it (twelve boards, four orders, side by side): 43
+  boards of 48 the same to the connection, the via and 0.1 mm of track; the five others are
+  runs that the clock ends.
+- At 40 million nodes `nrfmicro` lost its last connection in one order: the pass on the
+  finer lattice of the host's run that moves routes makes it, after a first pass there that
+  made nothing. Kept to a run that begins with a negotiation's routes, the 41 runs at the
+  two budgets of nodes are the boards that 0.0.52 has.
+- And so kept, it does not shorten the minute: `corne-cherry`'s slowest order ends its first
+  run 8 s sooner and the board at 55.7 s for 54.5 s, the host's later runs having the time
+  (a run that moves routes for one connection, 11.6 s and nothing; a run for shorter ways
+  that the order had no time for), with a via and 12.6 mm less and two pads short of two
+  spokes for one. `sweep-v2.2` ends at 31 to 33 s for 36 s.
+
+Not kept: a pad more short of its spokes and no second sooner on the board it was for.
+
+### What the pass adds after the rounds of cadlab's router
+
+The section below left `lumenpnp-mobo` with 1335 mm that two passes add over four orders,
+taken for nets moved. By net it is eight connections that those rounds leave failed from
+their first round on, as having no way on their grid: two nets laid whole by the pass (104
+to 108 mm and 74 to 79 mm), one connection on each of five others (10 to 18 mm and a via
+each), and one more net of 72 mm that the board has whole when it leaves (by the pass on
+the finer lattice: an inference). Each ends on a pad of a stepper driver
+behind the pours of the driver's outputs, zones of nets of two to four pads, which this
+crate holds to be copper of their nets and no planes to cut through (`POUR_PADS`); the pass
+goes round them by the other side of the board. Cadlab's router routes through such a pour
+and fills it again round the track.
+
+- With every zone a plane (a switch in the instrument build) the rounds make the eight and
+  the signals are some 70 mm shorter a board; the nets with zones are 29 and 77 mm longer
+  in the two orders looked at by net, and the board has 0.06 % more track outside the pads
+  over four orders with 2.75 vias fewer. Not kept.
+- The route that a net had before the pass, taken back where it is free once the passes
+  end: free for 2 nets of the 266 that the passes move in 12 runs of three boards, and the
+  12 boards leave as they were. Not kept.
+
+### Beside cadlab's router
+
+0.0.52 again, twelve boards in four orders (`tinytapeout-demo` in eight) beside cadlab's
+router with seeds 1 to 4 in the same minutes, measured twice: 35 cells better, 31 equal and
+6 worse of 72 in both sets, the six of the section below: `corne-cherry`'s time (25 to 54 s
+against 23 to 27 s); `glasgow-revC3`'s track and track outside the pads (3508 mm against
+3216); `glasgow-revD1`'s vias (1131 against 1077), track and track outside the pads
+(10157 mm against 8512). `tinytapeout-demo`'s track outside the pads is equal in both
+(4751 and 4753 mm against 4672, +1.7 %). On the nets that both routers complete, 16 cells
+better, 15 equal and 5 worse of 36 in one set and 17, 14 and 5 in the other. No pad without
+a spoke, no pad made solid by a track, no DRC error but unrouted and no joint by a round
+end alone in the 104 runs. At budgets of nodes 569 connections open at 40 million over
+nine boards in three orders and 164 at 150 million over seven in two, as before.
+
+### What this does not show
+
+`glasgow-revD1`'s track is where it was: what it has over cadlab's router is its rounds',
+on a grid that the minute has no room to halve, and of rounds that cadlab's router does not
+get to. A step that lays the routes of such rounds again on the pitch, several nets at a
+time, is not built. A host's run after a first run that ends at its deadline is begun with
+a few tenths of a second to spare, and whatever the first run does past its deadline costs
+it.
+
+The runs of a host that move routes are as they were: `corne-cherry`'s slowest order has
+one of 11.6 s that makes nothing after the first run, and the time that the finer passes
+leave goes to it and to the run for shorter ways. A second such run after one that was not
+kept was left out in a build on the way, with the same boards in 45 of 48 runs at 60 s and
+`sweep-v2.2` 12 to 13 s sooner; at 150 million nodes `glasgow-revC3`'s fourth such run,
+after three that were not kept, makes a connection, and the host has them as before.
+
+The host's last run still takes back the neighbours of a net that its check sends back. In
+the 52 runs of the table of 0.0.52 that check took no item out for clearance: a net goes
+back for a connection that a pour had joined and no longer does (30 of the 34 times it
+says why) or for a pad with fewer necks than it had (11), both told on the host's fill
+after the run, where this crate's rules are told on the fill from before it.
+
 ## PCB routing: what each router does to its routes after the rounds, step by step, and each run laid round the corners beside it
 
 Measured through cadlab at 60 s, four runs at a time on three threads, the load 7 to 13 with other work on the machine (25 as the table beside cadlab's router began), and

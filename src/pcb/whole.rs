@@ -4358,6 +4358,7 @@ pub(crate) fn again<'r>(
     if jobs.is_empty() || design.rules.layer_count() == 0 {
         return out;
     }
+    let began = std::time::Instant::now();
     let pitch = grid_pitch(design, jobs, options, (pitch, coarse, 2));
     let Ok((mut board, mut nets, mut sc)) = setup(
         design,
@@ -4434,7 +4435,7 @@ pub(crate) fn again<'r>(
     let flag = &halt;
     // And whether the step is over.
     let over = AtomicBool::new(false);
-    let (done_tx, done_rx) = mpsc::channel::<(usize, Ahead, Vec<u64>)>();
+    let (done_tx, done_rx) = mpsc::channel::<(usize, Ahead, Vec<u64>, std::time::Duration)>();
     std::thread::scope(|scope| {
         for _ in 1..ahead {
             let done_tx = done_tx.clone();
@@ -4469,8 +4470,12 @@ pub(crate) fn again<'r>(
                     };
                     let at = task.at;
                     board.look(&mut sc, &task.net);
+                    let from = std::time::Instant::now();
                     let routed = board.route_task(&base, &mut sc, task, &ctl);
-                    if done_tx.send((at, routed, sc.looked.clone())).is_err() {
+                    if done_tx
+                        .send((at, routed, sc.looked.clone(), from.elapsed()))
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -4501,6 +4506,15 @@ pub(crate) fn again<'r>(
             // The nets that ended a turn with other copper, in order, and the blocks that
             // the claims of each changed in or beside.
             let mut changes: Vec<(usize, Vec<u64>)> = Vec::new();
+            // What the step would have taken with every search made at its net's turn, on
+            // this thread: its own time until here, and from here on the time of each
+            // search that a turn has, wherever and whenever it was made, and of the turn.
+            // The step ends when that is the time it has: made ahead and kept, the
+            // searches are sooner, and what follows the step, the joining of the pads
+            // that the routes cut off their fills, takes longer for each net laid again
+            // (`glasgow-revD1`: 9 ms a net, in a run whose deadline ends this step).
+            let mut alone = began.elapsed();
+            let has = until.map(|t| t.saturating_duration_since(began));
             // Whether a search stands: none of the nets that ended with other copper since
             // it was asked for, itself aside, has claims that changed where it looked, and
             // it had the nodes that it would have now.
@@ -4564,12 +4578,14 @@ pub(crate) fn again<'r>(
                 // ended with other copper when it was asked for, if it was.
                 let first = asked;
                 asked += order.len();
-                let mut made: Vec<Option<(Ahead, Vec<u64>)>> = order.iter().map(|_| None).collect();
+                let mut made: Vec<Option<(Ahead, Vec<u64>, std::time::Duration)>> =
+                    order.iter().map(|_| None).collect();
                 let mut since: Vec<Option<usize>> = vec![None; order.len()];
                 let mut next = 0;
                 let mut gained = false;
                 for at in 0..order.len() {
-                    if late(run) || halt.load(Ordering::Relaxed) {
+                    if late(run) || halt.load(Ordering::Relaxed) || has.is_some_and(|t| alone >= t)
+                    {
                         return;
                     }
                     let i = order[at];
@@ -4633,16 +4649,18 @@ pub(crate) fn again<'r>(
                                 };
                                 let k = t.at;
                                 board.look(&mut sc, &t.net);
+                                let from = std::time::Instant::now();
                                 let r = board.route_task(base, &mut sc, t, &ctl);
                                 if k >= first {
-                                    made[k - first] = Some((r, core::mem::take(&mut sc.looked)));
+                                    made[k - first] =
+                                        Some((r, core::mem::take(&mut sc.looked), from.elapsed()));
                                 }
                                 continue;
                             }
                             match done_rx.recv_timeout(std::time::Duration::from_millis(5)) {
-                                Ok((k, r, looked)) => {
+                                Ok((k, r, looked, took)) => {
                                     if k >= first {
-                                        made[k - first] = Some((r, looked));
+                                        made[k - first] = Some((r, looked, took));
                                     }
                                 }
                                 Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -4655,7 +4673,7 @@ pub(crate) fn again<'r>(
                         }
                         dear = made[at]
                             .take()
-                            .map(|(a, looked)| Known {
+                            .map(|(a, looked, took)| Known {
                                 net: a.net,
                                 nodes: a.nodes,
                                 stopped: a.stopped,
@@ -4663,9 +4681,13 @@ pub(crate) fn again<'r>(
                                 since: asked_at,
                                 limit,
                                 fresh: true,
+                                took,
                             })
                             .filter(|k| stands(k, i, limit, &changes));
                     }
+                    // The turn's own time, less the searches made in it on this thread.
+                    let turn = std::time::Instant::now();
+                    let mut here = std::time::Duration::ZERO;
                     old.unplace(world);
                     let mut found: Option<NetCopper> = None;
                     // With vias dear, which finds the fewest and the shortest way with those;
@@ -4685,7 +4707,9 @@ pub(crate) fn again<'r>(
                                     if remember {
                                         board.look(&mut sc, &t.net);
                                     }
+                                    let from = std::time::Instant::now();
                                     let a = board.route_task(base, &mut sc, t, &ctl);
+                                    here += from.elapsed();
                                     Known {
                                         net: a.net,
                                         nodes: a.nodes,
@@ -4694,10 +4718,13 @@ pub(crate) fn again<'r>(
                                         since: changes.len(),
                                         limit,
                                         fresh: true,
+                                        took: from.elapsed(),
                                     }
                                 }
                             };
-                            // The nodes of a search count once, when it is made.
+                            // The nodes of a search count once, when it is made; its time
+                            // at every turn that has it.
+                            alone += k.took;
                             let ended = (k.stopped, if k.fresh { k.nodes } else { 0 });
                             // A search that the run's end cut short says nothing later.
                             if remember && !run.ending() && !halt.load(Ordering::Relaxed) {
@@ -4718,12 +4745,15 @@ pub(crate) fn again<'r>(
                                 flag,
                                 limit,
                             };
+                            let from = std::time::Instant::now();
                             let a = board.route_task(
                                 base,
                                 &mut sc,
                                 task(&nets, &keys, i, 0, via, limit),
                                 &ctl,
                             );
+                            here += from.elapsed();
+                            alone += from.elapsed();
                             nets[i] = a.net;
                             (a.stopped, a.nodes)
                         };
@@ -4782,6 +4812,7 @@ pub(crate) fn again<'r>(
                     };
                     now.place(world, ctx);
                     copper[j] = Some(now);
+                    alone += turn.elapsed().saturating_sub(here);
                 }
                 if !gained && sweep > 0 {
                     break;
@@ -4818,6 +4849,8 @@ struct Known {
     limit: u64,
     /// Whether its nodes are still to be counted.
     fresh: bool,
+    /// How long it took.
+    took: std::time::Duration,
 }
 
 /// The keys of `old` that are not in `new`, and those of `new` that are not in `old`:

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.54](https://github.com/KarpelesLab/guide/compare/v0.0.53...v0.0.54) - 2026-11-27
+
+### Other
+
+- *(benchmarks)* where the joining of the pads to their fills spends its time, and what was built for it and after guide's own rounds and not kept (the stubs searched for apart, the long ways round on glasgow-revC3: 0.3 % of its track for a connection more at budgets of nodes, each net laid again ended by its time: 309 connections open in 24 runs for 274) ([#116](https://github.com/KarpelesLab/guide/pull/116))
+
 ## [0.0.53](https://github.com/KarpelesLab/guide/compare/v0.0.52...v0.0.53) - 2026-11-27
 
 ### Other

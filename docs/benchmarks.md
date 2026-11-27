@@ -5911,6 +5911,99 @@ at a time.
   are what it has for the balls left shut in, and no other way to those was tried.
 - More than one thread, or a deadline: the comparison is by nodes.
 
+## PCB routing: the pads cut off a fill planned again by an index (0.0.53), and what was measured and not kept: the stubs searched for apart, the long ways round after guide's own rounds, each net laid again ended by its time
+
+Measured through cadlab at 60 s, four runs at a time on three threads, and at budgets of nodes
+on one thread. The machine had other work all through, a load of 20 to 67 on 64 threads, which
+is said with each set: the sets at 60 s are side by side in the same minutes, and their
+numbers are not those of the sections before this one. cadlab's commit for this is its decision
+D152. 0.0.53 is one change, which lays the same routes; the rest is measurements, and three
+things built and not kept.
+
+### Where the joining's time is
+
+What the routes cut off the planned fills is joined to them again by stubs as a run's routing
+ends (0.0.42), past the run's deadline if it has to be. On `glasgow-revD1` that is one net, the
+ground: 13 to 15 thousand places where its routes may end, the places in its fill among them,
+2 to 11 pads cut off, 1800 tracks and 300 vias. Prints in a build that is in no release, and
+the stub search of one run made thirty times over under a sampler:
+
+- The net planned again from the pads cut off (`Pours::rejoin`): 0.09 to 0.43 s in eight runs.
+  Its parts in one run of 0.27 s: the pieces of the fill by the cells 4 ms, the net's copper
+  joined to the pieces and the pads 29 ms, the count of the terminals 14 ms, the places near
+  the pads cut off 216 ms. The last asked, for each cell within reach of a pad cut off and each
+  layer, whether the net has a place there, by a pass over every pad of the net; the second
+  asked for the pads at each end of each track the same way.
+- The stubs (`detail::route_net`): 0.4 to 2.1 s, in 12 to 14 searches from the fill to one pad
+  each, every one begun from all the places of the fill, 2 to 5 ms to begin with. A node costs
+  three to five times what a pass's node does: 23 % of the search is the track from a node to
+  the centre of a pad nearby asked of the world, once for each place of the fill within a pitch
+  of the node, 13 % the via at the node, 3.5 % the order of the stubs. The pads that are hard
+  to reach are the time: one of 35 thousand nodes and 0.34 s after a look of 8000 that found
+  nothing, where five others together are 6 thousand.
+
+### 0.0.53: the pads at a point by an index, the places a net has by a set
+
+`Pours::rejoin` has the pads by their centres, in their order, and the places that the net has
+by centre and layer. The unions are made in the same order and the same places are found. At
+budgets of 40 and 150 million nodes, nine and seven boards in three and two orders, the 41 runs
+are the boards of 0.0.52 to the connection, the via, 0.1 mm of track and the nodes spent.
+`glasgow-revD1`'s plan is 0.04 to 0.08 s in sixteen runs for the 0.09 to 0.43 s.
+
+### Built and not kept
+
+- *A step to a pad's centre one step of the lattice away by the verdict of the lattice's own
+  step there.* Exact: the 41 runs at budgets of nodes are the same boards with the same nodes.
+  And no faster, 28.5 s of stub searches in their 140 joinings for 28.2 s: the places of a fill
+  are on the cells of the pours, not on the net's lattice, and next to none is one step away.
+- *The stubs searched for apart*, each piece cut off by a search of its own from the fill as it
+  is, on the run's threads; a stub whose via would be too near another's left out, and the one
+  search for them all made for what is left. Two pairs of runs with the same board at the
+  joining: 0.35 s for 0.37 s with 45.6 thousand nodes for 49.3, and 0.32 s for 0.60 s with 92.6
+  thousand for 63.4; and one run of eight with 451 thousand nodes and 1.85 s for ten pieces. A
+  stub's search apart has a budget of its own and none of what the stubs before it had found,
+  so the nodes are more where the wall time is less, and the stubs are other stubs on every
+  board with two pads cut off.
+- *Each net laid again among the others, ended by its time itself* (the first form of the
+  branch of the section before this one, with the index): `glasgow-revD1`'s first run now ends
+  when it did, 42.49 s in the mean with both over 24 runs each, where it was 0.5 to 0.8 s late.
+  Track outside the pads 0.50 % less, vias 1159.5 for 1167.2, and 309 connections open for 274,
+  more in each of the four orders; the host's run after the first is made in one run of 24 and
+  in none with 0.0.52 under this load, so it is not by that run that they are open. A set of
+  the same size under a load of 45 to 67, with two builds that lay the same routes, is 1406 open
+  for 1338: what the load does is as large. No gain that the load does not hide, and a
+  connection is no price for track.
+- *The long ways round after guide's own rounds* (`rounds::relay` of 0.0.51 in `whole`): on
+  `glasgow-revC3`, 14 wires over as the rounds of the default order end, 135 mm in all; the
+  step keeps 2 to 8 of 15 to 17 tried and takes 14 to 74 mm off on the grid in 0.06 to 0.24 s.
+  On the board that leaves, four orders twice side by side: 0.3 % less track where two runs of
+  one order are 0.9 % apart, 3 vias fewer, 72 connections open for 71. At budgets of nodes 570
+  and 166 connections open for 569 and 164, both of them `glasgow-revC3`'s. `glasgow-revD1`'s
+  rounds are ended by their share in every run and have no such step.
+- *The same within the step that lays each net again* (a net much longer than the way between
+  its pads laid again at a low price of sharing, the nets that it then crosses laid again
+  round it, three at most, kept where each is whole and free in the exact geometry with no
+  more vias among them and less track): of 339 tried in the 41 runs at budgets of nodes 47 are
+  kept, 116 have a net they cross with no way round, 86 cross more than three or one that may
+  not move, 43 are no shorter. 0.1 % less track, 732 connections open for 733, and 123 vias
+  more of 16631, `glasgow-revD1`'s, where the step's 0.4 to 1.8 s are time that the searches
+  for fewer vias after it do not have.
+
+### One connection of corne-cherry
+
+The board's slowest order at 60 s leaves one connection open after 27 s of passes for it (the
+section before this one). It is `right/QSPI_SD3` to a pad of 1.6 by 0.6 mm on the back between
+its neighbours 1.27 mm away, with a track down the back 0.9 mm from its end: its way out is a
+via at the pad's end and the front. In that order two other nets have their tracks on the
+front through the two places where such a via stands. cadlab's router has the net there and
+leaves one of those two open for no room on the front; guide's rounds make both in one order
+of four, a run that moves routes in a second, and nothing in the two others. And the rounds of
+the two slow orders, 19 s for 14 to 16 s, are the rounds for the pads cut off their pours: the
+negotiation is a dozen rounds past its best after 65 to 81 rounds in every order, and then the
+pads cut off are told, their nets planned again and the rounds go on, once or twice in 18 and
+27 rounds in the two fast orders, and two and three times in 72 and 77 in the slow ones, where
+the points shared go from 47 back to over a hundred. Nothing built.
+
 ## PCB routing: each net laid again among the others with its searches made ahead on the run's threads, and where a host's run that moves routes spends its time: measured and built, not kept
 
 Measured through cadlab at 60 s, four runs at a time on three threads, the load 3 to 10 with

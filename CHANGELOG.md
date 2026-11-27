@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.53](https://github.com/KarpelesLab/guide/compare/v0.0.52...v0.0.53) - 2026-11-27
+
+### Other
+
+- *(pcb)* a net with a fill planned again from the pads cut off it asks an index for the pads at a point and a set for the places it has (`glasgow-revD1`: 0.04 to 0.08 s for 0.09 to 0.43 s a plan; the boards of 0.0.52 in 41 runs of 41 at budgets of nodes) ([#115](https://github.com/KarpelesLab/guide/pull/115))
+- *(benchmarks)* each net laid again among the others with its searches made ahead on the run's threads (the same routes to the track; 27 to 106 nets laid again in glasgow-revD1's first run for 12 to 16 and the host's next run lost, or the same boards 2 s sooner on corne-cherry and an order of tinytapeout-demo no longer one board), and where a host's run that moves routes spends its time (two million nodes a pass after its last connection, on one thread): measured and built, not kept ([#114](https://github.com/KarpelesLab/guide/pull/114))
+- *(benchmarks)* the two glasgow boards beside cadlab's router round by round and step by step (glasgow-revD1's track is made in its rounds: 2.9 % more after the first, 9.3 % as they end, on a grid of twice the pitch and in rounds that cadlab's router does not get to), and what was built for it and not kept ([#112](https://github.com/KarpelesLab/guide/pull/112))
+- *(benchmarks)* the corners by where they are laid, counted beside the same build without them (0.65 % less in the first run, the runs after it and the last, 16 orders of 16; the last run alone a third of that), and the nets that a last run takes back as the final sets have them (125 or 126 of 134, 160 to 162 of 162) ([#110](https://github.com/KarpelesLab/guide/pull/110))
+
 ## [0.0.52](https://github.com/KarpelesLab/guide/compare/v0.0.51...v0.0.52) - 2026-11-26
 
 ### Added

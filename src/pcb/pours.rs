@@ -32,6 +32,7 @@ use super::zones::Fill;
 use crate::geom::drc::{Track, Via};
 use crate::geom::{LayerId, LayerSet, Point, Rect, Shape};
 use crate::id::NetId;
+use crate::space::{FastMap, FastSet};
 
 /// How many cells a grid has at most on a layer: a board too large for that at the
 /// lattice's pitch has coarser cells.
@@ -1030,14 +1031,21 @@ impl Pours {
                 });
             }
         }
+        // The pads by their centres, in their order: a net with a fill has a pad for
+        // every place in it, thousands, and each end of each track asks for those at it.
+        let mut at_center: FastMap<Point, Vec<u32>> = FastMap::default();
+        for (i, p) in ctx.pads.iter().enumerate() {
+            at_center.entry(p.center).or_default().push(i as u32);
+        }
         let touch = |parent: &mut Vec<u32>, node: u32, at: Point, layers: LayerSet| {
             for l in layers.iter() {
                 if let Some(id) = at_layer(l).and_then(|a| piece_at(a, at)) {
                     union(parent, node, id);
                 }
             }
-            for (i, p) in ctx.pads.iter().enumerate() {
-                if p.center != at || p.layers.0 & layers.0 == 0 {
+            for &i in at_center.get(&at).into_iter().flatten() {
+                let (i, p) = (i as usize, &ctx.pads[i as usize]);
+                if p.layers.0 & layers.0 == 0 {
                     continue;
                 }
                 if p.terminal != 0 {
@@ -1165,6 +1173,14 @@ impl Pours {
         }
         offsets.sort_unstable();
         let mut sites: Vec<TermPad> = Vec::new();
+        // The places of the largest piece that the net has, by centre and layer: each
+        // place looked at near a pad cut off asks whether it is one of them.
+        let mut have: FastSet<(Point, u8)> = FastSet::default();
+        for p in pads.iter().filter(|p| p.terminal == 0) {
+            for l in p.layers.iter() {
+                have.insert((p.center, l.0));
+            }
+        }
         let lost = groups
             .iter()
             .flat_map(|(_, list)| list.iter().copied())
@@ -1184,10 +1200,7 @@ impl Pours {
                 }
                 let q = self.center(cy as usize * self.cols + cx as usize);
                 for (at, layer) in net.layers.iter().enumerate() {
-                    let known = |s: &TermPad| {
-                        s.terminal == 0 && s.center == q && s.layers.contains(layer.layer)
-                    };
-                    if !in_main(&mut parent, at, q) || pads.iter().chain(&sites).any(known) {
+                    if !in_main(&mut parent, at, q) || have.contains(&(q, layer.layer.0)) {
                         continue;
                     }
                     let fits = if pad.layers.contains(layer.layer) {
@@ -1200,6 +1213,7 @@ impl Pours {
                         })
                     };
                     if fits {
+                        have.insert((q, layer.layer.0));
                         sites.push(TermPad {
                             center: q,
                             layers: LayerSet::EMPTY.with(layer.layer),
